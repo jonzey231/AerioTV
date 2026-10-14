@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.8.43 - 2026-10-14
+
+### Added
+
+- Radio Mode: Audio Only mode was renamed and revamped as Radio Mode. Listen
+  to a channel with no video; it keeps playing in the background
+  (jonzey231/AerioTV-Android#127). Thanks @PsykoRider.
+- Radio Mode card in the cast card's slot with a full sheet: Channel Up and
+  Down, Back 5s, Play/Pause, and Forward 60s on the Live Rewind buffer, and
+  Options with Switch Stream, Record Current Program, Audio Track, Stream
+  Info, Switch to Video Mode, and Stop. Lock screen shows the channel,
+  program, and logo.
+- Apple TV Radio Mode banner (Return to Channel, Stop) and hint row:
+  Play/Pause switches to video, hold Right stops.
+- Program Info Button: Guide View and List View toggles inside the picker;
+  info button on list rows and expanded schedule rows
+  (jonzey231/AerioTV-Android#127). Thanks @PsykoRider.
+- Multiview Add Channel picker: Show Subtitles and Show Descriptions toggles
+  in Settings > Player > Multiview.
+- Leave Multiview? offers Back to Guide: Multiview keeps playing, and the
+  guide long-press offers Remove from Multiview.
+- Dummy EPG program posters from Dispatcharr custom_properties.icon
+  (jonzey231/AerioTV-Android#132).
+- Recording menus say Resume when a recording has saved progress.
+
+### Changed
+
+- No video surface or Picture in Picture while Radio Mode is active.
+- The expanded schedule no longer repeats the current program.
+- Selecting a checked channel in the Multiview picker deselects it; a lone
+  remaining channel continues in the single player.
+- Channel Up/Down and extra remote buttons page the guide on third-party
+  remotes (jonzey231/AerioTV#98, jonzey231/AerioTV-Android#114).
+- Program art order: detail, feed icon, then TMDB.
+- Apple TV: preview banner titles wrap to two lines; native Leave Multiview
+  and Exit Playback dialogs; opening the player with Select lands on Pause.
+- Settings > Movies & TV Shows: the TMDB toggle describes everything the key
+  provides.
+- CarPlay: the app uses the CarPlay Audio entitlement only, per Apple's
+  guidance for apps with audio and video.
+
+### Fixed
+
+- In-progress DVR recordings on iPad play, pause, and seek, and no longer
+  restart when the recording finishes (jonzey231/AerioTV#93).
+- Player orientation no longer locks other pages to landscape
+  (jonzey231/AerioTV#99).
+- Teamarr program art and Dispatcharr program details resolve correctly in
+  Program Info. Thanks Frankie B. on Discord.
+- iCloud preference sync no longer reverts a device's newer settings (last
+  writer wins).
+- Apple TV: the clock no longer leaves a gray block with Remote Hints and
+  Channel Preview off (thanks Glitzbr on Discord); hold Right restores focus;
+  guide paging no longer sends focus off screen.
+- A paused channel stays paused through stall recovery and reconnects. Play
+  resumes it, long pauses resume at the live edge when the buffer is gone,
+  and there is no Reconnecting flash on resume.
+- MKV recordings and movies: skipping ahead reopens the stream at the target
+  and memory is capped, fixing an Apple TV crash after rapid skips in a
+  recording. Thanks .r.o.m.a.n. on Discord.
+- Phone hero deck: the card behind no longer shows through.
+- iPad guide: the now line stops at the last row.
+
 ## v1.8.42 - 2026-10-11
 
 ### Added
