@@ -4155,8 +4155,8 @@ final class NowPlayingManager: ObservableObject {
         return Date().timeIntervalSince(at) <= 2
     }
 
-    func minimize() {
-        debugLog("🎮 NowPlaying.minimize: \(playingItem?.name ?? "nil")")
+    func minimize(caller: String = #fileID, line: Int = #line) {
+        debugLog("🎮 NowPlaying.minimize: \(playingItem?.name ?? "nil") from \(caller):\(line)")
         #if os(iOS)
         // GH #99: leaving fullscreen (swipe down, pinch, Back to mini)
         // returns the home screen to its at-rest orientation.
@@ -4176,7 +4176,8 @@ final class NowPlayingManager: ObservableObject {
     }
 
     /// The state half of minimize, without the iPhone PiP routing.
-    func applyMinimized() {
+    func applyMinimized(caller: String = #fileID, line: Int = #line) {
+        debugLog("[HMP] applyMinimized from \(caller):\(line) wasMinimized=\(isMinimized)")
         #if os(iOS)
         AppOrientationLock.release(reason: "minimized")
         #endif
@@ -4194,8 +4195,24 @@ final class NowPlayingManager: ObservableObject {
         chromeIsVisible = false
     }
 
-    func expand() {
-        debugLog("🎮 NowPlaying.expand: \(playingItem?.name ?? "nil")")
+    func expand(caller: String = #fileID, line: Int = #line) {
+        debugLog("🎮 NowPlaying.expand: \(playingItem?.name ?? "nil") from \(caller):\(line)")
+        // iPad 2026-10-13: Switch to Video Mode left the docked mini up and
+        // later expands did nothing. Record the state now and after the
+        // update so the next trace names whatever keeps it minimized.
+        let wasMinimized = isMinimized
+        let radio = RadioModeSession.shared.isActive
+        let mode = PlayerSession.shared.mode
+        let tiles = MultiviewStore.shared.tiles.count
+        if !wasMinimized {
+            debugLog("[HMP] expand ignored: minimized=false radio=\(radio) mode=\(mode) tiles=\(tiles) (already expanded)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self else { return }
+            if self.isMinimized {
+                debugLog("[HMP] expand undone: minimized=true +0.5s radio=\(RadioModeSession.shared.isActive) mode=\(PlayerSession.shared.mode) tiles=\(MultiviewStore.shared.tiles.count) docked=\(UIDevice.current.userInterfaceIdiom == .pad)")
+            }
+        }
         // Engine-agnostic now: an AVPlayer sole tile lives in the same
         // container as mpv, so "fullscreen" is just un-minimizing the
         // mounted container, no teardown, no restart, no separate screen

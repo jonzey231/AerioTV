@@ -2325,12 +2325,28 @@ final class RadioModeSession: ObservableObject {
     /// same tile, no re-tune.
     func returnToVideo() {
         guard isActive else { return }
+        #if os(iOS)
+        // iPad 2026-10-13: the sink's reattach ran inside the expand's
+        // SwiftUI update (258 ms, AVKit in the stack). Expand first, then
+        // reattach on a later runloop turn, outside the transaction.
+        let player = radioPlayer
+        suppressReattach = true
+        surfaceTimer?.invalidate()
+        surfaceTimer = nil
+        detachedItem = nil
+        #endif
         isActive = false
         debugLog("[RADIO] stop (return to video)")
         #if os(iOS)
         reattachLayer()
         #endif
         withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.expand() }
+        #if os(iOS)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            debugLog("[RADIO] reattach after expand (video mode)")
+            RadioModeSession.shared.reattachVideoSurface(player: player)
+        }
+        #endif
     }
 
     // MARK: Transport + Now Playing
