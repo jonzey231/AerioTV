@@ -8044,7 +8044,7 @@ struct AVPlayerMultiviewTile: View {
         if isVOD, let srv = mkvServer {
             let baseSeek = progressStore.seekAction
             progressStore.seekAction = { [weak srv] target in
-                srv?.noteSeek()
+                srv?.noteSeek(targetMs: target)
                 baseSeek?(target)
             }
         }

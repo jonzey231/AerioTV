@@ -207,7 +207,12 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
         highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
         keepBehind = Int64(max(8 * 1024 * 1024, maxSpan + 4 * 1024 * 1024))
-        farAhead = Int64(max(48 * 1024 * 1024, 2 * maxSpan))
+        // 16 MB floor (was 48): a forward read this far past the head
+        // used to stream THROUGH everything in between while the read
+        // waited, holding it all in `buffer`. User seeks now reposition
+        // explicitly (reposition(at:)); this only covers AVPlayer's own
+        // re-requests, which land within a span or two of the head.
+        farAhead = Int64(max(16 * 1024 * 1024, 2 * maxSpan))
         cond.unlock()
         debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB",
                         Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576))
@@ -252,6 +257,46 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         debugLog(String(format: "[MKV] stream opened at %.1f MB (request #%d this session)",
                         Double(offset) / 1_048_576, requestsMade))
         t.resume()
+    }
+
+    /// Worst-case bytes this stream can hold: history behind the consume
+    /// point, the high-water look-ahead, and a read waiting at most
+    /// farAhead past the head for one span. Feeds the [MKV-MEM] cap line.
+    func capBytes(maxSpan: Int) -> Int {
+        cond.lock()
+        defer { cond.unlock() }
+        return Int(keepBehind) + highWater + Int(farAhead) + maxSpan
+    }
+
+    /// Locked snapshot for the periodic [MKV-MEM] line.
+    var memorySnapshot: (buffered: Int, lookAhead: Int) {
+        cond.lock()
+        defer { cond.unlock() }
+        let head = bufferStart + Int64(buffer.count)
+        return (buffer.count, Int(max(0, head - consumePoint)))
+    }
+
+    /// User seek: when the target lies outside the bytes already held,
+    /// drop the buffer and the in-flight request NOW and reopen at the
+    /// target, instead of letting the next read stream through (and
+    /// hold) everything between the old position and the target.
+    /// Returns the bytes dropped, or nil when the target was already
+    /// buffered (or the stream is not open) and nothing changed.
+    func reposition(at offset: Int64) -> Int? {
+        cond.lock()
+        if cancelled || task == nil {
+            cond.unlock()
+            return nil
+        }
+        let head = bufferStart + Int64(buffer.count)
+        if offset >= bufferStart, offset <= head {
+            cond.unlock()
+            return nil
+        }
+        let dropped = buffer.count
+        cond.unlock()
+        open(at: offset)
+        return dropped
     }
 
     /// Blocking read of an exact range. Returns nil when the range lies
@@ -733,6 +778,32 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         spanCacheBytes = 0
     }
 
+    /// Queue-confined seek preparation. Purges the span cache and, when
+    /// the target's first needed span lies outside the stream's held
+    /// bytes, drops the stream buffer and reopens ONE range request at
+    /// that cluster (Cues give the byte offset). Starts two spans before
+    /// the target segment so the target's neighbor parse and AVPlayer's
+    /// usual one-segment-earlier request both read forward from here.
+    /// Returns the [MKV-MEM] seek line, or nil when nothing was dropped.
+    func prepareSeek(toMs ms: Int32) -> String? {
+        let purged = spanCacheBytes
+        purgeCaches()
+        guard streamOpen, !segmentsMap.isEmpty else { return nil }
+        let ticks = Int64(max(0, ms)) * (Self.ticksPerSecond / 1000)
+        let target = segmentsMap.lastIndex(where: { $0.startTicks <= ticks }) ?? 0
+        let first = max(0, target - 2)
+        let offset = segmentsMap[first].byteStart
+        guard let dropped = stream.reposition(at: offset) else {
+            let held = stream.memorySnapshot.buffered
+            return String(format: "[MKV-MEM] seek: target at %.1f MB already buffered, kept %.1f MB (span cache %.1f MB purged, target segment %d)",
+                          Double(offset) / 1_048_576, Double(held) / 1_048_576,
+                          Double(purged) / 1_048_576, target)
+        }
+        return String(format: "[MKV-MEM] seek: dropped %.1f MB buffered, reopened at %.1f MB (span cache %.1f MB purged, target segment %d)",
+                      Double(dropped) / 1_048_576, Double(offset) / 1_048_576,
+                      Double(purged) / 1_048_576, target)
+    }
+
     // MARK: Header + cues parse
 
     /// Fetch and parse everything needed to publish the playlist. Throws
@@ -846,7 +917,12 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         // the server's segment cache is how a 57GB UHD remux jetsammed
         // the app at 1.4GB during a version switch (2026-08-26).
         let maxSpan = segmentsMap.map { Int($0.byteEnd - $0.byteStart) }.max() ?? 0
-        spanCacheByteLimit = max(160 * 1024 * 1024, 3 * maxSpan + 16 * 1024 * 1024)
+        // 64 MB floor (was 160): eviction never drops a span of the
+        // current build (ensureSpans), so the floor only buys history,
+        // and on a 1080p recording 160 MB was ~55 spans (5 minutes) of
+        // already-played bytes resident for the whole session.
+        spanCacheByteLimit = max(64 * 1024 * 1024, 3 * maxSpan + 16 * 1024 * 1024)
+        maxSpanBytes = maxSpan
         stream.setSpanSize(maxSpan)
         let mins = Double(durationTicks) / Double(Self.ticksPerSecond) / 60
         log(String(format: "[MKV] prepared: %@ %dx%d + %@ + %d text sub(s), %.0f min, %d segments, cues %@",
@@ -1560,7 +1636,29 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// with an ordinary segmented client; seeks miss and fetch a fresh
     /// batch, same as before.
     private var spanCache: [(index: Int, data: Data)] = []
-    private var spanCacheBytes = 0
+    private var spanCacheBytes = 0 {
+        didSet {
+            statLock.lock()
+            spanCacheBytesMirror = spanCacheBytes
+            statLock.unlock()
+        }
+    }
+    /// Cross-thread mirror of spanCacheBytes for the [MKV-MEM] timer
+    /// (spanCache itself is confined to the server queue).
+    private let statLock = NSLock()
+    private var spanCacheBytesMirror = 0
+    /// Largest cue span in bytes (set in prepare()).
+    private(set) var maxSpanBytes = 0
+    /// Bytes held by the span cache, safe from any thread.
+    var spanCacheBytesSnapshot: Int {
+        statLock.lock()
+        defer { statLock.unlock() }
+        return spanCacheBytesMirror
+    }
+    /// Stream buffer and look-ahead, safe from any thread.
+    var streamMemorySnapshot: (buffered: Int, lookAhead: Int) { stream.memorySnapshot }
+    /// Worst-case bytes of the stream buffer plus the span cache.
+    var remuxerCapBytes: Int { stream.capBytes(maxSpan: maxSpanBytes) + spanCacheByteLimit }
     /// Scales with the file: a high-bitrate 4K remux has ~54MB cue spans
     /// (In the Grey, 2026-08-26), and a fixed 160MB cap evicted the
     /// FIRST span of a 3-span build while caching its neighbors -
@@ -2340,12 +2438,40 @@ final class MKVVODServer: @unchecked Sendable {
     /// landing, bitrate probe) does not refetch megabytes. BYTE-capped:
     /// four 60MB UHD-remux segments were ~240MB of the 1.4GB that
     /// jetsammed the app (2026-08-26).
-    private var cache: [(index: Int, data: Data)] = []
-    private var cacheBytes = 0
+    private var cache: [(index: Int, data: Data)] = [] {
+        didSet {
+            statLock.lock()
+            cacheCountMirror = cache.count
+            statLock.unlock()
+        }
+    }
+    private var cacheBytes = 0 {
+        didSet {
+            statLock.lock()
+            cacheBytesMirror = cacheBytes
+            statLock.unlock()
+        }
+    }
     private let cacheByteLimit = 64 * 1024 * 1024
+    /// Cross-thread mirrors for the [MKV-MEM] timer: the caches are
+    /// queue-confined, and the queue can sit inside a blocking span read
+    /// for up to 45 s, so the timer must not hop onto it.
+    private let statLock = NSLock()
+    private var cacheCountMirror = 0
+    private var cacheBytesMirror = 0
+    private var audBytesMirror = 0
+    private var memTimer: DispatchSourceTimer?
+    /// Alternate-audio segment cache byte cap (FIFO).
+    private static let audCacheByteLimit = 24 * 1024 * 1024
     /// Alternate-audio segments (a few MB each), small FIFO byte cap.
     private var audCache: [(path: String, data: Data)] = []
-    private var audCacheBytes = 0
+    private var audCacheBytes = 0 {
+        didSet {
+            statLock.lock()
+            audBytesMirror = audCacheBytes
+            statLock.unlock()
+        }
+    }
     /// Fast engine-fallback trigger: 3 straight failed video-segment
     /// builds on a LIVE server fire onError once (queue-confined).
     private var consecutiveBuildFailures = 0
@@ -2413,6 +2539,7 @@ final class MKVVODServer: @unchecked Sendable {
                             }
                             let url = URL(string: "http://127.0.0.1:\(self.localPort)/\(entry)")!
                             debugLog("[MKV-VOD] READY -> \(url.absoluteString)")
+                            self.startMemoryLog()
                             DispatchQueue.main.async { self.onReady?(url) }
                         }
                     }
@@ -2426,7 +2553,42 @@ final class MKVVODServer: @unchecked Sendable {
         }
     }
 
+    /// Documented memory cap (see the [MKV-MEM] cap line): stream buffer
+    /// (keepBehind + highWater + farAhead + one span), span cache
+    /// (max(64 MB, 3 spans + 16 MB)), built-segment cache (64 MB, 4
+    /// entries), alternate-audio cache (24 MB). Then a 15 s
+    /// [MKV-MEM] sample, the same cadence as [AVP-PERF], so a field log
+    /// shows which of these moved when the footprint does.
+    private func startMemoryLog() {
+        guard memTimer == nil, !stopped else { return }
+        let remux = remuxer
+        let mb = { (b: Int) in Double(b) / 1_048_576 }
+        debugLog(String(format: "[MKV-MEM] cap %.0f MB (stream+spans %.0f MB, segments %.0f MB, audio %.0f MB), max span %.1f MB",
+                        mb(remux.remuxerCapBytes + cacheByteLimit + Self.audCacheByteLimit),
+                        mb(remux.remuxerCapBytes), mb(cacheByteLimit), mb(Self.audCacheByteLimit),
+                        mb(remux.maxSpanBytes)))
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 15, repeating: 15)
+        t.setEventHandler { [weak self] in
+            guard let self, !self.stopped else { return }
+            let s = remux.streamMemorySnapshot
+            let spans = remux.spanCacheBytesSnapshot
+            self.statLock.lock()
+            let segCount = self.cacheCountMirror
+            let segBytes = self.cacheBytesMirror
+            let audBytes = self.audBytesMirror
+            self.statLock.unlock()
+            debugLog(String(format: "[MKV-MEM] buffers=%.0f MB segments=%d (%.1f MB) lookahead=%.0f MB (stream %.0f MB, spans %.0f MB, audio %.1f MB)",
+                            mb(s.buffered + spans + audBytes), segCount, mb(segBytes), mb(s.lookAhead),
+                            mb(s.buffered), mb(spans), mb(audBytes)))
+        }
+        t.resume()
+        memTimer = t
+    }
+
     func stop() {
+        memTimer?.cancel()
+        memTimer = nil
         // Kill the network side NOW, from the caller's thread: a version
         // switch overlaps this server's drain with its successor's
         // spin-up, and two full engines resident at once is what
@@ -2476,14 +2638,22 @@ final class MKVVODServer: @unchecked Sendable {
     /// scrubbing stacked several such generations and jetsammed the app
     /// (tester 2026-08-31, crash at 20:21 during VOD scrubbing). Purge
     /// them; the new position rebuilds exactly what it needs.
-    func noteSeek() {
+    /// `targetMs` (when known) also repositions the upstream stream at
+    /// the target's cluster if it lies outside the held bytes, so a
+    /// several-minute forward seek opens one new range request instead
+    /// of streaming through and buffering everything in between.
+    func noteSeek(targetMs: Int32? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
             self.cache.removeAll()
             self.cacheBytes = 0
             self.audCache.removeAll()
             self.audCacheBytes = 0
-            self.remuxer.purgeCaches()
+            if let targetMs, !self.stopped {
+                if let line = self.remuxer.prepareSeek(toMs: targetMs) { debugLog(line) }
+            } else {
+                self.remuxer.purgeCaches()
+            }
         }
     }
 
@@ -2564,7 +2734,7 @@ final class MKVVODServer: @unchecked Sendable {
                         body = try remuxer.buildAudioSegment(trackNumber: track, index: index)
                         audCache.append((path, body))
                         audCacheBytes += body.count
-                        while audCacheBytes > 24 * 1024 * 1024, audCache.count > 1 {
+                        while audCacheBytes > Self.audCacheByteLimit, audCache.count > 1 {
                             audCacheBytes -= audCache.removeFirst().data.count
                         }
                         contentType = "video/iso.segment"
