@@ -2078,6 +2078,21 @@ final class MultiviewBackgroundSession: ObservableObject {
 /// skips its background quiesce while Radio Mode owns it and detaches
 /// its AVPlayerLayer so iOS does not pause a video player in the
 /// background (reattached on return). Apple TV is foreground only.
+/// Stop-path timing for Radio Mode (iPad 2026-10-13: the card Stop blocked
+/// the main thread 839 ms inside a SwiftUI update). Lines are written only
+/// within 3 s of a Radio Mode stop: "[RADIO-STOP] <step> Nms (+Nms)".
+enum RadioStopTrace {
+    @MainActor private static var startedAt: CFTimeInterval = 0
+    @MainActor static func begin() { startedAt = CACurrentMediaTime() }
+    @MainActor static var isOn: Bool { startedAt > 0 && CACurrentMediaTime() - startedAt < 3 }
+    /// Logs the time since `t0` and since the stop.
+    @MainActor static func log(_ step: String, since t0: CFTimeInterval) {
+        guard isOn else { return }
+        let now = CACurrentMediaTime()
+        debugLog("[RADIO-STOP] \(step) \(Int((now - t0) * 1000))ms (+\(Int((now - startedAt) * 1000))ms since stop)")
+    }
+}
+
 @MainActor
 final class RadioModeSession: ObservableObject {
     static let shared = RadioModeSession()
@@ -2467,6 +2482,18 @@ final class RadioModeSession: ObservableObject {
         detachedItem = nil
         #endif
         debugLog("[RADIO] stop (\(reason))")
+        RadioStopTrace.begin()
+        #if os(iOS)
+        // iPad 2026-10-13 23:32:33: SwiftUI still updated the radio tile
+        // once after the reset (stale tile in the same update), and with
+        // isActive false its layer host re-attached the player (a
+        // synchronous AVFoundation attach) and armed PiP. The tile's player
+        // stays held (no surface, no PiP) until the tile is gone.
+        stoppingPlayer = radioPlayer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            RadioModeSession.shared.stoppingPlayer = nil
+        }
+        #endif
         NowPlayingBridge.shared.teardown()
         let started = Date()
         var t = Transaction()
@@ -2496,10 +2523,14 @@ final class RadioModeSession: ObservableObject {
     private var surfaceTimer: Timer?
     private weak var detachedItem: AVPlayerItem?
 
-    /// True when `player` is the radio tile's player.
+    /// True when `player` is the radio tile's player, or the player of a
+    /// radio tile being torn down by a card / sheet Stop.
     func ownsPlayer(_ player: AVPlayer) -> Bool {
-        isActive && radioPlayer === player
+        (isActive && radioPlayer === player) || (stoppingPlayer != nil && stoppingPlayer === player)
     }
+
+    /// The radio tile's player while a Stop tears its tile down.
+    private weak var stoppingPlayer: AVPlayer?
 
     /// While Radio Mode is on: the tile's layer shows nothing and the
     /// item's video track is disabled, so nothing decodes or can be

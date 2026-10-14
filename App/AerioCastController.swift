@@ -6169,7 +6169,10 @@ struct KeptLiveCard: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 8)
         .modifier(KeptDockSurface())
-        .onAppear { debugLog("[AVP-RETAIN] kept dock card show (\(channels.count))") }
+        .onAppear {
+            debugLog("[AVP-RETAIN] kept dock card show (\(channels.count))")
+            RadioStopTrace.log("kept dock card onAppear", since: CACurrentMediaTime())
+        }
         .onDisappear { debugLog("[AVP-RETAIN] kept dock card hide") }
         .accessibilityElement(children: .contain)
     }

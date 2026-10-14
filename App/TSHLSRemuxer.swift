@@ -8250,6 +8250,8 @@ struct AVPlayerMultiviewTile: View {
     /// `keepForceHLS`: the tile is going away or flipping (not an internal
     /// retry), so a healthy Force HLS channel may be Kept Live.
     private func stop(allowRetain: Bool = true, keepForceHLS: Bool = false) {
+        let stopT0 = CACurrentMediaTime()
+        defer { MainActor.assumeIsolated { RadioStopTrace.log("tile stop total", since: stopT0) } }
         let firstFrameSeenAtStop = firstFrameSeen
         tileStopped = true
         audioOnlyProgram = false
@@ -8293,10 +8295,12 @@ struct AVPlayerMultiviewTile: View {
             if allowRetain, LiveChannelRetention.isEnabled, tileError == nil,
                let mux = remuxer, let url = readyLocalURL,
                let key = sessionRetainKey, let chID = sessionRetainChannelID {
+                let retainT0 = CACurrentMediaTime()
                 LiveChannelRetention.shared.retain(
                     key: key, channelID: chID,
                     channelName: sessionRetainName ?? channelName,
                     remuxer: mux, localURL: url)
+                MainActor.assumeIsolated { RadioStopTrace.log("AVP-RETAIN retain", since: retainT0) }
                 remuxer = nil
             }
             sessionRetainKey = nil
@@ -8328,7 +8332,9 @@ struct AVPlayerMultiviewTile: View {
             player?.pause()
         }
         let releasedPlayer = player
+        let releaseT0 = CACurrentMediaTime()
         player = nil
+        MainActor.assumeIsolated { RadioStopTrace.log("tile player release", since: releaseT0) }
         #if os(iOS)
         MultiviewCompositeTaps.shared.unregister(tileID: tileID)
         // Only the route owner releases AirPlay state (device log
@@ -8522,6 +8528,8 @@ struct AVPlayerLayerView: UIViewRepresentable {
         /// Build the controller on `layer` (auto-start from inline unless
         /// an AirPlay receiver is served from this tile).
         @MainActor func arm() {
+            let t0 = CACurrentMediaTime()
+            defer { if controller != nil { RadioStopTrace.log("PiP arm", since: t0) } }
             guard controller == nil, let layer,
                   AVPictureInPictureController.isPictureInPictureSupported(),
                   let pip = AVPictureInPictureController(playerLayer: layer) else { return }
@@ -8546,6 +8554,8 @@ struct AVPlayerLayerView: UIViewRepresentable {
         /// Stop any PiP window and drop the controller.
         @MainActor func release(reason: String) {
             guard let existing = controller else { return }
+            let t0 = CACurrentMediaTime()
+            defer { RadioStopTrace.log("PiP release", since: t0) }
             if existing.isPictureInPictureActive { existing.stopPictureInPicture() }
             existing.canStartPictureInPictureAutomaticallyFromInline = false
             existing.delegate = nil
@@ -8624,6 +8634,8 @@ struct AVPlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: HostView, context: Context) {
+        let t0 = CACurrentMediaTime()
+        defer { MainActor.assumeIsolated { RadioStopTrace.log("layer host update", since: t0) } }
         if radioHoldsSurface {
             // Radio Mode: no video surface; Switch to Video Mode reattaches.
             AVPlayerDisplayLayerRegistry.register(view.playerLayer, for: player)
@@ -8673,7 +8685,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
                             else if !MultiviewStore.shared.tiles.isEmpty { coordinator.arm() }
                         }
                 }
-                if RadioModeSession.shared.isActive {
+                if RadioModeSession.shared.isActive || radioHoldsSurface {
                     coordinator.release(reason: "Radio Mode")
                 } else {
                     coordinator.arm()

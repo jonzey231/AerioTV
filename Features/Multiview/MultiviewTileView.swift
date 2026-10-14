@@ -986,10 +986,20 @@ struct MultiviewTileView: View {
             // onAppear ran, guarantees the registration even
             // when the diff swallows onAppear.
             .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
+                // iPad 2026-10-13 23:32:33: a session reset bumps the epoch
+                // while this (stale) tile is still in the update that
+                // removes it; a tile no longer in the store has nothing
+                // to register.
+                guard store.tiles.contains(where: { $0.id == tile.id }) else {
+                    debugLog("[MV-Tile] task(id) skipped id=\(tile.id): tile no longer in the store")
+                    return
+                }
+                let t0 = CACurrentMediaTime()
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
+                RadioStopTrace.log("tile task(id)", since: t0)
             }
 
             // Per-tile corner chrome is suppressed at N=1. The
@@ -1346,10 +1356,20 @@ struct MultiviewTileView: View {
             // see the matching `.task(id: tile.id)` block in
             // `tvOSBody` for the freeze-after-channel-flip rationale.
             .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
+                // iPad 2026-10-13 23:32:33: a session reset bumps the epoch
+                // while this (stale) tile is still in the update that
+                // removes it; a tile no longer in the store has nothing
+                // to register.
+                guard store.tiles.contains(where: { $0.id == tile.id }) else {
+                    debugLog("[MV-Tile] task(id) skipped id=\(tile.id): tile no longer in the store")
+                    return
+                }
+                let t0 = CACurrentMediaTime()
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
+                RadioStopTrace.log("tile task(id)", since: t0)
             }
             // Same stale-badge fix as the tvOS body: re-register on engine
             // change so a downgradeToMPV updates the chrome badge.
