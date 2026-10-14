@@ -3418,6 +3418,10 @@ struct MoviesHero: View {
         .padding(.horizontal, 16)
         #else
         ZStack(alignment: .leading) {
+            // Opaque base: portrait art sits at the trailing edge and the
+            // placeholder is clear, so without it the card behind in the
+            // phone deck showed its title and buttons through this one.
+            Color.appBackground
             artwork
             gradient
             copy
