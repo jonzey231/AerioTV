@@ -5480,7 +5480,21 @@ final class AVPlayerProgressDriver {
         // paused so the spinner logic matches the mpv path.
         observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) {
             [weak self] p, _ in
+            // Diagnostic (Apple TV 2026-10-13): a user-paused tile started
+            // playing by itself 7 s after the pause with no nudge line in
+            // the log. KVO fires synchronously on the caller's thread, so
+            // the stack here names whoever called play().
+            let status = p.timeControlStatus
+            let stack: String? = {
+                guard status != .paused, Thread.isMainThread else { return nil }
+                let paused = MainActor.assumeIsolated { MultiviewStore.shared.audioProgressStore?.userPaused ?? false }
+                guard paused else { return nil }
+                return Thread.callStackSymbols.prefix(14).joined(separator: "\n")
+            }()
             Task { @MainActor in
+                if let stack {
+                    debugLog("[PLAYER] rate rose while user paused (status=\(status.rawValue)) caller:\n\(stack)")
+                }
                 guard let self else { return }
                 self.store.isPaused = (p.timeControlStatus == .paused)
                 // A paused live stream is behind its edge by definition,
