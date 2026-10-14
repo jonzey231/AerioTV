@@ -5647,6 +5647,18 @@ final class AVPlayerProgressDriver {
                 // The receiver owns playback; its fetch errors are not this
                 // engine's to escalate.
                 if self.externalRenderSuspended { return }
+                // A paused player stops polling the playlist, so every
+                // "unchanged" / not-received entry while the user has
+                // paused is the pause itself, not a dead feed. Reset the
+                // counters and wait for the resume.
+                if self.store.userPaused {
+                    if self.playlistStaleSince != nil || self.softErrorCount > 0 {
+                        debugLog("[AVP-STREAM] error log ignored: user paused (no escalation)")
+                    }
+                    self.playlistStaleSince = nil
+                    self.softErrorCount = 0
+                    return
+                }
                 let code = event.errorStatusCode
                 // Fatal, one entry is enough: playlist parse/validation failure
                 // (-12642), variant/media selection failure (-12646), and
