@@ -1153,3 +1153,149 @@ enum ServerCredentialChange {
         return nil
     }
 }
+
+// MARK: - Playlist host change
+
+/// Editing a playlist's address (Remote URL or Local URL) to a different
+/// host, scheme, or port.
+///
+/// Field report (Discord, 2026-10-14): a Dispatcharr playlist moved from a
+/// LAN address to a public one behind an SSO reverse proxy did not work
+/// until "Refresh Permissions" was tapped, even across relaunches. The edit
+/// kept the playlist row (its id, favorites, recents, and DVR are all keyed
+/// by it, which is correct) but also kept state that was learned against
+/// the OLD host and is not re-learned on its own:
+///  - the persisted auth header shape (`dispatcharrAuthMode`), discovered
+///    against whatever sat in front of the old host; launch discovery only
+///    runs while the field is empty, so it never re-ran;
+///  - the process-local JWT pair and the memoized catch-up credentials;
+///  - the capability snapshot read through the old host;
+///  - cookies the old host set in the shared cookie store;
+///  - the LAN probe's remembered candidate list (refreshed only on launch
+///    and on a playlist count change), so a new Local URL was not probed;
+///  - a live session whose stream URL embeds the old host.
+///
+/// `invalidate` drops all of that, re-discovers the header shape against
+/// the new host, takes the same unthrottled capability probe "Refresh
+/// Permissions" runs, and bumps `credentialGeneration` so the load
+/// orchestrator refetches channels, guide, VOD, and DVR from the new host.
+@MainActor
+enum PlaylistHostChange {
+
+    /// "scheme://host:port", lowercased, with the default port filled in.
+    /// Empty for an empty or unparseable value.
+    static func hostKey(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if !s.lowercased().hasPrefix("http://") && !s.lowercased().hasPrefix("https://") {
+            s = "http://" + s
+        }
+        guard let url = URL(string: s), let host = url.host?.lowercased(), !host.isEmpty else { return "" }
+        let scheme = (url.scheme ?? "http").lowercased()
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
+    }
+
+    /// True when either route of the playlist now points somewhere else.
+    static func hostChanged(oldBase: String, newBase: String,
+                            oldLocal: String, newLocal: String) -> Bool {
+        hostKey(oldBase) != hostKey(newBase) || hostKey(oldLocal) != hostKey(newLocal)
+    }
+
+    static func invalidate(server: ServerConnection,
+                           oldBase: String, oldLocal: String,
+                           allServers: [ServerConnection]) async {
+        var cleared: [String] = []
+
+        // A live stream (or Dispatcharr proxy connection) opened against the
+        // old host keeps that URL for its whole life.
+        if server.isActive {
+            PlayerSession.shared.stop()
+            cleared.append("player session")
+        }
+
+        DispatcharrTokenStore.shared.clear(serverID: server.id)
+        cleared.append("JWT pair")
+        CatchupSupport.invalidateCredentials(serverID: server.id)
+        cleared.append("catch-up credentials")
+
+        // Cookies the old host(s) set (an SSO portal in front of the old
+        // address, or Dispatcharr's own session cookie).
+        let oldHosts = Set([oldBase, oldLocal].compactMap { raw -> String? in
+            let key = hostKey(raw)
+            guard !key.isEmpty, let url = URL(string: key) else { return nil }
+            return url.host
+        })
+        let newHosts = server.ownHosts
+        var cookieCount = 0
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            for cookie in cookies {
+                let domain = cookie.domain.lowercased()
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                guard oldHosts.contains(domain), !newHosts.contains(domain) else { continue }
+                HTTPCookieStorage.shared.deleteCookie(cookie)
+                cookieCount += 1
+            }
+        }
+        cleared.append("\(cookieCount) cookie(s)")
+
+        if server.type == .dispatcharrAPI {
+            // Header shape learned against the old host. Re-discover it
+            // against the new one right away rather than waiting for a
+            // launch (discovery only runs while the field is empty).
+            let previousMode = server.dispatcharrAuthMode
+            server.dispatcharrAuthMode = ""
+            cleared.append("auth header mode '\(previousMode.isEmpty ? "default" : previousMode)'")
+        }
+
+        // The new Local URL has never been probed, and the probe's candidate
+        // list still holds the old one until the next launch.
+        TVLANProbe.shared.probe(servers: allServers)
+        cleared.append("LAN probe candidates")
+
+        debugLog("[PLAYLIST] host changed \(hostKey(oldBase))\(oldLocal.isEmpty ? "" : " (local \(hostKey(oldLocal)))")"
+                 + " -> \(hostKey(server.baseURL))\(server.localURL.isEmpty ? "" : " (local \(hostKey(server.localURL)))")"
+                 + ": cleared \(cleared.joined(separator: ", ")) server=\(server.name)")
+
+        guard server.type == .dispatcharrAPI else {
+            server.credentialGeneration &+= 1
+            return
+        }
+
+        // Re-authenticate against the new host before anything else loads.
+        if server.dispatcharrCredentialType == .usernamePassword {
+            let password = server.password.isEmpty ? server.effectivePassword : server.password
+            if !server.username.isEmpty, !password.isEmpty,
+               let pair = try? await DispatcharrAPI.login(baseURL: server.effectiveBaseURL,
+                                                         username: server.username,
+                                                         password: password,
+                                                         userAgent: server.effectiveUserAgent) {
+                DispatcharrTokenStore.shared.store(serverID: server.id,
+                                                   access: pair.access,
+                                                   refresh: pair.refresh)
+                debugLog("[PLAYLIST] host change: signed in again at the new host (server=\(server.name))")
+            } else {
+                debugLog("[PLAYLIST] host change: sign-in at the new host failed; the 401 path re-mints later (server=\(server.name))")
+            }
+        }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        if let info = try? await api.verifyConnection() {
+            if let mode = info.discoveredAuthMode {
+                server.dispatcharrAuthMode = mode.rawValue
+            }
+            debugLog("[PLAYLIST] host change: new host verified, auth header mode "
+                     + "'\(server.dispatcharrAuthMode.isEmpty ? "default" : server.dispatcharrAuthMode)' (server=\(server.name))")
+        } else {
+            debugLog("[PLAYLIST] host change: verifying the new host failed; auth header mode left at default (server=\(server.name))")
+        }
+
+        // Exactly what "Refresh Permissions" runs: unthrottled, waits for an
+        // in-flight pass.
+        _ = await DispatcharrCapabilityProbe.refresh(server, reason: "playlist host change",
+                                                     waitIfInFlight: true)
+        server.credentialGeneration &+= 1
+    }
+}

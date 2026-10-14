@@ -741,6 +741,7 @@ enum PlaylistSaveRunner {
                     typedBaseURL: String,
                     credentialType: DispatcharrCredentialType,
                     originalCredentials: DispatcharrCredentialSnapshot?,
+                    originalLocalURL: String? = nil,
                     progress: PlaylistSaveProgress,
                     commitStaged: () -> Void) async -> String? {
         progress.reset()
@@ -752,6 +753,14 @@ enum PlaylistSaveRunner {
         )
         let urlChanged = typedBaseURL != server.baseURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Host, scheme, or port of either route. The Local URL field binds
+        // straight to the row, so its pre-edit value comes from the caller.
+        let oldBaseURL = server.baseURL
+        let oldLocalURL = originalLocalURL ?? server.localURL
+        let hostChanged = PlaylistHostChange.hostChanged(oldBase: oldBaseURL,
+                                                         newBase: typedBaseURL,
+                                                         oldLocal: oldLocalURL,
+                                                         newLocal: server.localURL)
         // A rename, a User-Agent edit or a Guide Days change costs no login
         // round trip at all, only a credential swap or a new URL does.
         let needsVerify = credentialsChanged || (urlChanged && server.type != .m3uPlaylist)
@@ -787,15 +796,25 @@ enum PlaylistSaveRunner {
                 progress.fail(.verify, message: message)
                 return message
             }
-        } else if urlChanged, server.type == .dispatcharrAPI {
-            // Same panel, new address: permissions still have to be re-read
+        }
+        let servers = allServers(around: server)
+        if hostChanged {
+            // Drops everything learned against the old host, re-verifies
+            // against the new one, and runs the same probe "Refresh
+            // Permissions" does, before the Movies / TV Shows rows are
+            // decided.
+            await PlaylistHostChange.invalidate(server: server,
+                                                oldBase: oldBaseURL,
+                                                oldLocal: oldLocalURL,
+                                                allServers: servers)
+        } else if urlChanged, !credentialsChanged, server.type == .dispatcharrAPI {
+            // Same host, new path: permissions still have to be re-read
             // before the Movies / TV Shows rows are decided.
             await DispatcharrCapabilityProbe.refresh(server, reason: "playlist URL change")
         }
         SyncManager.shared.saveCredentialsSynced(for: server)
 
-        let identityChanged = credentialsChanged || urlChanged
-        let servers = allServers(around: server)
+        let identityChanged = credentialsChanged || urlChanged || hostChanged
 
         // Channels: only the ACTIVE playlist has any on screen, and only a
         // new identity or address invalidates them.

@@ -85,6 +85,9 @@ struct EditServerPage: View {
     /// re-authentication while a rename or an EPG-URL edit costs nothing.
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
+    /// Local URL when the edit surface opened. The field binds straight to
+    /// the row, so Save needs this to tell a host change apart.
+    @State private var originalLocalURL: String? = nil
 
     /// See `EditServerSheet.saveEdits` for the rationale: Save verifies a
     /// credential change before persisting anything, shows "Saving…", and
@@ -149,6 +152,7 @@ struct EditServerPage: View {
             typedBaseURL: typedBaseURL,
             credentialType: mode,
             originalCredentials: originalCredentials,
+            originalLocalURL: originalLocalURL,
             progress: saveProgress,
             commitStaged: {
                 commitBaseURLIfStaged()
@@ -164,6 +168,7 @@ struct EditServerPage: View {
             return
         }
         originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
+        originalLocalURL = server.localURL
         dismiss()
     }
 
@@ -246,6 +251,7 @@ struct EditServerPage: View {
         .onAppear {
             guard server.modelContext != nil, originalCredentials == nil else { return }
             originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
+            originalLocalURL = server.localURL
         }
     }
 
