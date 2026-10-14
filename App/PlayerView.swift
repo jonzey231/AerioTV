@@ -892,6 +892,21 @@ final class ForegroundPiPBridge: ObservableObject {
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
+    /// The USER paused this tile (chrome Pause, Play/Pause, lock screen).
+    /// Not @Published (no re-render). Every automatic play (stall nudge,
+    /// rejoin, reconnect, background resume, the post-switch return to
+    /// live) checks it and leaves the player paused; ingest and buffering
+    /// carry on. Cleared by a user resume and by a new tune.
+    /// Apple TV 2026-10-13 (SXM Alt Nation): pauses "resumed on their own".
+    var userPaused = false
+
+    /// Record a user pause / resume with the position.
+    func noteUserPause(_ paused: Bool, positionSeconds: Double) {
+        userPaused = paused
+        debugLog(String(format: "[PLAYER] user %@ at %.1fs", paused ? "pause" : "resume",
+                        positionSeconds.isFinite ? positionSeconds : 0))
+    }
+
     /// Current playback position in milliseconds (live-timeline relative).
     @Published var currentMs: Int32 = 0
     /// Total stream duration in ms (0 for live streams without a static file).
@@ -5931,6 +5946,7 @@ final class AVPlayerProgressDriver {
             if ahead >= 2 * (td > 0 ? td : 2.0) {
                 nudgedThisWaitStreak = true
                 earlyStartNudgeAt = Date()
+                guard autoPlayAllowed("first join") else { return }
                 player.playImmediately(atRate: 1.0)
                 debugLog(String(format:
                     "[AVP-NUDGE] first join: %d s waited, %.1f s loaded ahead, no new segment needed; playImmediately",
@@ -5966,6 +5982,7 @@ final class AVPlayerProgressDriver {
             stallGateSince = nil
         }
         nudgedThisWaitStreak = true
+        guard autoPlayAllowed("waiting nudge") else { return }
         player.playImmediately(atRate: 1.0)
         debugLog(String(format:
             "[AVP-NUDGE] waiting %ds with %d new segments and %.1fs loaded ahead; playImmediately",
@@ -6062,9 +6079,18 @@ final class AVPlayerProgressDriver {
             "[AVP-NUDGE] rejoin: seeking back %.0f s into the local window (learned %.0f s, window %.0f s)",
             back, learned, behind))
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
-            self?.player.playImmediately(atRate: 1.0)
+            guard let self, self.autoPlayAllowed("rejoin") else { return }
+            self.player.playImmediately(atRate: 1.0)
         }
         return true
+    }
+
+    /// False (and logged) when the user paused this tile: automatic
+    /// recovery may fill the buffer, never start playback.
+    func autoPlayAllowed(_ site: String) -> Bool {
+        guard store.userPaused else { return true }
+        debugLog("[AVP-NUDGE] skipped: user paused (\(site))")
+        return false
     }
 
     /// The remuxer's TARGETDURATION can grow during the first seconds of
@@ -6475,6 +6501,7 @@ final class AVPlayerProgressDriver {
         store.togglePauseAction = { [weak self, weak player] in
             guard let player else { return }
             let resuming = player.timeControlStatus == .paused
+            self?.store.noteUserPause(!resuming, positionSeconds: player.currentTime().seconds)
             if let self, self.store.isDVRWindow {
                 // GH #93 instrumentation: position and buffered-ahead at
                 // every DVR pause/resume, so a post-resume freeze can be

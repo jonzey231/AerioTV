@@ -1584,6 +1584,18 @@ struct PlaybackBottomChrome_tvOS: View {
         // this view as its own focus anchor so the engine routes
         // D-pad-down from the tile above cleanly into here.
         .focusSection()
+        // Apple TV 2026-10-13: chrome opened by Select left focus on the
+        // video, so the second Select only re-armed the hide timer and
+        // never paused. Opened by Select, the chrome lands on Pause.
+        .onAppear {
+            guard chromeState.lastReason == "tap" else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                if focusedChrome == nil {
+                    focusedChrome = .playPause
+                    debugLog("[CHROME] focus -> Pause (chrome opened by Select)")
+                }
+            }
+        }
     }
 
     /// One native-style tool cell: frosted circle, icon-only at rest;

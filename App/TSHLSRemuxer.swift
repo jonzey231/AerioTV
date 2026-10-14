@@ -5583,11 +5583,17 @@ struct AVPlayerMultiviewTile: View {
         #endif
         .onChange(of: shouldPause) { _, paused in
             driver?.expectPlaying = !paused
+            if !paused, progressStore.userPaused {
+                debugLog("[AVP-NUDGE] skipped: user paused (tile un-paused by the session)")
+                return
+            }
             if paused { player?.pause() } else { player?.play() }
         }
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { oldURL, newURL in
+            // A new tune starts playing: the user's pause belonged to the old one.
+            progressStore.userPaused = false
             // A previous channel's TS fallback / Force HLS bypass URL must
             // not follow the flip: liveSourceURL prefers it over streamURL,
             // so the flip would re-open the OLD channel.
@@ -5821,6 +5827,7 @@ struct AVPlayerMultiviewTile: View {
     /// Held DVR start: play, then prove the rate took two seconds later.
     static func playAndVerify(_ avPlayer: AVPlayer, item: AVPlayerItem) {
         avPlayer.play()
+        let store = MainActor.assumeIsolated { MultiviewStore.shared.audioProgressStore }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             guard avPlayer.currentItem === item else { return }
             let layer = AVPlayerDisplayLayerRegistry.layer(for: avPlayer)
@@ -5828,6 +5835,10 @@ struct AVPlayerMultiviewTile: View {
             if avPlayer.rate == 1 {
                 debugLog("[AVP-DVR] play took: rate=1 pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s \(layerNote)")
             } else {
+                if store?.userPaused == true {
+                    debugLog("[AVP-NUDGE] skipped: user paused (play check)")
+                    return
+                }
                 debugLog("[AVP-DVR] play did not take, retrying (rate=\(avPlayer.rate) status=\(avPlayer.timeControlStatus.rawValue) pos=\(String(format: "%.1f", avPlayer.currentTime().seconds))s) \(layerNote)")
                 avPlayer.play()
             }
@@ -6942,7 +6953,8 @@ struct AVPlayerMultiviewTile: View {
                            toleranceBefore: .zero, toleranceAfter: .positiveInfinity)
                 }
             }
-            if !shouldPause { p.play() }
+            if !shouldPause, !progressStore.userPaused { p.play() }
+            else if progressStore.userPaused { debugLog("[AVP-NUDGE] skipped: user paused (background resume)") }
         }
         gracePausedPlayer = false
         debugLog("[AVP-MV] background grace: resumed after \(String(format: "%.1f", secs)) s, no rebuild channel=\(channelName)")
@@ -7875,7 +7887,11 @@ struct AVPlayerMultiviewTile: View {
             avPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
             debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s (exact) title=\(channelName)")
         }
-        if !shouldPause, !deferDVRStartPlay {
+        // A rebuild (reconnect, retune after an error) of a tile the user
+        // paused stays paused; a new tune clears the flag (streamURL change).
+        let userHeld = progressStore.userPaused
+        if userHeld { debugLog("[AVP-NUDGE] skipped: user paused (pipeline start) channel=\(channelName)") }
+        if !shouldPause, !deferDVRStartPlay, !userHeld {
             if let dvrLoader {
                 // Start point comes from #EXT-X-START in the rewritten
                 // playlist; no client seek. Prove the rate took, and
