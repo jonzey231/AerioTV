@@ -6488,6 +6488,11 @@ struct MainTabView: View {
             debugLog("🎮 [MT-OUTER] .onExitCommand FIRED (body's outer modifier, focus was outside tabContentView's TabView)")
             handleMenuPress()
         }
+        // Guide Hold Back (Logan 2026-10-15). On the outer body: one more
+        // modifier on tabContentView tips the tvOS type-checker budget.
+        .onReceive(NotificationCenter.default.publisher(for: .guideMenuHoldBegan)) { _ in
+            handleMenuHold()
+        }
         #endif
         .environmentObject(nowPlaying)
         .environmentObject(favoritesStore)
@@ -8874,7 +8879,53 @@ struct MainTabView: View {
         playerSession.mode == .multiview && multiviewStore.tiles.count == 1
     }
 
+    /// Guide Back rows (Logan 2026-10-15): run the mapped action for a
+    /// single Back (`.backShort`, default the top-channel ladder) or a held
+    /// Back (`.backLong`, default Do nothing).
+    private func runGuideBack(_ slot: RemoteSlot) {
+        #if os(tvOS)
+        let action = RemoteControlStore.shared.effectiveGuideAction(slot)
+        debugLog("[PRESS] guide " + slot.wire + " action=" + action.wire)
+        switch action {
+        case .none, .navigate:
+            return
+        case .openSearch:
+            withAnimation(.easeOut(duration: 0.2)) { showSearch = true }
+        default:
+            GuideRemoteDispatch.perform(action)
+        }
+        #endif
+    }
+
+    #if os(tvOS)
+    /// Held Menu in the guide (GuideLongPressMenuDetector). Same context as a
+    /// single Back reaching the guide branches of `handleMenuPress`: nothing
+    /// pushed, no drawer or search on top, no full-screen player.
+    private func handleMenuHold() {
+        guard selectedTab == .liveTV,
+              playerSession.nativeHLSItem == nil,
+              !TVGuideSidebarState.shared.isOpen,
+              !showSearch,
+              !(nowPlaying.isActive && !nowPlaying.isMinimized),
+              !isVODDetailPushed, !isSettingsSubviewPushed else {
+            debugLog("[PRESS] guide hold-Menu ignored: not in the guide context")
+            return
+        }
+        // A pending single/double Back window from an earlier press must not
+        // also fire under the hold.
+        nowPlaying.menuMiniDebounce?.cancel()
+        nowPlaying.menuMiniPressCount = 0
+        runGuideBack(.backLong)
+    }
+    #endif
+
     private func handleMenuPress() {
+        #if os(tvOS)
+        if GuideMenuHold.consumed {
+            debugLog("🎮 [HMP] swallowed: release of a recognized Hold Back")
+            return
+        }
+        #endif
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
         // TEST (branch test/avplayer-hls-engine): if this handler runs
         // while the native AVPlayer cover is presented, focus is stuck
@@ -9027,8 +9078,8 @@ struct MainTabView: View {
                 if isDouble {
                     radio.stop(reason: "double Menu")
                 } else {
-                    debugLog("\u{1F3AE} Menu pressed: Radio Mode -> scroll guide to top")
-                    NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+                    debugLog("\u{1F3AE} Menu pressed: Radio Mode -> mapped guide Back")
+                    runGuideBack(.backShort)
                 }
             }
         } else if selectedTab == .liveTV {
@@ -9038,8 +9089,8 @@ struct MainTabView: View {
             // as a notification so ChannelListView can scroll its
             // internal ScrollViewReader without HomeView having
             // to hold a binding through the tab view hierarchy.
-            debugLog("🎮 Menu pressed: Live TV tab → scroll guide to top")
-            NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+            debugLog("🎮 Menu pressed: Live TV tab → mapped guide Back")
+            runGuideBack(.backShort)
         } else if tabBarScrollState.isHidden {
             // Movies & TV redesign: the tab scrolled its bar away. Menu
             // means "back to the top" there, same as the guide's

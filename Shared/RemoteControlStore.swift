@@ -192,12 +192,18 @@ final class RemoteControlStore: ObservableObject {
     }
 
     func setPlayerAction(_ slot: RemoteSlot, _ action: PlayerRemoteAction) {
+        // Back is mappable in the GUIDE only; the player's Back stays fixed.
+        guard slot != .backShort, slot != .backLong else { return }
         var player = materializedPlayer()
         player[slot] = action
         commit(RemoteControlMap(preset: .custom, player: player, guide: materializedGuide()))
     }
 
     func setGuideAction(_ slot: RemoteSlot, _ action: GuideRemoteAction) {
+        // The ladder is Back's own built-in behavior; no other press runs it.
+        if action == .backLadder, slot != .backShort, slot != .backLong { return }
+        // One press, one action: the dictionary write REPLACES whatever this
+        // press held, so a press can never carry two actions.
         var guide = materializedGuide()
         guide[slot] = action
         commit(RemoteControlMap(preset: .custom, player: materializedPlayer(), guide: guide))

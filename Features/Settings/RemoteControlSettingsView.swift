@@ -12,8 +12,9 @@ import SwiftUI
 /// persists the map and syncs it across the user's Apple TVs.
 ///
 /// Design invariants inherited from the shared model (do not relax):
-/// - Back / Menu is never a slot; Back semantics stay hardcoded and are
-///   deliberately absent from every choice list.
+/// - Back / Menu is a slot in the GUIDE only (Back and Hold Back rows,
+///   Logan 2026-10-15). Double Back and the Radio Mode shortcuts stay
+///   fixed; the player's Back is never a slot.
 /// - Guide rows (2026-09-14): Select, Left and Right, short and hold. Every
 ///   short arrow defaults to Move focus (the LOCKED timeline rule)
 ///   and Up/Down stay unmappable focus navigation.
@@ -88,11 +89,14 @@ struct RemoteControlSettingsView: View {
     /// the Android per-slot curation exactly.
     private static func guideActionChoices(for slot: RemoteSlot) -> [GuideRemoteAction] {
         var out: [GuideRemoteAction] = []
+        let isBack = slot == .backShort || slot == .backLong
+        // Back's built-in behavior (the top-channel ladder) leads its rows.
+        if isBack { out.append(.backLadder) }
         // Move focus first on the arrows (their built-in behavior).
         // Select's built-in behavior is Play, listed below.
         // Channel buttons have no built-in move, so no Move focus choice.
         if slot != .okShort && slot != .okLong
-            && slot != .channelUp && slot != .channelDown { out.append(.navigate) }
+            && slot != .channelUp && slot != .channelDown && !isBack { out.append(.navigate) }
         out += [
             .play, .programInfo, .programDetails, .record,
             .openGroupSidebar,
@@ -223,6 +227,7 @@ struct RemoteControlSettingsView: View {
         // pushed page. The list is long, so it scrolls inside the card.
         return TVSlotChoiceRow(
             title: displayName(slot),
+            subtitle: nil,
             choices: Self.playerActionChoices,
             current: current,
             displayName: { displayName($0) },
@@ -238,6 +243,9 @@ struct RemoteControlSettingsView: View {
         let current = store.effectiveGuideAction(slot)
         return TVSlotChoiceRow(
             title: displayName(slot),
+            subtitle: slot == .backShort
+                ? "Single press. Pressing twice quickly and the Radio Mode shortcuts are fixed."
+                : nil,
             choices: Self.guideActionChoices(for: slot),
             current: current,
             displayName: { displayName($0) },
@@ -283,6 +291,8 @@ private func displayName(_ slot: RemoteSlot) -> String {
     case .rewind:      return "Rewind"
     case .channelUp:   return "Channel Up"
     case .channelDown: return "Channel Down"
+    case .backShort:   return "Back"
+    case .backLong:    return "Hold Back"
     }
 }
 
@@ -336,6 +346,7 @@ private func displayName(_ action: GuideRemoteAction) -> String {
     case .play:            return "Play channel"
     case .programDetails:  return "Program info"
     case .record:          return "Record"
+    case .backLadder:      return "Back ladder (top channel, then close)"
     case .none:            return "Do nothing"
     }
 }
@@ -353,6 +364,7 @@ private func displayName(_ action: GuideRemoteAction) -> String {
 /// marks the current choice.
 private struct TVSlotChoiceRow<Action: Hashable>: View {
     let title: String
+    var subtitle: String? = nil
     let choices: [Action]
     let current: Action
     let displayName: (Action) -> String
@@ -363,9 +375,17 @@ private struct TVSlotChoiceRow<Action: Hashable>: View {
     var body: some View {
         TVSettingsCardButtonRow(action: { isSheetPresented = true }, logTitle: title) {
             HStack(spacing: 16) {
-                Text(title)
-                    .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
-                    .foregroundColor(.textPrimary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .scaledFont(.system(size: 22).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 Spacer(minLength: 12)
                 Text(displayName(current))
                     .scaledFont(.system(size: SettingsMetrics.tvEyebrowSize))

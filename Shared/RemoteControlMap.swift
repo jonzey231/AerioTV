@@ -33,6 +33,10 @@ enum RemoteSlot: String, CaseIterable {
     case rightShort, rightLong
     case playPause, ffwd, rewind
     case channelUp, channelDown
+    /// Back / Menu, GUIDE map only (Discord request, Logan 2026-10-15). The
+    /// double-Back rules (top channel with a mini up, stop Radio Mode) and
+    /// the single-Back Radio Mode deferral stay fixed outside the map.
+    case backShort, backLong
 
     var wire: String { rawValue }
     static func fromWire(_ s: String) -> RemoteSlot? { RemoteSlot(rawValue: s) }
@@ -84,6 +88,9 @@ enum GuideRemoteAction: String, CaseIterable {
     /// Focused-cell actions: tune the channel, open the Program Info sheet,
     /// open the record sheet.
     case play, programDetails, record
+    /// Back (short) built-in behavior: the guide's top-channel ladder
+    /// (top channel, then close). Only offered on the Back rows.
+    case backLadder
     case none
 
     var wire: String { rawValue }
@@ -222,13 +229,16 @@ struct RemoteControlMap: Equatable {
             .rightShort: .navigate,
             .rightLong: .closeMiniPlayer,
             .playPause: .resumePlayer,
+            .backShort: .backLadder,
+            .backLong: .none,
         ]
     )
 
-    /// The six guide rows shown under Settings > Remote Control > In the TV
+    /// The guide rows shown under Settings > Remote Control > In the TV
     /// Guide, in display order.
     static let guideKeySlots: [RemoteSlot] = [
         .okShort, .okLong, .leftShort, .leftLong, .rightShort, .rightLong,
+        .backShort, .backLong,
     ]
 
     /// What a guide slot ACTUALLY does, given the Group Selection mode.
@@ -274,8 +284,10 @@ struct RemoteControlMap: Equatable {
         if preset == .default { return .default }
         return RemoteControlMap(
             preset: preset,
-            player: decodeContext(obj["player"] as? [String: Any]) { PlayerRemoteAction.fromWire($0) },
-            guide: decodeContext(obj["guide"] as? [String: Any]) { GuideRemoteAction.fromWire($0) }
+            player: decodeContext(obj["player"] as? [String: Any],
+                                  firstWins: firstOccurrences(in: raw, context: "player")) { PlayerRemoteAction.fromWire($0) },
+            guide: decodeContext(obj["guide"] as? [String: Any],
+                                 firstWins: firstOccurrences(in: raw, context: "guide")) { GuideRemoteAction.fromWire($0) }
         )
     }
 
@@ -284,15 +296,45 @@ struct RemoteControlMap: Equatable {
         return fromJSON(str)
     }
 
+    /// One press, one action (Logan 2026-10-15). A JSON object cannot hold
+    /// two values for one press once parsed (JSONSerialization keeps only
+    /// one), so older or hand-edited blobs with a repeated press key are
+    /// detected on the RAW text: the first occurrence wins and every later
+    /// one is dropped with a log line. Returns press wire -> first action
+    /// wire for the presses that were repeated.
+    private static func firstOccurrences(in raw: String, context: String) -> [String: String] {
+        guard let ctxRange = raw.range(of: "\"\(context)\"\\s*:\\s*\\{[^}]*\\}",
+                                       options: .regularExpression) else { return [:] }
+        let body = String(raw[ctxRange])
+        guard let pairRegex = try? NSRegularExpression(
+            pattern: "\"([A-Za-z]+)\"\\s*:\\s*\"([A-Za-z]+)\"") else { return [:] }
+        var first: [String: String] = [:]
+        var repeated: [String: String] = [:]
+        let ns = body as NSString
+        for m in pairRegex.matches(in: body, range: NSRange(location: 0, length: ns.length)) {
+            let key = ns.substring(with: m.range(at: 1))
+            let value = ns.substring(with: m.range(at: 2))
+            if let kept = first[key] {
+                debugLog("[REMOTE] duplicate action for \(key) dropped (\(context): kept \(kept), dropped \(value))")
+                repeated[key] = kept
+            } else {
+                first[key] = value
+            }
+        }
+        return repeated
+    }
+
     private static func decodeContext<A>(
         _ obj: [String: Any]?,
+        firstWins: [String: String] = [:],
         _ action: (String) -> A?
     ) -> [RemoteSlot: A] {
         guard let obj = obj else { return [:] }
         var out: [RemoteSlot: A] = [:]
         for (key, value) in obj {
             guard let slot = RemoteSlot.fromWire(key) else { continue }
-            guard let wire = value as? String, let act = action(wire) else { continue }
+            let chosen = firstWins[key] ?? (value as? String)
+            guard let wire = chosen, let act = action(wire) else { continue }
             out[slot] = act
         }
         return out

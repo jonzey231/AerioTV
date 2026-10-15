@@ -134,6 +134,9 @@ extension Notification.Name {
     static let guideFocusedCellAction = Notification.Name("guideFocusedCellAction")
     /// Move focus onto the first group pill (Top Group Pills mode).
     static let guideFocusGroupPills = Notification.Name("guideFocusGroupPills")
+    /// Guide Hold Back recognized (GuideLongPressMenuDetector); HomeView
+    /// runs the mapped backLong action.
+    static let guideMenuHoldBegan = Notification.Name("guideMenuHoldBegan")
 }
 
 /// Remote Control #196: shared dispatcher for the guide-context actions
@@ -163,7 +166,7 @@ enum GuideRemoteDispatch {
         case .jumpToNow:
             post(.guideJumpToNow)
             return true
-        case .jumpToTop:
+        case .jumpToTop, .backLadder:
             post(.guideScrollToTop)
             return true
         case .pageUp:
@@ -334,6 +337,7 @@ extension RemoteControlHints {
         case .programDetails:  return "Program info"
         case .record:          return "Record"
         case .play:            return "Play"
+        case .backLadder:      return "Top channel"
         case .navigate, .none: return nil
         }
     }
@@ -382,8 +386,13 @@ extension RemoteControlHints {
             // Radio Mode (HomeView.handleMenuPress);
             // the mapped Play/Pause and hold-Right slots run the banner's
             // two actions (GuideRemoteDispatch.perform).
-            pairs.append(RemoteHintPair(key: "Back", action: "Top channel"))
+            if let phrase = stripGuideAction(map.guideAction(.backShort)) {
+                pairs.append(RemoteHintPair(key: "Back", action: phrase))
+            }
             pairs.append(RemoteHintPair(key: "Double Back", action: "Stop"))
+            if let phrase = stripGuideAction(map.guideAction(.backLong)) {
+                pairs.append(RemoteHintPair(key: "Hold Back", action: phrase))
+            }
             if map.guideAction(.playPause) == .resumePlayer {
                 pairs.append(RemoteHintPair(key: "Play/Pause", action: "Switch to Video Mode"))
             }
@@ -392,8 +401,17 @@ extension RemoteControlHints {
             }
             return pairs
         }
-        pairs.append(RemoteHintPair(key: miniActive ? "Double Back" : "Back",
-                                    action: "Top channel"))
+        // Back (Logan 2026-10-15): with the mini up a single Back expands it
+        // and a double Back jumps to the top channel (both fixed); with no
+        // mini the single Back runs the mapped backShort action.
+        if miniActive {
+            pairs.append(RemoteHintPair(key: "Double Back", action: "Top channel"))
+        } else if let phrase = stripGuideAction(map.guideAction(.backShort)) {
+            pairs.append(RemoteHintPair(key: "Back", action: phrase))
+        }
+        if let phrase = stripGuideAction(map.guideAction(.backLong)) {
+            pairs.append(RemoteHintPair(key: "Hold Back", action: phrase))
+        }
         if miniActive {
             if let phrase = stripGuideAction(map.guideAction(.playPause)) {
                 pairs.append(RemoteHintPair(key: "Play/Pause", action: phrase))
