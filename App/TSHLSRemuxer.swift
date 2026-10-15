@@ -4264,6 +4264,16 @@ final class AVPStallWatchdog {
     /// item legitimately reports presentationSize 0x0, so that is not a
     /// death verdict there. The clock checks still apply.
     var audioOnlyExpected: (() -> Bool)?
+    /// Direct HLS tiles only (Force HLS, iPhone 2026-10-15 00:31:56,
+    /// SiriusXM Hits 1): there is no remuxer to call the program
+    /// audio-only, so a 0x0 item that is playing audio is judged here.
+    /// Returns the acceptance reason, or nil when the 0x0 item must keep
+    /// the undecodable-video fallback. Called with whether the item has
+    /// video and audio tracks and whether the player is playing.
+    var audioOnlyAccept: ((_ hasVideoTrack: Bool, _ hasAudioTrack: Bool, _ playing: Bool) -> String?)?
+    /// Fired once when `audioOnlyAccept` accepts the program.
+    var onAudioOnlyAccepted: ((String) -> Void)?
+    private var audioOnlyAccepted = false
 
     init(player: AVPlayer, item: AVPlayerItem, label: String,
          interval: TimeInterval = 4.0,
@@ -4372,9 +4382,20 @@ final class AVPStallWatchdog {
         case .readyToPlay:
             unknownPolls = 0
             let size = item.presentationSize
-            if size.width == 0 && size.height == 0, audioOnlyExpected?() != true {
-                die("ready but no renderable video (audio-only / undecodable video)")
-                return
+            if size.width == 0 && size.height == 0, audioOnlyExpected?() != true, !audioOnlyAccepted {
+                var accepted: String?
+                if let accept = audioOnlyAccept {
+                    let types = item.tracks.compactMap { $0.assetTrack?.mediaType }
+                    accepted = accept(types.contains(.video), types.contains(.audio),
+                                      player.timeControlStatus == .playing && player.rate > 0)
+                }
+                if let accepted {
+                    audioOnlyAccepted = true
+                    onAudioOnlyAccepted?(accepted)
+                } else {
+                    die("ready but no renderable video (audio-only / undecodable video)")
+                    return
+                }
             }
             // Frozen clock: only count when the player claims to be
             // PLAYING with a stuck playhead (a true wedge), or when it is
@@ -5379,6 +5400,8 @@ struct AVPlayerMultiviewTile: View {
     /// just ended, a fast flip back - so the same URL is the right URL;
     /// it only needs the teardown to drain. Reset on a user tune.
     @State private var channelStoppingRetries = 0
+    /// Seconds already spent waiting on "Channel is stopping".
+    @State private var channelStoppingWaited: Double = 0
     /// Live Rewind armed for this tile: the remuxer was created with a
     /// spill window (solo live + setting on), so the driver runs in
     /// rewind-window mode and LiveRewindEngine mirrors the window for
@@ -5862,6 +5885,7 @@ struct AVPlayerMultiviewTile: View {
             mismatchAutoRetries = 0
             serverBusyRetries = 0
             channelStoppingRetries = 0
+            channelStoppingWaited = 0
             standingRetries = 0
             teardownToken = UUID()
             // The failed-channel id stays for stop()'s Kept Live check (it
@@ -6305,6 +6329,7 @@ struct AVPlayerMultiviewTile: View {
         mismatchAutoRetries = 0
         serverBusyRetries = 0
         channelStoppingRetries = 0
+        channelStoppingWaited = 0
         stop(allowRetain: false)
         start()
     }
@@ -6320,6 +6345,7 @@ struct AVPlayerMultiviewTile: View {
         mismatchAutoRetries = 0
         serverBusyRetries = 0
         channelStoppingRetries = 0
+        channelStoppingWaited = 0
         standingRetries = 0
         start()
     }
@@ -6597,8 +6623,13 @@ struct AVPlayerMultiviewTile: View {
 
     // MARK: - Dispatcharr 503 reasons (Logan 2026-09-12)
 
-    /// Same-URL waits allowed on "Channel is stopping, retry shortly".
-    private static let channelStoppingMaxRetries = 5
+    /// "Channel is stopping, retry shortly": same-URL waits.
+    /// Backoff ladder for "Channel is stopping" (iPhone 2026-10-15
+    /// 00:32:00-00:32:05: five 1 s retries all landed inside the previous
+    /// HLS session's drain). The server's Retry-After is the floor; the
+    /// ladder is 1, 2, 4, 8 s, then 8 s, until about 20 s have been spent.
+    private static let channelStoppingBackoff: [Double] = [1, 2, 4, 8]
+    private static let channelStoppingBudget: Double = 20
     /// Cap on the server's Retry-After, so a generous header cannot park
     /// a live tile on a spinner.
     private static let channelStoppingMaxDelay: Double = 3
@@ -6846,11 +6877,17 @@ struct AVPlayerMultiviewTile: View {
            let info = Self.parse503(reason) {
             if let serverReason = info.serverReason {
                 if serverReason.lowercased().contains("is stopping") {
-                    if channelStoppingRetries < Self.channelStoppingMaxRetries {
-                        let delay = min(max(info.retryAfter ?? 1, 1), Self.channelStoppingMaxDelay)
+                    let step = Self.channelStoppingBackoff[min(channelStoppingRetries, Self.channelStoppingBackoff.count - 1)]
+                    let serverFloor = min(max(info.retryAfter ?? 1, 1), Self.channelStoppingMaxDelay)
+                    // The last wait is trimmed to what is left of the budget.
+                    let remaining = Self.channelStoppingBudget - channelStoppingWaited
+                    let delay = max(min(max(step, serverFloor), remaining), serverFloor)
+                    if remaining >= serverFloor {
                         channelStoppingRetries += 1
+                        channelStoppingWaited += delay
                         debugLog("[AVP-MV] 503 reason=\"\(serverReason)\"; same-URL retry "
-                            + "\(channelStoppingRetries)/\(Self.channelStoppingMaxRetries) in \(delay)s "
+                            + "\(channelStoppingRetries) in \(delay)s (backoff, server retryAfter=\(info.retryAfter.map { "\($0)" } ?? "-"), "
+                            + "waited \(channelStoppingWaited)s of \(Self.channelStoppingBudget)s) "
                             + "channel=\(channelName)")
                         stop()
                         statusText = "Reconnecting..."
@@ -8428,6 +8465,37 @@ struct AVPlayerMultiviewTile: View {
             onDead: { failOrFallback($0) })
         if let mux = remuxer {
             watchdog.audioOnlyExpected = { [weak mux] in mux?.isAudioOnlyProgram ?? false }
+        } else if isForceHLSDirect {
+            // Direct HLS has no remuxer to call a program audio-only, so an
+            // audio-only provider stream (SiriusXM, AAC in TS) reached
+            // readyToPlay at 0x0 and was torn down at +4 s as undecodable
+            // video (iPhone 2026-10-15 00:31:56). The TS remux path that
+            // replaced it then hit five 503 "Channel is stopping" answers
+            // while the HLS session drained. Accept audio-only here the
+            // same way the TS path does; only a video track that never
+            // renders keeps the fallback.
+            let memoryKey = forceHLSKeep?.key ?? removingHLSOutputFormat(url).absoluteString
+            let name = channelName
+            watchdog.audioOnlyAccept = { hasVideo, hasAudio, playing in
+                if AudioOnlyTuneIntent.shared.radioRequested { return "Radio Mode requested" }
+                if DeclaredRadioChannels.shared.contains(memoryKey) { return "declared radio channel" }
+                if AudioOnlyChannelMemory.isRemembered(memoryKey) { return "remembered audio-only" }
+                if !hasVideo, hasAudio, playing { return "no video track" }
+                return nil
+            }
+            watchdog.onAudioOnlyAccepted = { why in
+                debugLog("[FORCE-HLS] audio-only program accepted (\(why)) channel=\(name)")
+                if !progressStore.isAudioOnlyProgram { progressStore.isAudioOnlyProgram = true }
+                if !audioOnlyProgram {
+                    audioOnlyProgram = true
+                    debugLog("[AVP-MV] tile \(name): audio-only program, showing the channel logo")
+                }
+                MultiviewStore.shared.registerVideoAspect(16.0 / 9.0, for: tileID)
+                // Radio Mode tunes are audio by request, not evidence.
+                if why == "no video track" || why == "remembered audio-only" {
+                    AudioOnlyChannelMemory.remember(memoryKey)
+                }
+            }
         }
         #if os(iOS)
         // Started on the LAN for an AirPlay receiver: the local clock is
