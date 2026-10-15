@@ -378,10 +378,12 @@ extension RemoteControlHints {
         }
         if radioActive {
             // Radio Mode (2026-10-13): Back has no mini to expand, so a
-            // single Back reaches the top channel (HomeView.handleMenuPress);
+            // single Back reaches the top channel and a double Back stops
+            // Radio Mode (HomeView.handleMenuPress);
             // the mapped Play/Pause and hold-Right slots run the banner's
             // two actions (GuideRemoteDispatch.perform).
             pairs.append(RemoteHintPair(key: "Back", action: "Top channel"))
+            pairs.append(RemoteHintPair(key: "Double Back", action: "Stop"))
             if map.guideAction(.playPause) == .resumePlayer {
                 pairs.append(RemoteHintPair(key: "Play/Pause", action: "Switch to Video Mode"))
             }

@@ -8979,6 +8979,26 @@ struct MainTabView: View {
                     withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
                 }
             }
+        } else if radio.isActive && selectedTab == .liveTV {
+            // Radio Mode (Logan 2026-10-14): a SINGLE Back scrolls the guide
+            // to the top channel (unchanged); a DOUBLE Back stops Radio Mode,
+            // the same stop hold Right runs. Same ~0.3 s deferred window as
+            // the mini's single/double Back above, so a double press stops
+            // without the guide also jumping.
+            nowPlaying.menuMiniPressCount += 1
+            nowPlaying.menuMiniDebounce?.cancel()
+            nowPlaying.menuMiniDebounce = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                let isDouble = nowPlaying.menuMiniPressCount >= 2
+                nowPlaying.menuMiniPressCount = 0
+                if isDouble {
+                    radio.stop(reason: "double Menu")
+                } else {
+                    debugLog("\u{1F3AE} Menu pressed: Radio Mode -> scroll guide to top")
+                    NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+                }
+            }
         } else if selectedTab == .liveTV {
             // Menu on the guide (nothing playing, no mini) =
             // "take me back to the top of the list". Matches the
