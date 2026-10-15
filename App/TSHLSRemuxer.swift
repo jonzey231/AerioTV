@@ -904,6 +904,26 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// no-video call also needs this much real time to have passed.
     private var firstAudioWallWithoutVideo: Date?
     private let audioOnlyWallFloorSeconds = 4.0
+    /// How a PMT that DECLARES a video PID may be called audio-only on this
+    /// tune (GH AerioTV#90, SiriusXM channels up to 15 s to start).
+    /// Read once in start(); see AudioOnlyStartPolicy for the exact
+    /// conditions of each case.
+    private var audioOnlyPolicy: AudioOnlyStartPolicy = .unknown
+    /// Shorter grace for a channel REMEMBERED audio-only: 2 s of audio PTS
+    /// and 1 s of wall time with zero packets on the declared video PID.
+    private let rememberedAudioOnlyMediaSeconds = 2.0
+    private let rememberedAudioOnlyWallSeconds = 1.0
+    /// Video packets arrived after an audio-only call over a PMT that
+    /// declares video (reported once per source).
+    private var videoAfterAudioOnlyReported = false
+    /// Fires on the main queue when the declared video PID starts carrying
+    /// packets after this remuxer went audio-only on the remembered or the
+    /// 3 s / 4 s path: the tile restarts the tune as a video program.
+    /// Not fired for a Radio Mode tune (the user chose audio; Switch to
+    /// Video Mode restarts it instead).
+    var onVideoAppearedAfterAudioOnly: (() -> Void)?
+    /// Memory key for this channel (the ingest URL).
+    private var audioOnlyMemoryKey: String { sourceURL.absoluteString }
     /// Audio-only by the 3 s fallback: the PMT still declares a video PID,
     /// so segments lead with a rewritten PMT that drops it.
     private var audioOnlyDroppedVideo = false
@@ -1087,8 +1107,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // Done HERE and not on the player-item swap, because the SPS is
         // parsed before the item exists on this path.
         DispatchQueue.main.async { RemuxMeasuredVideo.shared.reset() }
+        let policy = AudioOnlyStartPolicy.current(forKey: audioOnlyMemoryKey)
         queue.async { [weak self] in
             guard let self else { return }
+            self.audioOnlyPolicy = policy
+            if policy != .unknown {
+                debugLog("[TS-REMUX] audio-only start policy: \(policy.logName)")
+            }
             if self.rewindWindowSeconds > 0 {
                 self.setupSpillDir()
             }
@@ -1419,20 +1444,53 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             return
         }
         if fmp4 == nil, videoPID >= 0, nextSeq == 0, !videoPacketSeen {
+            // Audio-only call over a PMT that DECLARES a video PID. The
+            // three cases (AudioOnlyStartPolicy) and their exact conditions:
+            //  - requested (Radio Mode tune or channel step): the first
+            //    audio PES with no video packet seen yet. No video wait.
+            //  - remembered (an earlier tune of this channel ended
+            //    audio-only and no video was seen since): zero packets on
+            //    the video PID while 2 s of audio PTS and 1 s of wall time
+            //    passed.
+            //  - unknown (every other channel, including every normal video
+            //    channel): unchanged, zero video packets over 3 s of audio
+            //    PTS AND 4 s of wall time.
+            // Any packet on the video PID before the call ends the window
+            // for good (video program, timing exactly as before).
             if pid == videoPID {
                 videoPacketSeen = true
+                if audioOnlyPolicy == .remembered {
+                    AudioOnlyChannelMemory.forget(audioOnlyMemoryKey, reason: "video packets before the audio-only call")
+                }
             } else if pid == primaryAudioPID, pusi, let apts = extractPTS(p) {
                 if firstAudioPTSWithoutVideo < 0 || apts < firstAudioPTSWithoutVideo
                     || apts - firstAudioPTSWithoutVideo > 30 {
                     // First audio, or a wrap/jump: (re)start the window.
                     firstAudioPTSWithoutVideo = apts
                     firstAudioWallWithoutVideo = Date()
-                } else if apts - firstAudioPTSWithoutVideo >= audioOnlyVideoGraceSeconds,
-                          Date().timeIntervalSince(firstAudioWallWithoutVideo ?? Date()) >= audioOnlyWallFloorSeconds {
-                    debugLog("[TS-REMUX] audio-only program detected: no video packets in \(Int(audioOnlyVideoGraceSeconds)) s (PMT video PID \(videoPID) silent, audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
-                    enterAudioOnly(dropVideoFromPMT: true)
-                    handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
-                    return
+                    if audioOnlyPolicy == .requested {
+                        debugLog("[TS-REMUX] audio-only program (Radio Mode requested): first audio PES, no video wait (PMT video PID \(videoPID), audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
+                        enterAudioOnly(dropVideoFromPMT: true)
+                        handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
+                        return
+                    }
+                } else {
+                    let media = apts - firstAudioPTSWithoutVideo
+                    let wall = Date().timeIntervalSince(firstAudioWallWithoutVideo ?? Date())
+                    if audioOnlyPolicy == .remembered,
+                       media >= rememberedAudioOnlyMediaSeconds, wall >= rememberedAudioOnlyWallSeconds {
+                        debugLog(String(format: "[TS-REMUX] audio-only program (optimistic): %.1f s audio, no video packets; starting (remembered audio-only channel, PMT video PID %d, wall %.1f s)",
+                                        media, videoPID, wall))
+                        enterAudioOnly(dropVideoFromPMT: true)
+                        handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
+                        return
+                    }
+                    if media >= audioOnlyVideoGraceSeconds, wall >= audioOnlyWallFloorSeconds {
+                        debugLog("[TS-REMUX] audio-only program detected: no video packets in \(Int(audioOnlyVideoGraceSeconds)) s (PMT video PID \(videoPID) silent, audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
+                        enterAudioOnly(dropVideoFromPMT: true)
+                        handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
+                        return
+                    }
                 }
             }
         }
@@ -1826,6 +1884,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         firstAudioPTSWithoutVideo = -1
         setAudioOnly(false)
         audioOnlyDroppedVideo = false
+        videoAfterAudioOnlyReported = false
+        if audioOnlyPolicy == .requested { AudioOnlyTuneIntent.shared.setRequestedCutActive(false) }
         lastVideoCC = -1
         lastSPS = nil
         adtsLogged = false
@@ -1992,6 +2052,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         currentStartPTS = nil
         awaitingFirstKeyframe = true
         setAudioOnly(true)
+        TuneTimeline.shared.markAudioOnly()
+        if audioOnlyPolicy == .requested {
+            // No evidence about the channel: the user asked for audio.
+            // Switch to Video Mode restarts a PMT that declares video.
+            if dropVideoFromPMT { AudioOnlyTuneIntent.shared.setRequestedCutActive(true) }
+        } else {
+            AudioOnlyChannelMemory.remember(audioOnlyMemoryKey)
+        }
     }
 
     /// Audio-only demux: the primary audio PID's PES starts (on a frame
@@ -2000,6 +2068,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private func handleAudioOnlyPacket(_ p: Data, pid: Int, pusi: Bool) {
         // The silent video PID and in-stream PMT repeats (which may still
         // declare it) stay out; each segment leads with the cached PMT.
+        if videoPID >= 0, pid == videoPID, !videoAfterAudioOnlyReported {
+            // The declared video PID woke up after the audio-only call.
+            videoAfterAudioOnlyReported = true
+            AudioOnlyChannelMemory.forget(audioOnlyMemoryKey, reason: "video appeared after the audio-only call")
+            if audioOnlyPolicy == .requested {
+                debugLog("[TS-REMUX] video packets on PID \(videoPID) during a Radio Mode audio-only tune; Switch to Video Mode restarts as video")
+            } else {
+                debugLog("[TS-REMUX] video appeared after optimistic audio-only start; restarting as video (policy \(audioOnlyPolicy.logName), PID \(videoPID))")
+                let cb = onVideoAppearedAfterAudioOnly
+                DispatchQueue.main.async { cb?() }
+            }
+        }
         if pid == videoPID || pid == pmtPID || pid == 0 { return }
         if pid == primaryAudioPID, pusi, let pts = extractPTS(p), audioPESStartsOnSync(p) {
             // Completes the previous PES into the segment it belongs to.
@@ -4936,6 +5016,100 @@ struct LoadingDetailLine: View {
     }
 }
 
+/// How a tune may call a video-declaring PMT audio-only (GH AerioTV#90).
+///
+/// Hard rule (Logan 2026-10-14): a regular video channel is never started
+/// audio-only by this. The two fast cases need strong evidence:
+/// - `requested`: Radio Mode is on (a Radio Mode start, a guide or list
+///   pick in Radio Mode, or a sheet Channel Up / Down). The user chose
+///   audio, so the first audio PES starts the program.
+/// - `remembered`: an earlier tune of this exact channel URL was called
+///   audio-only (PMT without video, or the full 3 s / 4 s grace) and no
+///   video has been seen on it since (`AudioOnlyChannelMemory`, 7 day TTL).
+///   2 s of audio PTS plus 1 s of wall time with zero video packets.
+/// - `unknown`: everything else. Unchanged 3 s audio PTS AND 4 s wall time.
+/// Video after a remembered or unknown call restarts the tune as video
+/// and clears the memory.
+enum AudioOnlyStartPolicy: Equatable {
+    case unknown, remembered, requested
+
+    var logName: String {
+        switch self {
+        case .unknown: return "unknown (3 s audio / 4 s wall grace)"
+        case .remembered: return "remembered audio-only (2 s audio / 1 s wall)"
+        case .requested: return "Radio Mode requested (no video wait)"
+        }
+    }
+
+    static func current(forKey key: String) -> AudioOnlyStartPolicy {
+        if AudioOnlyTuneIntent.shared.radioRequested { return .requested }
+        return AudioOnlyChannelMemory.isRemembered(key) ? .remembered : .unknown
+    }
+}
+
+/// Thread-safe Radio Mode intent, read by the remuxer when a tune starts.
+final class AudioOnlyTuneIntent: @unchecked Sendable {
+    static let shared = AudioOnlyTuneIntent()
+    private let lock = NSLock()
+    private var requested = false
+    private var cutActive = false
+
+    /// Mirrors RadioModeSession.isActive.
+    var radioRequested: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return requested }
+        set { lock.lock(); requested = newValue; lock.unlock() }
+    }
+    /// A Radio Mode tune is cutting audio-only over a PMT that declares a
+    /// video PID: Switch to Video Mode must restart it as a video program.
+    var requestedCutActive: Bool {
+        lock.lock(); defer { lock.unlock() }; return cutActive
+    }
+    func setRequestedCutActive(_ on: Bool) {
+        lock.lock(); cutActive = on; lock.unlock()
+    }
+}
+
+/// Per-channel memory "this channel was audio-only", keyed by ingest URL.
+/// Device-local like LiveFirstByteLearner. Cleared the moment the channel
+/// shows a video packet.
+enum AudioOnlyChannelMemory {
+    private static let defaultsKey = "playback.audioOnlyChannelsAt"
+    static let ttl: TimeInterval = 7 * 24 * 60 * 60
+    private static let maxEntries = 400
+
+    static func isRemembered(_ key: String) -> Bool {
+        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
+        guard let stamp = map?[key] else { return false }
+        let age = Date().timeIntervalSince1970 - stamp
+        return age >= 0 && age < ttl
+    }
+
+    static func remember(_ key: String) {
+        guard !key.isEmpty else { return }
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        let now = Date().timeIntervalSince1970
+        map = map.filter { now - $0.value < ttl }
+        if map.count >= maxEntries { map.removeAll() }
+        let known = map[key] != nil
+        map[key] = now
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        if !known { debugLog("[TS-REMUX] audio-only channel remembered (next tune starts after 2 s of audio)") }
+    }
+
+    static func forget(_ key: String, reason: String) {
+        var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
+        guard map.removeValue(forKey: key) != nil else { return }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        debugLog("[TS-REMUX] audio-only channel memory cleared: \(reason)")
+    }
+}
+
+extension Notification.Name {
+    /// Switch to Video Mode on a Radio Mode tune that cut audio-only over
+    /// a video-declaring PMT: the live tile restarts as a video program.
+    static let aerioRadioRestartAsVideo = Notification.Name("AerioRadioRestartAsVideo")
+}
+
 /// Per-channel learned time-to-first-byte for the live silent-start
 /// deadline (see `AVPlayerMultiviewTile.armFirstByteDeadline`).
 ///
@@ -5704,6 +5878,10 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[SWITCH] kept connection (AVPlayer remux tile) channel=\(channelName)")
             mux.noteSourceSwitch()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .aerioRadioRestartAsVideo)) { _ in
+            guard !isVOD, !isDVR, catchup == nil else { return }
+            restartAsVideoProgram("Switch to Video Mode")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .aerioLiveRewindDropRelay)) { _ in
             guard liveRewindArmed else { return }
             liveRewindArmed = false
@@ -5874,6 +6052,17 @@ struct AVPlayerMultiviewTile: View {
         mux.reportsIngestStall = true
         mux.onIngestSilence = { silent in handleIngestSilence(silent) }
         mux.onIngestClosed = { handleUpstreamClosed() }
+        mux.onVideoAppearedAfterAudioOnly = { restartAsVideoProgram("video appeared after audio-only start") }
+    }
+
+    /// The tune went audio-only over a PMT that declares video and video
+    /// turned up (or the user left Radio Mode): rebuild the pipeline so the
+    /// new remuxer and player item carry the video track from the start.
+    private func restartAsVideoProgram(_ why: String) {
+        guard !tileStopped, tileError == nil, remuxer?.isAudioOnlyProgram == true else { return }
+        debugLog("[AVP-MV] restarting tile as video program (\(why)) channel=\(channelName)")
+        stop(allowRetain: false)
+        start()
     }
 
     /// Bytes stopped (or resumed) on a channel that is already playing.
@@ -7747,6 +7936,20 @@ struct AVPlayerMultiviewTile: View {
                                 chosen, recommended.isFinite ? String(format: "%.1f", recommended) : "-",
                                 channelName))
             }
+        } else if isLiveTune, remuxer?.isAudioOnlyProgram == true {
+            // Audio-only program (GH AerioTV#90): no video GOPs to hold back
+            // for, and READY already means two full 2 s audio segments. Join
+            // two target durations back instead of the 6 s video floor; a
+            // stall-learned hold-back above the base still applies.
+            let learnedExtra = learned > LiveEdgeHoldback.base ? learned : 0
+            let offset = min(18.0, max(2 * max(joinTargetDuration, 2), learnedExtra) + streamBufferSeconds)
+            playerItem.configuredTimeOffsetFromLive =
+                CMTime(seconds: offset, preferredTimescale: 600)
+            debugLog(String(format:
+                "[AVP-MV] live edge offset %.1fs at join (audio-only program: 2x targetDuration %.1f, learned %.1f, stream buffer %.1f) channel=%@",
+                offset, joinTargetDuration, learned, streamBufferSeconds, channelName))
+            driverJoinOffset = offset
+            driverOffsetFloor = offset
         } else if isLiveTune {
             let floor = max(3 * joinTargetDuration, learned, LiveEdgeHoldback.base)
             let offset = min(18.0, floor + streamBufferSeconds)

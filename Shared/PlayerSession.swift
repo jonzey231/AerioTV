@@ -1470,13 +1470,23 @@ final class TuneTimeline: @unchecked Sendable {
     private var pressAt: CFTimeInterval?
     private var label = ""
     private var stages: [(name: String, ms: Int)] = []
+    /// This tune's program went audio-only (GH AerioTV#90).
+    private var audioOnly = false
 
     /// A channel press (or channel flip) started a tune. Resets the clock.
     func press(_ name: String) {
         lock.lock(); defer { lock.unlock() }
         pressAt = CACurrentMediaTime()
         label = name
+        audioOnly = false
         stages.removeAll(keepingCapacity: true)
+    }
+
+    /// The remuxer declared the program audio-only: the first "frame" is
+    /// the first audio, logged as press->audio.
+    func markAudioOnly() {
+        mark("audioOnly")
+        lock.lock(); audioOnly = true; lock.unlock()
     }
 
     /// True while a tune is armed and has not reached first frame yet. Read by
@@ -1513,10 +1523,16 @@ final class TuneTimeline: @unchecked Sendable {
         let total = Int((CACurrentMediaTime() - pressAt) * 1000)
         let breakdown = stages.map { "\($0.name)=\($0.ms)ms" }.joined(separator: " ")
         let name = label
+        let wasAudioOnly = audioOnly
         self.pressAt = nil
+        audioOnly = false
         stages.removeAll(keepingCapacity: true)
         lock.unlock()
-        debugLog("[TUNE] press->firstFrame \(total)ms channel=\(name) | \(breakdown)")
+        if wasAudioOnly {
+            debugLog("[TUNE] press->audio \(total) ms channel=\(name) | \(breakdown)")
+        } else {
+            debugLog("[TUNE] press->firstFrame \(total)ms channel=\(name) | \(breakdown)")
+        }
     }
 }
 
@@ -2096,7 +2112,11 @@ enum RadioStopTrace {
 @MainActor
 final class RadioModeSession: ObservableObject {
     static let shared = RadioModeSession()
-    @Published private(set) var isActive = false
+    @Published private(set) var isActive = false {
+        // The remuxer reads this when a tune starts: a Radio Mode tune cuts
+        // audio-only from the first audio PES (AudioOnlyStartPolicy).
+        didSet { AudioOnlyTuneIntent.shared.radioRequested = isActive }
+    }
     /// Set while a tune started from Radio Mode is reseeding the tile, so
     /// the transient idle / expand states of the swap do not end it.
     private var switching = false
@@ -2340,6 +2360,10 @@ final class RadioModeSession: ObservableObject {
     /// same tile, no re-tune.
     func returnToVideo() {
         guard isActive else { return }
+        // A Radio Mode tune cut audio-only over a PMT that declares video:
+        // that item has no video track, so the tile restarts as a video
+        // program instead of re-attaching the surface.
+        let restartAsVideo = AudioOnlyTuneIntent.shared.requestedCutActive
         #if os(iOS)
         // iPad 2026-10-13: the sink's reattach ran inside the expand's
         // SwiftUI update (258 ms, AVKit in the stack). Expand first, then
@@ -2356,6 +2380,14 @@ final class RadioModeSession: ObservableObject {
         reattachLayer()
         #endif
         withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.expand() }
+        if restartAsVideo {
+            AudioOnlyTuneIntent.shared.setRequestedCutActive(false)
+            debugLog("[RADIO] video mode: restarting remuxer as video program")
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(name: .aerioRadioRestartAsVideo, object: nil)
+            }
+            return
+        }
         #if os(iOS)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             debugLog("[RADIO] reattach after expand (video mode)")
@@ -2512,6 +2544,17 @@ final class RadioModeSession: ObservableObject {
         guard isActive else { return }
         isActive = false
         debugLog("[RADIO] stop (\(reason))")
+        if AudioOnlyTuneIntent.shared.requestedCutActive {
+            // Same as Switch to Video Mode: a tile still playing a Radio
+            // Mode audio-only cut of a video channel restarts as video.
+            AudioOnlyTuneIntent.shared.setRequestedCutActive(false)
+            if PlayerSession.shared.mode != .idle {
+                debugLog("[RADIO] video mode: restarting remuxer as video program")
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .aerioRadioRestartAsVideo, object: nil)
+                }
+            }
+        }
         #if os(iOS)
         reattachLayer()
         #endif
