@@ -22,6 +22,11 @@ struct M3UChannel: Identifiable {
     /// the symptom on broadcast lineups.
     var channelNumber: String?
     var rawAttributes: [String: String]
+    /// EXTINF `radio="true"` (Dispatcharr's M3U output marks radio
+    /// channels this way).
+    var isRadio: Bool {
+        (rawAttributes["radio"] ?? "").trimmingCharacters(in: .whitespaces).lowercased() == "true"
+    }
 }
 
 // MARK: - M3U Parser

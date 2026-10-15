@@ -2109,6 +2109,12 @@ enum RadioStopTrace {
     }
 }
 
+extension Notification.Name {
+    /// A short confirmation or error over the Live TV list and guide
+    /// (userInfo "message").
+    static let aerioChannelListToast = Notification.Name("AerioChannelListToast")
+}
+
 @MainActor
 final class RadioModeSession: ObservableObject {
     static let shared = RadioModeSession()
@@ -2253,6 +2259,82 @@ final class RadioModeSession: ObservableObject {
             shared.stop(reason: "menu Exit")
         } else {
             shared.start(item: item, server: ChannelStore.shared.activeServer)
+        }
+    }
+
+    // MARK: Declared radio channels (backend radio flag)
+
+    /// Long-press "Watch" on a radio channel: the next pick of this channel
+    /// opens the full-screen player (artwork card) instead of Radio Mode.
+    private static var watchOverride: (id: String, at: Date)?
+
+    static func noteWatchVideo(_ item: ChannelDisplayItem) {
+        guard item.isRadio else { return }
+        watchOverride = (item.id, Date())
+    }
+
+    /// A pick (tap / Select from the guide, list, favorites, recents, Kept
+    /// Live, deep link) of a declared radio channel opens Radio Mode.
+    /// False while Radio Mode is hidden (Cast, AirPlay, Remote, CarPlay,
+    /// a Multiview grid) or already on (begin switches in place), and for
+    /// a long-press Watch.
+    static func shouldAutoOpen(for item: ChannelDisplayItem) -> Bool {
+        if let o = watchOverride {
+            watchOverride = nil
+            if o.id == item.id, Date().timeIntervalSince(o.at) < 30 {
+                debugLog("[RADIO] declared radio \(item.name): Watch, full-screen player")
+                return false
+            }
+        }
+        guard item.isRadio, item.streamURL != nil, isAvailable, !shared.isActive else { return false }
+        let store = MultiviewStore.shared
+        if PlayerSession.shared.mode == .multiview, store.tiles.count > 1 { return false }
+        return true
+    }
+
+    /// Routes a pick of a declared radio channel into Radio Mode. Returns
+    /// false when the caller should play it normally.
+    static func openIfDeclared(_ item: ChannelDisplayItem, server: ServerConnection?) -> Bool {
+        guard shouldAutoOpen(for: item) else { return false }
+        debugLog("[RADIO] declared radio channel \(item.name): opening Radio Mode")
+        shared.start(item: item, server: server)
+        return true
+    }
+
+    // MARK: Admin radio flag (Dispatcharr Direct Connect)
+
+    /// "Mark as Radio Channel" / "Unmark Radio Channel" for an admin on a
+    /// Dispatcharr Direct Connect playlist; nil hides the item (M3U, XC,
+    /// non-admin, or a permission snapshot not loaded yet).
+    static func radioFlagMenuTitle(for item: ChannelDisplayItem) -> String? {
+        guard let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI, server.dispatcharrCanSwitchStream,
+              item.dispatcharrChannelID != nil else { return nil }
+        return item.isRadio ? "Unmark Radio Channel" : "Mark as Radio Channel"
+    }
+    static let radioFlagMenuSymbol = "dot.radiowaves.left.and.right"
+
+    static func radioFlagMenuAction(for item: ChannelDisplayItem) {
+        guard let channelID = item.dispatcharrChannelID,
+              let api = SwitchStreamFlow.makeAPI(server: ChannelStore.shared.activeServer) else { return }
+        let target = !item.isRadio
+        Task { @MainActor in
+            do {
+                let code = try await api.updateChannelRadioFlag(channelID: channelID, isRadio: target)
+                debugLog("[DISPATCHARR] is_radio -> \(target) channel=\(item.name) status=\(code)")
+                ChannelStore.shared.setRadioFlag(channelID: item.id, isRadio: target)
+                NotificationCenter.default.post(
+                    name: .aerioChannelListToast, object: nil,
+                    userInfo: ["message": target ? "Marked as a radio channel" : "Radio channel mark removed"])
+            } catch {
+                let status = SwitchStreamView.httpStatus(of: error)
+                debugLog("[DISPATCHARR] is_radio -> \(target) channel=\(item.name) status=\(status.map(String.init) ?? "none") error=\(error.localizedDescription)")
+                let message = status == 403 || status == 401
+                    ? "You do not have permission to change this channel."
+                    : "Could not update the channel. Try again."
+                NotificationCenter.default.post(name: .aerioChannelListToast, object: nil,
+                                                userInfo: ["message": message])
+            }
         }
     }
 

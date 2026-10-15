@@ -1455,6 +1455,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             //  - unknown (every other channel, including every normal video
             //    channel): unchanged, zero video packets over 3 s of audio
             //    PTS AND 4 s of wall time.
+            //  - declared (the backend flags the channel radio): same
+            //    first-audio-PES cut as requested.
             // Any packet on the video PID before the call ends the window
             // for good (video program, timing exactly as before).
             if pid == videoPID {
@@ -1468,8 +1470,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     // First audio, or a wrap/jump: (re)start the window.
                     firstAudioPTSWithoutVideo = apts
                     firstAudioWallWithoutVideo = Date()
-                    if audioOnlyPolicy == .requested {
-                        debugLog("[TS-REMUX] audio-only program (Radio Mode requested): first audio PES, no video wait (PMT video PID \(videoPID), audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
+                    if audioOnlyPolicy == .requested || audioOnlyPolicy == .declared {
+                        let why = audioOnlyPolicy == .declared ? "declared radio" : "Radio Mode requested"
+                        debugLog("[TS-REMUX] audio-only program (\(why)): first audio PES, no video wait (PMT video PID \(videoPID), audio PID \(primaryAudioPID) type \(String(format: "0x%02X", primaryAudioType)))")
                         enterAudioOnly(dropVideoFromPMT: true)
                         handleAudioOnlyPacket(p, pid: pid, pusi: pusi)
                         return
@@ -2057,7 +2060,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // No evidence about the channel: the user asked for audio.
             // Switch to Video Mode restarts a PMT that declares video.
             if dropVideoFromPMT { AudioOnlyTuneIntent.shared.setRequestedCutActive(true) }
-        } else {
+        } else if audioOnlyPolicy != .declared {
+            // A declared radio channel is known from the backend flag; it
+            // never writes the per-URL memory unflagged channels rely on.
             AudioOnlyChannelMemory.remember(audioOnlyMemoryKey)
         }
     }
@@ -2071,7 +2076,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if videoPID >= 0, pid == videoPID, !videoAfterAudioOnlyReported {
             // The declared video PID woke up after the audio-only call.
             videoAfterAudioOnlyReported = true
-            AudioOnlyChannelMemory.forget(audioOnlyMemoryKey, reason: "video appeared after the audio-only call")
+            if audioOnlyPolicy == .declared {
+                DeclaredRadioChannels.shared.noteVideoSeen(audioOnlyMemoryKey)
+            } else {
+                AudioOnlyChannelMemory.forget(audioOnlyMemoryKey, reason: "video appeared after the audio-only call")
+            }
             if audioOnlyPolicy == .requested {
                 debugLog("[TS-REMUX] video packets on PID \(videoPID) during a Radio Mode audio-only tune; Switch to Video Mode restarts as video")
             } else {
@@ -5030,20 +5039,68 @@ struct LoadingDetailLine: View {
 /// - `unknown`: everything else. Unchanged 3 s audio PTS AND 4 s wall time.
 /// Video after a remembered or unknown call restarts the tune as video
 /// and clears the memory.
+///
+/// - `declared`: the backend flags the channel radio (Dispatcharr
+///   `effective_is_radio`, M3U `radio="true"`, Xtream `radio_streams`)
+///   and Radio Mode is off (a plain Watch of it). Same first-audio-PES
+///   cut as `requested`; video turning up later restarts the tune as
+///   video (safety net). Never reads or writes AudioOnlyChannelMemory.
 enum AudioOnlyStartPolicy: Equatable {
-    case unknown, remembered, requested
+    case unknown, remembered, requested, declared
 
     var logName: String {
         switch self {
         case .unknown: return "unknown (3 s audio / 4 s wall grace)"
         case .remembered: return "remembered audio-only (2 s audio / 1 s wall)"
         case .requested: return "Radio Mode requested (no video wait)"
+        case .declared: return "declared radio channel (no video wait)"
         }
     }
 
     static func current(forKey key: String) -> AudioOnlyStartPolicy {
         if AudioOnlyTuneIntent.shared.radioRequested { return .requested }
+        if DeclaredRadioChannels.shared.contains(key) { return .declared }
         return AudioOnlyChannelMemory.isRemembered(key) ? .remembered : .unknown
+    }
+}
+
+/// Ingest URLs of the loaded channels the backend declares radio, keyed
+/// by path and query (host-independent, so a LAN/WAN failover base still
+/// matches). Rebuilt on every channel list publish.
+final class DeclaredRadioChannels: @unchecked Sendable {
+    static let shared = DeclaredRadioChannels()
+    private let lock = NSLock()
+    private var keys: Set<String> = []
+    /// Flagged channels that showed video on a declared tune this app
+    /// run: later tunes use the normal path, so the safety-net restart
+    /// cannot loop back into another audio-only cut.
+    private var videoSeen: Set<String> = []
+
+    static func key(_ url: URL) -> String {
+        let q = url.query.map { "?\($0)" } ?? ""
+        return url.path + q
+    }
+
+    func update(from channels: [ChannelDisplayItem]) {
+        var next = Set<String>()
+        for ch in channels where ch.isRadio {
+            for u in ch.streamURLs { next.insert(Self.key(u)) }
+        }
+        lock.lock(); keys = next; lock.unlock()
+    }
+
+    func contains(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        let k = Self.key(url)
+        lock.lock(); defer { lock.unlock() }
+        return keys.contains(k) && !videoSeen.contains(k)
+    }
+
+    func noteVideoSeen(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        let k = Self.key(url)
+        lock.lock(); videoSeen.insert(k); lock.unlock()
+        debugLog("[TS-REMUX] declared radio channel carries video; next tunes use the normal start")
     }
 }
 

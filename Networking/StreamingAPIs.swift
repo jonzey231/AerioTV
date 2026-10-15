@@ -1637,8 +1637,12 @@ struct XtreamStream: Decodable, Identifiable {
     let tvArchive: Int
     /// Catch-up retention window in DAYS (mixed String/Int upstream).
     let tvArchiveDuration: Int
+    /// `stream_type == "radio_streams"` (Dispatcharr's XC output and
+    /// classic panels mark radio this way).
+    let isRadio: Bool
 
     enum CodingKeys: String, CodingKey {
+        case streamType = "stream_type"
         case streamID = "stream_id"
         case name
         case streamIcon = "stream_icon"
@@ -1696,6 +1700,8 @@ struct XtreamStream: Decodable, Identifiable {
         } else {
             tvArchiveDuration = 0
         }
+        isRadio = ((try? c.decode(String.self, forKey: .streamType)) ?? "")
+            .trimmingCharacters(in: .whitespaces).lowercased() == "radio_streams"
         // GH #59: identity is the panel's stream_id, never the channel
         // number - the old `num ?? streamID` mixed two ID spaces and could
         // collide Identifiable rows.
@@ -4275,6 +4281,22 @@ struct DispatcharrAPI {
         try validateKeepingReason(response: response, data: data)
     }
 
+    /// Mark as Radio Channel (admin only): `PATCH /api/channels/channels/<id>/`
+    /// with `is_radio`. Dispatcharr's PatchedChannel takes the field alone;
+    /// `partial_update` is `IsAdmin` server side.
+    @discardableResult
+    func updateChannelRadioFlag(channelID: Int, isRadio: Bool) async throws -> Int {
+        let url = try buildURL(path: "/api/channels/channels/\(channelID)/")
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "PATCH"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["is_radio": isRadio])
+        let (data, response) = try await loggedData(for: request)
+        try validateKeepingReason(response: response, data: data)
+        return (response as? HTTPURLResponse)?.statusCode ?? 0
+    }
+
     /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
     /// `url` is reliably updated on a stream switch; `streamID` is NOT (the
     /// owner:false event path never rewrites it, so it stays stale ~20s),
@@ -5229,10 +5251,16 @@ struct DispatcharrChannel: Decodable, Identifiable {
     /// Retention window in days, the MAX across the channel's catch-up
     /// streams (server caps at 30). 0 when not catch-up capable.
     let catchupDays: Int
+    /// Radio channel (Dispatcharr dev, 2026-10-14): `effective_is_radio`
+    /// is the flag after the channel-profile override; older builds of
+    /// the dev branch send only `is_radio`. Absent = not radio.
+    let isRadio: Bool
 
     enum CodingKeys: String, CodingKey {
         case id
         case name
+        case isRadioFlag = "is_radio"
+        case effectiveIsRadio = "effective_is_radio"
         case channelNumber = "channel_number"
         case uuid
         case logoID = "logo_id"
@@ -5299,6 +5327,9 @@ struct DispatcharrChannel: Decodable, Identifiable {
         } else {
             catchupDays = 0
         }
+        isRadio = (try? container.decodeIfPresent(Bool.self, forKey: .effectiveIsRadio))
+            ?? (try? container.decodeIfPresent(Bool.self, forKey: .isRadioFlag))
+            ?? false
 
         // Try both "channel_group_id" and "channel_group" keys
         enum ExtraKeys: String, CodingKey {

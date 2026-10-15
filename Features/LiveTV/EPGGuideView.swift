@@ -9425,10 +9425,20 @@ private struct GuideProgramButton: View {
                     Button("Watch") {
                         onWatchCatchup(channelItem, prog)
                     }
+                } else if prog.isLive, channelItem.isRadio {
+                    // Declared radio channel: Select opens Radio Mode, so
+                    // Watch is the way into the full-screen player.
+                    Button("Watch") {
+                        RadioModeSession.noteWatchVideo(channelItem)
+                        onSelect(channelItem)
+                    }
                 }
                 // Radio Mode: the channel's audio with no video.
                 if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
                     Button(radioTitle) { RadioModeSession.menuAction(for: channelItem) }
+                }
+                if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: channelItem) {
+                    Button(flagTitle) { RadioModeSession.radioFlagMenuAction(for: channelItem) }
                 }
                 // Favorite toggle first, most frequent action users take
                 // on a program cell that isn't "just play it."
@@ -9673,11 +9683,19 @@ private struct GuideProgramButton: View {
         if canReplayNow {
             items.append(.init(title: "Watch", systemImage: "clock.arrow.circlepath") { onWatchCatchup(channelItem, prog) })
         } else if prog.isLive {
-            items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
+            items.append(.init(title: "Watch", systemImage: "play.fill") {
+                RadioModeSession.noteWatchVideo(channelItem)
+                onSelect(channelItem)
+            })
         }
         if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
             items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
                 RadioModeSession.menuAction(for: channelItem)
+            })
+        }
+        if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: channelItem) {
+            items.append(.init(title: flagTitle, systemImage: RadioModeSession.radioFlagMenuSymbol) {
+                RadioModeSession.radioFlagMenuAction(for: channelItem)
             })
         }
         let isFav = favoritesStore.isFavorite(channelItem.id)
@@ -9753,11 +9771,19 @@ private struct GuideProgramButton: View {
                 Label("Watch", systemImage: "clock.arrow.circlepath")
             }
         } else if prog.isLive {
-            Button { onSelect(channelItem) } label: { Label("Watch", systemImage: "play.fill") }
+            Button {
+                RadioModeSession.noteWatchVideo(channelItem)
+                onSelect(channelItem)
+            } label: { Label("Watch", systemImage: "play.fill") }
         }
         if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
             Button { RadioModeSession.menuAction(for: channelItem) } label: {
                 Label(radioTitle, systemImage: RadioModeSession.menuSymbol)
+            }
+        }
+        if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: channelItem) {
+            Button { RadioModeSession.radioFlagMenuAction(for: channelItem) } label: {
+                Label(flagTitle, systemImage: RadioModeSession.radioFlagMenuSymbol)
             }
         }
         let isFav = favoritesStore.isFavorite(channelItem.id)
@@ -10897,11 +10923,19 @@ struct GuideCanvasRow: View {
         if canReplayNow {
             items.append(.init(title: "Watch", systemImage: "clock.arrow.circlepath") { onWatchCatchup(channelItem, prog) })
         } else if prog.isLive {
-            items.append(.init(title: "Watch", systemImage: "play.fill") { onSelect(channelItem) })
+            items.append(.init(title: "Watch", systemImage: "play.fill") {
+                RadioModeSession.noteWatchVideo(channelItem)
+                onSelect(channelItem)
+            })
         }
         if let radioTitle = RadioModeSession.menuTitle(for: channelItem) {
             items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
                 RadioModeSession.menuAction(for: channelItem)
+            })
+        }
+        if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: channelItem) {
+            items.append(.init(title: flagTitle, systemImage: RadioModeSession.radioFlagMenuSymbol) {
+                RadioModeSession.radioFlagMenuAction(for: channelItem)
             })
         }
         let isFav = favoritesStore.isFavorite(channelItem.id)

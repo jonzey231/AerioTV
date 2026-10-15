@@ -597,6 +597,9 @@ struct ChannelListView: View {
                     }
                 }
                 #endif
+                // Mark as Radio Channel confirmations and errors (rows and
+                // guide cells post; the list owns the toast).
+                .modifier(ChannelListToastHost(toast: $defaultGroupToast))
                 // Frame / input probe also covers the Live TV list, which is
                 // where the iPhone scroll lag is reported (Logan 2026-09-12).
                 .onAppear { FrameProbe.start("channel list") }
@@ -2929,6 +2932,13 @@ struct ChannelListView: View {
 
     private func startPlayback(_ item: ChannelDisplayItem) {
         guard !item.streamURLs.isEmpty else { return }
+        // A channel the backend declares radio opens Radio Mode (the same
+        // entry as the long-press Radio Mode item); long-press Watch, a
+        // Multiview grid and remote sessions keep the normal player.
+        if RadioModeSession.openIfDeclared(item, server: channelStore.activeServer
+                                           ?? servers.first(where: { $0.isActive }) ?? servers.first) {
+            return
+        }
         // "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
         // default off; Android #226 twin, AerioTV-Android 8cfddab). First
         // Select on a browse tune mounts the session ALREADY minimized (the
@@ -3106,6 +3116,40 @@ struct ChannelListView: View {
 }
 
 // MARK: - Channel Display Item
+/// Shows `.aerioChannelListToast` messages through the list's toast
+/// state (tvOS draws it in the existing overlay; iOS draws it here).
+private struct ChannelListToastHost: ViewModifier {
+    @Binding var toast: String?
+
+    func body(content: Content) -> some View {
+        content
+            #if os(iOS)
+            .overlay(alignment: .bottom) {
+                if let msg = toast {
+                    Text(msg)
+                        .scaledFont(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 10)
+                        .background(Capsule().fill(Color.black.opacity(0.8)))
+                        .padding(.bottom, 110)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                }
+            }
+            #endif
+            .onReceive(NotificationCenter.default.publisher(for: .aerioChannelListToast)) { note in
+                guard let message = note.userInfo?["message"] as? String else { return }
+                withAnimation(.easeInOut(duration: 0.2)) { toast = message }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    if toast == message {
+                        withAnimation(.easeInOut(duration: 0.2)) { toast = nil }
+                    }
+                }
+            }
+    }
+}
+
 struct ChannelDisplayItem: Identifiable, Equatable {
     let id: String
     let name: String
@@ -3178,6 +3222,12 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// (`is_catchup`/`catchup_days` on /api/channels/channels/). Xtream
     /// Codes: get_live_streams `tv_archive`/`tv_archive_duration`.
     var catchupDays: Int = 0
+    /// The backend declares this channel radio (audio only): Dispatcharr
+    /// `effective_is_radio`, M3U `radio="true"`, Xtream `stream_type`
+    /// `radio_streams`. A pick opens Radio Mode, and every tune starts
+    /// audio-only from the first audio packet (AudioOnlyStartPolicy
+    /// `declared`).
+    var isRadio: Bool = false
 
     /// Stable SwiftUI list identity keyed by the channel's UNIQUE stream
     /// URL rather than `id`. A messy provider (large IPTV panels do this)
@@ -4163,10 +4213,18 @@ struct ChannelRow: View {
     /// `cardMenuButtons` as data for `SystemMenuAnchor` (iOS rows).
     private var cardMenuItems: [SystemMenuItem] {
         var items: [SystemMenuItem] = []
-        items.append(.init(title: "Watch", systemImage: "play.fill") { onTap() })
+        items.append(.init(title: "Watch", systemImage: "play.fill") {
+            RadioModeSession.noteWatchVideo(item)
+            onTap()
+        })
         if let radioTitle = RadioModeSession.menuTitle(for: item) {
             items.append(.init(title: radioTitle, systemImage: RadioModeSession.menuSymbol) {
                 RadioModeSession.menuAction(for: item)
+            })
+        }
+        if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: item) {
+            items.append(.init(title: flagTitle, systemImage: RadioModeSession.radioFlagMenuSymbol) {
+                RadioModeSession.radioFlagMenuAction(for: item)
             })
         }
         let isFav = favoritesStore.isFavorite(item.id)
@@ -4240,11 +4298,28 @@ struct ChannelRow: View {
     private var cardMenuButtons: some View {
         let isFav = favoritesStore.isFavorite(item.id)
         #if os(iOS)
-        Button { onTap() } label: { Label("Watch", systemImage: "play.fill") }
+        Button {
+            RadioModeSession.noteWatchVideo(item)
+            onTap()
+        } label: { Label("Watch", systemImage: "play.fill") }
+        #else
+        // tvOS: Select is Watch, except on a declared radio channel, where
+        // Select opens Radio Mode and Watch opens the full-screen player.
+        if item.isRadio {
+            Button {
+                RadioModeSession.noteWatchVideo(item)
+                onTap()
+            } label: { Label("Watch", systemImage: "play.fill") }
+        }
         #endif
         if let radioTitle = RadioModeSession.menuTitle(for: item) {
             Button { RadioModeSession.menuAction(for: item) } label: {
                 Label(radioTitle, systemImage: RadioModeSession.menuSymbol)
+            }
+        }
+        if let flagTitle = RadioModeSession.radioFlagMenuTitle(for: item) {
+            Button { RadioModeSession.radioFlagMenuAction(for: item) } label: {
+                Label(flagTitle, systemImage: RadioModeSession.radioFlagMenuSymbol)
             }
         }
         Button { favoritesStore.toggle(item) } label: {

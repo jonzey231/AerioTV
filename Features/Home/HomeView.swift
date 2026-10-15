@@ -1611,7 +1611,18 @@ final class ChannelStore: ObservableObject {
     // MARK: - Published State
     @Published private(set) var channels: [ChannelDisplayItem] = [] {
         // Now/next cells belong to channels in the list; drop the rest.
-        didSet { GuideStore.shared.pruneNowNextCells(keeping: Set(channels.map(\.id))) }
+        didSet {
+            GuideStore.shared.pruneNowNextCells(keeping: Set(channels.map(\.id)))
+            DeclaredRadioChannels.shared.update(from: channels)
+        }
+    }
+
+    /// Mark as Radio Channel / Unmark: the server accepted the PATCH, so
+    /// the loaded channel changes at once (no reload).
+    func setRadioFlag(channelID: String, isRadio: Bool) {
+        guard let idx = channels.firstIndex(where: { $0.id == channelID }),
+              channels[idx].isRadio != isRadio else { return }
+        channels[idx].isRadio = isRadio
     }
     @Published private(set) var orderedGroups: [String] = []
     @Published private(set) var isLoading = false
@@ -3110,6 +3121,7 @@ final class ChannelStore: ObservableObject {
                 categoryOrder: groups.firstIndex(of: ch.groupTitle) ?? Int.max,
                 streamURL: streamURL, streamURLs: [streamURL])
             if !ch.tvgID.isEmpty { item.tvgID = ch.tvgID }
+            item.isRadio = ch.isRadio
             return item
         }
 
@@ -3206,6 +3218,7 @@ final class ChannelStore: ObservableObject {
             if s.tvArchive == 1, s.tvArchiveDuration > 0 {
                 item.catchupDays = s.tvArchiveDuration
             }
+            item.isRadio = s.isRadio
             return item
         }
         let sorted = sortChannels(items, groupOrder: groupOrder)
@@ -3414,6 +3427,7 @@ final class ChannelStore: ObservableObject {
             if ch.isCatchup, ch.catchupDays > 0, activeServer?.dispatcharrCanUseCatchup ?? true {
                 item.catchupDays = ch.catchupDays
             }
+            item.isRadio = ch.isRadio
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
