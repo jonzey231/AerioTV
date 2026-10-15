@@ -134,9 +134,10 @@ extension Notification.Name {
     static let guideFocusedCellAction = Notification.Name("guideFocusedCellAction")
     /// Move focus onto the first group pill (Top Group Pills mode).
     static let guideFocusGroupPills = Notification.Name("guideFocusGroupPills")
-    /// Guide Hold Back recognized (GuideLongPressMenuDetector); HomeView
-    /// runs the mapped backLong action.
-    static let guideMenuHoldBegan = Notification.Name("guideMenuHoldBegan")
+    /// Radio Mode double Menu: the first press captures the focused guide
+    /// cell; the stop restores it (EPGGuideView).
+    static let guideRadioStopFocusCapture = Notification.Name("guideRadioStopFocusCapture")
+    static let guideRadioStopFocusRestore = Notification.Name("guideRadioStopFocusRestore")
 }
 
 /// Remote Control #196: shared dispatcher for the guide-context actions
@@ -390,9 +391,6 @@ extension RemoteControlHints {
                 pairs.append(RemoteHintPair(key: "Back", action: phrase))
             }
             pairs.append(RemoteHintPair(key: "Double Back", action: "Stop"))
-            if let phrase = stripGuideAction(map.guideAction(.backLong)) {
-                pairs.append(RemoteHintPair(key: "Hold Back", action: phrase))
-            }
             if map.guideAction(.playPause) == .resumePlayer {
                 pairs.append(RemoteHintPair(key: "Play/Pause", action: "Switch to Video Mode"))
             }
@@ -408,9 +406,6 @@ extension RemoteControlHints {
             pairs.append(RemoteHintPair(key: "Double Back", action: "Top channel"))
         } else if let phrase = stripGuideAction(map.guideAction(.backShort)) {
             pairs.append(RemoteHintPair(key: "Back", action: phrase))
-        }
-        if let phrase = stripGuideAction(map.guideAction(.backLong)) {
-            pairs.append(RemoteHintPair(key: "Hold Back", action: phrase))
         }
         if miniActive {
             if let phrase = stripGuideAction(map.guideAction(.playPause)) {

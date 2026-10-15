@@ -35,8 +35,10 @@ enum RemoteSlot: String, CaseIterable {
     case channelUp, channelDown
     /// Back / Menu, GUIDE map only (Discord request, Logan 2026-10-15). The
     /// double-Back rules (top channel with a mini up, stop Radio Mode) and
-    /// the single-Back Radio Mode deferral stay fixed outside the map.
-    case backShort, backLong
+    /// the single-Back Radio Mode deferral stay fixed outside the map. There
+    /// is no held Back: tvOS owns Menu while held. A "backLong" key synced
+    /// from another device has no slot, so the loader ignores it.
+    case backShort
 
     var wire: String { rawValue }
     static func fromWire(_ s: String) -> RemoteSlot? { RemoteSlot(rawValue: s) }
@@ -230,7 +232,6 @@ struct RemoteControlMap: Equatable {
             .rightLong: .closeMiniPlayer,
             .playPause: .resumePlayer,
             .backShort: .backLadder,
-            .backLong: .none,
         ]
     )
 
@@ -238,7 +239,7 @@ struct RemoteControlMap: Equatable {
     /// Guide, in display order.
     static let guideKeySlots: [RemoteSlot] = [
         .okShort, .okLong, .leftShort, .leftLong, .rightShort, .rightLong,
-        .backShort, .backLong,
+        .backShort,
     ]
 
     /// What a guide slot ACTUALLY does, given the Group Selection mode.

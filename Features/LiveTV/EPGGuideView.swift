@@ -5319,6 +5319,10 @@ final class GuideFocusScratch {
         if let entry = focusHistory.last(where: { $0.at <= instant }) { return entry.pid }
         return focusBeforeHistory
     }
+    /// Radio Mode double-Menu stop: the cell focused at the first press,
+    /// and until when a teardown focus move (to nil or the clock) is undone.
+    var radioStopOriginPID: String?
+    var radioStopRestoreUntil: Date?
     /// A remapped short Left/Right action waiting out the hold threshold;
     /// cancelled when the same press turns into a hold.
     var pendingArrowAction: Task<Void, Never>?
@@ -6413,7 +6417,11 @@ struct EPGGuideView: View {
             // release performs the step that was deferred on press-down.
             .onReceive(rightReleasePublisher) { note in
                 #if os(tvOS)
-                if note.name == .guideRightHoldEnded {
+                if note.name == .guideRadioStopFocusCapture {
+                    focusScratch.radioStopOriginPID = focusedProgramID
+                } else if note.name == .guideRadioStopFocusRestore {
+                    restoreFocusAfterRadioStop()
+                } else if note.name == .guideRightHoldEnded {
                     rightHoldPinningTimeline = false
                     rightHoldSafetyTask?.cancel()
                     rightHoldSafetyTask = nil
@@ -7024,10 +7032,43 @@ struct EPGGuideView: View {
     /// linear scan ran on every focus change and up to ~5x per horizontal
     /// press via the retarget/assert-retry loops.
     // Both platforms: the receiver in the view body is unconditional.
+    #if os(tvOS)
+    /// Radio Mode double-Menu stop: put focus back on the cell focused at the
+    /// first press. The stop's player teardown drops focus (nil, then the
+    /// clock, ~350 ms later on the Apple TV), so the restore re-applies for a
+    /// short window, like the hold-Right origin restore.
+    private func restoreFocusAfterRadioStop() {
+        guard let origin = focusScratch.radioStopOriginPID else { return }
+        focusScratch.radioStopRestoreUntil = Date().addingTimeInterval(1.5)
+        debugLog("[FOCUS] radio stop restore -> \(origin)")
+        focusedProgramID = origin
+        Task { @MainActor in
+            for delay: UInt64 in [250, 500, 900] {
+                try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                if focusedProgramID != origin {
+                    debugLog("[FOCUS] radio stop restore -> \(origin) (re-applied after \(delay) ms)")
+                    focusedProgramID = origin
+                }
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            focusScratch.radioStopRestoreUntil = nil
+            focusScratch.radioStopOriginPID = nil
+        }
+    }
+    #endif
+
     private var rightReleasePublisher: AnyPublisher<Notification, Never> {
+        #if os(tvOS)
+        NotificationCenter.default.publisher(for: .guideRightHoldEnded)
+            .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
+            .merge(with: NotificationCenter.default.publisher(for: .guideRadioStopFocusCapture))
+            .merge(with: NotificationCenter.default.publisher(for: .guideRadioStopFocusRestore))
+            .eraseToAnyPublisher()
+        #else
         NotificationCenter.default.publisher(for: .guideRightHoldEnded)
             .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
             .eraseToAnyPublisher()
+        #endif
     }
 
     #if os(tvOS)
@@ -7753,6 +7794,12 @@ struct EPGGuideView: View {
                 // the ring vanished. Land on the row's cell at the anchor
                 // column instead, like the Android guide's clock Down.
                 .onChange(of: clockFocused) { _, focused in
+                    if focused, let origin = focusScratch.radioStopOriginPID,
+                       let until = focusScratch.radioStopRestoreUntil, Date() < until {
+                        debugLog("[FOCUS] radio stop restore -> \(origin) (clock took focus in teardown)")
+                        focusedProgramID = origin
+                        return
+                    }
                     if focused {
                         let f = focusScratch.clockFrame
                         debugLog("[FOCUS] clock focused frame=\(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height)) column=\(Int(channelColumnWidth)) stripTop=\(Int(f.minY))")

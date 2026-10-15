@@ -6488,11 +6488,6 @@ struct MainTabView: View {
             debugLog("🎮 [MT-OUTER] .onExitCommand FIRED (body's outer modifier, focus was outside tabContentView's TabView)")
             handleMenuPress()
         }
-        // Guide Hold Back (Logan 2026-10-15). On the outer body: one more
-        // modifier on tabContentView tips the tvOS type-checker budget.
-        .onReceive(NotificationCenter.default.publisher(for: .guideMenuHoldBegan)) { _ in
-            handleMenuHold()
-        }
         #endif
         .environmentObject(nowPlaying)
         .environmentObject(favoritesStore)
@@ -8879,9 +8874,10 @@ struct MainTabView: View {
         playerSession.mode == .multiview && multiviewStore.tiles.count == 1
     }
 
-    /// Guide Back rows (Logan 2026-10-15): run the mapped action for a
-    /// single Back (`.backShort`, default the top-channel ladder) or a held
-    /// Back (`.backLong`, default Do nothing).
+    /// Guide Back row (Logan 2026-10-15): run the mapped action for a
+    /// single Back (`.backShort`, default the top-channel ladder). A held
+    /// Back cannot be mapped: tvOS owns Menu while held and delivers the
+    /// press and release together on release (Apple TV log 2026-10-15).
     private func runGuideBack(_ slot: RemoteSlot) {
         #if os(tvOS)
         let action = RemoteControlStore.shared.effectiveGuideAction(slot)
@@ -8897,35 +8893,7 @@ struct MainTabView: View {
         #endif
     }
 
-    #if os(tvOS)
-    /// Held Menu in the guide (GuideLongPressMenuDetector). Same context as a
-    /// single Back reaching the guide branches of `handleMenuPress`: nothing
-    /// pushed, no drawer or search on top, no full-screen player.
-    private func handleMenuHold() {
-        guard selectedTab == .liveTV,
-              playerSession.nativeHLSItem == nil,
-              !TVGuideSidebarState.shared.isOpen,
-              !showSearch,
-              !(nowPlaying.isActive && !nowPlaying.isMinimized),
-              !isVODDetailPushed, !isSettingsSubviewPushed else {
-            debugLog("[PRESS] guide hold-Menu ignored: not in the guide context")
-            return
-        }
-        // A pending single/double Back window from an earlier press must not
-        // also fire under the hold.
-        nowPlaying.menuMiniDebounce?.cancel()
-        nowPlaying.menuMiniPressCount = 0
-        runGuideBack(.backLong)
-    }
-    #endif
-
     private func handleMenuPress() {
-        #if os(tvOS)
-        if GuideMenuHold.consumed {
-            debugLog("🎮 [HMP] swallowed: release of a recognized Hold Back")
-            return
-        }
-        #endif
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
         // TEST (branch test/avplayer-hls-engine): if this handler runs
         // while the native AVPlayer cover is presented, focus is stuck
@@ -9069,6 +9037,12 @@ struct MainTabView: View {
             // the mini's single/double Back above, so a double press stops
             // without the guide also jumping.
             nowPlaying.menuMiniPressCount += 1
+            // The guide cell focused at the FIRST press is where focus goes
+            // back after a double-Menu stop (Apple TV 2026-10-15: the stop's
+            // teardown left focus on the clock). Same restore as hold Right.
+            if nowPlaying.menuMiniPressCount == 1 {
+                NotificationCenter.default.post(name: .guideRadioStopFocusCapture, object: nil)
+            }
             nowPlaying.menuMiniDebounce?.cancel()
             nowPlaying.menuMiniDebounce = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 300_000_000)
@@ -9077,6 +9051,7 @@ struct MainTabView: View {
                 nowPlaying.menuMiniPressCount = 0
                 if isDouble {
                     radio.stop(reason: "double Menu")
+                    NotificationCenter.default.post(name: .guideRadioStopFocusRestore, object: nil)
                 } else {
                     debugLog("\u{1F3AE} Menu pressed: Radio Mode -> mapped guide Back")
                     runGuideBack(.backShort)

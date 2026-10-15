@@ -1592,18 +1592,6 @@ struct ChannelListView: View {
                         }
                     )
                 )
-                // Hold Back (Logan 2026-10-15): attached only while the guide's
-                // Hold Back row is mapped, so the default leaves Menu alone.
-                .background(
-                    GuideLongPressMenuDetector(
-                        isEnabled: !searchOverlay.isUp
-                            && remoteStore.guideAction(.backLong) != .none
-                            && !(nowPlaying.isActive && !nowPlaying.isMinimized),
-                        onBegan: {
-                            NotificationCenter.default.post(name: .guideMenuHoldBegan, object: nil)
-                        }
-                    )
-                )
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
                     // Sidebar mode opens the docked group menu on this hold
                     // by default (Logan 2026-08-06, ported from the Android

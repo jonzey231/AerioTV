@@ -12,8 +12,8 @@ import SwiftUI
 /// persists the map and syncs it across the user's Apple TVs.
 ///
 /// Design invariants inherited from the shared model (do not relax):
-/// - Back / Menu is a slot in the GUIDE only (Back and Hold Back rows,
-///   Logan 2026-10-15). Double Back and the Radio Mode shortcuts stay
+/// - Back / Menu is a slot in the GUIDE only (the Back row, Logan
+///   2026-10-15; holding Back is owned by tvOS and is not a row). Double Back and the Radio Mode shortcuts stay
 ///   fixed; the player's Back is never a slot.
 /// - Guide rows (2026-09-14): Select, Left and Right, short and hold. Every
 ///   short arrow defaults to Move focus (the LOCKED timeline rule)
@@ -89,7 +89,7 @@ struct RemoteControlSettingsView: View {
     /// the Android per-slot curation exactly.
     private static func guideActionChoices(for slot: RemoteSlot) -> [GuideRemoteAction] {
         var out: [GuideRemoteAction] = []
-        let isBack = slot == .backShort || slot == .backLong
+        let isBack = slot == .backShort
         // Back's built-in behavior (the top-channel ladder) leads its rows.
         if isBack { out.append(.backLadder) }
         // Move focus first on the arrows (their built-in behavior).
@@ -244,7 +244,9 @@ struct RemoteControlSettingsView: View {
         return TVSlotChoiceRow(
             title: displayName(slot),
             subtitle: slot == .backShort
-                ? "Single press. Pressing twice quickly and the Radio Mode shortcuts are fixed."
+                // Second line (Apple TV log 2026-10-15): tvOS owns a held
+                // Menu and reports press and release together on release.
+                ? "Single press. Pressing twice quickly and the Radio Mode shortcuts are fixed.\nHolding Back is handled by tvOS and cannot be mapped."
                 : nil,
             choices: Self.guideActionChoices(for: slot),
             current: current,
@@ -292,7 +294,6 @@ private func displayName(_ slot: RemoteSlot) -> String {
     case .channelUp:   return "Channel Up"
     case .channelDown: return "Channel Down"
     case .backShort:   return "Back"
-    case .backLong:    return "Hold Back"
     }
 }
 
