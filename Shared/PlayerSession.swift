@@ -2395,6 +2395,7 @@ final class RadioModeSession: ObservableObject {
         switching = true
         isActive = true
         debugLog("[RADIO] start \(item.name)")
+        NotificationCenter.default.post(name: .radioModeDidStart, object: nil)
         NowPlayingManager.shared.requestStartMinimized()
         _ = PlayerSession.shared.begin(item: item, server: server)
         settleAfterTune()
@@ -2405,6 +2406,7 @@ final class RadioModeSession: ObservableObject {
         guard Self.isAvailable, let t = Self.soleLiveTile else { return }
         isActive = true
         debugLog("[RADIO] start \(t.item.name)")
+        NotificationCenter.default.post(name: .radioModeDidStart, object: nil)
         #if os(iOS)
         AppOrientationLock.release(reason: "radio mode")
         #endif
@@ -2445,6 +2447,7 @@ final class RadioModeSession: ObservableObject {
     private func switchTo(item: ChannelDisplayItem, server: ServerConnection?) {
         // begin() takes the swap-from-mini path and calls noteSwitch.
         _ = PlayerSession.shared.begin(item: item, server: server)
+        NotificationCenter.default.post(name: .radioModeDidStart, object: nil)
     }
 
     private func settleAfterTune() {
@@ -2711,6 +2714,8 @@ final class RadioModeSession: ObservableObject {
         reattachLayer()
         #endif
         debugLog("[RADIO] stop teardown \(Int(Date().timeIntervalSince(started) * 1000))ms (no reattach, no seek)")
+        // tvOS guide focus restore (EPGGuideView), every stop reason.
+        NotificationCenter.default.post(name: .radioModeDidStop, object: nil, userInfo: ["reason": reason])
     }
 
     private func clear(reason: String) {
@@ -2903,4 +2908,12 @@ final class RadioModeSession: ObservableObject {
         detachedPlayer = nil
     }
     #endif
+}
+
+extension Notification.Name {
+    /// Radio Mode started (any path): the tvOS guide stores the origin cell.
+    static let radioModeDidStart = Notification.Name("radioModeDidStart")
+    /// Radio Mode stopped; userInfo["reason"] is the stop reason. The tvOS
+    /// guide restores focus to the stored origin cell.
+    static let radioModeDidStop = Notification.Name("radioModeDidStop")
 }

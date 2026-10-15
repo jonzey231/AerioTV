@@ -9037,9 +9037,9 @@ struct MainTabView: View {
             // the mini's single/double Back above, so a double press stops
             // without the guide also jumping.
             nowPlaying.menuMiniPressCount += 1
-            // The guide cell focused at the FIRST press is where focus goes
-            // back after a double-Menu stop (Apple TV 2026-10-15: the stop's
-            // teardown left focus on the clock). Same restore as hold Right.
+            // A grid cell focused at the FIRST press replaces the Radio Mode
+            // start origin that a double-Menu stop restores (Apple TV
+            // 2026-10-15: the stop's teardown left focus on the clock).
             if nowPlaying.menuMiniPressCount == 1 {
                 NotificationCenter.default.post(name: .guideRadioStopFocusCapture, object: nil)
             }
@@ -9051,7 +9051,6 @@ struct MainTabView: View {
                 nowPlaying.menuMiniPressCount = 0
                 if isDouble {
                     radio.stop(reason: "double Menu")
-                    NotificationCenter.default.post(name: .guideRadioStopFocusRestore, object: nil)
                 } else {
                     debugLog("\u{1F3AE} Menu pressed: Radio Mode -> mapped guide Back")
                     runGuideBack(.backShort)

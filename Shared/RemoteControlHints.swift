@@ -134,10 +134,9 @@ extension Notification.Name {
     static let guideFocusedCellAction = Notification.Name("guideFocusedCellAction")
     /// Move focus onto the first group pill (Top Group Pills mode).
     static let guideFocusGroupPills = Notification.Name("guideFocusGroupPills")
-    /// Radio Mode double Menu: the first press captures the focused guide
-    /// cell; the stop restores it (EPGGuideView).
+    /// Radio Mode double Menu: the first press re-captures the focused
+    /// guide cell when one has focus (EPGGuideView).
     static let guideRadioStopFocusCapture = Notification.Name("guideRadioStopFocusCapture")
-    static let guideRadioStopFocusRestore = Notification.Name("guideRadioStopFocusRestore")
 }
 
 /// Remote Control #196: shared dispatcher for the guide-context actions
