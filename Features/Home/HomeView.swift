@@ -4828,6 +4828,7 @@ struct MainTabView: View {
     /// Measured height of the iPhone Kept Live dock card; the Control-a-TV
     /// circle beside it takes this diameter.
     @State private var keptCardHeight: CGFloat = 0
+    @State private var radioCardHeight: CGFloat = 0
     #if os(iOS)
     @State private var multiviewCardHeight: CGFloat = 0
     #endif
@@ -6211,11 +6212,8 @@ struct MainTabView: View {
                // pill drew over it at the same height. Same for the
                // Multiview card (Logan 2026-10-06).
                !keptLiveCardVisible, !multiviewCardVisible, !mvBackgroundCardVisible,
-               // The Radio Mode card takes the cast card's slot above the
-               // bar, and the button showed behind its trailing edge (Logan
-               // 2026-10-15). Hide it like the cast card does; it returns
-               // when Radio Mode stops.
-               !radio.isActive {
+               // Radio Mode card row carries the button (Logan 2026-10-15).
+               !radioCardCarriesControlATV {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6292,9 +6290,24 @@ struct MainTabView: View {
                         // button trailing. The card's edges line up with the
                         // measured tab bar capsule, like the Kept Live row
                         // (Logan 2026-10-05); 20 pt until measured.
-                        remoteSessionCard
-                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
-                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
+                        // Radio Mode (Logan 2026-10-15): the Kept Live row's
+                        // rules. The card narrows and the Control-a-TV circle
+                        // sits at its trailing edge on the same row, when no
+                        // lower card row carries the circle. A cast card
+                        // never shares the row (the circle hides while
+                        // casting).
+                        HStack(spacing: RemoteSessionCardMetrics.gap) {
+                            remoteSessionCard
+                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                    if abs(h - radioCardHeight) > 0.5 { radioCardHeight = h }
+                                }
+                            if radioCardCarriesControlATV {
+                                CompanionControlFAB(action: { showCompanionPickerGlobal = true },
+                                                    size: radioCardHeight > 0 ? radioCardHeight : 48)
+                            }
+                        }
+                        .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                        .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
                         // Multiview staging card (Logan 2026-10-06): the
                         // Kept Live row's rules. The Control-a-TV circle
                         // rides the LOWEST card row, so it sits here only
@@ -7374,6 +7387,15 @@ struct MainTabView: View {
         return tabs
     }
 
+    /// iPhone: the Radio Mode card is the lowest dock row and the
+    /// Control-a-TV circle rides it, Kept Live style (Logan 2026-10-15).
+    private var radioCardCarriesControlATV: Bool {
+        !PadTabPill.isActive && radio.isActive && radio.channel != nil
+            && multiviewStore.audioProgressStore != nil
+            && !playerFullscreen && showsControlATVButton
+            && !keptLiveCardVisible && !multiviewCardVisible && !mvBackgroundCardVisible
+    }
+
     /// Same gates as the phone's floating Control-a-TV button.
     private var showsControlATVButton: Bool {
         (!companionClient.devices.isEmpty || castController.state != .unavailable)
@@ -7382,7 +7404,6 @@ struct MainTabView: View {
             && !airPlay.hostsHeadless
             && (nowPlaying.playingItem == nil || nowPlaying.isMinimized)
             && (playerSession.mode == .idle || nowPlaying.isMinimized)
-            && !radio.isActive  // Radio Mode card holds the cast slot (2026-10-15)
     }
 
     /// iPad bottom pill plus the Control-a-TV circle on the same row, so the
