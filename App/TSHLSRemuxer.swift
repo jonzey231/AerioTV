@@ -972,6 +972,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var adtsSampleRate = 0
     private var lastAudioPESPTS = -1.0
     private var lastAudioPESFrames = 0
+    /// Audio-only programs: primary audio PES timestamps come from the
+    /// sample count, not the provider (see AudioOnlySampleClock).
+    private var audioOnlyClock: AudioOnlySampleClock?
     private var audioGapWarnings = 0
     private var lastAudioGapLogAt = Date.distantPast
     /// Non-nil after the PMT declared HEVC: the fMP4 arm (Apple HLS rule
@@ -1712,6 +1715,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lastVideoAUPTS = -1
         lastAudioPESPTS = -1
         lastAudioPESFrames = 0
+        audioOnlyClock?.requestResync("source switch")
     }
 
     /// Append the completed audio PES to the open segment and read its
@@ -2058,6 +2062,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         currentSegment = Data()
         currentStartPTS = nil
         awaitingFirstKeyframe = true
+        if audioOnlyClock == nil {
+            audioOnlyClock = AudioOnlySampleClock(streamType: primaryAudioType, primaryPID: primaryAudioPID)
+            audioOnlyClock?.requestResync(nil)
+        } else {
+            audioOnlyClock?.streamType = primaryAudioType
+            audioOnlyClock?.primaryPID = primaryAudioPID
+            audioOnlyClock?.requestResync("source switch")
+        }
         setAudioOnly(true)
         TuneTimeline.shared.markAudioOnly()
         if audioOnlyPolicy == .requested {
@@ -2094,6 +2106,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
         if pid == videoPID || pid == pmtPID || pid == 0 { return }
+        var p = p
+        if pid == primaryAudioPID, let clocked = audioOnlyClock?.process(p) {
+            // PTS/DTS restamped from the sample clock; every cut and
+            // EXTINF below reads the rewritten value. PCR stays as sent.
+            p = clocked.packet
+            for line in clocked.logs { debugLog(line) }
+        }
         if pid == primaryAudioPID, pusi, let pts = extractPTS(p), audioPESStartsOnSync(p) {
             // Completes the previous PES into the segment it belongs to.
             flushHeldAudio()
