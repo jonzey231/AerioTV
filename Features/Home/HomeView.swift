@@ -6210,7 +6210,12 @@ struct MainTabView: View {
                // pill's row in the dock instead (Logan 2026-10-04): here the
                // pill drew over it at the same height. Same for the
                // Multiview card (Logan 2026-10-06).
-               !keptLiveCardVisible, !multiviewCardVisible, !mvBackgroundCardVisible {
+               !keptLiveCardVisible, !multiviewCardVisible, !mvBackgroundCardVisible,
+               // The Radio Mode card takes the cast card's slot above the
+               // bar, and the button showed behind its trailing edge (Logan
+               // 2026-10-15). Hide it like the cast card does; it returns
+               // when Radio Mode stops.
+               !radio.isActive {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -7377,6 +7382,7 @@ struct MainTabView: View {
             && !airPlay.hostsHeadless
             && (nowPlaying.playingItem == nil || nowPlaying.isMinimized)
             && (playerSession.mode == .idle || nowPlaying.isMinimized)
+            && !radio.isActive  // Radio Mode card holds the cast slot (2026-10-15)
     }
 
     /// iPad bottom pill plus the Control-a-TV circle on the same row, so the
