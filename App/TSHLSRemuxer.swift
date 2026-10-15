@@ -2446,6 +2446,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // of an upstream gap must NOT be answered by holding further
                 // back from the live edge (2026-09-11, see the holdback note
                 // in AVPlayerProgressDriver).
+                // Gap first, then the stamp: the driver reads the stamp and
+                // then the gap, so it never pairs a new stamp with an old gap.
+                Self.lastFeedStarvationGap.set(gap)
                 Self.lastFeedStarvation.set(nowWall)
                 if nowWall.timeIntervalSince(lastStarvationLogAt) > 10 {
                     lastStarvationLogAt = nowWall
@@ -2570,6 +2573,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// stopped arriving. Read from the main thread by the playback
     /// driver; written from the ingest queue, hence the box.
     static let lastFeedStarvation = TimestampBox()
+    /// Wall seconds between the closures of the starvation stamped in
+    /// `lastFeedStarvation` (the "Ws wall for a 2.0s segment" figure). The
+    /// audio-only hold-back rule sizes its offset from it.
+    static let lastFeedStarvationGap = DoubleBox(0)
     /// Rolling 30 s delivery window behind `lastFeedStarvation`: it says
     /// whether the feed is bursty (average at real time) or genuinely
     /// slow, and carries the monotonic published-segment counter the
@@ -2792,6 +2799,26 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
               let lastStored = segments.last?.seq,
               advertised < lastStored,
               pacedHighestRequestedSeq >= 0 else { return }
+        // Audio-only (2026-10-15): READY is two 2 s audio segments and the
+        // join sits 3 x targetDuration back, so a held segment leaves the
+        // player with no margin on a clean feed (AVPlayer reported
+        // WaitingToMinimizeStalls at the first frame and the audio chopped).
+        // Never hold while the player has fewer than 3 segments ahead.
+        if isAudioOnlyProgram {
+            var advertisedNow = advertised
+            var aheadCount = segments.filter { $0.seq > pacedHighestRequestedSeq && $0.seq <= advertisedNow }.count
+            guard aheadCount < 3 else { return }
+            let before = advertisedNow
+            while aheadCount < 3, advertisedNow < lastStored {
+                advertisedNow += 1
+                aheadCount += 1
+            }
+            pacedAdvertisedSeq = advertisedNow
+            pacedNextReleaseAt = now + (segments.first(where: { $0.seq == advertisedNow })?.duration
+                                        ?? targetSegmentSeconds)
+            debugLog("[TS-REMUX] paced: audio-only, released early (player below 3 segments) segs \(before + 1)-\(advertisedNow)")
+            return
+        }
         let ahead = segments
             .filter { $0.seq > pacedHighestRequestedSeq && $0.seq <= advertised }
             .reduce(0.0) { $0 + $1.duration }
@@ -8079,14 +8106,17 @@ struct AVPlayerMultiviewTile: View {
         } else if isLiveTune, remuxer?.isAudioOnlyProgram == true {
             // Audio-only program (GH AerioTV#90): no video GOPs to hold back
             // for, and READY already means two full 2 s audio segments. Join
-            // two target durations back instead of the 6 s video floor; a
-            // stall-learned hold-back above the base still applies.
+            // three target durations back (2026-10-15: 2x left AVPlayer no
+            // margin on a clean AAC feed and it chopped from the first
+            // seconds); a stall-learned hold-back above it still applies. Capped
+            // at 20 s, not 18: the audio-only bursty-feed rule learns up to
+            // 20 s (AVPlayerProgressDriver.checkAudioOnlyBurstyFeed).
             let learnedExtra = learned > LiveEdgeHoldback.base ? learned : 0
-            let offset = min(18.0, max(2 * max(joinTargetDuration, 2), learnedExtra) + streamBufferSeconds)
+            let offset = min(LiveEdgeHoldback.audioOnlyCap, max(3 * max(joinTargetDuration, 2), learnedExtra) + streamBufferSeconds)
             playerItem.configuredTimeOffsetFromLive =
                 CMTime(seconds: offset, preferredTimescale: 600)
             debugLog(String(format:
-                "[AVP-MV] live edge offset %.1fs at join (audio-only program: 2x targetDuration %.1f, learned %.1f, stream buffer %.1f) channel=%@",
+                "[AVP-MV] live edge offset %.1fs at join (audio-only program: 3x targetDuration %.1f, learned %.1f, stream buffer %.1f) channel=%@",
                 offset, joinTargetDuration, learned, streamBufferSeconds, channelName))
             driverJoinOffset = offset
             driverOffsetFloor = offset
@@ -8324,6 +8354,7 @@ struct AVPlayerMultiviewTile: View {
             isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
         // Where a stall-learned hold-back is recorded for the NEXT tune.
         driver?.liveHoldbackKey = holdbackKey
+        driver?.liveChannelName = channelName
         // Freeze detector: a player we asked to play that sits at rate 0
         // is a freeze too (device 2026-10-12, held DVR start).
         driver?.expectPlaying = !shouldPause
