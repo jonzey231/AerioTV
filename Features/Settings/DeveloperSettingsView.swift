@@ -100,6 +100,11 @@ struct DeveloperSettingsView: View {
     /// plays direct on AVPlayer. Read at tune time by
     /// PlaybackFeatureFlags.forceHLS, so a flip applies on the next tune.
     @AppStorage("developer.forceHLS") private var forceHLS = false
+    /// Dump Audio-Only Segments (developer diagnostic, 2026-10-15): the TS
+    /// remuxer also writes every audio-only segment and playlist it serves
+    /// on the loopback to Documents/AudioOnlyDump. Per device, read at tune
+    /// time by AudioOnlySegmentDumper.enabled.
+    @AppStorage(AudioOnlySegmentDumper.defaultsKey) private var dumpAudioOnlySegments = false
 
     /// **Experimental**, iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
@@ -318,6 +323,7 @@ struct DeveloperSettingsView: View {
                                          icon: "play.rectangle.on.rectangle")
                     engineAdvancedGroup
                     forceHLSToggle
+                    dumpAudioOnlyToggle
                 } header: {
                     Text("Playback Engine")
                         .sectionHeaderStyle()
@@ -952,6 +958,15 @@ struct DeveloperSettingsView: View {
             subtitle: "Request HLS output from Dispatcharr for every live channel instead of the TS stream. For testing.",
             icon: forceHLS ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right",
             isOn: $forceHLS)
+    }
+
+    /// Developer diagnostic: dump the audio-only segments the remuxer serves.
+    private var dumpAudioOnlyToggle: some View {
+        engineFlagToggle(
+            title: "Dump Audio-Only Segments",
+            subtitle: "Save every audio-only segment and playlist served to the player in Documents/AudioOnlyDump, starting with the next tune. For testing.",
+            icon: dumpAudioOnlySegments ? "square.and.arrow.down.fill" : "square.and.arrow.down",
+            isOn: $dumpAudioOnlySegments)
     }
 
     @ViewBuilder

@@ -965,6 +965,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// an order of magnitude past ffmpeg's 2930 B cap.
     private let heldAudioPacketCap = 140
     private var adtsLogged = false
+    /// Developer dump of the audio-only segments and playlists served on
+    /// the loopback (Settings > Developer > Dump Audio-Only Segments).
+    /// Created on the first audio-only segment of a tune; remux queue only.
+    private var audioOnlyDumper: AudioOnlySegmentDumper?
     private var adtsSampleRate = 0
     private var lastAudioPESPTS = -1.0
     private var lastAudioPESFrames = 0
@@ -2102,6 +2106,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 }
                 beginSegment(at: pts)
                 currentSegmentLeadNALs = []
+                startAudioOnlyDumpIfEnabled(firstPTS: pts)
                 debugLog("[TS-REMUX] audio-only: first audio segment \(nextSeq) opened at pts \(String(format: "%.3f", pts)) (PID \(primaryAudioPID), type \(String(format: "0x%02X", primaryAudioType)))")
             } else if let start = currentStartPTS {
                 var elapsed = pts - start
@@ -2326,7 +2331,41 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // really is, and what its first video access unit opens with.
             debugLog("[TS-REMUX] seg \(nextSeq) start=\(String(format: "%.3f", start)) end=\(String(format: "%.3f", endPTS)) dur=\(String(format: "%.3f", duration)) bytes=\(currentSegment.count) lead=\(currentSegmentLeadNALs)")
         }
+        if audioOnly, let dumper = audioOnlyDumper {
+            dumper.note(String(format: "seg %05d start_pts=%.6f end_pts=%.6f dur=%.6f bytes=%d%@",
+                               nextSeq, start, endPTS, duration, currentSegment.count,
+                               nextSegmentDiscontinuity ? " discontinuity" : ""))
+        }
         storeSegment(data: currentSegment, duration: duration)
+    }
+
+    /// Opens the developer dump for this tune when the toggle is on.
+    private func startAudioOnlyDumpIfEnabled(firstPTS: Double) {
+        guard AudioOnlySegmentDumper.enabled else { return }
+        if let dumper = audioOnlyDumper {
+            dumper.note(String(format: "audio-only re-gated at pts %.6f (source switch), PID %d type 0x%02X, PMT %@",
+                               firstPTS, primaryAudioPID, primaryAudioType, pmtPacket.map(Self.hex) ?? "none"))
+            return
+        }
+        let label = sourceURL.pathComponents.filter { $0 != "/" }.suffix(2).joined(separator: "_")
+        guard let dumper = AudioOnlySegmentDumper(channel: label.isEmpty ? "channel" : label) else { return }
+        audioOnlyDumper = dumper
+        debugLog("[TS-REMUX] dump: \(dumper.path)")
+        var lines = [
+            "source: \(sourceURL.host ?? "")\(sourceURL.path)",
+            String(format: "audio PID %d (0x%04X), stream type 0x%02X, PMT PID %d, droppedVideo=%@",
+                   primaryAudioPID, primaryAudioPID, primaryAudioType, pmtPID,
+                   audioOnlyDroppedVideo ? "yes" : "no"),
+            "PAT: \(patPacket.map(Self.hex) ?? "none")",
+            "PMT (as served): \(pmtPacket.map(Self.hex) ?? "none")",
+            String(format: "first segment opens at pts %.6f, target %.1f s", firstPTS, targetSegmentSeconds)
+        ]
+        if audioOnlyDroppedVideo { lines.insert("PMT rewritten without the video entry", at: 3) }
+        dumper.note(lines.joined(separator: "\n"))
+    }
+
+    private static func hex(_ d: Data) -> String {
+        d.map { String(format: "%02x", $0) }.joined()
     }
 
     /// NAL types (in order) of the first video PES in the open segment,
@@ -3959,6 +3998,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             if path.hasSuffix("live.m3u8") {
                 let text = self.playlistText(lan: lan)
                 if !lan { self.noteLocalPlaylist(text) }
+                if !lan, self.audioOnly { self.audioOnlyDumper?.playlist(text) }
                 r = ServedResource(status: 200, body: Data(text.utf8),
                                    contentType: "application/vnd.apple.mpegurl", uti: "public.m3u-playlist")
             } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
@@ -3999,6 +4039,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     }
                     return
                 }
+                if !lan, self.audioOnly { self.audioOnlyDumper?.segment(seq: seq, data: data) }
                 r = ServedResource(status: 200, body: data, contentType: "video/mp2t", uti: "public.mpeg-2-transport-stream")
             } else if path.hasPrefix("/seg"), path.hasSuffix(".m4s"),
                       let seq = Int(path.dropFirst(4).dropLast(4)),
@@ -9437,6 +9478,78 @@ enum AudioOnlyCardRenderer {
             }
             .frame(width: size.width, height: size.height)
             .environment(\.colorScheme, .dark)
+        }
+    }
+}
+
+// MARK: - Audio-only segment dump (developer diagnostic, 2026-10-15)
+
+/// Writes the audio-only segments and playlists the remuxer serves on the
+/// loopback to Documents/AudioOnlyDump/<channel>/<timestamp>/ (seg_NNNNN.ts,
+/// live_NNNNN.m3u8, notes.txt) so the bytes AVPlayer actually received can
+/// be checked offline (Scripts/audio-only-ts-check/tscheck.py). Writes run
+/// on a private utility queue; the <channel> folder is cleared on each new
+/// tune; at most 200 segments and 600 playlists per tune.
+final class AudioOnlySegmentDumper {
+    static let defaultsKey = "developer.dumpAudioOnlySegments"
+    static var enabled: Bool {
+        #if os(iOS)
+        return UserDefaults.standard.bool(forKey: defaultsKey)
+        #else
+        return false   // tvOS Documents is not a writable, pullable place
+        #endif
+    }
+
+    let path: String
+    private let dir: URL
+    private let ioQueue = DispatchQueue(label: "aerio.audioOnlyDump", qos: .utility)
+    private var dumpedSeqs = Set<Int>()
+    private var playlistCount = 0
+    private let segmentCap = 200
+    private let playlistCap = 600
+
+    init?(channel: String) {
+        let fm = FileManager.default
+        guard let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let safe = String(channel.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "_" }.prefix(80))
+        let channelDir = docs.appendingPathComponent("AudioOnlyDump", isDirectory: true)
+            .appendingPathComponent(safe, isDirectory: true)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        dir = channelDir.appendingPathComponent(f.string(from: Date()), isDirectory: true)
+        path = "Documents/AudioOnlyDump/\(safe)/\(dir.lastPathComponent)"
+        let target = dir
+        ioQueue.async {
+            try? fm.removeItem(at: channelDir)
+            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+        }
+    }
+
+    /// Caller: the remux queue. `data` is an immutable value copy.
+    func segment(seq: Int, data: Data) {
+        guard dumpedSeqs.count < segmentCap, dumpedSeqs.insert(seq).inserted else { return }
+        let url = dir.appendingPathComponent(String(format: "seg_%05d.ts", seq))
+        ioQueue.async { try? data.write(to: url) }
+    }
+
+    func playlist(_ text: String) {
+        guard playlistCount < playlistCap else { return }
+        let url = dir.appendingPathComponent(String(format: "live_%05d.m3u8", playlistCount))
+        playlistCount += 1
+        ioQueue.async { try? Data(text.utf8).write(to: url) }
+    }
+
+    func note(_ line: String) {
+        let url = dir.appendingPathComponent("notes.txt")
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let bytes = Data("[\(stamp)] \(line)\n".utf8)
+        ioQueue.async {
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile(); h.write(bytes); try? h.close()
+            } else {
+                try? bytes.write(to: url)
+            }
         }
     }
 }
