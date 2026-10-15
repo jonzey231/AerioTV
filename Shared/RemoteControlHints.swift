@@ -190,6 +190,7 @@ enum GuideRemoteDispatch {
         case .closeMiniPlayer:
             // Radio Mode: hold Right = Stop, like the banner's Stop.
             if RadioModeSession.shared.isActive {
+                GuideArrowPressEdges.armRightSwallowAfterStop()
                 RadioModeSession.shared.stop(reason: "hold Right")
                 return true
             }

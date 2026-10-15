@@ -5398,6 +5398,33 @@ enum GuideArrowPressEdges {
     /// guide opened: the press that minimized the player. Its repeats and
     /// its release must never reach the guide (they scrolled the timeline
     /// back in time on Android). Swallowed until key-up; a new press works.
+    /// Radio Mode hold-Right stop (Apple TV 2026-10-15): the held Right kept
+    /// auto-repeating after the stop and fought the focus restore. Every
+    /// Right of that press is swallowed until it is released, or until no
+    /// repeat arrived for 300 ms (a lost release must not lock Right).
+    static var rightStopPressDown: Date?
+    static var rightStopLastSwallowAt: Date = .distantPast
+
+    static func armRightSwallowAfterStop() {
+        guard isDown("RIGHT"), let down = downAt["RIGHT"] else { return }
+        rightStopPressDown = down
+        rightStopLastSwallowAt = Date()
+        debugLog("[PRESS] hold-Right stop: swallowing Right until release")
+    }
+
+    static func shouldSwallowRightAfterStop() -> Bool {
+        guard let armed = rightStopPressDown else { return false }
+        let now = Date()
+        guard isDown("RIGHT"), downAt["RIGHT"] == armed,
+              now.timeIntervalSince(rightStopLastSwallowAt) < 0.3 else {
+            rightStopPressDown = nil
+            debugLog("[PRESS] hold-Right stop: Right swallow ended")
+            return false
+        }
+        rightStopLastSwallowAt = now
+        return true
+    }
+
     static func isHeldFromBeforeGuideOpen(_ key: String) -> Bool {
         guard isDown(key), let down = downAt[key] else { return false }
         return down < guideOpenedAt
@@ -5908,7 +5935,9 @@ struct EPGGuideView: View {
                 // Back to Guide: the background Multiview's banner takes
                 // the staging banner's slot (they never coexist).
                 MultiviewBackgroundBannerSlot()
-                RadioModeBannerSlot()
+                // Guide (Logan 2026-10-15): focus stays on the chosen cell
+                // when Radio Mode starts; the banner is reachable with Up.
+                RadioModeBannerSlot(takesFocusOnAppear: false)
                 if staging.isStaging && !MultiviewBackgroundSession.shared.isActive {
                     stagingBanner
                 }
@@ -7051,6 +7080,23 @@ struct EPGGuideView: View {
         focusScratch.radioStopOriginChannel = pid.flatMap { channelID(ofProgram: $0) }
             ?? RadioModeSession.shared.channel?.id
         debugLog("[FOCUS] radio origin captured at start -> \(pid ?? "nil") channel=\(focusScratch.radioStopOriginChannel ?? "nil")")
+        // Keep focus on the chosen cell through the start (menu dismissal
+        // and the banner's arrival); the banner no longer takes focus here.
+        guard let pid else { return }
+        Task { @MainActor in
+            var waited: UInt64 = 0
+            for step: UInt64 in [150, 200, 300] {
+                try? await Task.sleep(nanoseconds: step * 1_000_000)
+                waited += step
+                guard RadioModeSession.shared.isActive,
+                      focusScratch.radioStopOriginPID == pid else { return }
+                if focusedProgramID != pid {
+                    debugLog("[FOCUS] radio start keep -> \(pid) at \(waited) ms (was \(focusedProgramID ?? "nil"))")
+                    focusedProgramID = pid
+                }
+            }
+            debugLog("[FOCUS] radio start keep -> \(pid) result=\(focusedProgramID == pid ? "ok" : "failed (focused=\(focusedProgramID ?? "nil"))")")
+        }
     }
 
     /// Radio Mode stop (double Menu, hold Right, banner Stop, any reason):
@@ -7141,6 +7187,10 @@ struct EPGGuideView: View {
         // always has a focused cell) is untouched.
         // GH Android #128 parity: a move command from the arrow that
         // minimized the player (still held) never scrolls the guide.
+        if direction == .right, GuideArrowPressEdges.shouldSwallowRightAfterStop() {
+            debugLog("[PRESS] swallowed Right after hold-Right stop (move command)")
+            return
+        }
         let heldKey: String? = direction == .left ? "LEFT" : (direction == .right ? "RIGHT" : nil)
         if let heldKey, GuideArrowPressEdges.isHeldFromBeforeGuideOpen(heldKey) {
             debugLog("[PRESS] swallowed repeat after guide open key=\(heldKey) (move command)")
@@ -7379,6 +7429,12 @@ struct EPGGuideView: View {
         let heading = context.focusHeading
         let isLeft = heading.contains(.left)
         guard isLeft || heading.contains(.right) else { return false }
+        // Radio Mode hold-Right stop: the rest of that press never moves
+        // focus (grid cells and the banner alike: this veto is window-wide).
+        if !isLeft, GuideArrowPressEdges.shouldSwallowRightAfterStop() {
+            debugLog("[PRESS] swallowed Right after hold-Right stop (focus move)")
+            return true
+        }
         // GH Android #128 parity: the arrow that minimized the player is
         // still held; refuse every move it asks for until key-up.
         if GuideArrowPressEdges.isHeldFromBeforeGuideOpen(isLeft ? "LEFT" : "RIGHT") {
@@ -10399,6 +10455,9 @@ struct RadioModeBannerSlot: View {
     @ObservedObject private var radio = RadioModeSession.shared
     @ObservedObject private var store = MultiviewStore.shared
     @FocusState private var returnFocused: Bool
+    /// False in the guide grid: Radio Mode start keeps focus on the cell the
+    /// user chose (EPGGuideView logs "[FOCUS] radio start keep").
+    var takesFocusOnAppear: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10477,6 +10536,7 @@ struct RadioModeBannerSlot: View {
             .tvFocusRingShape(.capsule)
             .focused($returnFocused)
             .onAppear {
+                guard takesFocusOnAppear else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { returnFocused = true }
             }
             Button {
