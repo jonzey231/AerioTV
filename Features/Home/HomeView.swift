@@ -6217,6 +6217,11 @@ struct MainTabView: View {
         .overlay(alignment: .bottomLeading) {
             MinimizedTabButton(tab: selectedTab)
         }
+        // The full-screen player owns the bar's visibility while it is up
+        // (see TabBarCollapseState.playerHidden).
+        .onChange(of: playerFullscreen, initial: true) { _, full in
+            TabBarCollapseState.shared.setPlayerFullscreen(full)
+        }
         // AirPlay handoff (device test 2026-09-25): the receiver took the
         // channel, the fullscreen player was minimized, so land on Live TV
         // with the remote-session card driving the session (Cast parity).
@@ -9829,6 +9834,77 @@ final class TabBarCollapseState: ObservableObject {
     /// collapse state is kept untouched for the pop.
     @Published private(set) var detailHidden = false
     private var detailDepth = 0
+    /// True while the full-screen player is up (MrDynamo report 2026-10-15,
+    /// 1.8.43: after a PiP round trip and a rotate-button landscape/portrait
+    /// toggle, the scroll tracker under the player read the rotation's
+    /// offset jump as a scroll up, logged "auto-hide -> shown", and the bar
+    /// plus the 48 pt mini button drew over the video until the player
+    /// closed). Nothing showed the bar's hide was owned by the player, so
+    /// every show path now checks this and re-hides instead.
+    @Published private(set) var playerHidden = false
+    private var orientationObserver: NSObjectProtocol?
+
+    /// The bar, its mini button and the system bar are hidden for a detail
+    /// page or the full-screen player.
+    var barSuppressed: Bool { detailHidden || playerHidden }
+
+    /// Driven by HomeView's playerFullscreen (iPhone only).
+    func setPlayerFullscreen(_ on: Bool) {
+        if PadTabPill.isActive { return }
+        guard playerHidden != on else { return }
+        playerHidden = on
+        debugLog("[TABBAR] player \(on ? "hide" : "restore") collapsed=\(collapsed) detail=\(detailHidden)")
+        if on {
+            if orientationObserver == nil {
+                orientationObserver = NotificationCenter.default.addObserver(
+                    forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
+                ) { _ in
+                    MainActor.assumeIsolated { TabBarCollapseState.shared.reassertPlayerHide(reason: "orientation") }
+                }
+            }
+        } else if let o = orientationObserver {
+            NotificationCenter.default.removeObserver(o)
+            orientationObserver = nil
+        }
+        DispatchQueue.main.async { [self] in applyDetailVisibility() }
+    }
+
+    /// Re-applies the full-screen player's hide (isHidden, empty mask,
+    /// alpha 0) to every system bar. No-op unless the player is up. Called
+    /// from each path that can bring the bar back: a blocked auto-hide
+    /// show, the insets re-measure after a window size change, the PiP
+    /// did-stop callback, and the orientation lock (rotate button).
+    func reassertPlayerHide(reason: String) {
+        guard playerHidden, !PadTabPill.isActive else { return }
+        let bars = Self.allTabBars()
+        var changed = 0
+        for bar in bars {
+            let visible = !bar.isHidden || bar.alpha > 0.01 || bar.layer.mask?.name != Self.collapsedMaskName
+            if visible { changed += 1 }
+            Self.setCollapsedMask(bar, on: true)
+            bar.alpha = 0
+        }
+        debugLog("[TABBAR] re-hidden (reason=\(reason)) bars=\(bars.count) wasVisible=\(changed)")
+    }
+
+    /// Re-asserts now and again while a rotation settles (the window size
+    /// changes after requestGeometryUpdate returns).
+    func reassertPlayerHideAcrossTransition(reason: String) {
+        guard playerHidden else { return }
+        reassertPlayerHide(reason: reason)
+        for delay in [0.15, 0.5, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
+                reassertPlayerHide(reason: reason)
+            }
+        }
+    }
+
+    private static func allTabBars() -> [UITabBar] {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .flatMap { tabBars(in: $0) }
+    }
 
     func enterDetail() {
         detailDepth += 1
@@ -9842,6 +9918,7 @@ final class TabBarCollapseState: ObservableObject {
         detailDepth = max(0, detailDepth - 1)
         guard detailDepth == 0, detailHidden else { return }
         detailHidden = false
+        // The player's hide survives a detail pop beneath it.
         debugLog("[TABBAR] detail restore collapsed=\(collapsed)")
         DispatchQueue.main.async { [self] in applyDetailVisibility() }
     }
@@ -9853,12 +9930,9 @@ final class TabBarCollapseState: ObservableObject {
     private func applyDetailVisibility() {
         // iPad: the system bar stays hidden; the pill reads detailHidden.
         if PadTabPill.isActive { return }
-        let bars = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .flatMap { Self.tabBars(in: $0) }
+        let bars = Self.allTabBars()
         for bar in bars {
-            if detailHidden {
+            if barSuppressed {
                 Self.setCollapsedMask(bar, on: true)
                 bar.alpha = 0
             } else if collapsed {
@@ -9879,7 +9953,7 @@ final class TabBarCollapseState: ObservableObject {
                 }
             }
         }
-        debugLog("[TABBAR] detail \(detailHidden ? "hidden" : "restored") bars=\(bars.count)")
+        debugLog("[TABBAR] detail \(barSuppressed ? "hidden" : "restored") bars=\(bars.count) player=\(playerHidden)")
     }
 
     func set(_ value: Bool) {
@@ -9894,6 +9968,10 @@ final class TabBarCollapseState: ObservableObject {
         DispatchQueue.main.async { [self] in
             // A detail page owns the bar's visibility; its restore applies
             // the latest collapse state.
+            if playerHidden {
+                reassertPlayerHide(reason: value ? "auto-hide hidden" : "auto-hide shown")
+                return
+            }
             guard !detailHidden else { return }
             applyToSystemBar()
         }
@@ -9974,6 +10052,10 @@ final class TabBarCollapseState: ObservableObject {
                     bar.transform = .identity
                 }, completion: { finished in
                     guard !self.collapsed else { return }
+                    if self.playerHidden {
+                        self.reassertPlayerHide(reason: "show completion")
+                        return
+                    }
                     if !finished { debugLog("[TABBAR] show animation interrupted") }
                     Self.normalize(bar)
                     // The dock cards' capsule frame may be from another
@@ -10173,6 +10255,7 @@ final class RemoteSessionCardMetrics: ObservableObject {
             if barLeadingInset != 0 { barLeadingInset = 0 }
             if barTrailingInset != 0 { barTrailingInset = 0 }
             loggedBarFrame = .null
+            TabBarCollapseState.shared.reassertPlayerHide(reason: "size change")
         }
         measureBarInsets(bar, superview: superview, window: window)
     }
@@ -10436,11 +10519,12 @@ private struct MinimizedTabButton: View {
             .glassEffect(.regular, in: Circle())
             .padding(.leading, 28)
             .padding(.bottom, -6)
-            .opacity(collapse.collapsed && !collapse.detailHidden ? 1 : 0)
+            .opacity(collapse.collapsed && !collapse.barSuppressed ? 1 : 0)
             .scaleEffect(collapse.collapsed ? 1 : 0.6)
-            .allowsHitTesting(collapse.collapsed && !collapse.detailHidden)
+            .allowsHitTesting(collapse.collapsed && !collapse.barSuppressed)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
             .animation(.easeInOut(duration: 0.2), value: collapse.detailHidden)
+            .animation(.easeInOut(duration: 0.2), value: collapse.playerHidden)
             .accessibilityLabel("Show tab bar")
         }
     }

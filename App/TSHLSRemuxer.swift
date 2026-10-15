@@ -9029,7 +9029,11 @@ struct AVPlayerLayerView: UIViewRepresentable {
             debugLog("[AVP-PIP] did stop")
             #if os(iOS)
             let pipID = ObjectIdentifier(controller)
-            MainActor.assumeIsolated { ForegroundPiPBridge.shared.handleDidStop(pipID) }
+            MainActor.assumeIsolated {
+                ForegroundPiPBridge.shared.handleDidStop(pipID)
+                // The scene restore after PiP can relayout the tab bar.
+                TabBarCollapseState.shared.reassertPlayerHideAcrossTransition(reason: "pip stop")
+            }
             #endif
         }
 

@@ -341,6 +341,9 @@ enum AppOrientationLock {
         // immediately, notably when releasing back to portrait (no pending
         // geometry change would otherwise trigger the re-query).
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        // A rotation under the full-screen player must not bring the tab
+        // bar back (MrDynamo 2026-10-15).
+        TabBarCollapseState.shared.reassertPlayerHideAcrossTransition(reason: "rotate")
     }
 
     /// Teardown convenience: always return to the natural orientation.
