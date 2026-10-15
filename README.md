@@ -430,7 +430,7 @@ rule for it; see the note below the table.
 | 1 | Pass to Auth | Path | `/api/swagger/*` | keeps the API docs behind SSO |
 | 2 | Pass to Auth | Path | `/api/redoc/*` | keeps the API docs behind SSO |
 | 3 | Pass to Auth | Path | `/api/schema/*` | keeps the API docs behind SSO |
-| 4 | Bypass Auth | Path | `/api/*` | channels, EPG, VOD, recordings, logos, native Catch-Up sessions, Mark as Radio Channel (admin only PATCH of `/api/channels/channels/<id>/`) |
+| 4 | Bypass Auth | Path | `/api/*` | channels, EPG, VOD, recordings, logos, native Catch-Up sessions, Mark as Radio Channel (admin only PATCH of `/api/channels/channels/<id>/`), Radio Channel Stream Profile (admin only GET of `/api/core/streamprofiles/`) |
 | 5 | Bypass Auth | Path | `/proxy/*` | live streams, VOD streams, Catch-Up playback, stream switching |
 | 6 | Bypass Auth | Path | `/player_api.php` | Xtream Codes only |
 | 7 | Bypass Auth | Path | `/xmltv.php` | Xtream Codes only |
@@ -467,44 +467,45 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 4 | Login and account | `/api/accounts/users/` | admin check; a 2xx here proves the account is an admin (unlocks Switch Stream and server-side features) |
 | 5 | Server | `/api/core/version/` | server version, also the connectivity and auth test at setup |
 | 6 | Server | `/api/core/settings/` | server-wide switches such as whether Catch-Up is enabled |
-| 7 | Channels and guide | `/api/channels/channels/` | the channel list for the playlist |
-| 8 | Channels and guide | `/api/channels/channels/<id>/` | one channel's details and stream order (Switch Stream reorder); PATCH `is_radio` for Mark as Radio Channel (admin only) |
-| 9 | Channels and guide | `/api/channels/channels/<id>/streams/` | a channel's member streams for Switch Stream |
-| 10 | Channels and guide | `/api/channels/groups/` | channel groups for the group pills and sidebar |
-| 11 | Channels and guide | `/api/channels/profiles/` | channel profiles for the Edit Playlist picker |
-| 12 | Channels and guide | `/api/channels/profiles/<id>/` | the channels inside the chosen profile |
-| 13 | Channels and guide | `/api/channels/logos/<id>/cache/` | channel logo images |
-| 14 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection |
-| 15 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
-| 16 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
-| 17 | Channels and guide | `/api/epg/programs/<id>/` | one program's full detail (categories, rating) for tinted cards and the info sheet |
-| 18 | Channels and guide | `/api/epg/current-programs/` | what is airing now on a set of channels (Live TV cards, Top Shelf) |
-| 19 | Channels and guide | `/api/epg/epgdata/` | the EPG channel rows that map tvg ids to EPG sources |
-| 20 | Channels and guide | `/api/epg/sources/` | the server's EPG sources, layered onto the guide |
-| 21 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
-| 22 | DVR | `/api/channels/recordings/` | list and schedule recordings |
-| 23 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
-| 24 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
-| 25 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
-| 26 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
-| 27 | DVR | `/api/channels/series-rules/` | series recording rules |
-| 28 | DVR | `/api/channels/series-rules/evaluate/` | schedules the episodes a new series rule matches |
-| 29 | VOD | `/api/vod/categories/` | movie and series categories |
-| 30 | VOD | `/api/vod/movies/` | movie library pages, search and Recently Added |
-| 31 | VOD | `/api/vod/movies/<id>/providers/` | the copies of a movie across source accounts (version picker) |
-| 32 | VOD | `/api/vod/movies/<id>/provider-info/` | TMDB-enriched detail for a movie |
-| 33 | VOD | `/api/vod/series/` | series library pages, search and Recently Added |
-| 34 | VOD | `/api/vod/series/<id>/` | one series by id, for Continue Watching and Watchlist rows |
-| 35 | VOD | `/api/vod/series/<id>/providers/` | the copies of a series across source accounts |
-| 36 | VOD | `/api/vod/series/<id>/provider-info/` | TMDB-enriched detail for a series |
-| 37 | VOD | `/api/vod/episodes/` | the episodes of a series |
-| 38 | Playback sessions | `/api/proxy/hls/sessions/` | opens a Force HLS session for a channel |
-| 39 | Playback sessions | `/api/proxy/hls/sessions/<token>/` | closes that session when playback stops |
-| 40 | Playback sessions | `/api/catchup/sessions/` | opens a native Catch-Up session for a past program |
-| 41 | Playback sessions | `/api/catchup/sessions/<id>/` | closes the Catch-Up session |
-| 42 | Playback sessions | `/api/catchup/sessions/<id>/position/` | reports the playback position so the session can be resumed |
+| 7 | Server | `/api/core/streamprofiles/` | the server's stream profiles for Radio Channel Stream Profile (admin only) |
+| 8 | Channels and guide | `/api/channels/channels/` | the channel list for the playlist |
+| 9 | Channels and guide | `/api/channels/channels/<id>/` | one channel's details and stream order (Switch Stream reorder); PATCH `is_radio` for Mark as Radio Channel and `stream_profile_id` for Radio Channel Stream Profile (admin only) |
+| 10 | Channels and guide | `/api/channels/channels/<id>/streams/` | a channel's member streams for Switch Stream |
+| 11 | Channels and guide | `/api/channels/groups/` | channel groups for the group pills and sidebar |
+| 12 | Channels and guide | `/api/channels/profiles/` | channel profiles for the Edit Playlist picker |
+| 13 | Channels and guide | `/api/channels/profiles/<id>/` | the channels inside the chosen profile |
+| 14 | Channels and guide | `/api/channels/logos/<id>/cache/` | channel logo images |
+| 15 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection |
+| 16 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
+| 17 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
+| 18 | Channels and guide | `/api/epg/programs/<id>/` | one program's full detail (categories, rating) for tinted cards and the info sheet |
+| 19 | Channels and guide | `/api/epg/current-programs/` | what is airing now on a set of channels (Live TV cards, Top Shelf) |
+| 20 | Channels and guide | `/api/epg/epgdata/` | the EPG channel rows that map tvg ids to EPG sources |
+| 21 | Channels and guide | `/api/epg/sources/` | the server's EPG sources, layered onto the guide |
+| 22 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
+| 23 | DVR | `/api/channels/recordings/` | list and schedule recordings |
+| 24 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
+| 25 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
+| 26 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
+| 27 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
+| 28 | DVR | `/api/channels/series-rules/` | series recording rules |
+| 29 | DVR | `/api/channels/series-rules/evaluate/` | schedules the episodes a new series rule matches |
+| 30 | VOD | `/api/vod/categories/` | movie and series categories |
+| 31 | VOD | `/api/vod/movies/` | movie library pages, search and Recently Added |
+| 32 | VOD | `/api/vod/movies/<id>/providers/` | the copies of a movie across source accounts (version picker) |
+| 33 | VOD | `/api/vod/movies/<id>/provider-info/` | TMDB-enriched detail for a movie |
+| 34 | VOD | `/api/vod/series/` | series library pages, search and Recently Added |
+| 35 | VOD | `/api/vod/series/<id>/` | one series by id, for Continue Watching and Watchlist rows |
+| 36 | VOD | `/api/vod/series/<id>/providers/` | the copies of a series across source accounts |
+| 37 | VOD | `/api/vod/series/<id>/provider-info/` | TMDB-enriched detail for a series |
+| 38 | VOD | `/api/vod/episodes/` | the episodes of a series |
+| 39 | Playback sessions | `/api/proxy/hls/sessions/` | opens a Force HLS session for a channel |
+| 40 | Playback sessions | `/api/proxy/hls/sessions/<token>/` | closes that session when playback stops |
+| 41 | Playback sessions | `/api/catchup/sessions/` | opens a native Catch-Up session for a past program |
+| 42 | Playback sessions | `/api/catchup/sessions/<id>/` | closes the Catch-Up session |
+| 43 | Playback sessions | `/api/catchup/sessions/<id>/position/` | reports the playback position so the session can be resumed |
 
-**Collapsed to prefixes (10 rules cover all 42 paths):**
+**Collapsed to prefixes (10 rules cover all 43 paths):**
 `/api/accounts/*`, `/api/core/*`, `/api/channels/*`, `/api/epg/*`, `/api/m3u/*`,
 `/api/vod/*`, `/api/proxy/*`, `/api/catchup/*`, plus `/proxy/*` and
 `/timeshift/*`.

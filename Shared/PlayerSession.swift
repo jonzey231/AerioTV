@@ -2341,10 +2341,21 @@ final class RadioModeSession: ObservableObject {
         guard let channelID = item.dispatcharrChannelID,
               let api = SwitchStreamFlow.makeAPI(server: ChannelStore.shared.activeServer) else { return }
         let target = !item.isRadio
+        // Radio Channel Stream Profile: Mark carries the chosen profile in
+        // the same PATCH (only when one other than Server default is
+        // picked); Unmark puts the channel back on the server default.
+        let serverID = ChannelStore.shared.activeServer?.id
+        let chosen = serverID.flatMap { RadioStreamProfileSetting.selection(serverID: $0) }
+        let profileField: Int?? = target ? chosen.map { .some($0.id) } : .some(nil)
+        let profileName = target ? (chosen?.name ?? "") : "Server default"
         Task { @MainActor in
             do {
-                let code = try await api.updateChannelRadioFlag(channelID: channelID, isRadio: target)
+                let code = try await api.updateChannelRadioFlag(channelID: channelID, isRadio: target,
+                                                                streamProfile: profileField)
                 debugLog("[DISPATCHARR] is_radio -> \(target) channel=\(item.name) status=\(code)")
+                if profileField != nil {
+                    debugLog("[DISPATCHARR] radio profile \(profileName) -> channel=\(item.name) status=\(code)")
+                }
                 ChannelStore.shared.setRadioFlag(channelID: item.id, isRadio: target)
                 NotificationCenter.default.post(
                     name: .aerioChannelListToast, object: nil,
@@ -2359,6 +2370,38 @@ final class RadioModeSession: ObservableObject {
                                                 userInfo: ["message": message])
             }
         }
+    }
+
+    // MARK: Radio Channel Stream Profile (Dispatcharr Direct Connect, admin)
+
+    /// Sets `profile` (nil = Server default) on every loaded channel of the
+    /// active playlist whose effective_is_radio is true. One PATCH per
+    /// channel; returns (succeeded, total).
+    @MainActor
+    static func applyRadioStreamProfile(_ profile: DispatcharrStreamProfile?) async -> (ok: Int, total: Int) {
+        guard let api = SwitchStreamFlow.makeAPI(server: ChannelStore.shared.activeServer) else { return (0, 0) }
+        let targets = ChannelStore.shared.channels.filter { $0.isRadio && $0.dispatcharrChannelID != nil }
+        let name = profile?.name ?? "Server default"
+        var ok = 0
+        for ch in targets {
+            guard let id = ch.dispatcharrChannelID else { continue }
+            do {
+                let code = try await api.updateChannelStreamProfile(channelID: id, profileID: profile?.id)
+                ok += 1
+                debugLog("[DISPATCHARR] radio profile \(name) -> channel=\(ch.name) status=\(code)")
+            } catch {
+                let status = SwitchStreamView.httpStatus(of: error)
+                debugLog("[DISPATCHARR] radio profile \(name) -> channel=\(ch.name) status=\(status.map(String.init) ?? "none") error=\(error.localizedDescription)")
+            }
+        }
+        debugLog("[DISPATCHARR] radio profile \(name) applied ok=\(ok) failed=\(targets.count - ok) total=\(targets.count)")
+        return (ok, targets.count)
+    }
+
+    /// The number of loaded radio channels the bulk apply would touch.
+    @MainActor
+    static var loadedRadioChannelCount: Int {
+        ChannelStore.shared.channels.filter { $0.isRadio && $0.dispatcharrChannelID != nil }.count
     }
 
     /// The one live tile currently playing, when the session is a plain
@@ -2903,4 +2946,25 @@ final class RadioModeSession: ObservableObject {
         detachedPlayer = nil
     }
     #endif
+}
+
+
+/// Radio Channel Stream Profile choice, per playlist (server id), local
+/// UserDefaults only (no iCloud sync). Absent = Server default.
+enum RadioStreamProfileSetting {
+    private static func key(_ serverID: UUID) -> String { "radioStreamProfile.\(serverID.uuidString)" }
+
+    static func selection(serverID: UUID) -> DispatcharrStreamProfile? {
+        guard let dict = UserDefaults.standard.dictionary(forKey: key(serverID)),
+              let id = dict["id"] as? Int, let name = dict["name"] as? String else { return nil }
+        return DispatcharrStreamProfile(id: id, name: name)
+    }
+
+    static func setSelection(_ profile: DispatcharrStreamProfile?, serverID: UUID) {
+        if let profile {
+            UserDefaults.standard.set(["id": profile.id, "name": profile.name], forKey: key(serverID))
+        } else {
+            UserDefaults.standard.removeObject(forKey: key(serverID))
+        }
+    }
 }
