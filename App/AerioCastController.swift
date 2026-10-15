@@ -3247,6 +3247,14 @@ struct RemoteSessionSheet: View {
     var onAddChannel: (() -> Void)? = nil
     /// Radio only: back to the full player, no re-tune.
     var onSwitchToVideo: () -> Void = {}
+    /// Radio only: the stream is unavailable. Non-nil shows the error,
+    /// the retry countdown, and Retry Now, and disables Play / Pause.
+    var failure: Failure? = nil
+    struct Failure {
+        var message: String
+        var retryLine: String
+        var onRetry: () -> Void
+    }
 
     @State private var contentHeight: CGFloat = 320
     @State private var liveWindow: RemoteSeekWindow?
@@ -3366,6 +3374,7 @@ struct RemoteSessionSheet: View {
             } else {
                 addChannelRow
             }
+            if let failure { failureBlock(failure) }
             programBlock
             Group {
                 if !compositeMultiview && nativeMultiview == nil {
@@ -3397,6 +3406,8 @@ struct RemoteSessionSheet: View {
                         .frame(width: Self.buttonColumnWidth)
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
+                    .disabled(failure != nil)
+                    .opacity(failure != nil ? 0.4 : 1)
                     }
                     if !compositeMultiview && nativeMultiview == nil {
                         labeledButton(SkipIntervals.forwardSymbol(skipForwardSeconds),
@@ -3450,6 +3461,27 @@ struct RemoteSessionSheet: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Radio Mode on a failed stream: the player overlay's error text,
+    /// countdown, and Retry Now.
+    private func failureBlock(_ f: Failure) -> some View {
+        VStack(spacing: 8) {
+            if !f.message.isEmpty {
+                Text(verbatim: f.message)
+                    .scaledFont(.footnote)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(f.retryLine)
+                .scaledFont(.subheadline)
+                .foregroundStyle(.white.opacity(0.7))
+            wideButton {
+                Label(PlaybackFailureCopy.retryNow, systemImage: "arrow.clockwise")
+                    .foregroundStyle(.black)
+            } background: { accent } action: { f.onRetry() }
+        }
     }
 
     private func wideButton<L: View>(@ViewBuilder _ label: () -> L,
@@ -5441,6 +5473,9 @@ struct RemoteSessionCard: View {
     /// Add Channel (Logan 2026-10-11): the + beside the X; nil hides it
     /// (no Multiview possible, or at the tile cap).
     var onAddChannel: (() -> Void)? = nil
+    /// Radio Mode on a failed stream: the transport button is Retry Now
+    /// (Play / Pause has nothing to act on).
+    var onRetry: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 12) {
@@ -5485,7 +5520,17 @@ struct RemoteSessionCard: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            if showTransport {
+            if showTransport, let onRetry {
+                Button(action: onRetry) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 18, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                        .foregroundStyle(ThemeManager.shared.accent)
+                        .frame(width: 38, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(PlaybackFailureCopy.retryNow)
+            } else if showTransport {
                 Button(action: onTogglePlayPause) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 18, weight: .semibold))  // glyph in a fixed box: not text, stays fixed

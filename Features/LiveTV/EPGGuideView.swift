@@ -10328,13 +10328,30 @@ struct RadioModeBannerSlot: View {
                     .scaledFont(.system(size: 15, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
-                Text("Playing in Radio Mode")
+                Text(radio.isFailed ? "\(radio.statusLine) \u{00B7} \(radio.retryLine)" : radio.statusLine)
                     .scaledFont(.system(size: 13))
                     .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
             }
             .layoutPriority(1)
             Spacer()
+            // Failed stream: Retry Now beside the two capsules.
+            if radio.isFailed {
+                Button {
+                    radio.retryNow(source: "banner")
+                } label: {
+                    Text(PlaybackFailureCopy.retryNow)
+                        .scaledFont(.system(size: 22, weight: .medium))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .foregroundColor(Color.contrastText(.accentPrimary))
+                        .padding(.horizontal, 26)
+                        .padding(.vertical, 13)
+                        .background(Capsule().stroke(Color.accentPrimary, lineWidth: 1))
+                }
+                .buttonStyle(TVNoHighlightButtonStyle())
+                .tvFocusRingShape(.capsule)
+            }
             // Android TV parity: two capsules like the background Multiview
             // banner; Switch to Video Mode takes focus by default.
             Button {

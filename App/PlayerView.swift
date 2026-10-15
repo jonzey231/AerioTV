@@ -891,6 +891,18 @@ final class ForegroundPiPBridge: ObservableObject {
 
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
+/// The player's failed-stream wording, shared by the player overlay, the
+/// Multiview tile card and the Radio Mode card, sheet, banner, and lock
+/// screen so every surface says the same thing (Android parity).
+enum PlaybackFailureCopy {
+    static let title = "Channel Unavailable"
+    static let retryNow = "Retry Now"
+    static let reconnecting = "Reconnecting\u{2026}"
+    /// Flat auto-retry cadence of the failure card, in seconds.
+    static let retryInterval = 5
+    static func retrying(_ seconds: Int) -> String { "Retrying in \(seconds)s" }
+}
+
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// The USER paused this tile (chrome Pause, Play/Pause, lock screen).
     /// Not @Published (no re-render). Every automatic play (stall nudge,
@@ -959,6 +971,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// with the Android connection-issue Retry). Set by the MPV coordinator
     /// on terminal error, cleared on PLAYBACK_RESTART recovery.
     @Published var connectionIssueActive: Bool = false
+    /// Live AVPlayer tile whose stream failed (standing retry or the
+    /// terminal card) and has not shown a frame since: the user-facing
+    /// error text. Nil while the stream plays. Radio Mode reads it.
+    @Published var liveFailureMessage: String? = nil
+    /// Set by the AVPlayer tile: one fresh tune of the failed channel.
+    var liveFailureRetryAction: (() -> Void)?
     /// True once the live pipeline has confirmed the picture is wedged: mpv
     /// has stopped delivering real frames for longer than the stall-report
     /// threshold and the forced reload has NOT recovered it. Set by the MPV
@@ -1187,14 +1205,14 @@ private struct StreamErrorView: View {
                     .padding(.horizontal, 20)
 
                     if onRetry != nil, retryCountdown > 0 {
-                        Text("Retrying in \(retryCountdown)s")
+                        Text(PlaybackFailureCopy.retrying(retryCountdown))
                             .scaledFont(.system(size: 12))
                             .foregroundColor(.white.opacity(0.7))
                     }
 
                     HStack(spacing: 14) {
                         if let onRetry {
-                            Button("Retry Now") {
+                            Button(PlaybackFailureCopy.retryNow) {
                                 autoRetryTask?.cancel()
                                 onRetry()
                             }

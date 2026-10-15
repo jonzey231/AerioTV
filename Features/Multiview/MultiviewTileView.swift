@@ -1719,7 +1719,7 @@ struct MultiviewTileView: View {
                     // Sole tile = the regular full-screen player: title it like
                     // one (Android "Channel Unavailable" parity). The multiview
                     // grid keeps the per-tile "Playback Problem" wording.
-                    Text(isSoleTile ? "Channel Unavailable" : "Playback Problem")
+                    Text(isSoleTile ? PlaybackFailureCopy.title : "Playback Problem")
                         .scaledFont(.headline)
                         .foregroundStyle(.white)
                     // SECURITY: mpv error strings can echo server-controlled
@@ -1896,7 +1896,7 @@ struct MultiviewTileView: View {
 
     private var reconnectStatusText: String {
         if isReconnecting { return "Reconnecting…" }
-        if reconnectCountdown > 0 { return "Retrying in \(reconnectCountdown)s" }
+        if reconnectCountdown > 0 { return PlaybackFailureCopy.retrying(reconnectCountdown) }
         return " "
     }
 

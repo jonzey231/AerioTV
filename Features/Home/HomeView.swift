@@ -6607,13 +6607,15 @@ struct MainTabView: View {
                     RemoteSessionCard(
                         transport: .radio,
                         title: ch.name,
-                        status: "Playing in Radio Mode",
+                        status: radio.statusLine,
                         artURL: ch.logoURL?.absoluteString,
-                        isPlaying: !p.isPaused,
+                        isPlaying: !p.isPaused && !radio.isFailed,
                         showTransport: true,
+                        detailLines: radio.isFailed ? [radio.retryLine] : [],
                         onTap: { showRadioSheet = true },
                         onTogglePlayPause: { radio.togglePause() },
-                        onStop: { radio.stop(reason: "card Stop") }
+                        onStop: { radio.stop(reason: "card Stop") },
+                        onRetry: radio.isFailed ? { radio.retryNow(source: "card") } : nil
                     )
                 }
             } else {
@@ -6793,10 +6795,10 @@ struct MainTabView: View {
                     transport: .radio,
                     mode: .playing,
                     channelName: ch.name,
-                    statusText: "Playing in Radio Mode",
+                    statusText: radio.statusLine,
                     artURL: ch.logoURL?.absoluteString,
                     channelID: ch.id,
-                    isPlaying: !p.isPaused,
+                    isPlaying: !p.isPaused && !radio.isFailed,
                     item: ch,
                     onTogglePlayPause: { radio.togglePause() },
                     // Radio Mode's own in-place switch, never the video flip.
@@ -6812,6 +6814,10 @@ struct MainTabView: View {
                     onSwitchToVideo: {
                         showRadioSheet = false
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { radio.returnToVideo() }
+                    },
+                    failure: radio.failureMessage.map { msg in
+                        .init(message: msg, retryLine: radio.retryLine,
+                              onRetry: { radio.retryNow(source: "sheet") })
                     }
                 )
             }

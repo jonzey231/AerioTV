@@ -5501,6 +5501,10 @@ struct AVPlayerMultiviewTile: View {
     /// (session.txt:3610-3619) because nothing tried again. Cancelled by
     /// bumping `teardownToken` on teardown or a channel change.
     @State private var standingRetries = 0
+    /// Guide channel id of a live stream that failed (standing retry or
+    /// the terminal card) and has not shown a frame since. stop() never
+    /// hands that channel to Keep Recent Channels Live.
+    @State private var failedChannelID: String?
     @State private var teardownToken = UUID()
     /// First-byte deadline / stream-failover walk (s7_86.txt:353-395).
     /// ESPN2 HD opened its ingest at 18:37:12 and delivered ZERO bytes:
@@ -5697,6 +5701,7 @@ struct AVPlayerMultiviewTile: View {
         .onAppear {
             AudioSessionRefCount.increment(caller: "avp-tile")
             progressStore.liveStopRetryAction = { retryLiveStopNotice() }
+            progressStore.liveFailureRetryAction = { retryLiveFailure() }
             start()
         }
         .onDisappear {
@@ -5716,6 +5721,8 @@ struct AVPlayerMultiviewTile: View {
             stop(keepForceHLS: true)
             progressStore.liveStopNotice = nil
             progressStore.liveStopRetryAction = nil
+            progressStore.liveFailureRetryAction = nil
+            clearLiveFailureDisplay("tile gone")
             // Tile teardown clears the stream-failover walk
             // (s7_86.txt:353-395).
             resetFailoverWalk()
@@ -5857,6 +5864,9 @@ struct AVPlayerMultiviewTile: View {
             channelStoppingRetries = 0
             standingRetries = 0
             teardownToken = UUID()
+            // The failed-channel id stays for stop()'s Kept Live check (it
+            // names the outgoing channel); only the display comes down.
+            clearLiveFailureDisplay("channel change")
             // User-initiated tune: the incoming channel starts its own
             // stream-failover walk (s7_86.txt:353-395).
             resetFailoverWalk()
@@ -6004,6 +6014,8 @@ struct AVPlayerMultiviewTile: View {
         let delay = standingRetries < Self.standingRetryDelays.count
             ? Self.standingRetryDelays[standingRetries] : 60
         standingRetries += 1
+        // Before stop(): a failed stream is never Kept Live.
+        markLiveFailure(reason)
         stop()
         // Copy rule (Logan 2026-09-12): quote the server when it said
         // something, and say nothing about a cause when it did not. The
@@ -6262,6 +6274,39 @@ struct AVPlayerMultiviewTile: View {
         stop(allowRetain: false)
         statusText = nil
         progressStore.liveStopNotice = notice
+    }
+
+    /// A live stream failed: remember the channel for the Kept Live check
+    /// and publish the error for Radio Mode (card, sheet, banner, lock
+    /// screen), which retries on the player's 5 s cadence.
+    private func markLiveFailure(_ reason: String) {
+        guard !isVOD, !isDVR, catchup == nil else { return }
+        failedChannelID = sessionRetainChannelID ?? channelID
+        let message = Self.userFacingError(reason).message
+        if progressStore.liveFailureMessage != message { progressStore.liveFailureMessage = message }
+        RadioModeSession.shared.noteTileFailure(tileID: tileID, message: message)
+    }
+
+    /// The stream plays again (first frame) or the tile tuned another
+    /// channel: the failure display comes down.
+    private func clearLiveFailureDisplay(_ why: String) {
+        guard progressStore.liveFailureMessage != nil else { return }
+        progressStore.liveFailureMessage = nil
+        RadioModeSession.shared.noteTileFailureCleared(tileID: tileID, why: why)
+    }
+
+    /// Radio Mode Retry Now (and its 5 s auto retry): one fresh tune of
+    /// the failed channel, cancelling any standing retry in flight.
+    private func retryLiveFailure() {
+        guard progressStore.liveFailureMessage != nil, !isVOD, !isDVR, catchup == nil else { return }
+        debugLog("[AVP-MV] failure retry channel=\(channelName)")
+        teardownToken = UUID()
+        resetFailoverWalk()
+        mismatchAutoRetries = 0
+        serverBusyRetries = 0
+        channelStoppingRetries = 0
+        stop(allowRetain: false)
+        start()
     }
 
     /// Retry button of the notice: one fresh tune of the same channel.
@@ -7041,6 +7086,7 @@ struct AVPlayerMultiviewTile: View {
         mkvServer?.stop()
         remuxer?.stop()
         let friendly = Self.userFacingError(reason)
+        if !isVOD, !isDVR, catchup == nil { markLiveFailure(reason) }
         tileError = TileError(title: friendly.title,
                               message: friendly.message,
                               version: version,
@@ -8260,6 +8306,8 @@ struct AVPlayerMultiviewTile: View {
             // the same moment (it owns the clock-advance detection).
             guard !firstFrameSeen else { return }
             firstFrameSeen = true
+            failedChannelID = nil
+            clearLiveFailureDisplay("first frame")
             if let started = forceHLSStartedAt {
                 forceHLSStartedAt = nil
                 debugLog("[FORCE-HLS] first frame channel=\(channelName) in \(Int(Date().timeIntervalSince(started) * 1000))ms from AVPlayer open (direct HLS)")
@@ -8551,12 +8599,20 @@ struct AVPlayerMultiviewTile: View {
         // display-mode switch.
         firstFrameSeen = false
         pendingDisplayCriteria = nil
+        // A channel whose stream failed and has not played since is
+        // released, never handed to Keep Recent Channels Live.
+        let streamFailed = failedChannelID != nil
+            && failedChannelID == (sessionRetainChannelID ?? channelID)
+        if streamFailed, allowRetain, LiveChannelRetention.isEnabled,
+           liveRewindArmed || directHLSRetainable {
+            debugLog("[AVP-RETAIN] not kept \(sessionRetainName ?? channelName): stream failed")
+        }
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             // Channel retention: hand a HEALTHY rewind session to the
             // manager instead of stopping it, so flipping back resumes
             // the full window. Errored tiles stop as before.
-            if allowRetain, LiveChannelRetention.isEnabled, tileError == nil,
+            if allowRetain, LiveChannelRetention.isEnabled, tileError == nil, !streamFailed,
                let mux = remuxer, let url = readyLocalURL,
                let key = sessionRetainKey, let chID = sessionRetainChannelID {
                 let retainT0 = CACurrentMediaTime()
@@ -8577,7 +8633,7 @@ struct AVPlayerMultiviewTile: View {
         if directHLSRetainable {
             directHLSRetainable = false
             if keepForceHLS, allowRetain, LiveChannelRetention.isEnabled, tileError == nil,
-               firstFrameSeenAtStop, remuxer == nil, mkvServer == nil,
+               !streamFailed, firstFrameSeenAtStop, remuxer == nil, mkvServer == nil,
                !isVOD, !isDVR, catchup == nil,
                let p = player, p.currentItem?.status == .readyToPlay,
                sessionRetainKey != nil, sessionRetainChannelID != nil {

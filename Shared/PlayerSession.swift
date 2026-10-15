@@ -2121,7 +2121,15 @@ final class RadioModeSession: ObservableObject {
     @Published private(set) var isActive = false {
         // The remuxer reads this when a tune starts: a Radio Mode tune cuts
         // audio-only from the first audio PES (AudioOnlyStartPolicy).
-        didSet { AudioOnlyTuneIntent.shared.radioRequested = isActive }
+        didSet {
+            AudioOnlyTuneIntent.shared.radioRequested = isActive
+            guard oldValue != isActive else { return }
+            if isActive {
+                DispatchQueue.main.async { RadioModeSession.shared.adoptTileFailure() }
+            } else {
+                clearFailure()
+            }
+        }
     }
     /// Set while a tune started from Radio Mode is reseeding the tile, so
     /// the transient idle / expand states of the swap do not end it.
@@ -2131,6 +2139,21 @@ final class RadioModeSession: ObservableObject {
     private var suppressReattach = false
     /// Source suffix for the next "[RADIO] switch" line ("sheet").
     private var pendingSwitchSource: String?
+    /// The radio tile's stream failed (the player's Channel Unavailable
+    /// state): its error text, nil while the stream plays. The card, the
+    /// sheet, the tvOS banner, and the lock screen follow it.
+    @Published private(set) var failureMessage: String?
+    /// Seconds to the next automatic retry (0: a retry is running).
+    @Published private(set) var retryCountdown = 0
+    private var retryTask: Task<Void, Never>?
+    /// True while Radio Mode is on and its stream is unavailable.
+    var isFailed: Bool { isActive && failureMessage != nil }
+    /// Status line for the card, sheet, and banner.
+    var statusLine: String { isFailed ? PlaybackFailureCopy.title : "Playing in Radio Mode" }
+    /// "Retrying in Ns", or "Reconnecting..." while a retry runs.
+    var retryLine: String {
+        retryCountdown > 0 ? PlaybackFailureCopy.retrying(retryCountdown) : PlaybackFailureCopy.reconnecting
+    }
     private var bag: Set<AnyCancellable> = []
     #if os(iOS)
     /// The layer detached for background audio, with the player it showed.
@@ -2482,7 +2505,71 @@ final class RadioModeSession: ObservableObject {
 
     var isPaused: Bool { MultiviewStore.shared.audioProgressStore?.isPaused ?? false }
 
+    // MARK: Failed stream (Channel Unavailable)
+
+    /// The tile's live stream failed. Only the radio tile counts.
+    func noteTileFailure(tileID: String, message: String) {
+        guard isActive, MultiviewStore.shared.audioTileID == tileID else { return }
+        let first = failureMessage == nil
+        failureMessage = message
+        if first { debugLog("[RADIO] channel unavailable \(channel?.name ?? "?")") }
+        armRetry()
+        if first { publishNowPlaying() }
+    }
+
+    /// The tile played again (first frame) or tuned another channel.
+    func noteTileFailureCleared(tileID: String, why: String) {
+        guard failureMessage != nil else { return }
+        guard !isActive || MultiviewStore.shared.audioTileID == tileID else { return }
+        clearFailure()
+        debugLog("[RADIO] recovered \(channel?.name ?? "?") (\(why))")
+        publishNowPlaying()
+    }
+
+    private func clearFailure() {
+        retryTask?.cancel()
+        retryTask = nil
+        retryCountdown = 0
+        failureMessage = nil
+    }
+
+    /// The player's flat 5 s cadence, then one fresh tune.
+    private func armRetry() {
+        retryTask?.cancel()
+        retryTask = Task { @MainActor [weak self] in
+            var remaining = PlaybackFailureCopy.retryInterval
+            while remaining > 0 {
+                self?.retryCountdown = remaining
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                remaining -= 1
+            }
+            self?.retryNow(source: "auto")
+        }
+    }
+
+    /// Retry Now (card, sheet, banner, lock screen Play).
+    func retryNow(source: String = "Retry Now") {
+        guard isFailed else { return }
+        retryTask?.cancel()
+        retryTask = nil
+        retryCountdown = 0
+        debugLog("[RADIO] retry \(channel?.name ?? "?") (\(source))")
+        MultiviewStore.shared.audioProgressStore?.liveFailureRetryAction?()
+    }
+
+    /// Radio Mode came on over a tile that is already failing.
+    private func adoptTileFailure() {
+        guard isActive, failureMessage == nil,
+              let msg = MultiviewStore.shared.audioProgressStore?.liveFailureMessage else { return }
+        failureMessage = msg
+        debugLog("[RADIO] channel unavailable \(channel?.name ?? "?")")
+        armRetry()
+    }
+
     func togglePause() {
+        // Play / Pause is off while the stream is unavailable.
+        guard !isFailed else { return }
         MultiviewStore.shared.audioProgressStore?.userTogglePause()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.publishPlaybackRate() }
     }
@@ -2505,12 +2592,13 @@ final class RadioModeSession: ObservableObject {
             return
         }
         #endif
+        if isFailed { retryNow(source: "lock screen"); return }
         setPaused(pause)
     }
 
     private func publishPlaybackRate() {
         guard isActive else { return }
-        NowPlayingBridge.shared.updateElapsed(0, rate: isPaused ? 0 : 1)
+        NowPlayingBridge.shared.updateElapsed(0, rate: (isPaused || isFailed) ? 0 : 1)
     }
 
     /// Lock screen / Control Center for Radio Mode. The AVPlayer tile path
@@ -2539,19 +2627,22 @@ final class RadioModeSession: ObservableObject {
     private func publishNowPlaying() {
         guard isActive, let ch = channel else { return }
         let lines = nowAiringLines(ch)
-        publishedNowPlayingKey = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")"
+        let failed = isFailed
+        publishedNowPlayingKey = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(failed)"
         // Title = channel, subtitle (artist) = program, album = the
         // program's episode subtitle. Live stream: the LIVE bar, no times.
         NowPlayingBridge.shared.configure(
             title: ch.name,
-            subtitle: lines.title ?? "AerioTV",
+            // Failed stream: the player's wording, never the program as if
+            // it were playing.
+            subtitle: failed ? PlaybackFailureCopy.title : (lines.title ?? "AerioTV"),
             artworkURL: ch.logoURL,
             duration: nil,
             isLive: true,
             onPlay: { RadioModeSession.shared.handlePlayPauseCommand(pause: false) },
             onPause: { RadioModeSession.shared.handlePlayPauseCommand(pause: true) },
             onSeek: nil,
-            programLine: lines.sub
+            programLine: failed ? nil : lines.sub
         )
         #if os(iOS)
         // iOS draws Stop in the center when it is the only enabled
@@ -2563,14 +2654,14 @@ final class RadioModeSession: ObservableObject {
         cc.togglePlayPauseCommand.isEnabled = true
         #endif
         publishPlaybackRate()
-        debugLog("[RADIO] now playing -> \(ch.name) | \(lines.title ?? "AerioTV")")
+        debugLog("[RADIO] now playing -> \(ch.name) | \(failed ? PlaybackFailureCopy.title : (lines.title ?? "AerioTV"))")
     }
 
     /// 1 s tick: republish when the program (or channel) changed.
     private func refreshNowPlayingIfChanged() {
         guard isActive, let ch = channel else { return }
         let lines = nowAiringLines(ch)
-        let key = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")"
+        let key = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(isFailed)"
         if key != publishedNowPlayingKey { publishNowPlaying() }
     }
 
