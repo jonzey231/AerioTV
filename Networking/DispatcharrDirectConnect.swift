@@ -378,6 +378,10 @@ final class DispatcharrTokenStore: @unchecked Sendable {
             debugLog("📺 Direct Connect warmup: no credentials cached (server=\(serverID.uuidString.prefix(8))); skipping")
             return
         }
+        if DispatcharrLoginGate.shared.isRejected(serverID: serverID) {
+            debugLog("[AUTH] warmup login skipped for \(serverID.uuidString.prefix(8)): parked after a rejected login")
+            return
+        }
         do {
             let pair = try await DispatcharrAPI.login(
                 baseURL: baseURL,
@@ -387,6 +391,8 @@ final class DispatcharrTokenStore: @unchecked Sendable {
             )
             store(serverID: serverID, access: pair.access, refresh: pair.refresh)
             debugLog("📺 Direct Connect warmup: logged in fresh (server=\(serverID.uuidString.prefix(8)))")
+        } catch DispatcharrDirectConnectError.invalidCredentials {
+            DispatcharrLoginGate.shared.noteRejected(serverID: serverID)
         } catch {
             debugLog("📺 Direct Connect warmup: login failed (\(error.localizedDescription))")
         }
@@ -552,6 +558,13 @@ extension DispatcharrAPI {
         // picked" self-diagnosis without leaking the account name.
         let usernameMasked = username.isEmpty ? "" : "\(username.prefix(1))***"
         debugLog("📺 Direct Connect login: attempting POST /api/accounts/token/ baseURL=\(baseURL.prefix(60)) username='\(usernameMasked)' usernameLen=\(username.count) passwordLen=\(password.count)")
+        // An earlier 429 is still parking logins to this host: do not spend
+        // another attempt against the client IP's throttle window.
+        let parkedLeft = DispatcharrLoginGate.shared.serverParkedSeconds(baseURL: baseURL)
+        if parkedLeft > 0 {
+            debugLog("[AUTH] login throttled by the server; next attempt in \(parkedLeft)s")
+            throw DispatcharrDirectConnectError.loginRateLimited
+        }
         guard let url = URL(string: "\(normalizedBase(baseURL))/api/accounts/token/") else {
             debugLog("📺 Direct Connect login FAIL: malformed URL after normalization")
             throw DispatcharrDirectConnectError.transport("Malformed login URL")
@@ -589,6 +602,10 @@ extension DispatcharrAPI {
             // transport copy sent the user chasing URL/credential problems
             // that did not exist (Discord 2026-08-16).
             debugLog("📺 Direct Connect login FAIL: rate limited (HTTP 429)")
+            DispatcharrLoginGate.shared.parkServer(
+                baseURL: baseURL,
+                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
+            )
             throw DispatcharrDirectConnectError.loginRateLimited
         }
         guard status == 200 else {
@@ -638,6 +655,13 @@ extension DispatcharrAPI {
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         if status == 401 || status == 403 {
             throw DispatcharrDirectConnectError.refreshExpired
+        }
+        if status == 429 {
+            DispatcharrLoginGate.shared.parkServer(
+                baseURL: baseURL,
+                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
+            )
+            throw DispatcharrDirectConnectError.loginRateLimited
         }
         guard status == 200,
               let decoded = try? JSONDecoder().decode(DispatcharrJWTRefreshResponse.self, from: data)
@@ -841,6 +865,9 @@ extension DispatcharrAPI {
             debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))), server is in API Key mode without saved credentials")
             return nil
         }
+        // One attempt per server per 60 s, shared by concurrent callers;
+        // 429 and rejected logins park (DispatcharrLoginGate).
+        return await DispatcharrLoginGate.shared.silentRelogin(serverID: serverID) {
         do {
             let pair = try await login(
                 baseURL: baseURL,
@@ -868,10 +895,153 @@ extension DispatcharrAPI {
             KeychainHelper.save(user.apiKey, for: apiKeyKey)
             KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
             debugLog("📺 silentRebootstrapApiKey: SUCCESS, fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
-            return user.apiKey
+            return .key(user.apiKey)
+        } catch DispatcharrDirectConnectError.invalidCredentials {
+            debugLog("📺 silentRebootstrapApiKey: FAIL, login rejected (server=\(serverID.uuidString.prefix(8)))")
+            return .rejected
         } catch {
             debugLog("📺 silentRebootstrapApiKey: FAIL, \(error.localizedDescription) (server=\(serverID.uuidString.prefix(8)))")
+            return .failed
+        }
+        }
+    }
+}
+
+// MARK: - Login throttle gate
+
+/// Keeps AerioTV from tripping Dispatcharr's login throttle (scope "login",
+/// 3 POST /api/accounts/token/ per minute per client IP; 429 with a
+/// Retry-After while the window lasts). Before this gate one 401 on an API
+/// call fanned out into a silent re-login from every caller (player reload
+/// ladder, DVR refresh, guide), several per minute, and once the throttle
+/// tripped every later login on the same home IP was refused too.
+///
+/// Rules (Android twin: core/network/DispatcharrLoginGate.kt):
+///  1. At most one silent re-login per server per 60 s; concurrent callers
+///     await the in-flight attempt and share its result.
+///  2. A 429 parks every login to that host until Retry-After (default 60 s).
+///  3. A rejected login (401/403) parks that server for 60 s and the "enter
+///     a new key" state is logged once per park.
+///  4. Callers never reach the gate without a stored password (API Key mode).
+///  5. A successful login changes nothing.
+final class DispatcharrLoginGate: @unchecked Sendable {
+    static let shared = DispatcharrLoginGate()
+    static let attemptWindow: TimeInterval = 60
+    static let defaultRetryAfter: TimeInterval = 60
+
+    private let lock = NSLock()
+    private var inFlight: [UUID: Task<String?, Never>] = [:]
+    private var lastAttemptAt: [UUID: Date] = [:]
+    private var lastKey: [UUID: String] = [:]
+    private var rejectedUntil: [UUID: Date] = [:]
+    private var serverParkedUntil: [String: Date] = [:]
+
+    private static func hostKey(_ baseURL: String) -> String {
+        if let c = URLComponents(string: baseURL.trimmingCharacters(in: .whitespaces)), let h = c.host {
+            return "\(h.lowercased()):\(c.port ?? -1)"
+        }
+        return baseURL
+    }
+
+    /// Whole seconds left on a 429 park for this host, 0 when logins may go out.
+    func serverParkedSeconds(baseURL: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        guard let until = serverParkedUntil[Self.hostKey(baseURL)] else { return 0 }
+        let left = until.timeIntervalSinceNow
+        return left > 0 ? Int(left.rounded(.up)) : 0
+    }
+
+    /// Record a 429 from the login (or refresh) endpoint.
+    func parkServer(baseURL: String, retryAfterHeader: String?) {
+        let secs = retryAfterHeader.flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
+            .flatMap { $0 > 0 ? $0 : nil } ?? Self.defaultRetryAfter
+        lock.lock()
+        serverParkedUntil[Self.hostKey(baseURL)] = Date(timeIntervalSinceNow: secs)
+        lock.unlock()
+        debugLog("[AUTH] login throttled by the server; next attempt in \(Int(secs))s")
+    }
+
+    func isRejected(serverID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (rejectedUntil[serverID] ?? .distantPast) > Date()
+    }
+
+    /// A login outside `silentRelogin` (warmup) was rejected.
+    func noteRejected(serverID: UUID) {
+        lock.lock()
+        if (rejectedUntil[serverID] ?? .distantPast) > Date() { lock.unlock(); return }
+        rejectedUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
+        lock.unlock()
+        Self.surfaceRejected(serverID)
+    }
+
+    private static func surfaceRejected(_ serverID: UUID) {
+        debugLog("[AUTH] login rejected for \(serverID.uuidString.prefix(8)); re-login parked for \(Int(attemptWindow))s. The user must enter a new key or password in Edit Playlist.")
+    }
+
+    /// Run `attempt` (a silent re-login returning the fresh api_key, or nil)
+    /// under the rules above. `attempt` reports a rejected login by returning
+    /// `.rejected`.
+    enum Outcome { case key(String), failed, rejected }
+
+    private enum Claim {
+        case wait(Task<String?, Never>)
+        case parked(Int)
+        case shared(String?, Int)
+        case mine(Task<String?, Never>)
+    }
+
+    private func claim(_ serverID: UUID, _ attempt: @escaping @Sendable () async -> Outcome) -> Claim {
+        lock.lock(); defer { lock.unlock() }
+        if let task = inFlight[serverID] { return .wait(task) }
+        if let until = rejectedUntil[serverID], until > Date() {
+            return .parked(Int(until.timeIntervalSinceNow.rounded(.up)))
+        }
+        if let last = lastAttemptAt[serverID], Date().timeIntervalSince(last) < Self.attemptWindow {
+            return .shared(lastKey[serverID], Int(Date().timeIntervalSince(last)))
+        }
+        lastAttemptAt[serverID] = Date()
+        lastKey[serverID] = nil
+        // Created and registered under the lock so a concurrent caller
+        // always finds it and waits instead of starting its own.
+        let task = Task<String?, Never> { self.finish(serverID, await attempt()) }
+        inFlight[serverID] = task
+        return .mine(task)
+    }
+
+    private func finish(_ serverID: UUID, _ outcome: Outcome) -> String? {
+        lock.lock()
+        inFlight[serverID] = nil
+        switch outcome {
+        case .key(let k):
+            lastKey[serverID] = k
+            lock.unlock()
+            return k
+        case .failed:
+            lock.unlock()
             return nil
+        case .rejected:
+            rejectedUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
+            lock.unlock()
+            Self.surfaceRejected(serverID)
+            return nil
+        }
+    }
+
+    func silentRelogin(serverID: UUID, attempt: @escaping @Sendable () async -> Outcome) async -> String? {
+        let id8 = serverID.uuidString.prefix(8)
+        switch claim(serverID, attempt) {
+        case .wait(let task):
+            debugLog("[AUTH] re-login for \(id8) in flight; waiting for its result")
+            return await task.value
+        case .parked(let left):
+            debugLog("[AUTH] re-login for \(id8) parked after a rejected login; next attempt in \(left)s")
+            return nil
+        case .shared(let key, let ago):
+            debugLog("[AUTH] re-login for \(id8) already ran \(ago)s ago; sharing its result")
+            return key
+        case .mine(let task):
+            return await task.value
         }
     }
 }
