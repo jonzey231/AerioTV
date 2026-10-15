@@ -15,80 +15,21 @@ func performServerCascadeDelete(_ server: ServerConnection,
                                 modelContext: ModelContext) {
     let sid = server.id.uuidString
     let deletedID = server.id
+    let name = server.name
     // TestFlight 1.8.41 crash: the channel-server task was inside
     // seedEPGCache holding this model when it was deleted. Cancel every
     // long task that holds it first; they re-check `isGone` after each
     // suspension.
-    ChannelStore.shared.cancelWork(forDeletedServerID: server.id, name: server.name)
+    ChannelStore.shared.cancelWork(forDeletedServerID: deletedID, name: name)
+    // 2026-10-14 crash: the launch permissions pass was sleeping between
+    // retries and resumed into `server.type` on the deleted model.
+    DispatcharrCapabilityProbe.cancelWork(forDeletedServerID: deletedID, name: name)
+    GuideStore.shared.cancelBackgroundGridSweep(reason: "playlist \(name) deleted")
     VODStore.shared.clear()
-    debugLog("[PLAYLIST] delete: cancelled VOD loads and sweeps for \(server.name)")
+    debugLog("[PLAYLIST] delete: cancelled VOD loads and sweeps for \(name)")
     server.deleteCredentialsFromKeychain()
     // Display-only account facts for the permissions section.
-    DispatcharrAccountFactsStore.clear(server.id)
-    // Cascade: delete any EPGProgram rows scoped to this
-    // server so they don't orphan and get reused by a
-    // later server of a different type with different
-    // channel IDs. Without this, deleting an Xtream
-    // playlist and re-adding the same server via
-    // Dispatcharr API leaves stale XC EPG rows in
-    // SwiftData that loadFromCache would otherwise
-    // return, bypassing the network fetch and leaving
-    // the guide empty.
-    let epgDescriptor = FetchDescriptor<EPGProgram>(
-        predicate: #Predicate<EPGProgram> { $0.serverID == sid }
-    )
-    if let stale = try? modelContext.fetch(epgDescriptor) {
-        for p in stale { modelContext.delete(p) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
-    }
-    // v1.7.x: cascade delete WatchProgress rows
-    // scoped to this server so movie / series /
-    // recording resume positions don't orphan
-    // when the server is removed. Mirrors the
-    // EPGProgram cascade above. WatchProgress.
-    // serverID is Optional<String>; the SwiftData
-    // #Predicate `$0.serverID == sid` unwraps and
-    // matches only rows whose serverID is exactly
-    // `sid`, leaving legacy nil-serverID rows
-    // (pre-multi-server era) untouched. Same
-    // safety pattern the EPGProgram cascade uses.
-    let wpDescriptor = FetchDescriptor<WatchProgress>(
-        predicate: #Predicate<WatchProgress> { $0.serverID == sid }
-    )
-    if let stale = try? modelContext.fetch(wpDescriptor) {
-        for w in stale { modelContext.delete(w) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
-    }
-    // v1.7.x: cascade delete server-side Recording
-    // rows scoped to this server. These are
-    // Dispatcharr server-side recordings (rows
-    // where `localFilePath == nil` and
-    // `remoteRecordingID != nil`). After the
-    // server is removed, the row is useless: the
-    // Dispatcharr playback URL it references
-    // (`/api/channels/recordings/<id>/file/` or
-    // `/api/channels/recordings/<id>/hls/`) is
-    // unreachable, and `MyRecordingsView` would
-    // surface unplayable rows pointing at a
-    // server the user just deleted.
-    //
-    // Local recordings (rows where
-    // `localFilePath != nil`) are intentionally
-    // NOT cascaded. The user may have captured
-    // those locally on purpose and want to keep
-    // the `.ts` files in `Documents/Recordings/`
-    // even after the source server is removed.
-    // The `localFilePath == nil` predicate is
-    // the gate.
-    let recDescriptor = FetchDescriptor<Recording>(
-        predicate: #Predicate<Recording> {
-            $0.serverID == sid && $0.localFilePath == nil
-        }
-    )
-    if let stale = try? modelContext.fetch(recDescriptor) {
-        for r in stale { modelContext.delete(r) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
-    }
+    DispatcharrAccountFactsStore.clear(deletedID)
     // Rebuildable on-disk caches are keyed per server and are kept across
     // playlist switches so switching back is instant (Logan 2026-09-16).
     // DELETING the playlist is the one moment they are removed.
@@ -101,6 +42,9 @@ func performServerCascadeDelete(_ server: ServerConnection,
     let deletedRef = VODStore.DeletedCatalogRef(server)
     Task { await VODStore.shared.deleteCatalog(deletedRef) }
     EPGGridCoverage.clear(identity: EPGGridCoverage.identity(serverID: sid, server: server))
+    // The server row goes first, on the main context, so nothing in the UI
+    // can resolve it any more. The per-server rows below are keyed only by
+    // the id STRING, so they are purged afterwards off the main thread.
     modelContext.delete(server)
     try? modelContext.save()
     // Issue #25: wipe in-memory VOD so On Demand stops
@@ -116,15 +60,67 @@ func performServerCascadeDelete(_ server: ServerConnection,
     // `server` is deleted now: compare against the id captured up front and
     // skip any row that is gone, never read the deleted model.
     SyncManager.shared.pushServers(servers.filter { !$0.isGone && $0.id != deletedID })
-    // Push the post-cascade WatchProgress set to
-    // iCloud (immediate, not debounced) so the
-    // deletion replicates to other devices before
-    // they next pull. Without this, another device
-    // would re-introduce the orphaned rows on its
-    // next merge pass via the KVS payload.
-    if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
-        SyncManager.shared.pushWatchProgress(remaining, immediate: true)
+
+    // Orphan-row purge, OFF the main thread (2026-10-14: deleting 19,513
+    // EPGProgram rows on the main context blocked the UI for 996 ms inside
+    // the Delete button's animation completion). Same background-context
+    // pattern as `GuideStore.purgePrograms`.
+    //
+    // - EPGProgram: rows scoped to this server, so a later server of a
+    //   different type with different channel ids never reuses them (an
+    //   Xtream playlist deleted and re-added via Dispatcharr API otherwise
+    //   left stale XC EPG rows that loadFromCache returned).
+    // - WatchProgress: resume positions for this server. The predicate
+    //   matches only rows whose Optional serverID is exactly `sid`, so
+    //   legacy nil-serverID rows stay untouched.
+    // - Recording: server-side Dispatcharr recordings only
+    //   (`localFilePath == nil`); their playback URLs point at the deleted
+    //   server. Local recordings are kept on purpose: the user may want the
+    //   `.ts` files in `Documents/Recordings/` after the server is gone.
+    let container = modelContext.container
+    Task { @MainActor in
+        await Task.detached(priority: .utility) {
+            purgeOrphanRows(forDeletedServerID: sid, container: container)
+        }.value
+        // Push the post-cascade WatchProgress set to iCloud (immediate, not
+        // debounced) so the deletion replicates to other devices before they
+        // next pull; otherwise another device would re-introduce the
+        // orphaned rows on its next merge pass via the KVS payload. Filtered
+        // by id in case the main context has not merged the purge yet.
+        if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+            let kept = remaining.filter { !$0.isDeleted && $0.serverID != sid }
+            SyncManager.shared.pushWatchProgress(kept, immediate: true)
+        }
     }
+}
+
+/// Background half of `performServerCascadeDelete`. Plain values only: the
+/// server row is already deleted, and this runs on its own ModelContext.
+nonisolated private func purgeOrphanRows(forDeletedServerID sid: String,
+                                         container: ModelContainer) {
+    let started = Date()
+    let ctx = ModelContext(container)
+    ctx.autosaveEnabled = false
+
+    let epgPredicate = #Predicate<EPGProgram> { $0.serverID == sid }
+    let epgCount = (try? ctx.fetchCount(FetchDescriptor<EPGProgram>(predicate: epgPredicate))) ?? 0
+    if epgCount > 0 { try? ctx.delete(model: EPGProgram.self, where: epgPredicate) }
+    debugLog("🗑️ Deleted \(epgCount) orphaned EPGProgram rows for server \(sid) (background)")
+
+    let wpPredicate = #Predicate<WatchProgress> { $0.serverID == sid }
+    let wpCount = (try? ctx.fetchCount(FetchDescriptor<WatchProgress>(predicate: wpPredicate))) ?? 0
+    if wpCount > 0 { try? ctx.delete(model: WatchProgress.self, where: wpPredicate) }
+    debugLog("🗑️ Deleted \(wpCount) orphaned WatchProgress rows for server \(sid) (background)")
+
+    let recPredicate = #Predicate<Recording> { $0.serverID == sid && $0.localFilePath == nil }
+    let recCount = (try? ctx.fetchCount(FetchDescriptor<Recording>(predicate: recPredicate))) ?? 0
+    if recCount > 0 { try? ctx.delete(model: Recording.self, where: recPredicate) }
+    debugLog("🗑️ Deleted \(recCount) orphaned server-side Recording rows for server \(sid) (background)")
+
+    try? ctx.save()
+    let ms = Int(Date().timeIntervalSince(started) * 1000)
+    debugLog("[PLAYLIST] delete: orphan-row purge off main finished in \(ms) ms for server \(sid) "
+             + "(main=\(Thread.isMainThread))")
 }
 
 /// Activate a playlist: stop whatever the old source is still playing
@@ -273,7 +269,7 @@ struct ServerDetailView: View {
         // SwiftData row, so the probe's writes re-render it directly.
         // Android parity: PlaylistDetailScreen, trigger "playlist detail".
         .task(id: server.isActive) {
-            guard server.isActive, server.type == .dispatcharrAPI else { return }
+            guard !server.isGone, server.isActive, server.type == .dispatcharrAPI else { return }
             await DispatcharrCapabilityProbe.refresh(server, reason: "playlist detail",
                                                      minInterval: 60)
         }
@@ -301,11 +297,16 @@ struct ServerDetailView: View {
         .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Refresh", role: .destructive) {
+                // Plain values captured up front; the model is re-checked
+                // after every await (2026-10-14 delete crash audit).
+                guard !server.isGone else { return }
+                let sid = server.id.uuidString
+                let wasActive = server.isActive
                 Task {
                     isPurgingEPG = true
                     await GuideStore.shared.purgePrograms(
-                        for: server.id.uuidString,
-                        isActiveServer: server.isActive,
+                        for: sid,
+                        isActiveServer: wasActive,
                         modelContext: modelContext
                     )
                     // Also drop the in-memory per-channel "upcoming" actor
@@ -315,7 +316,7 @@ struct ServerDetailView: View {
                     // 30-minute in-memory cache that repopulates lazily, so
                     // clearing it for all servers is harmless.)
                     await EPGCache.shared.invalidateAll()
-                    if server.isActive {
+                    if !server.isGone, server.isActive {
                         // Refresh EPG Data must refetch the grid too: with the
                         // chunk coverage still valid the walk fetched 0 of 61
                         // chunks after a purge (atv log 2026-10-02 16:21:03).
@@ -342,18 +343,22 @@ struct ServerDetailView: View {
                     //    SwiftData plus GuideStore's in-memory state and
                     //    load-idempotency flags (via invalidateCache).
                     await GuideStore.shared.purgeAllPrograms(modelContext: modelContext)
+                    guard !server.isGone else { isRefreshingAll = false; return }
                     // 2. Clear the per-channel "upcoming" actor cache.
                     //    "Refresh EPG Data" leaves this in place, which is
                     //    how stale guide data can survive that action.
                     await EPGCache.shared.invalidateAll()
+                    guard !server.isGone else { isRefreshingAll = false; return }
                     // 3. Drop all On Demand state, INCLUDING this server's
                     //    stored catalog: its rows, sweep state and lanes, the
                     //    legacy snapshot and the sweep position files. Only
                     //    this server's; another playlist's catalog is what
                     //    makes switching back instant and is never touched.
                     VODStore.shared.clear()
+                    let name = server.name
                     await VODStore.shared.deleteCatalog(for: server)
-                    debugLog("[VOD-CAT] refresh everything: catalog cleared for server=\(server.name), full sweep starting")
+                    debugLog("[VOD-CAT] refresh everything: catalog cleared for server=\(name), full sweep starting")
+                    guard !server.isGone else { isRefreshingAll = false; return }
                     // 4. Reload from scratch for the active playlist:
                     //    channels are re-fetched (newly-added channels
                     //    appear), the guide is rebuilt and re-cached, and
@@ -1028,6 +1033,8 @@ struct ServerDetailView: View {
     private func refreshPermissions() {
         guard server.isActive, server.type == .dispatcharrAPI, !isRefreshingPermissions else { return }
         isRefreshingPermissions = true
+        // The probe re-checks the model after each await and bails when the
+        // playlist is deleted meanwhile.
         Task {
             _ = await DispatcharrCapabilityProbe.refresh(server, reason: "manual refresh",
                                                      waitIfInFlight: true)
@@ -1262,6 +1269,9 @@ struct ServerDetailView: View {
                                          userAgent: server.effectiveUserAgent,
                                          authMode: server.dispatcharrHeaderMode)
                 let info = try await api.verifyConnection()
+                // Playlist deleted while the request ran (2026-10-14 delete
+                // crash audit): never write to the deleted model.
+                guard !server.isGone else { isTestingConnection = false; return }
                 // v1.6.20: persist the discovered auth shape so
                 // subsequent API calls and stream playback use it.
                 if let mode = info.discoveredAuthMode,
@@ -1285,8 +1295,10 @@ struct ServerDetailView: View {
                 // probe so this path can never drift from the launch /
                 // foreground / 403 paths. A failed probe keeps the last
                 // good snapshot.
-                if await DispatcharrCapabilityProbe.refresh(server, reason: "Test Connection") {
-                    SyncManager.shared.pushServers(servers, immediate: true)
+                let probed = await DispatcharrCapabilityProbe.refresh(server, reason: "Test Connection")
+                guard !server.isGone else { isTestingConnection = false; return }
+                if probed {
+                    SyncManager.shared.pushServers(servers.filter { !$0.isGone }, immediate: true)
                 }
                 if let version = info.version, !version.isEmpty {
                     server.dispatcharrServerVersion = version

@@ -5031,10 +5031,26 @@ struct MainTabView: View {
         // paths are untouched: Test Connection, server creation, credential
         // change, and the opportunistic DVR / On Demand refreshIfStale all
         // probe their own specific server directly.
-        let dispatcharrServers = activeDispatcharrServers
-        guard !dispatcharrServers.isEmpty else { return }
-        Task { @MainActor in
-            for server in dispatcharrServers {
+        // 2026-10-14 crash (playlist delete during the retry backoff): the
+        // pass holds only ids across its awaits and re-resolves the live
+        // model from the server list at each resume, bailing when the
+        // playlist was deleted. The Task is registered with the probe so
+        // the playlist delete cancels it outright.
+        let targets = activeDispatcharrServers.map { (id: $0.id, name: $0.name) }
+        guard !targets.isEmpty else { return }
+        let ctx = modelContext
+        let resolve: @MainActor (UUID) -> ServerConnection? = { id in
+            guard !Task.isCancelled, !DispatcharrCapabilityProbe.isCancelled(id) else { return nil }
+            let descriptor = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == id })
+            guard let live = (try? ctx.fetch(descriptor))?.first, !live.isGone else { return nil }
+            return live
+        }
+        let task = Task { @MainActor in
+            for target in targets {
+                guard let server = resolve(target.id) else {
+                    debugLog("[PERMS] permissions pass skipped server=\(target.name): playlist deleted")
+                    continue
+                }
                 // RETRY rather than discard. The old code fired once and,
                 // on any transport hiccup, left the device gating on
                 // whatever stale (or absent) snapshot it happened to have
@@ -5069,15 +5085,21 @@ struct MainTabView: View {
                 }
                 DispatcharrCapabilityProbe.noteActiveServerProbed(server)
                 var reached = false
+                var deleted = false
                 for attempt in 1...3 {
-                    reached = await DispatcharrCapabilityProbe.refresh(server, reason: "\(reason) #\(attempt)")
+                    guard let live = resolve(target.id) else { deleted = true; break }
+                    reached = await DispatcharrCapabilityProbe.refresh(live, reason: "\(reason) #\(attempt)")
                     if reached { break }
                     try? await Task.sleep(for: .seconds(attempt * 3))
                 }
+                guard !deleted, let after = resolve(target.id) else {
+                    debugLog("[PERMS] permissions pass abandoned server=\(target.name) reason=\(reason): playlist deleted")
+                    continue
+                }
                 if !reached {
-                    debugLog("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
+                    debugLog("[PERMS] probe FAILED server=\(after.name) reason=\(reason) "
                              + "detail=unresolved-after-retries; keeping the last good snapshot "
-                             + "(\(server.dispatcharrCapabilities.probeSummary))")
+                             + "(\(after.dispatcharrCapabilities.probeSummary))")
                 }
                 // Publish unconditionally after an active-server change
                 // (Logan 2026-09-16). `DispatcharrCapabilityProbe.refresh`
@@ -5091,9 +5113,13 @@ struct MainTabView: View {
                 }
             }
             // Capabilities are synced, so a device that just repaired a
-            // wrong snapshot shares the good one.
-            SyncManager.shared.pushServers(allServers)
+            // wrong snapshot shares the good one. Re-read after the awaits
+            // and skip any row deleted meanwhile.
+            guard !Task.isCancelled else { return }
+            let remaining = (try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []
+            SyncManager.shared.pushServers(remaining.filter { !$0.isGone })
         }
+        DispatcharrCapabilityProbe.registerPass(task, for: targets.map(\.id))
     }
 
     // Cast audio, 2026-09-13: the launch / foreground re-resolve of the
@@ -5126,6 +5152,9 @@ struct MainTabView: View {
         let dispatcharrServers = activeDispatcharrServers.filter { $0.dispatcharrCanViewDVR }
         guard !dispatcharrServers.isEmpty else { return }
         for server in dispatcharrServers {
+            // Later iterations run after an await: skip a playlist deleted
+            // meanwhile (2026-10-14 delete crash audit).
+            guard !server.isGone else { continue }
             let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
@@ -8265,7 +8294,7 @@ struct MainTabView: View {
                         let fetchStart = Date()
                         let didRefresh = await guideStore.fetchUpcoming(
                             channels: channelStore.channels,
-                            servers: allServers,
+                            servers: allServers.filter { !$0.isGone },
                             replaceExisting: false
                         )
                         let elapsed = Int(Date().timeIntervalSince(fetchStart))
@@ -8313,7 +8342,7 @@ struct MainTabView: View {
                         let fetchStart = Date()
                         let didRefresh = await guideStore.fetchUpcoming(
                             channels: channelStore.channels,
-                            servers: allServers,
+                            servers: allServers.filter { !$0.isGone },
                             replaceExisting: false
                         )
                         debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE, didRefresh=\(didRefresh), elapsed=\(Int(Date().timeIntervalSince(fetchStart)))s (post-bulk window walk, held \(heldSec)s)")

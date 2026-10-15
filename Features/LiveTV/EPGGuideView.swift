@@ -3052,12 +3052,19 @@ final class GuideStore: ObservableObject {
                                      channels: [ChannelDisplayItem],
                                      reason: String,
                                      force: Bool = false) async {
-        guard server.type == .dispatcharrAPI, server.dispatcharrVersionAtLeast("0.30.0") else { return }
+        guard !server.isGone, server.type == .dispatcharrAPI,
+              server.dispatcharrVersionAtLeast("0.30.0") else { return }
         guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
         if backgroundSweepTask != nil { return }
         if !force, let last = lastEPGSourceGateCheckAt,
            Date().timeIntervalSince(last) < Self.epgSourceGateInterval { return }
         guard let probe = await fetchEPGSourcesFingerprint(server: server) else { return }
+        // Playlist deleted while the fingerprint request ran (2026-10-14
+        // delete crash audit): never read the model again.
+        guard !server.isGone else {
+            debugLog("[PLAYLIST] background grid sweep gate: skipped, playlist was deleted")
+            return
+        }
         lastEPGSourceGateCheckAt = Date()
         if let cached = gridCoverageSourcesFingerprint, cached == probe.fingerprint {
             debugLog("[EPG grid window] sources unchanged, background sweep skipped")

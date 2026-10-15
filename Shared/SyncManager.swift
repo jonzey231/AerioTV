@@ -698,7 +698,9 @@ final class SyncManager: ObservableObject {
             // (serialize, lastPushTime) without a dispatch_assert_queue crash.
             MainActor.assumeIsolated {
                 let mgr = SyncManager.shared
-                let payload = capturedServers.map { mgr.serialize($0) }
+                // Debounced: a playlist deleted during the 2 s window is
+                // skipped, never read (2026-10-14 delete crash audit).
+                let payload = capturedServers.filter { !$0.isGone }.map { mgr.serialize($0) }
                 mgr.lastPushTime = ProcessInfo.processInfo.systemUptime
                 NSUbiquitousKeyValueStore.default.set(payload, forKey: key)
                 debugLog("🔵 SyncManager: pushed \(payload.count) servers")

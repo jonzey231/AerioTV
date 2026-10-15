@@ -1521,6 +1521,49 @@ enum DispatcharrCapabilityProbe {
 
     private static var inFlight: Set<UUID> = []
 
+    /// Playlists deleted in this process (2026-10-14 crash: the launch
+    /// permissions pass slept between retries, the playlist was deleted,
+    /// and the next `refresh` read `server.type` on the deleted model).
+    /// Every resume point in `refresh` checks this plus `isGone`, so a
+    /// probe that is mid-request when the delete lands never touches the
+    /// model again. UUIDs are never reused, so the set only grows by one
+    /// per delete.
+    private static var deletedIDs: Set<UUID> = []
+
+    /// Callers that run their own multi-attempt loop around `refresh`
+    /// (the MainTabView permissions pass) register the Task here so the
+    /// playlist delete can cancel it outright.
+    private static var passTasks: [UUID: Task<Void, Never>] = [:]
+
+    static func registerPass(_ task: Task<Void, Never>, for ids: [UUID]) {
+        for id in ids { passTasks[id] = task }
+    }
+
+    static func isCancelled(_ id: UUID) -> Bool { deletedIDs.contains(id) }
+
+    /// True when `server` must not be read any more: deleted from SwiftData,
+    /// detached from its context, or marked deleted by the playlist delete.
+    static func isUnusable(_ server: ServerConnection, id: UUID) -> Bool {
+        server.isGone || deletedIDs.contains(id)
+    }
+
+    /// Playlist delete: stop every permissions probe for this server before
+    /// the model is removed. Plain values only.
+    static func cancelWork(forDeletedServerID id: UUID, name: String) {
+        deletedIDs.insert(id)
+        var cancelled = false
+        if let task = passTasks.removeValue(forKey: id) {
+            task.cancel()
+            cancelled = true
+        }
+        if inFlight.contains(id) { cancelled = true }
+        if cancelled {
+            debugLog("[PLAYLIST] delete: cancelled permissions probe for \(name)")
+        } else {
+            debugLog("[PLAYLIST] delete: no permissions probe in flight for \(name)")
+        }
+    }
+
     /// When each server was last probed in this process (attempt start,
     /// success or not). Throttles the foreground and channel-refresh
     /// triggers; nothing polls on its own.
@@ -1563,15 +1606,27 @@ enum DispatcharrCapabilityProbe {
     static func refresh(_ server: ServerConnection, reason: String,
                         minInterval: TimeInterval = 0,
                         waitIfInFlight: Bool = false) async -> Bool {
-        guard server.type == .dispatcharrAPI else { return false }
-        if inFlight.contains(server.id) {
+        // Values captured before the first suspension: after any await the
+        // model may have been deleted, and only `isGone` / these copies may
+        // be read until `isUnusable` says it is still live.
+        guard !server.isGone else { return false }
+        let id = server.id
+        let name = server.name
+        guard !deletedIDs.contains(id), server.type == .dispatcharrAPI else { return false }
+        func gone(_ step: String) -> Bool {
+            guard isUnusable(server, id: id) else { return false }
+            debugLog("[PERMS] probe abandoned server=\(name) reason=\(reason) step=\(step): playlist deleted")
+            return true
+        }
+        if inFlight.contains(id) {
             // A pass is already running. Gate checks (Switch Stream open,
             // reorder save) must see ITS answer, so they wait for it (time
             // boxed) instead of reading the pre-probe snapshot.
             guard waitIfInFlight else { return false }
             let deadline = Date().addingTimeInterval(10)
-            while inFlight.contains(server.id), Date() < deadline {
+            while inFlight.contains(id), Date() < deadline {
                 try? await Task.sleep(nanoseconds: 100_000_000)
+                if gone("wait for in-flight") { return false }
             }
             return server.dispatcharrCapabilities.hasSnapshot
         }
@@ -1588,7 +1643,9 @@ enum DispatcharrCapabilityProbe {
                                  serverID: server.id,
                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
                                      ? server.username : nil)
-        guard let user = try? await api.fetchCurrentUser() else {
+        let fetched = try? await api.fetchCurrentUser()
+        if gone("users/me") { return false }
+        guard let user = fetched else {
             logProbe("[PERMS] level \(oldLevel) -> \(oldLevel) (refresh failed, kept) trigger=\(reason) server=\(server.name)")
             logProbe("[PERMS] probe FAILED server=\(server.name) reason=\(reason) "
                      + "detail=users/me-unavailable; keeping the last good snapshot "
@@ -1612,7 +1669,9 @@ enum DispatcharrCapabilityProbe {
         // Only with a username to compare against: in pure API Key mode
         // there is nothing the user asserted about WHICH account, so a
         // mismatch cannot be detected and must not be guessed at.
-        if await healIdentityMismatchIfNeeded(server, serverUsername: user.username) {
+        let healed = await healIdentityMismatchIfNeeded(server, serverUsername: user.username)
+        if gone("identity repair") { return false }
+        if healed {
             // The repair re-probed with the new key; that pass owns the
             // snapshot, and re-applying this stale payload over it would
             // put the old account's answers straight back.
@@ -1623,10 +1682,15 @@ enum DispatcharrCapabilityProbe {
         // A legacy superuser can still report a low custom level; the
         // IsAdmin-gated users LIST endpoint settles it.
         if level < 10, await api.probeAdminAccess() { level = 10 }
+        if gone("admin probe") { return false }
         let version = (try? await api.fetchVersion()) ?? nil
+        if gone("version") { return false }
         // Only worth asking when the account may read settings at all.
         var systemCatchup: Bool? = nil
-        if level >= 1 { systemCatchup = (try? await api.fetchSystemCatchupEnabled()) ?? nil }
+        if level >= 1 {
+            systemCatchup = (try? await api.fetchSystemCatchupEnabled()) ?? nil
+            if gone("system catch-up") { return false }
+        }
 
         var changed = false
         if server.dispatcharrUserLevel != level {
@@ -1650,18 +1714,20 @@ enum DispatcharrCapabilityProbe {
         // never typed one); the profile names are only asked for when the
         // account actually has profiles assigned, and a 403 / failure just
         // leaves the ids to be shown instead.
-        var facts = DispatcharrAccountFactsStore.load(server.id)
+        var facts = DispatcharrAccountFactsStore.load(id)
         facts.username = user.username
         let assignedIDs = server.dispatcharrProfileIDList
         if assignedIDs.isEmpty {
             facts.profileNames = []
         } else if let profiles = try? await api.listChannelProfiles() {
+            if gone("channel profiles") { return false }
             let names = assignedIDs.compactMap { id in
                 profiles.first(where: { $0.id == id })?.name
             }
             if !names.isEmpty { facts.profileNames = names }
         }
-        DispatcharrAccountFactsStore.save(facts, for: server.id)
+        if gone("channel profiles") { return false }
+        DispatcharrAccountFactsStore.save(facts, for: id)
 
         logProbe("[PERMS] level \(oldLevel) -> \(levelDescription(server)) trigger=\(reason) "
                  + "changed=\(changed) server=\(server.name)")
@@ -1756,7 +1822,7 @@ enum DispatcharrCapabilityProbe {
     /// probes when the snapshot is missing, schema-outdated, or older than
     /// `DispatcharrCapabilitySet.staleAfter` (about 6 hours).
     static func refreshIfStale(_ server: ServerConnection, reason: String) async {
-        guard server.type == .dispatcharrAPI,
+        guard !isUnusable(server, id: server.id), server.type == .dispatcharrAPI,
               server.dispatcharrCapabilities.isStale else { return }
         await refresh(server, reason: reason)
     }
@@ -1773,7 +1839,11 @@ enum DispatcharrCapabilityProbe {
     static func handleForbidden(_ server: ServerConnection,
                                 capability: DispatcharrCapability,
                                 serverReason: String?) async -> String {
+        guard !server.isGone else { return capability.deniedMessage }
+        let id = server.id
         await refresh(server, reason: "403 on \(capability.rawValue)")
+        // Deleted while the re-probe ran: nothing left to explain.
+        guard !isUnusable(server, id: id) else { return capability.deniedMessage }
         let caps = server.dispatcharrCapabilities
         let message: String
         if caps.state(of: capability) == .denied {
@@ -1794,7 +1864,7 @@ enum DispatcharrCapabilityProbe {
     /// affordance instead of staying wrongly hidden.
     static func promoteIfUnexpectedlyAllowed(_ server: ServerConnection,
                                              capability: DispatcharrCapability) async {
-        guard server.type == .dispatcharrAPI,
+        guard !isUnusable(server, id: server.id), server.type == .dispatcharrAPI,
               server.dispatcharrCapabilities.state(of: capability) == .denied else { return }
         await refresh(server, reason: "200 on supposedly denied \(capability.rawValue)")
     }
