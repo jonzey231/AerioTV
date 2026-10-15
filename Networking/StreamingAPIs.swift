@@ -4283,50 +4283,15 @@ struct DispatcharrAPI {
 
     /// Mark as Radio Channel (admin only): `PATCH /api/channels/channels/<id>/`
     /// with `is_radio`. Dispatcharr's PatchedChannel takes the field alone;
-    /// `partial_update` is `IsAdmin` server side. `streamProfile` adds
-    /// `stream_profile_id` to the same PATCH (Radio Channel Stream Profile):
-    /// `.some(nil)` sends JSON null (server default), `nil` leaves it out.
+    /// `partial_update` is `IsAdmin` server side.
     @discardableResult
-    func updateChannelRadioFlag(channelID: Int, isRadio: Bool,
-                                streamProfile: Int?? = nil) async throws -> Int {
-        var body: [String: Any] = ["is_radio": isRadio]
-        if let streamProfile { body["stream_profile_id"] = streamProfile ?? NSNull() }
-        return try await patchChannel(channelID: channelID, body: body)
-    }
-
-    /// Radio Channel Stream Profile (admin only): `PATCH
-    /// /api/channels/channels/<id>/` with `stream_profile_id` (nil = JSON
-    /// null, the server default profile).
-    @discardableResult
-    func updateChannelStreamProfile(channelID: Int, profileID: Int?) async throws -> Int {
-        try await patchChannel(channelID: channelID,
-                               body: ["stream_profile_id": profileID ?? NSNull()])
-    }
-
-    /// `GET /api/core/streamprofiles/`: the server's stream profiles (id,
-    /// name) in the server's order. Accepts a bare list or a paginated
-    /// `results` page.
-    func getStreamProfiles() async throws -> [DispatcharrStreamProfile] {
-        let url = try buildURL(path: "/api/core/streamprofiles/")
-        var request = URLRequest(url: url, timeoutInterval: 15)
-        request.httpMethod = "GET"
-        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        let (data, response) = try await loggedData(for: request)
-        try validate(response: response, data: data)
-        if let list = try? Self.jsonDecoder.decode([DispatcharrStreamProfile].self, from: data) {
-            return list
-        }
-        struct Page: Decodable { let results: [DispatcharrStreamProfile] }
-        return try Self.jsonDecoder.decode(Page.self, from: data).results
-    }
-
-    private func patchChannel(channelID: Int, body: [String: Any]) async throws -> Int {
+    func updateChannelRadioFlag(channelID: Int, isRadio: Bool) async throws -> Int {
         let url = try buildURL(path: "/api/channels/channels/\(channelID)/")
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "PATCH"
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["is_radio": isRadio])
         let (data, response) = try await loggedData(for: request)
         try validateKeepingReason(response: response, data: data)
         return (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -5448,12 +5413,6 @@ struct DispatcharrM3UAccount: Decodable, Identifiable {
 
 /// Response of `POST /proxy/ts/change_stream/<uuid>`. We only need `url`
 /// (the resolved upstream the server switched to) for the confirm gate.
-/// One row of `GET /api/core/streamprofiles/`.
-struct DispatcharrStreamProfile: Decodable, Hashable {
-    let id: Int
-    let name: String
-}
-
 struct DispatcharrChangeStreamResponse: Decodable {
     let url: String?
     /// True when the request landed on the channel's OWNER worker. Only the

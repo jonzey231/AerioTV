@@ -184,15 +184,6 @@ struct ServerDetailView: View {
     @State private var isRefreshingPlaylist = false
     /// "Refresh Permissions" row: an unthrottled capability probe.
     @State private var isRefreshingPermissions = false
-    /// Radio Channel Stream Profile (admin, Direct Connect): the server's
-    /// stream profiles, the pick awaiting confirmation, and the progress
-    /// or result line under the row.
-    @State private var streamProfiles: [DispatcharrStreamProfile] = []
-    @State private var radioProfileSelection: DispatcharrStreamProfile? = nil
-    @State private var pendingRadioProfile: DispatcharrStreamProfile?? = nil
-    @State private var showRadioProfileConfirm = false
-    @State private var radioProfileStatus: String? = nil
-    @State private var isApplyingRadioProfile = false
     @State private var playlistRefreshDone = false
     @Environment(\.dismiss) private var dismiss
     #if os(iOS)
@@ -281,14 +272,6 @@ struct ServerDetailView: View {
             guard !server.isGone, server.isActive, server.type == .dispatcharrAPI else { return }
             await DispatcharrCapabilityProbe.refresh(server, reason: "playlist detail",
                                                      minInterval: 60)
-        }
-        .task(id: showsRadioProfileRow) { await loadStreamProfiles() }
-        .alert("Change stream profile on the server?", isPresented: $showRadioProfileConfirm,
-               presenting: pendingRadioProfile) { choice in
-            Button("Cancel", role: .cancel) { pendingRadioProfile = nil }
-            Button("Change") { applyRadioProfile(choice) }
-        } message: { choice in
-            Text("This sets \(choice?.name ?? "Server default") on \(RadioModeSession.loadedRadioChannelCount) radio channels for every user of this Dispatcharr server. You can set it back to Server default later.")
         }
         .alert("Delete Playlist?", isPresented: $showDeleteConfirm) {
             Button("Delete", role: .destructive) {
@@ -913,9 +896,6 @@ struct ServerDetailView: View {
                     }
                     .disabled(isRefreshingPermissions)
                 }
-                if showsRadioProfileRow {
-                    radioProfileRow
-                }
                 tvFooter("Set by your Dispatcharr admin. Permissions also refresh when you open the app or use Refresh Playlist.")
             }
         }
@@ -1046,110 +1026,6 @@ struct ServerDetailView: View {
             playlistRefreshDone = true
             try? await Task.sleep(for: .seconds(2))
             playlistRefreshDone = false
-        }
-    }
-
-    // MARK: - Radio Channel Stream Profile (admin only)
-
-    /// Same gate as Mark as Radio Channel, on the active playlist (the
-    /// bulk apply reads the loaded channel list, which is the active one).
-    private var showsRadioProfileRow: Bool {
-        !server.isGone && server.type == .dispatcharrAPI
-            && server.dispatcharrCanSwitchStream && server.isActive
-    }
-
-    private var radioProfileOptions: [SettingsChoice<Int?>] {
-        [SettingsChoice(nil, "Server default")]
-            + radioProfileOptionsProfiles.map { SettingsChoice(Optional($0.id), $0.name) }
-    }
-
-    /// The picker writes through this: a different pick is held for the
-    /// confirmation alert, and the row keeps showing the saved choice.
-    private var radioProfileBinding: Binding<Int?> {
-        Binding(
-            get: { radioProfileSelection?.id },
-            set: { newID in
-                guard newID != radioProfileSelection?.id, !isApplyingRadioProfile else { return }
-                let profile = newID.flatMap { id in
-                    radioProfileOptionsProfiles.first(where: { $0.id == id })
-                }
-                if newID != nil, profile == nil { return }
-                pendingRadioProfile = .some(profile)
-                showRadioProfileConfirm = true
-            })
-    }
-
-    /// Server profiles, plus a saved pick when the list has not loaded.
-    private var radioProfileOptionsProfiles: [DispatcharrStreamProfile] {
-        var profiles = streamProfiles
-        if let saved = radioProfileSelection, !profiles.contains(where: { $0.id == saved.id }) {
-            profiles.append(saved)
-        }
-        return profiles
-    }
-
-    private static let radioProfileSubtitle = "Changes the stream profile on your Dispatcharr server for every channel marked radio. This is a permanent server-side change that affects all users. Redirect starts radio channels instantly but bypasses Dispatcharr's stream tracking and connection limits; other profiles still wait for the server's buffer."
-
-    private var radioProfileRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SettingsChoicePicker("Radio Channel Stream Profile",
-                                 options: radioProfileOptions,
-                                 selection: radioProfileBinding,
-                                 footer: Self.radioProfileSubtitle,
-                                 icon: RadioModeSession.radioFlagMenuSymbol)
-            .disabled(isApplyingRadioProfile)
-            Text(Self.radioProfileSubtitle)
-                .scaledFont(.labelSmall.subtext())
-                .foregroundColor(Color.contrastText(.textTertiary))
-                .fixedSize(horizontal: false, vertical: true)
-            if let radioProfileStatus {
-                Text(radioProfileStatus)
-                    .scaledFont(.labelSmall.subtext())
-                    .foregroundColor(.accentPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func loadStreamProfiles() async {
-        guard showsRadioProfileRow else { return }
-        radioProfileSelection = RadioStreamProfileSetting.selection(serverID: server.id)
-        guard let api = SwitchStreamFlow.makeAPI(server: server) else { return }
-        do {
-            let list = try await api.getStreamProfiles()
-            streamProfiles = list
-            // A saved pick renamed on the server shows the server's name.
-            if let saved = radioProfileSelection, let fresh = list.first(where: { $0.id == saved.id }),
-               fresh.name != saved.name {
-                radioProfileSelection = fresh
-                RadioStreamProfileSetting.setSelection(fresh, serverID: server.id)
-            }
-            debugLog("[DISPATCHARR] stream profiles loaded count=\(list.count)")
-        } catch {
-            debugLog("[DISPATCHARR] stream profiles load failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func applyRadioProfile(_ profile: DispatcharrStreamProfile?) {
-        pendingRadioProfile = nil
-        guard showsRadioProfileRow, !isApplyingRadioProfile else { return }
-        let serverID = server.id
-        isApplyingRadioProfile = true
-        radioProfileStatus = "Applying to \(RadioModeSession.loadedRadioChannelCount) radio channels..."
-        Task { @MainActor in
-            let result = await RadioModeSession.applyRadioStreamProfile(profile)
-            // Keep the old choice when nothing was applied.
-            if result.ok > 0 || result.total == 0 {
-                RadioStreamProfileSetting.setSelection(profile, serverID: serverID)
-                radioProfileSelection = profile
-            }
-            isApplyingRadioProfile = false
-            let failed = result.total - result.ok
-            radioProfileStatus = failed == 0
-                ? "Applied to \(result.ok) radio channels"
-                : "Applied to \(result.ok) of \(result.total) radio channels, \(failed) failed"
-            try? await Task.sleep(for: .seconds(4))
-            if !isApplyingRadioProfile { radioProfileStatus = nil }
         }
     }
 
@@ -1286,9 +1162,6 @@ struct ServerDetailView: View {
                     }
                     .disabled(isRefreshingPermissions)
                     .tvActionRowChrome()
-                }
-                if showsRadioProfileRow {
-                    radioProfileRow
                 }
             } header: {
                 Text("Dispatcharr User Permissions").sectionHeaderStyle()
