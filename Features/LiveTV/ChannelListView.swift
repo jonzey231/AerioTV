@@ -567,6 +567,12 @@ struct ChannelListView: View {
     /// the Group Selection choice it modifies.
     @AppStorage(liveTVEdgeSwipeOpensSidebarKey) private var liveTVEdgeSwipeOpensSidebar = false
     @Environment(\.layoutDirection) private var listLayoutDirection
+    @Environment(\.aerioTextScale) private var edgeSwipeTextScale
+    /// GH #102 interactive edge swipe: inward translation the drawer follows
+    /// while an edge drag is in flight (nil when none), and the per-gesture
+    /// latch (nil until the first onChanged decides edge drag or not).
+    @State private var edgeDragTranslation: CGFloat? = nil
+    @State private var edgeDragRecognized: Bool? = nil
     @State private var phoneSearchPresented = false
     /// Phone sidebar mode: the group drawer over the list / guide.
     @State private var phoneDrawerOpen = false
@@ -978,12 +984,18 @@ struct ChannelListView: View {
             }
             #if os(iOS)
             .overlay {
-                if phoneDrawerOpen {
+                // GH #102: the drawer stays mounted in sidebar mode so every
+                // open and close (header button, edge swipe, scrim, row pick)
+                // is the same spring slide; closed it is fully off-screen and
+                // takes no touches.
+                if guideSidebarSelectorActive {
+                    let shown = phoneDrawerOpen || edgeDragTranslation != nil
                     phoneGroupDrawer
-                        .transition(.opacity)
+                        .allowsHitTesting(shown)
+                        .accessibilityHidden(!shown)
                 }
             }
-            .animation(.easeOut(duration: 0.22), value: phoneDrawerOpen)
+            .animation(phoneDrawerSpring, value: phoneDrawerOpen)
             // Catch-all: any transition with no matching [DRAWER] close line
             // above it came from somewhere other than the three known writers
             // (a view rebuild / @State reset), which is the next thing to look
@@ -1015,26 +1027,94 @@ struct ChannelListView: View {
     /// Header overflow (three-dot) state: see `phoneHeaderActions`.
     @State private var phoneHeaderActionsExpanded = false
 
+    #endif
+    /// GH #102 Guide view: a drag that starts anywhere on the fixed channel
+    /// column drives the same drawer tracking (no edge zone over the grid).
+    /// nil when the toggle is off, so the Guide is untouched.
+    private var channelColumnDragChanged: GuideColumnDragHandler? {
+        #if os(iOS)
+        guard edgeSwipeOpensSidebarActive else { return nil }
+        return { value in edgeSwipeChanged(value, requireEdge: false) }
+        #else
+        return nil
+        #endif
+    }
+    private var channelColumnDragEnded: GuideColumnDragHandler? {
+        #if os(iOS)
+        guard edgeSwipeOpensSidebarActive else { return nil }
+        return { value in edgeSwipeEnded(value) }
+        #else
+        return nil
+        #endif
+    }
+
+    #if os(iOS)
     /// GH #102: the edge swipe is live only with Sidebar Menu selected and the
     /// toggle on. Live TV is a tab root, so no system back-swipe competes.
     private var edgeSwipeOpensSidebarActive: Bool {
         guideSidebarSelectorActive && liveTVEdgeSwipeOpensSidebar
     }
 
-    /// GH #102: a horizontal-dominant drag that starts within 20 pt of the
-    /// leading edge (trailing in RTL) and travels at least 40 pt inward opens
-    /// the group drawer, the same action as the header button.
-    private func handleEdgeSwipe(_ value: DragGesture.Value) {
-        let width = UIScreen.main.bounds.width
-        let startX = value.startLocation.x
+    /// GH #102: one spring for every drawer open and close, matching the
+    /// Android drawer's no-bounce medium-low stiffness spring (k = 400).
+    private var phoneDrawerSpring: Animation { .spring(response: 0.31, dampingFraction: 1) }
+
+    /// GH #102: the drawer width the edge drag tracks, the same fitted width
+    /// PhoneGroupDrawer computes for itself.
+    private var edgeSwipeDrawerWidth: CGFloat {
+        max(phoneGroupDrawerFittedWidth(tokens: groupTokens,
+                                        favoritesToken: favoritesToken,
+                                        scale: edgeSwipeTextScale), 1)
+    }
+
+    /// GH #102: inward horizontal translation (rightward in LTR, leftward in RTL).
+    private func edgeInward(_ dx: CGFloat) -> CGFloat {
+        listLayoutDirection == .rightToLeft ? -dx : dx
+    }
+
+    /// GH #102, first onChanged of a drag: an edge drag starts within 20 pt
+    /// of the leading edge (trailing in RTL), is horizontal-dominant, and
+    /// heads inward. Latched so a vertical scroll never turns into one.
+    private func edgeSwipeChanged(_ value: DragGesture.Value, requireEdge: Bool = true) {
+        if phoneDrawerOpen { return }
         let dx = value.translation.width
         let dy = value.translation.height
-        let rtl = listLayoutDirection == .rightToLeft
-        let fromEdge = rtl ? startX >= width - 20 : startX <= 20
-        let inward = rtl ? dx <= -40 : dx >= 40
-        guard fromEdge, inward, abs(dx) > abs(dy) * 1.5 else { return }
-        debugLog("[GROUPS] edge swipe opened sidebar")
-        phoneDrawerOpen = true
+        if edgeDragRecognized == nil {
+            let width = UIScreen.main.bounds.width
+            let startX = value.startLocation.x
+            let fromEdge = listLayoutDirection == .rightToLeft
+                ? startX >= width - 20 : startX <= 20
+            edgeDragRecognized = (fromEdge || !requireEdge) && abs(dx) > abs(dy) * 1.5 && edgeInward(dx) > 0
+        }
+        guard edgeDragRecognized == true else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            edgeDragTranslation = min(max(edgeInward(dx), 0), edgeSwipeDrawerWidth)
+        }
+    }
+
+    /// GH #102 release: open fully past 40% of the drawer width or on an
+    /// inward fling above 300 pt/s, else slide back closed.
+    private func edgeSwipeEnded(_ value: DragGesture.Value) {
+        let recognized = edgeDragRecognized == true
+        edgeDragRecognized = nil
+        guard recognized, edgeDragTranslation != nil else {
+            edgeDragTranslation = nil
+            return
+        }
+        let width = edgeSwipeDrawerWidth
+        let travel = min(max(edgeInward(value.translation.width), 0), width)
+        let velocity = edgeInward(value.velocity.width)
+        if travel > width * 0.4 || velocity > 300 {
+            withAnimation(phoneDrawerSpring) {
+                phoneDrawerOpen = true
+                edgeDragTranslation = nil
+            }
+            debugLog("[GROUPS] edge swipe opened sidebar")
+        } else {
+            withAnimation(phoneDrawerSpring) { edgeDragTranslation = nil }
+        }
     }
 
     /// Phone header row (Logan 2026-09-05, mockup "Phone · Live TV"): the
@@ -1182,8 +1262,14 @@ struct ChannelListView: View {
     /// (the new order is the pill order too); Manage Groups sits beside
     /// the heading (Logan 2026-09-05).
     private var phoneGroupDrawer: some View {
-        ZStack(alignment: .leading) {
-            Color.black.opacity(0.45)
+        // GH #102: 1 when open (header button or a completed edge swipe);
+        // during an edge drag, the fraction of the drawer pulled out.
+        let width = edgeSwipeDrawerWidth
+        let progress: CGFloat = phoneDrawerOpen ? 1
+            : min(max((edgeDragTranslation ?? 0) / width, 0), 1)
+        let hidden = (1 - progress) * width
+        return ZStack(alignment: .leading) {
+            Color.black.opacity(0.45 * progress)
                 .ignoresSafeArea()
                 .onTapGesture {
                     debugLog("[DRAWER] close: scrim tap")
@@ -1224,7 +1310,10 @@ struct ChannelListView: View {
             // longest visible group label), so the slide-in transition and
             // the scrim both work off the same computed value.
             .background(Color.appBackground.ignoresSafeArea())
-            .shadow(color: .black.opacity(0.45), radius: 24, x: 8, y: 0)
+            .shadow(color: .black.opacity(0.45 * progress), radius: 24, x: 8, y: 0)
+            // GH #102: slide the drawer by the hidden part. .offset is not
+            // mirrored, so RTL (drawer on the right) moves the other way.
+            .offset(x: listLayoutDirection == .rightToLeft ? hidden : -hidden)
             .transition(.move(edge: .leading))
         }
     }
@@ -1475,6 +1564,8 @@ struct ChannelListView: View {
                             sidebarOpen: guideSidebarOpen,
                             chromeFocusHold: guideChromeFocusHold,
                             onPreviewProgramChange: previewProgramHandler,
+                            onChannelColumnDragChanged: channelColumnDragChanged,
+                            onChannelColumnDragEnded: channelColumnDragEnded,
                             onRequestGroupSidebar: { programID in
                                 guideSidebarReturnProgramID = programID
                                 // #196: remember the group for the Back-revert
@@ -2035,10 +2126,15 @@ struct ChannelListView: View {
             // dragging between pages instead of an instant filter change.
             .offset(x: groupDragOffset)
             .simultaneousGesture(
-                DragGesture(minimumDistance: 40)
+                // GH #102: edge mode recognizes sooner so the drawer starts
+                // tracking close to the finger.
+                DragGesture(minimumDistance: edgeSwipeOpensSidebarActive ? 10 : 40)
                     .onChanged { value in
                         // GH #102: edge-swipe mode replaces the group swipe.
-                        if edgeSwipeOpensSidebarActive { return }
+                        if edgeSwipeOpensSidebarActive {
+                            edgeSwipeChanged(value)
+                            return
+                        }
                         let dx = value.translation.width
                         let dy = value.translation.height
                         // Latch dominance once per gesture so a drag that
@@ -2054,7 +2150,7 @@ struct ChannelListView: View {
                         if edgeSwipeOpensSidebarActive {
                             groupDragIsHorizontal = nil
                             groupDragOffset = 0
-                            handleEdgeSwipe(value)
+                            edgeSwipeEnded(value)
                             return
                         }
                         let wasHorizontal = groupDragIsHorizontal == true

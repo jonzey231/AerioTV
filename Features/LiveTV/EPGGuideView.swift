@@ -5487,6 +5487,11 @@ struct EPGGuideView: View {
     /// tvOS Channel Preview: fires when the focused programme changes (and
     /// on the first seed) so the host can draw the banner.
     var onPreviewProgramChange: ((GuideProgram?, ChannelDisplayItem?) -> Void)? = nil
+    /// GH #102 (iPhone and iPad): with Swipe from Left Edge Opens Sidebar on,
+    /// a horizontal drag on the fixed channel column slides the group drawer
+    /// out. nil (the default) leaves the column without the gesture.
+    var onChannelColumnDragChanged: GuideColumnDragHandler? = nil
+    var onChannelColumnDragEnded: GuideColumnDragHandler? = nil
     var onRequestGroupSidebar: ((String?) -> Void)? = nil
     /// Single-flight guard for the return-from-player focus restore: the
     /// notification arrives more than once per minimize (log 2026-08-28:
@@ -6829,6 +6834,10 @@ struct EPGGuideView: View {
                 .overlay(alignment: .trailing) {
                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
                 }
+                #if os(iOS)
+                .modifier(ChannelColumnDrawerDrag(onChanged: onChannelColumnDragChanged,
+                                                  onEnded: onChannelColumnDragEnded))
+                #endif
                 #if os(tvOS)
                 // Bind the channel cell (which contains a focusable
                 // `GuideChannelButton` on tvOS) to the row-level
@@ -12024,4 +12033,34 @@ enum GuideCanvasRenderer {
         }
     }
 }
+#endif
+
+#if os(iOS)
+/// GH #102: attaches the drawer drag to a channel column cell only when the
+/// host passes handlers. simultaneousGesture keeps the vertical scroll and the
+/// cell tap; the host's dominance latch ignores vertical drags.
+private struct ChannelColumnDrawerDrag: ViewModifier {
+    let onChanged: ((DragGesture.Value) -> Void)?
+    let onEnded: ((DragGesture.Value) -> Void)?
+
+    func body(content: Content) -> some View {
+        if let onChanged, let onEnded {
+            content.simultaneousGesture(
+                DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                    .onChanged(onChanged)
+                    .onEnded(onEnded)
+            )
+        } else {
+            content
+        }
+    }
+}
+#endif
+
+/// GH #102: the channel column drawer drag handler. tvOS has no DragGesture
+/// and never passes one, so it gets a placeholder type.
+#if os(iOS)
+typealias GuideColumnDragHandler = (DragGesture.Value) -> Void
+#else
+typealias GuideColumnDragHandler = () -> Void
 #endif
