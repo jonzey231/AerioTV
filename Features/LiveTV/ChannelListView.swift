@@ -577,6 +577,11 @@ struct ChannelListView: View {
     /// open drawer or scrim is in flight (nil when none), and its latch.
     @State private var closeDragTranslation: CGFloat? = nil
     @State private var closeDragRecognized: Bool? = nil
+    /// GH #102: true from the moment an open or close drag latches until a
+    /// short grace after release. Row selects, pin taps, and scrim taps that
+    /// arrive meanwhile are the drag's own touch-up and are ignored.
+    @State private var drawerDragSuppressesTaps = false
+    @State private var drawerTapGraceWork: DispatchWorkItem? = nil
     @State private var phoneSearchPresented = false
     /// Phone sidebar mode: the group drawer over the list / guide.
     @State private var phoneDrawerOpen = false
@@ -1061,7 +1066,11 @@ struct ChannelListView: View {
 
     /// GH #102: one spring for every drawer open and close, matching the
     /// Android drawer's no-bounce medium-low stiffness spring (k = 400).
-    private var phoneDrawerSpring: Animation { .spring(response: 0.31, dampingFraction: 1) }
+    /// Critically damped (no overshoot), no blend; the per-frame clamp in
+    /// DrawerSlideOffset backs it up.
+    private var phoneDrawerSpring: Animation {
+        .spring(response: 0.31, dampingFraction: 1, blendDuration: 0)
+    }
 
     /// GH #102: the drawer width the edge drag tracks, the same fitted width
     /// PhoneGroupDrawer computes for itself.
@@ -1089,6 +1098,7 @@ struct ChannelListView: View {
             let fromEdge = listLayoutDirection == .rightToLeft
                 ? startX >= width - 20 : startX <= 20
             edgeDragRecognized = (fromEdge || !requireEdge) && abs(dx) > abs(dy) * 1.5 && edgeInward(dx) > 0
+            if edgeDragRecognized == true { beginDrawerTapSuppression() }
         }
         guard edgeDragRecognized == true else { return }
         var t = Transaction()
@@ -1103,6 +1113,7 @@ struct ChannelListView: View {
     private func edgeSwipeEnded(_ value: DragGesture.Value) {
         let recognized = edgeDragRecognized == true
         edgeDragRecognized = nil
+        if recognized { endDrawerTapSuppression() }
         guard recognized, edgeDragTranslation != nil else {
             edgeDragTranslation = nil
             return
@@ -1278,6 +1289,7 @@ struct ChannelListView: View {
             Color.black.opacity(0.45 * progress)
                 .ignoresSafeArea()
                 .onTapGesture {
+                    guard !drawerDragSuppressesTaps else { return }
                     debugLog("[DRAWER] close: scrim tap")
                     phoneDrawerOpen = false
                 }
@@ -1287,6 +1299,10 @@ struct ChannelListView: View {
                 favoritesToken: favoritesToken,
                 defaultToken: defaultGroupToken,
                 onSelect: { token in
+                    guard !drawerDragSuppressesTaps else {
+                        debugLog("[DRAWER] row select ignored during drag: \(token)")
+                        return
+                    }
                     debugLog("[DRAWER] close: row select \(token)")
                     withAnimation(.spring(response: 0.25)) { selectedGroup = token }
                     phoneDrawerOpen = false
@@ -1308,6 +1324,7 @@ struct ChannelListView: View {
                 // here, it collided with the List's hold-and-drag reorder.
                 // The drawer stays open so the pin change is visible.
                 onSetDefault: { token in
+                    guard !drawerDragSuppressesTaps else { return }
                     debugLog("[DRAWER] set default from row: \(token)")
                     setDefaultGroup(token)
                 }
@@ -1315,11 +1332,21 @@ struct ChannelListView: View {
             // Width is owned by PhoneGroupDrawer (it fits itself to the
             // longest visible group label), so the slide-in transition and
             // the scrim both work off the same computed value.
-            .background(Color.appBackground.ignoresSafeArea())
+            // GH #102: the background bleeds one drawer width past the
+            // leading edge, so any overshoot shows drawer color, never the
+            // guide or list underneath.
+            .background(
+                Color.appBackground
+                    .padding(.leading, -width)
+                    .ignoresSafeArea()
+            )
             .shadow(color: .black.opacity(0.45 * progress), radius: 24, x: 8, y: 0)
-            // GH #102: slide the drawer by the hidden part. .offset is not
-            // mirrored, so RTL (drawer on the right) moves the other way.
-            .offset(x: listLayoutDirection == .rightToLeft ? hidden : -hidden)
+            // GH #102: slide the drawer by the hidden part, clamped to
+            // 0...width on every animation frame (not just on the target), so
+            // neither an open nor a close settle can travel past its end.
+            // .offset is not mirrored, so RTL moves the other way.
+            .modifier(DrawerSlideOffset(hidden: hidden, width: width,
+                                        rtl: listLayoutDirection == .rightToLeft))
             .transition(.move(edge: .leading))
         }
         // GH #102: drag the open drawer (or the scrim) toward the leading
@@ -1333,12 +1360,27 @@ struct ChannelListView: View {
         )
     }
 
+    /// GH #102: taps are blocked from the drag latch until 0.35 s after
+    /// release, so the touch-up that ends a drag can never select a row.
+    private func beginDrawerTapSuppression() {
+        drawerTapGraceWork?.cancel()
+        drawerTapGraceWork = nil
+        drawerDragSuppressesTaps = true
+    }
+    private func endDrawerTapSuppression() {
+        drawerTapGraceWork?.cancel()
+        let work = DispatchWorkItem { drawerDragSuppressesTaps = false }
+        drawerTapGraceWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+    }
+
     private func closeDragChanged(_ value: DragGesture.Value) {
         guard phoneDrawerOpen else { return }
         let dx = value.translation.width
         let dy = value.translation.height
         if closeDragRecognized == nil {
             closeDragRecognized = abs(dx) > abs(dy) * 1.5 && edgeInward(dx) < 0
+            if closeDragRecognized == true { beginDrawerTapSuppression() }
         }
         guard closeDragRecognized == true else { return }
         var t = Transaction()
@@ -1353,6 +1395,7 @@ struct ChannelListView: View {
     private func closeDragEnded(_ value: DragGesture.Value) {
         let recognized = closeDragRecognized == true
         closeDragRecognized = nil
+        if recognized { endDrawerTapSuppression() }
         guard recognized, closeDragTranslation != nil else {
             closeDragTranslation = nil
             return
@@ -7101,3 +7144,24 @@ final class ListScheduleCache: @unchecked Sendable {
                             futureLastID: future.last?.id, validUntil: validUntil)
     }
 }
+
+#if os(iOS)
+/// GH #102: the group drawer's slide. Animatable so the clamp runs on every
+/// interpolated frame: the drawer can never sit past fully open (a gap at the
+/// screen edge) or past fully closed.
+private struct DrawerSlideOffset: ViewModifier, @preconcurrency Animatable {
+    var hidden: CGFloat
+    let width: CGFloat
+    let rtl: Bool
+
+    var animatableData: CGFloat {
+        get { hidden }
+        set { hidden = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let h = min(max(hidden, 0), width)
+        content.offset(x: rtl ? h : -h)
+    }
+}
+#endif
