@@ -4318,8 +4318,9 @@ struct ChannelRow: View {
         } label: { Label("Watch", systemImage: "play.fill") }
         #else
         // tvOS: Select is Watch, except on a declared radio channel, where
-        // Select opens Radio Mode and Watch opens the full-screen player.
-        if item.isRadio {
+        // Select opens Radio Mode and Watch opens the full-screen player
+        // (also every channel while "Radio Mode by Default" is on).
+        if RadioModeSession.opensInRadioMode(item) {
             Button {
                 RadioModeSession.noteWatchVideo(item)
                 onTap()

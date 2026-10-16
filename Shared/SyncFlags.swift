@@ -32,6 +32,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
     case reminders
     case preferences
     case remoteControl
+    case radioModeDefault
     case credentials
 
     var id: String { rawValue }
@@ -44,6 +45,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .reminders:     return "Reminders"
         case .preferences:   return "App Preferences"
         case .remoteControl: return "Remote Button Map"
+        case .radioModeDefault: return "Radio Mode by Default"
         case .credentials:   return "Credentials"
         }
     }
@@ -61,6 +63,8 @@ enum SyncCategory: String, CaseIterable, Identifiable {
             return "Theme, appearance mode, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
         case .remoteControl:
             return "Your customized Apple TV remote button assignments. Turn this off on a TV whose remote is a different model from your others."
+        case .radioModeDefault:
+            return "Whether every channel opens in Radio Mode. Off by default, so each device keeps its own choice."
         case .credentials:
             return "Server passwords and API keys, stored in iCloud Keychain."
         }
@@ -78,6 +82,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .reminders:     return "Program reminders you scheduled"
         case .preferences:   return "Theme, layout, and Guide settings"
         case .remoteControl: return "Your custom remote button assignments"
+        case .radioModeDefault: return "Open every channel in Radio Mode"
         case .credentials:   return "Server passwords and API keys"
         }
     }
@@ -90,6 +95,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .reminders:     return "bell.badge.fill"
         case .preferences:   return "gearshape.2.fill"
         case .remoteControl: return "av.remote.fill"
+        case .radioModeDefault: return "radio"
         case .credentials:   return "key.fill"
         }
     }
@@ -103,9 +109,14 @@ enum SyncCategory: String, CaseIterable, Identifiable {
     /// "everything syncs" behavior on first launch of v1.6.17.
     var isEnabled: Bool {
         let ud = UserDefaults.standard
-        if ud.object(forKey: defaultsKey) == nil { return true }
+        if ud.object(forKey: defaultsKey) == nil { return defaultEnabled }
         return ud.bool(forKey: defaultsKey)
     }
+
+    /// Value when the user has never chosen. Every category is on except
+    /// "Radio Mode by Default" (Discord: Glitzbr), a per-device listening
+    /// choice that stays local unless the user opts in.
+    var defaultEnabled: Bool { self != .radioModeDefault }
 }
 
 /// All five `syncEnabled.*` keys, exposed for SyncManager's
@@ -120,10 +131,10 @@ extension SyncCategory {
         // different remote from my other one". If the flag synced, turning it
         // off on the odd TV out would propagate and turn it off on the main TV
         // too, which then stops publishing its map - the opposite of what he
-        // asked for. Every other category is a genuinely account-wide
+        // asked for. `radioModeDefault` is per device for the same reason. Every other category is a genuinely account-wide
         // preference, so they keep syncing.
         SyncCategory.allCases
-            .filter { $0 != .remoteControl }
+            .filter { $0 != .remoteControl && $0 != .radioModeDefault }
             .map(\.defaultsKey)
     }
 }

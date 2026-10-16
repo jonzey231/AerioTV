@@ -81,6 +81,9 @@ struct PlayerSettingsView: View {
 
     // MARK: - Live Rewind
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
+    // Discord (Glitzbr): every live channel pick opens Radio Mode. Per device
+    // unless Sync Categories > Radio Mode by Default is turned on.
+    @AppStorage(RadioModeSession.byDefaultKey) private var radioModeByDefault = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
     @AppStorage("liveRewindRetainChannels") private var liveRewindRetainChannels = false
     @AppStorage("liveRewindRetainCount") private var liveRewindRetainCount = 2
@@ -259,6 +262,23 @@ struct PlayerSettingsView: View {
                 Text("On-Screen Display").sectionHeaderStyle()
             } footer: {
                 Text(Self.playerInfoCardFooter)
+                    .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Radio Mode
+            Section {
+                Toggle(isOn: $radioModeByDefault) {
+                    Text("Radio Mode by Default")
+                        .scaledFont(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Radio Mode").sectionHeaderStyle()
+            } footer: {
+                Text(RadioModeSession.byDefaultFooter)
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
@@ -652,6 +672,17 @@ struct PlayerSettingsView: View {
                                 ) { _ in }
                         }
                     }
+                }
+
+                SettingsSection("Radio Mode", style: .plain) {
+                    TVSettingsToggleRow(
+                        icon: RadioModeSession.menuSymbol,
+                        iconColor: theme.accent,
+                        title: "Radio Mode by Default",
+                        subtitle: "",
+                        isOn: $radioModeByDefault
+                    ) { _ in }
+                    tvFooter(RadioModeSession.byDefaultFooter)
                 }
 
                 // Phase 3, item 4: "Keep Available" and "Channel

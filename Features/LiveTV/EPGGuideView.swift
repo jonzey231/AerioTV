@@ -9584,7 +9584,7 @@ private struct GuideProgramButton: View {
                     Button("Watch") {
                         onWatchCatchup(channelItem, prog)
                     }
-                } else if prog.isLive, channelItem.isRadio {
+                } else if prog.isLive, RadioModeSession.opensInRadioMode(channelItem) {
                     // Declared radio channel: Select opens Radio Mode, so
                     // Watch is the way into the full-screen player.
                     Button("Watch") {

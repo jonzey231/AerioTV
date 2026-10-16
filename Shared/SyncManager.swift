@@ -568,6 +568,21 @@ final class SyncManager: ObservableObject {
                 store.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared remote map from preferences KVS")
             }
+        case .radioModeDefault:
+            // Like the remote map: the key lives inside the preferences
+            // dictionary, so rewrite it without the entry.
+            prefPushDebounce?.cancel(); prefPushDebounce = nil
+            let prefsKey = prefKVSKey
+            let radioKey = RadioModeSession.byDefaultKey
+            DispatchQueue.main.async {
+                let store = NSUbiquitousKeyValueStore.default
+                if var dict = store.dictionary(forKey: prefsKey) {
+                    dict.removeValue(forKey: radioKey)
+                    store.set(dict, forKey: prefsKey)
+                }
+                store.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared Radio Mode by Default from preferences KVS")
+            }
         case .credentials:
             // Mirrors the credentials-only portion of clearAllICloudData.
             var keychainCleared = 0
@@ -811,6 +826,13 @@ final class SyncManager: ObservableObject {
            let v = ud.data(forKey: RemoteControlStore.mapKey) {
             dict[RemoteControlStore.mapKey] = v
         }
+        // "Radio Mode by Default" rides its own category, default OFF, so
+        // the key never leaves this device unless the user opts in. It is
+        // in none of the sync*Keys sets.
+        if SyncCategory.radioModeDefault.isEnabled,
+           ud.object(forKey: RadioModeSession.byDefaultKey) != nil {
+            dict[RadioModeSession.byDefaultKey] = ud.bool(forKey: RadioModeSession.byDefaultKey)
+        }
 
         // Granular gate: when "App Preferences" sync is off, push only the
         // toggle subset above and bail. The other devices' caches stay
@@ -985,6 +1007,11 @@ final class SyncManager: ObservableObject {
         if SyncCategory.remoteControl.isEnabled,
            let v = dict[RemoteControlStore.mapKey] as? Data {
             ud.set(v, forKey: RemoteControlStore.mapKey)
+        }
+        // "Radio Mode by Default": applied only when this device opted in.
+        if SyncCategory.radioModeDefault.isEnabled,
+           let v = dict[RadioModeSession.byDefaultKey] as? Bool {
+            ud.set(v, forKey: RadioModeSession.byDefaultKey)
         }
 
         // Granular gate: when "App Preferences" sync is off on this device,

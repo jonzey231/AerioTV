@@ -2287,12 +2287,26 @@ final class RadioModeSession: ObservableObject {
 
     // MARK: Declared radio channels (backend radio flag)
 
+    /// Settings > Player "Radio Mode by Default" (Discord: Glitzbr). Off by
+    /// default and per device: it rides its own Sync Categories row
+    /// (SyncCategory.radioModeDefault), excluded unless the user opts in.
+    static let byDefaultKey = "radioModeByDefault"
+    static let byDefaultFooter = "Every channel opens in Radio Mode. Long-press a channel and choose Watch to play video."
+    static var byDefault: Bool { UserDefaults.standard.bool(forKey: byDefaultKey) }
+
+    /// True when a pick of `item` should open Radio Mode: the backend
+    /// declares it radio, or "Radio Mode by Default" is on. The long-press
+    /// Watch item is offered for exactly these channels.
+    static func opensInRadioMode(_ item: ChannelDisplayItem) -> Bool {
+        item.isRadio || byDefault
+    }
+
     /// Long-press "Watch" on a radio channel: the next pick of this channel
     /// opens the full-screen player (artwork card) instead of Radio Mode.
     private static var watchOverride: (id: String, at: Date)?
 
     static func noteWatchVideo(_ item: ChannelDisplayItem) {
-        guard item.isRadio else { return }
+        guard opensInRadioMode(item) else { return }
         watchOverride = (item.id, Date())
     }
 
@@ -2309,7 +2323,7 @@ final class RadioModeSession: ObservableObject {
                 return false
             }
         }
-        guard item.isRadio, item.streamURL != nil, isAvailable, !shared.isActive else { return false }
+        guard opensInRadioMode(item), item.streamURL != nil, isAvailable, !shared.isActive else { return false }
         let store = MultiviewStore.shared
         if PlayerSession.shared.mode == .multiview, store.tiles.count > 1 { return false }
         return true
@@ -2319,7 +2333,7 @@ final class RadioModeSession: ObservableObject {
     /// false when the caller should play it normally.
     static func openIfDeclared(_ item: ChannelDisplayItem, server: ServerConnection?) -> Bool {
         guard shouldAutoOpen(for: item) else { return false }
-        debugLog("[RADIO] declared radio channel \(item.name): opening Radio Mode")
+        debugLog("[RADIO] \(item.isRadio ? "declared radio channel" : "Radio Mode by Default") \(item.name): opening Radio Mode")
         shared.start(item: item, server: server)
         return true
     }

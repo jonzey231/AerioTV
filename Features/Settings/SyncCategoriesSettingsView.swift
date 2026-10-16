@@ -28,6 +28,8 @@ struct SyncCategoriesSettingsView: View {
     @AppStorage(SyncCategory.preferences.defaultsKey)   private var syncPreferences = true
     @AppStorage(SyncCategory.remoteControl.defaultsKey) private var syncRemoteControl = true
     @AppStorage(SyncCategory.credentials.defaultsKey)   private var syncCredentials = true
+    // Default OFF: a per-device choice unless the user opts in.
+    @AppStorage(SyncCategory.radioModeDefault.defaultsKey) private var syncRadioModeDefault = false
 
     /// The category whose Delete confirmation is currently being shown.
     @State private var pendingDeleteCategory: SyncCategory? = nil
@@ -43,6 +45,7 @@ struct SyncCategoriesSettingsView: View {
         case .reminders:     return $syncReminders
         case .preferences:   return $syncPreferences
         case .remoteControl: return $syncRemoteControl
+        case .radioModeDefault: return $syncRadioModeDefault
         case .credentials:   return $syncCredentials
         }
     }

@@ -678,7 +678,7 @@ struct OnboardingSyncCategoryChooser: View {
 
     /// Local until Continue, so backing out cannot leave a half-applied set.
     @State private var selection: [SyncCategory: Bool] = Dictionary(
-        uniqueKeysWithValues: SyncCategory.allCases.map { ($0, true) }
+        uniqueKeysWithValues: SyncCategory.allCases.map { ($0, $0.defaultEnabled) }
     )
 
     var body: some View {
@@ -701,7 +701,7 @@ struct OnboardingSyncCategoryChooser: View {
                     VStack(spacing: 8) {
                         ForEach(SyncCategory.allCases) { category in
                             let binding = Binding(
-                                get: { selection[category] ?? true },
+                                get: { selection[category] ?? category.defaultEnabled },
                                 set: { selection[category] = $0 }
                             )
                             #if os(tvOS)
