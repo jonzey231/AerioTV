@@ -44,6 +44,7 @@ struct LiveTVSettingsView: View {
     #endif
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
+    @AppStorage(liveTVEdgeSwipeOpensSidebarKey) private var liveTVEdgeSwipeOpensSidebar = false
     #endif
 
     // MARK: Badges
@@ -316,6 +317,21 @@ struct LiveTVSettingsView: View {
                         icon: "sidebar.leading"
                     )
                     .listRowBackground(Color.cardBackground)
+                    // GH #102: only meaningful with the drawer selected.
+                    if phoneGroupSelector == "sidebar" {
+                        Toggle(isOn: $liveTVEdgeSwipeOpensSidebar) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Swipe from Left Edge Opens Sidebar")
+                                    .scaledFont(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text("A swipe in from the left edge opens the group sidebar. Swiping left or right to change groups is off while this is on.")
+                                    .scaledFont(.labelSmall.subtext())
+                                    .foregroundColor(Color.contrastText(.textTertiary))
+                            }
+                        }
+                        .tint(theme.accent)
+                        .listRowBackground(Color.cardBackground)
+                    }
                 } header: {
                     Text("Group Selection").sectionHeaderStyle()
                 }

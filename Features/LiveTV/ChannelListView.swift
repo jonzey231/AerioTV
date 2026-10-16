@@ -562,6 +562,11 @@ struct ChannelListView: View {
     @State private var defaultGroupToast: String? = nil
     #if os(iOS)
     @AppStorage(phoneGroupSelectorKey) private var phoneGroupSelector = "sidebar"
+    /// GH #102: with Sidebar Menu, a swipe in from the leading edge opens the
+    /// group drawer and the left/right group swipe is off. Per device, like
+    /// the Group Selection choice it modifies.
+    @AppStorage(liveTVEdgeSwipeOpensSidebarKey) private var liveTVEdgeSwipeOpensSidebar = false
+    @Environment(\.layoutDirection) private var listLayoutDirection
     @State private var phoneSearchPresented = false
     /// Phone sidebar mode: the group drawer over the list / guide.
     @State private var phoneDrawerOpen = false
@@ -1009,6 +1014,28 @@ struct ChannelListView: View {
     private var isPhoneIdiom: Bool { usesPhoneLiveTVLayout }
     /// Header overflow (three-dot) state: see `phoneHeaderActions`.
     @State private var phoneHeaderActionsExpanded = false
+
+    /// GH #102: the edge swipe is live only with Sidebar Menu selected and the
+    /// toggle on. Live TV is a tab root, so no system back-swipe competes.
+    private var edgeSwipeOpensSidebarActive: Bool {
+        guideSidebarSelectorActive && liveTVEdgeSwipeOpensSidebar
+    }
+
+    /// GH #102: a horizontal-dominant drag that starts within 20 pt of the
+    /// leading edge (trailing in RTL) and travels at least 40 pt inward opens
+    /// the group drawer, the same action as the header button.
+    private func handleEdgeSwipe(_ value: DragGesture.Value) {
+        let width = UIScreen.main.bounds.width
+        let startX = value.startLocation.x
+        let dx = value.translation.width
+        let dy = value.translation.height
+        let rtl = listLayoutDirection == .rightToLeft
+        let fromEdge = rtl ? startX >= width - 20 : startX <= 20
+        let inward = rtl ? dx <= -40 : dx >= 40
+        guard fromEdge, inward, abs(dx) > abs(dy) * 1.5 else { return }
+        debugLog("[GROUPS] edge swipe opened sidebar")
+        phoneDrawerOpen = true
+    }
 
     /// Phone header row (Logan 2026-09-05, mockup "Phone · Live TV"): the
     /// groups control at the left, the pills (pills mode) or the active group
@@ -2010,6 +2037,8 @@ struct ChannelListView: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 40)
                     .onChanged { value in
+                        // GH #102: edge-swipe mode replaces the group swipe.
+                        if edgeSwipeOpensSidebarActive { return }
                         let dx = value.translation.width
                         let dy = value.translation.height
                         // Latch dominance once per gesture so a drag that
@@ -2022,6 +2051,12 @@ struct ChannelListView: View {
                         groupDragOffset = canCycleGroup(forward: dx < 0) ? dx : dx / 3
                     }
                     .onEnded { value in
+                        if edgeSwipeOpensSidebarActive {
+                            groupDragIsHorizontal = nil
+                            groupDragOffset = 0
+                            handleEdgeSwipe(value)
+                            return
+                        }
                         let wasHorizontal = groupDragIsHorizontal == true
                         groupDragIsHorizontal = nil
                         let dx = value.translation.width
@@ -6701,6 +6736,9 @@ private struct PhoneGroupDrawerRow: View {
 /// Phone Group Selection: "sidebar" (default) or "pills". Separate from the
 /// Apple TV's `useGroupSidebar` so each device keeps its own choice.
 let phoneGroupSelectorKey = "phoneGroupSelector"
+/// GH #102: Settings > Live TV > Group Selection, "Swipe from Left Edge Opens
+/// Sidebar". iPhone and iPad only; not synced, same as phoneGroupSelectorKey.
+let liveTVEdgeSwipeOpensSidebarKey = "liveTVEdgeSwipeOpensSidebar"
 
 /// iPhone and iPad share the bottom-bar Live TV layout (Logan 2026-10-04):
 /// header row, group drawer, Group Selection setting, collapse on scroll.
