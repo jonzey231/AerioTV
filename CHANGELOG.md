@@ -36,7 +36,7 @@
 
 ### Fixed
 
-- Audio-only programs no longer tap or click on SiriusXM-style feeds:
+- Audio-only programs no longer tap or click on radio channels:
   timestamps are rewritten from a running sample clock.
 - Force HLS direct tiles accept audio-only programs, and "Channel is
   stopping" retries back off.
