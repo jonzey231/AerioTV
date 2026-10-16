@@ -5167,8 +5167,10 @@ enum LiveEdgeHoldback {
 
     /// Ceiling for the audio-only bursty-feed rule (2026-10-15): a proxied
     /// radio channel released in 256 KB chunks goes 9 to 10 s between
-    /// segments, so W + 2 s can pass the 18 s video ceiling.
-    static let audioOnlyCap = 20.0
+    /// segments, so W + 2 s can pass the 18 s video ceiling. Raised to 32 s
+    /// the same day: Alt Nation's bursts grew to 18 to 29 s mid-session and a
+    /// 20 s ceiling could not cover them.
+    static let audioOnlyCap = 32.0
 
     static func record(_ seconds: Double, for key: String, cap: Double = 18) {
         var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
@@ -5333,6 +5335,18 @@ final class AVPlayerProgressDriver {
     private var audioOnlyBurstHandled = false
     private var audioOnlyPendingRejoin: Double?
     private var audioOnlyRejoinDeferredLogged = false
+    /// In-session growth (2026-10-15): the hold-back this session currently
+    /// runs for an audio-only program, the starvation stamp already handled,
+    /// how many in-session raises happened, when the last audio-only rejoin
+    /// seek ran (one per 15 s at most), and whether the cap line was logged.
+    private var audioOnlyHoldback = 0.0
+    private var audioOnlyHandledStarvation: Date?
+    private var audioOnlyRaiseCount = 0
+    private var audioOnlyLastRejoinSeekAt: Date?
+    private var audioOnlyCapLogged = false
+    private var audioOnlySpacingLogged = false
+    private static let audioOnlyRejoinSpacing: TimeInterval = 15
+    private static let audioOnlyMinReseekRaise = 2.0
     private let driverInitWall = Date()
     /// Live join-offset bookkeeping (see `maybeRaiseJoinOffset`).
     var appliedLiveOffset = 0.0
@@ -6097,34 +6111,104 @@ final class AVPlayerProgressDriver {
     /// offset only after a stall, in steps, and only for the next tune, so a
     /// radio channel chopped for a minute or more. For audio-only programs
     /// only, the FIRST starvation above 4 s sets the hold-back to W + 2 s
-    /// (cap 20 s) at once, persists it for the next tune, and rejoins the
+    /// (cap 32 s) at once, persists it for the next tune, and rejoins the
     /// local window at that offset as soon as the window holds it, with no
     /// 60 s / 3 minute repeat-stall gating. Video channels are untouched.
+    ///
+    /// In-session growth (2026-10-15, Alt Nation on the Apple TV): the
+    /// provider's bursts grew from 9.5 s to 18 to 29 s after the first raise,
+    /// the session kept its 11.5 s offset, and the buffer ran empty twice.
+    /// Every later starved closure whose gap + 2 s (rounded up to whole
+    /// seconds) passes the current hold-back now raises it at once, persists
+    /// it, and rejoins that far back (one rejoin seek per 15 s at most, none
+    /// for a raise under 2 s).
     private func checkAudioOnlyBurstyFeed() {
-        guard isLive, !audioOnlyBurstHandled, !externalRenderSuspended,
+        guard isLive, !externalRenderSuspended,
               store.isAudioOnlyProgram, let key = liveHoldbackKey else {
             retryAudioOnlyRejoin()
             return
         }
-        // Only a starvation measured during THIS session counts.
-        guard let since = TSHLSRemuxer.lastFeedStarvation.secondsSince(),
-              since <= Date().timeIntervalSince(driverInitWall) else { return }
-        let gap = TSHLSRemuxer.lastFeedStarvationGap.get()
-        guard gap > 4.0 else { return }
-        audioOnlyBurstHandled = true
-        let base = LiveEdgeHoldback.offset(for: key)
-        let want = min(LiveEdgeHoldback.audioOnlyCap, gap + 2.0)
-        let target = max(base, want)
-        if want > base + 0.5 {
-            LiveEdgeHoldback.record(want, for: key, cap: LiveEdgeHoldback.audioOnlyCap)
+        // Only a starvation measured during THIS session counts, and each
+        // starved closure is handled once.
+        let nowWall = Date()
+        guard let since = TSHLSRemuxer.lastFeedStarvation.secondsSince(nowWall),
+              since <= nowWall.timeIntervalSince(driverInitWall) else {
+            retryAudioOnlyRejoin()
+            return
         }
-        sessionHoldback = max(sessionHoldback, target)
-        liveOffsetFloor = max(liveOffsetFloor, target)
+        let stamp = nowWall.addingTimeInterval(-since)
+        if let handled = audioOnlyHandledStarvation, stamp.timeIntervalSince(handled) < 0.05 {
+            retryAudioOnlyRejoin()
+            return
+        }
+        let gap = TSHLSRemuxer.lastFeedStarvationGap.get()
+        guard gap > 4.0 else {
+            retryAudioOnlyRejoin()
+            return
+        }
+        audioOnlyHandledStarvation = stamp
+        let cap = LiveEdgeHoldback.audioOnlyCap
+        let wanted = (gap + 2.0).rounded(.up)
+        let want = min(cap, wanted)
+        let channel = liveChannelName ?? "-"
+        if !audioOnlyBurstHandled {
+            // First starvation of the session: same as before, from the
+            // learned value (or the base).
+            audioOnlyBurstHandled = true
+            let base = LiveEdgeHoldback.offset(for: key)
+            let target = max(base, want)
+            if want > base + 0.5 {
+                LiveEdgeHoldback.record(want, for: key, cap: cap)
+            }
+            audioOnlyHoldback = target
+            sessionHoldback = max(sessionHoldback, target)
+            liveOffsetFloor = max(liveOffsetFloor, target)
+            debugLog(String(format:
+                "[AVP-HOLDBACK] audio-only bursty feed: gap %.1fs -> hold-back %.1fs now (and for the next tune) channel=%@",
+                gap, target, channel))
+            logAudioOnlyCapIfNeeded(gap: gap, wanted: wanted, cap: cap, channel: channel)
+            audioOnlyPendingRejoin = target
+            retryAudioOnlyRejoin()
+            return
+        }
+        let was = max(audioOnlyHoldback, sessionHoldback)
+        guard want > was else {
+            logAudioOnlyCapIfNeeded(gap: gap, wanted: wanted, cap: cap, channel: channel)
+            retryAudioOnlyRejoin()
+            return
+        }
+        audioOnlyRaiseCount += 1
+        audioOnlyHoldback = want
+        LiveEdgeHoldback.record(want, for: key, cap: cap)
+        sessionHoldback = max(sessionHoldback, want)
+        liveOffsetFloor = max(liveOffsetFloor, want)
         debugLog(String(format:
-            "[AVP-HOLDBACK] audio-only bursty feed: gap %.1fs -> hold-back %.1fs now (and for the next tune) channel=%@",
-            gap, target, liveChannelName ?? "-"))
-        audioOnlyPendingRejoin = target
+            "[AVP-HOLDBACK] audio-only bursty feed: gap %.1fs -> hold-back %.0fs now (was %.0fs, in-session raise #%d) channel=%@",
+            gap, want, was, audioOnlyRaiseCount, channel))
+        logAudioOnlyCapIfNeeded(gap: gap, wanted: wanted, cap: cap, channel: channel)
+        if want - was >= Self.audioOnlyMinReseekRaise {
+            audioOnlyPendingRejoin = max(audioOnlyPendingRejoin ?? 0, want)
+            audioOnlyRejoinDeferredLogged = false
+            audioOnlySpacingLogged = false
+        } else {
+            if let pending = audioOnlyPendingRejoin {
+                audioOnlyPendingRejoin = max(pending, want)
+            }
+            debugLog(String(format:
+                "[AVP-NUDGE] audio-only raise %.0fs -> %.0fs under %.0f s, no rejoin seek",
+                was, want, Self.audioOnlyMinReseekRaise))
+        }
         retryAudioOnlyRejoin()
+    }
+
+    /// One line per session when the audio-only ceiling holds the hold-back
+    /// below gap + 2 s.
+    private func logAudioOnlyCapIfNeeded(gap: Double, wanted: Double, cap: Double, channel: String) {
+        guard wanted > cap, !audioOnlyCapLogged else { return }
+        audioOnlyCapLogged = true
+        debugLog(String(format:
+            "[AVP-HOLDBACK] audio-only hold-back capped at %.0fs: gap %.1fs wanted %.0fs channel=%@",
+            cap, gap, wanted, channel))
     }
 
     /// Moves the playhead to `audioOnlyPendingRejoin` seconds behind the live
@@ -6157,7 +6241,18 @@ final class AVPlayerProgressDriver {
             }
             return
         }
+        if let last = audioOnlyLastRejoinSeekAt,
+           Date().timeIntervalSince(last) < Self.audioOnlyRejoinSpacing {
+            if !audioOnlySpacingLogged {
+                audioOnlySpacingLogged = true
+                debugLog(String(format:
+                    "[AVP-NUDGE] audio-only rejoin to %.1f s held: last rejoin seek %.1f s ago (min %.0f s)",
+                    holdback, Date().timeIntervalSince(last), Self.audioOnlyRejoinSpacing))
+            }
+            return
+        }
         audioOnlyPendingRejoin = nil
+        audioOnlyLastRejoinSeekAt = Date()
         lastRejoinAt = Date()
         stallGateSince = nil
         let target = end - CMTime(seconds: holdback, preferredTimescale: 600)
@@ -6363,10 +6458,16 @@ final class AVPlayerProgressDriver {
                     stalls, rate))
             } else {
                 let td = liveTargetDuration?() ?? 2.0
-                let base = LiveEdgeHoldback.offset(for: key)
-                let next = min(18.0, max(base + 3, worstGap + (td > 0 ? td : 2.0)))
+                let learnedBase = LiveEdgeHoldback.offset(for: key)
+                // Audio-only programs use their own ceiling, and the base is
+                // never below the in-session value, so a stall after an
+                // in-session raise never lowers it (2026-10-15).
+                let audioOnly = store.isAudioOnlyProgram
+                let ceiling = audioOnly ? LiveEdgeHoldback.audioOnlyCap : 18.0
+                let base = audioOnly ? max(learnedBase, audioOnlyHoldback) : learnedBase
+                let next = min(ceiling, max(base + 3, worstGap + (td > 0 ? td : 2.0)))
                 if next > base + 0.5 {
-                    LiveEdgeHoldback.record(next, for: key)
+                    LiveEdgeHoldback.record(next, for: key, cap: ceiling)
                 }
                 // Applied to THIS session as well (2026-09-13): the raise is
                 // the session's target live-edge offset from here on, and the
@@ -6762,7 +6863,8 @@ final class AVPlayerProgressDriver {
             // Never rejoin closer to the edge than this channel has taught
             // us it can sustain (2026-09-13): landing 1 s back on a bursty
             // feed just books the next stall.
-            let back = max(1.0, min(20.0, self?.sessionHoldback ?? 0))
+            let ceiling = (self?.store.isAudioOnlyProgram ?? false) ? LiveEdgeHoldback.audioOnlyCap : 20.0
+            let back = max(1.0, min(ceiling, self?.sessionHoldback ?? 0))
             player.seek(to: CMTime(seconds: max(0, end - back), preferredTimescale: 600))
             if player.timeControlStatus == .paused { player.play() }
         }

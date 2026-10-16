@@ -3496,6 +3496,84 @@ struct AudioOnlyRun {
 
 runAudioOnlyChecks()
 
+// MARK: Audio-only sample clock: one resync per source step
+
+/// ADTS AAC-LC 44.1 kHz stereo frame of `len` bytes (1024 samples).
+func clockADTSFrame(_ len: Int = 100) -> [UInt8] {
+    var f: [UInt8] = [0xFF, 0xF1, 0x50, 0x80 | UInt8((len >> 11) & 0x03),
+                      UInt8((len >> 3) & 0xFF), UInt8((len & 0x07) << 5) | 0x1F, 0xFC]
+    f += [UInt8](repeating: 0x21, count: len - 7)
+    return f
+}
+
+/// TS packets of one PES (PTS only) carrying `frames` ADTS frames.
+func clockPESPackets(pts: Int64, frames: Int, cc: inout UInt8) -> [Data] {
+    var pes: [UInt8] = [0, 0, 1, 0xC0, 0, 0, 0x80, 0x80, 5, 0, 0, 0, 0, 0]
+    AudioOnlySampleClock.writeTS(&pes, 9, pts)
+    pes[9] = (pes[9] & 0x0F) | 0x20
+    for _ in 0..<frames { pes += clockADTSFrame() }
+    var out: [Data] = []
+    var i = 0
+    while i < pes.count {
+        let chunk = Array(pes[i..<min(i + 184, pes.count)])
+        var pkt = tsPacket(pid: 0x100, pusi: i == 0, cc: cc, payload: chunk)
+        if chunk.count < 184 {
+            // Pad with an adaptation field so the payload stays contiguous.
+            let pad = 184 - chunk.count
+            pkt = [0x47, i == 0 ? 0x41 : 0x01, 0x00, 0x30 | cc, UInt8(pad - 1)]
+            if pad > 1 { pkt += [0x00] + [UInt8](repeating: 0xFF, count: pad - 2) }
+            pkt += chunk
+        }
+        cc = (cc + 1) & 0x0F
+        out.append(Data(pkt))
+        i += 184
+    }
+    return out
+}
+
+@MainActor func runAudioOnlyClockStepChecks() {
+    // 8 frames per PES (185.8 ms), PTS rounded to whole ms like the
+    // SiriusXM feed, one genuine +291 ms step before PES 20.
+    var clock = AudioOnlySampleClock(streamType: 0x0F, primaryPID: 0x100)
+    clock.requestResync(nil)
+    var cc: UInt8 = 0
+    var resyncs: [(Int, String)] = []
+    var outPTS: [Int64] = []
+    let pesSamples = 8 * 1024
+    for n in 0..<60 {
+        let exact = Double(n * pesSamples) / 44100 + (n >= 20 ? 0.291 : 0)
+        let pts = Int64((exact * 1000).rounded()) * 90 + 900_000
+        for (k, pkt) in clockPESPackets(pts: pts, frames: 8, cc: &cc).enumerated() {
+            let r = clock.process(pkt)
+            for line in r.logs where line.contains("resync") { resyncs.append((n, line)) }
+            if k == 0 { outPTS.append(AudioOnlySampleClock.readTS([UInt8](r.packet), 4 + 9)) }
+        }
+    }
+    expectEq(resyncs.count, 1, "audio-only clock: one 291 ms source step yields exactly one resync")
+    expect(resyncs.first?.0 == 20, "audio-only clock: the resync lands on the stepped PES")
+    // After the step the output advances by the counted frames only.
+    let steps = (21..<60).map { outPTS[$0] - outPTS[$0 - 1] }
+    expect(steps.allSatisfy { abs($0 - Int64(pesSamples) * 90_000 / 44100) <= 1 },
+           "audio-only clock: after the resync the output PTS steps by exactly 8 frames")
+
+    // Field case: PES that arrive with frames missing while the source
+    // PTS keeps real time. Each short PES is a genuine hole, one resync each.
+    var lossy = AudioOnlySampleClock(streamType: 0x0F, primaryPID: 0x100)
+    lossy.requestResync(nil)
+    var lossyResyncs = 0
+    var t: Int64 = 900_000
+    for n in 0..<40 {
+        let frames = (10..<20).contains(n) ? 3 : 8
+        for pkt in clockPESPackets(pts: t, frames: frames, cc: &cc) {
+            lossyResyncs += lossy.process(pkt).logs.filter { $0.contains("resync") }.count
+        }
+        t += Int64(8 * 1024) * 90_000 / 44100
+    }
+    expectEq(lossyResyncs, 10, "audio-only clock: ten PES missing frames yield ten resyncs, one each")
+}
+
+runAudioOnlyClockStepChecks()
+
 // MARK: AirPlay LAN card video (audio-only programs)
 
 @MainActor func cardPSIPacket(pid: Int, section: [UInt8]) -> [UInt8] {
