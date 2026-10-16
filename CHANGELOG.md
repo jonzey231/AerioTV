@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.8.44 - 2026-10-16
+
+### Added
+
+- Radio Mode by Default: a setting in Settings > Player that opens every
+  channel in Radio Mode, with its own Sync Categories row (off by default).
+  Watch in the long-press menu still plays video. Requested by Glitzbr on
+  Discord.
+- Dispatcharr radio flag: AerioTV reads the radio flag on every backend.
+  Declared radio channels start as audio at once and open Radio Mode, and
+  admins can Mark as Radio Channel or Unmark as Radio Channel from the
+  long-press menu.
+- Radio Mode shows Channel Unavailable with a 5 s retry, and failed channels
+  are not kept live.
+- Apple TV: Back is a mappable guide key in the Remote Control settings, and
+  one press holds one action.
+- Developer: Dump Audio-Only Segments toggle.
+
+### Changed
+
+- Audio-only channels start fast in Radio Mode and on remembered channels,
+  and join at 3x the target duration so playback begins sooner.
+- The audio-only hold-back is learned on a bursty feed and grows during the
+  session, up to 32 s.
+- The Radio Mode card shares its row with the round Cast button, like the
+  Kept Live card, and the floating Cast button hides while Radio Mode is
+  active.
+- Apple TV: a double Menu press stops Radio Mode, and the hint row shows
+  Double Back Stop.
+- Apple TV: Radio Mode keeps guide focus on the chosen cell and restores it
+  on every stop.
+- Dispatcharr re-login is gated to one attempt per minute and honors server
+  rate limits (429 Retry-After).
+
+### Fixed
+
+- Audio-only programs no longer tap or click on SiriusXM-style feeds:
+  timestamps are rewritten from a running sample clock.
+- Force HLS direct tiles accept audio-only programs, and "Channel is
+  stopping" retries back off.
+- Editing a playlist URL resets the sign-in and server-bound state, so the
+  playlist reloads cleanly.
+- Deleting a playlist no longer crashes or stalls the app.
+- iPhone: the tab bar stays hidden under the full-screen player across
+  Picture in Picture, rotation, and auto-hide.
+- The Favorites group sorted By Number follows the channel order, not the
+  order channels were favorited (jonzey231/AerioTV#100).
+
 ## v1.8.43 - 2026-10-14
 
 ### Added
