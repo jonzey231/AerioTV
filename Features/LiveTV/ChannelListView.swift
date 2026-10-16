@@ -573,6 +573,10 @@ struct ChannelListView: View {
     /// latch (nil until the first onChanged decides edge drag or not).
     @State private var edgeDragTranslation: CGFloat? = nil
     @State private var edgeDragRecognized: Bool? = nil
+    /// GH #102 drag-to-close: outward translation while a close drag on the
+    /// open drawer or scrim is in flight (nil when none), and its latch.
+    @State private var closeDragTranslation: CGFloat? = nil
+    @State private var closeDragRecognized: Bool? = nil
     @State private var phoneSearchPresented = false
     /// Phone sidebar mode: the group drawer over the list / guide.
     @State private var phoneDrawerOpen = false
@@ -1265,7 +1269,9 @@ struct ChannelListView: View {
         // GH #102: 1 when open (header button or a completed edge swipe);
         // during an edge drag, the fraction of the drawer pulled out.
         let width = edgeSwipeDrawerWidth
-        let progress: CGFloat = phoneDrawerOpen ? 1
+        // A close drag on the open drawer pulls it back by its translation.
+        let progress: CGFloat = phoneDrawerOpen
+            ? 1 - min(max((closeDragTranslation ?? 0) / width, 0), 1)
             : min(max((edgeDragTranslation ?? 0) / width, 0), 1)
         let hidden = (1 - progress) * width
         return ZStack(alignment: .leading) {
@@ -1315,6 +1321,53 @@ struct ChannelListView: View {
             // mirrored, so RTL (drawer on the right) moves the other way.
             .offset(x: listLayoutDirection == .rightToLeft ? hidden : -hidden)
             .transition(.move(edge: .leading))
+        }
+        // GH #102: drag the open drawer (or the scrim) toward the leading
+        // edge to close it, whatever opened it and whatever the toggle says.
+        // Simultaneous with a 10 pt slop plus the dominance latch, so the
+        // drawer list's vertical scroll, reorder, and row taps keep working.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                .onChanged(closeDragChanged)
+                .onEnded(closeDragEnded)
+        )
+    }
+
+    private func closeDragChanged(_ value: DragGesture.Value) {
+        guard phoneDrawerOpen else { return }
+        let dx = value.translation.width
+        let dy = value.translation.height
+        if closeDragRecognized == nil {
+            closeDragRecognized = abs(dx) > abs(dy) * 1.5 && edgeInward(dx) < 0
+        }
+        guard closeDragRecognized == true else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            closeDragTranslation = min(max(-edgeInward(dx), 0), edgeSwipeDrawerWidth)
+        }
+    }
+
+    /// Release: close past 40% of the drawer width or on an outward fling
+    /// above 300 pt/s, else spring back open.
+    private func closeDragEnded(_ value: DragGesture.Value) {
+        let recognized = closeDragRecognized == true
+        closeDragRecognized = nil
+        guard recognized, closeDragTranslation != nil else {
+            closeDragTranslation = nil
+            return
+        }
+        let width = edgeSwipeDrawerWidth
+        let travel = min(max(-edgeInward(value.translation.width), 0), width)
+        let velocity = -edgeInward(value.velocity.width)
+        if travel > width * 0.4 || velocity > 300 {
+            withAnimation(phoneDrawerSpring) {
+                phoneDrawerOpen = false
+                closeDragTranslation = nil
+            }
+            debugLog("[GROUPS] drag closed sidebar")
+        } else {
+            withAnimation(phoneDrawerSpring) { closeDragTranslation = nil }
         }
     }
     #endif
