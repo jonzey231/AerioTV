@@ -2830,7 +2830,21 @@ struct ChannelListView: View {
             let nonFavs = result.filter { !favoritesStore.isFavorite($0.id) }
             result = favs + nonFavs
         default: // "number"
-            break // Channels arrive in number order from ChannelStore
+            // Most groups arrive in ChannelStore (provider/number) order
+            // already. Favorites is built from the favorites list, which is
+            // in favoriting order (#100), so restore ChannelStore order with
+            // a stable reorder; ids missing from the store keep their
+            // relative order at the end.
+            if selectedGroup == favoritesToken {
+                let storeRank = Dictionary(channelStore.channels.enumerated().map { ($0.element.id, $0.offset) },
+                                           uniquingKeysWith: { first, _ in first })
+                result = result.enumerated().sorted { lhs, rhs in
+                    let rl = storeRank[lhs.element.id] ?? Int.max
+                    let rr = storeRank[rhs.element.id] ?? Int.max
+                    if rl != rr { return rl < rr }
+                    return lhs.offset < rhs.offset
+                }.map { $0.element }
+            }
         }
         // Group ordering: when a non-default group order is chosen in
         // Manage Groups (A-Z or Manual), reorder channels so they are
