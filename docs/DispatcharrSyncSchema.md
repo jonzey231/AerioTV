@@ -97,8 +97,15 @@ Timestamps inside `data` are integer Unix seconds (UTC) to save bytes; only the 
 ## 4. Payloads
 
 IDs:
-- Channel: Dispatcharr channel `id` (int). Not the UUID, not the channel number.
-- VOD: the server's ids as strings: movie id, series id, episode id (`"vodId"`), exactly as `/api/vod/...` returns them.
+- Channel: Dispatcharr channel `id` (int). Not the UUID, not the channel number. favorites, recents,
+  collections, and reminders all use it. Android keys channels locally as `"disp:<uuid>"` and
+  translates them through its channel cache (the Dispatcharr channel id stored per cached channel)
+  in both directions. A local key or a remote id it cannot translate (cache not built yet, channel
+  gone) is never deleted: it is left out of the translation and kept as is on both sides. Apple
+  follows the same rule.
+- VOD: the Dispatcharr movie, series, and episode UUIDs as strings (`"vodId"`, `seriesId`), byte for
+  byte exactly as `/api/vod/...` returns them. Never a numeric id, never reformatted (no case change,
+  no added or removed hyphens).
 - Program: XMLTV programme id is not stable across EPG refreshes, so reminders key on `channelId` plus `start` (Unix seconds). That pair is the identity on both platforms.
 - Group: group name (string), as the server sends it.
 - Rows are compact arrays (positional). Position meanings are fixed per `schemaVersion`; new positions may only be appended (readers ignore extra trailing positions).
@@ -141,7 +148,11 @@ Finished entries older than 30 days are dropped before the cap is applied.
 {"rows":[[1042,1760731200,1760734800,"Monday Night Football","ESPN"]]}
 ```
 Row: `[channelId:int, start:int, end:int, title:string(max 60 B), channelName:string(max 40 B)]`.
-Writers drop rows whose `end` is in the past. Readers schedule a local notification (Apple) or
+Writers drop rows whose `end` is in the past.
+Channel rule (both platforms): write `channelId` when the local reminder knows it. Android today
+resolves it from the reminder's channel name through the channel cache; a local reminder whose
+channel cannot be resolved is not written. On read, a row whose `channelId` does not resolve to a
+local channel is kept in the payload (re-emitted on the next write) but not scheduled. Readers schedule a local notification (Apple) or
 alarm (Android) 5 minutes before `start`, and cancel local reminders absent from the payload.
 
 ### 4.5 watchlist (cap 500, newest first)
@@ -149,7 +160,8 @@ alarm (Android) 5 minutes before `start`, and cancel local reminders absent from
 {"rows":[["5531","m",1760700000],["301","s",1760600000]]}
 ```
 Row: `[vodId:string, type:"m"|"s", addedAt:int]`. Removal = absence (full replace replaces Android's
-`removedAt` tombstones; see 6.3). Title, poster, year, and rating come from the catalog.
+`removedAt` tombstones; see 6.3). Rows carry no title: the app fills title, poster, year, and rating
+from the VOD catalog by `vodId`.
 
 ### 4.6 hiddenTitles (cap 500)
 ```json
@@ -171,7 +183,7 @@ string[] each, cap 500 names each.
 
 ### 4.9 settings
 ```json
-{"v":{"selectedTheme":"ocean","appearanceMode":"dark","trueBlack":true,"textScale":1.1}}
+{"v":{"selectedTheme":"Midnight","appearanceMode":"dark","trueBlack":true,"textScale":1.1}}
 ```
 `v`: map of schema name to bool, int, double, or string. Only names in this allowlist are written:
 
@@ -188,8 +200,8 @@ string[] each, cap 500 names each.
 | subtextScale | double | SubtextScale.key | subtextScale |
 | textContrast | double | TextContrast.key | textContrast |
 | guideProgramInfoButton | string | guideProgramInfoButton | guideProgramInfoButton |
-| programInfoButtonGuide | string | guideProgramInfoButtonGuideView | programInfoButtonGuide |
-| programInfoButtonList | string | guideProgramInfoButtonListView | programInfoButtonList |
+| programInfoButtonGuide | bool | guideProgramInfoButtonGuideView | programInfoButtonGuide |
+| programInfoButtonList | bool | guideProgramInfoButtonListView | programInfoButtonList |
 | showEpgBadgesTv | bool | showEpgBadges.tv | showEpgBadgesTv |
 | showEpgBadgesMobile | bool | showEpgBadges.mobile | (Apple only) |
 | showRemoteHints | bool | showRemoteHintsKey | showRemoteHints |
@@ -210,6 +222,22 @@ string[] each, cap 500 names each.
 | skipLoadingScreen | bool | (Android only) | skipLoadingScreen |
 | appleTVChannelFlip | bool | (Android only) | appleTVChannelFlip |
 
+Values (what Android writes; Apple maps to exactly these strings and numbers). On read, an unknown
+value or a value of the wrong type is ignored and the local setting is left unchanged:
+| Schema name | Values |
+|---|---|
+| selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"` (Android AppTheme enum names, case sensitive) |
+| appearanceMode | `"dark"` (default), `"light"`, `"system"` |
+| defaultTab | `"LiveTV"`, `"DVR"`, `"Movies"`, `"TVShows"`, `"Settings"` (Android AppTab enum names); absent or `""` = Live TV |
+| timeFormat | `"system"` (default), `"12"`, `"24"` |
+| textScale, subtextScale | number 0.85 to 1.50 in 0.05 steps, default 1.0; readers clamp and snap |
+| textContrast | number 0.0 to 1.0 in 0.1 steps, default 0.0; readers clamp and snap |
+| guideProgramInfoButton | `"off"`, `"current"`, `"all"` |
+| guideGroupSelector | `"pills"`, `"sidebar"` |
+| phoneGroupSelector | `"sidebar"` (default), `"pills"` |
+| guideSidebarLayout | `"overlay"` (default), `"shift"` |
+| every bool row | JSON `true` or `false`, never a string |
+
 Excluded from settings (own keys or device-local): `remoteControlMap`, `radioModeByDefault`,
 `favoriteChannelIDs`, `favoriteOrder`, `channelGroupOrder*`, `hiddenChannelGroups` and siblings,
 `defaultLiveTVView`, `streamBufferSize`, `networkTimeout`, `maxRetries`, `bgRefresh*`, `preferAVPlayer`.
@@ -218,10 +246,34 @@ until closed, the other platform round-trips it (6.2).
 
 ### 4.10 remoteMap
 ```json
-{"tv":{"menu":"guide","playPause":"togglePlay","longSelect":"options"}}
+{"tv":{"version":1,"preset":"custom","guideKeys":2,"player":{"okShort":"toggleControls","upLong":"recentChannels"},"guide":{"ffwd":"pageDown","okLong":"programMenu"}}}
 ```
-`tv`: map of button name to action name (strings), as both apps already encode the TV map. Phones
-and tablets never edit it and round-trip it untouched.
+`tv` is a nested object, exactly the Android RemoteControlMap JSON (core/remote/RemoteControlMap.kt):
+| Field | Type | Values |
+|---|---|---|
+| version | int | 1 |
+| preset | string | `"default"` (track the app's standard scheme; stored slots are ignored) or `"custom"` (slots are authoritative). Any other preset discards the map |
+| guideKeys | int | 2. Marks a map written after the guide Select, Left, and Right slots became honored; absent means an older map that the reader migrates |
+| player | object | slot name to player action name |
+| guide | object | slot name to guide action name |
+
+Slot names: `okShort`, `okLong`, `upShort`, `upLong`, `downShort`, `downLong`, `leftShort`,
+`leftLong`, `rightShort`, `rightLong`, `playPause`, `ffwd`, `rewind`, `channelUp`, `channelDown`,
+`backShort`, `backLong` (the two Back slots are guide only; a reader drops them from `player`).
+
+Player actions: `channelUp`, `channelDown`, `lastChannel`, `recentChannels`, `toggleControls`,
+`showProgramInfo`, `optionsMenu`, `playPause`, `seekForward`, `seekBackward`, `restartProgram`,
+`jumpToLive`, `minimizeToGuide`, `channelList`, `subtitles`, `audioTracks`, `aspectRatio`, `record`,
+`sleepTimer`, `openSearch`, `stopPlayback`, `none`.
+
+Guide actions: `pageUp`, `pageDown`, `timelineBack`, `timelineForward`, `jumpToNow`, `jumpToTop`,
+`jumpToDay`, `focusGroupPills`, `resumePlayer`, `closeMiniPlayer`, `programInfo`, `openSearch`,
+`programMenu`, `play`, `record`, `navigate`, `backLadder`, `none`.
+
+Readers ignore unknown slots and actions; a missing slot falls back to the app default at resolve
+time; `none` is an explicit unassigned slot. When a press repeats inside one context, the first
+value wins. Apple writes and reads this same shape. Phones and tablets never edit it and round-trip
+it untouched.
 
 ### 4.11 radioDefault
 ```json
@@ -355,7 +407,7 @@ the key is still about 6 KB, and the collections caps (50 x 500 members) bound t
 | `hiddenChannelGroups`, `hiddenMovieGroups`, `hiddenSeriesGroups` | hiddenGroups.live/movies/series | |
 | `channelGroupOrder.sortMode`, `channelGroupOrder` | groupOrder.mode, order | |
 | prefs dictionary allowlist | settings.v | Table 4.9 |
-| `RemoteControlStore.mapKey` | remoteMap.tv | |
+| `RemoteControlStore.mapKey` | remoteMap.tv | Must match the 4.10 shape exactly |
 | `RadioModeSession.byDefaultKey` | radioDefault.on | |
 | servers, credentials categories | not synced here | Stay on iCloud |
 
