@@ -243,7 +243,8 @@ Written only by a device signed in as the admin profile, under the admin's own `
 ```json
 {"rows":[[1,"admin","Logan","none","",""],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex"]]}
 ```
-Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string]`, cap 25 rows.
+Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child"]`, cap 25 rows.
+- `role` is the app-local role set by an Admin on the device (default: `"admin"` when the Dispatcharr user level is Admin, else `"user"`). `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs an Admin PIN.
 - `pinHash` = lowercase hex SHA-256 of `pinSalt bytes || UTF-8 PIN` where the PIN is digits for
   numbers and the letters `U D L R` for directions (example `"UULR"`). Empty when `pinType` is `"none"`.
 - `pinSalt` = 16 random bytes from the platform CSPRNG, lowercase hex, regenerated on every PIN set
