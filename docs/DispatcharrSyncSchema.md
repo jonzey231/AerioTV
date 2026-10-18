@@ -293,9 +293,16 @@ Row: `[id:string, name:string(max 40 B), placement:"b"|"e", members:int[]]`, row
 ### 4.12 profiles (admin user only)
 Written only by a device signed in as the admin profile, under the admin's own `me` key.
 ```json
-{"rows":[[1,"admin","Logan","none","",""],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex"]]}
+{"rows":[[1,"admin","Logan","none","","","admin",1760724245],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000]]}
 ```
-Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child"]`, cap 25 rows.
+Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int]`, cap 25 rows.
+- `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, or role on the
+  writing device. Absent (older writer) reads as 0.
+- Merge is PER ROW, not last writer wins for the whole key: on every pull, a pulled row replaces the
+  local displayName, role, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
+  local row's; otherwise the local row stays and goes back up on the next write. A row for a user
+  this device has no profile for is added (section 5). A writer keeps rows it does not have locally,
+  except a profile it removed itself after that row's `updatedAt`.
 - `role` is the app-local role set by an Admin on the device (default: `"admin"` when the Dispatcharr user level is Admin, else `"user"`). `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs an Admin PIN.
 - `pinHash` = lowercase hex SHA-256 of `pinSalt bytes || UTF-8 PIN` where the PIN is digits for
   numbers and the letters `U D L R` for directions (example `"UULR"`). Empty when `pinType` is `"none"`.
