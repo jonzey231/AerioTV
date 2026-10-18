@@ -1,10 +1,13 @@
-# Dispatcharr Sync schema (v1)
+# Dispatcharr Sync schema (v3)
 
 Status: draft, not yet implemented on either platform.
 
 Shared by AerioTV for Apple (iOS, iPadOS, tvOS) and AerioTV for Android.
 This file must be byte-identical in both repos at `docs/DispatcharrSyncSchema.md`.
 Any change bumps the affected key's `schemaVersion` and lands in both repos in the same day.
+v3 (2026-10-18): ONE App Data key, `app.molinete.aerio`, holds every category (section 2), at the
+request of Dispatcharr's maintainer, so AerioTV uses 1 of a user's 25 keys. v1 used 13 keys and v2
+used three; both migrate (section 6.4). Payloads (section 4), caps, and merges are unchanged.
 
 ## 1. What it is
 
@@ -25,7 +28,7 @@ see the same favorites, progress, and reminders.
 | Endpoints | `GET/PUT/DELETE /api/accounts/users/me/app-data/<key>/`, `GET /api/accounts/users/me/app-data/` (list keys and sizes) |
 | Admin cross-user | `/api/accounts/users/<id>/app-data/<key>/` (user_level >= 10). AerioTV does not use it for writes in v1 |
 | Key pattern | `^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$` |
-| Limits | 25 keys per user, 32 KiB per key (compact UTF-8 JSON), 128 KiB total per user, depth 8, body cap about 33 KiB |
+| Limits | 25 keys per user, 32 KiB per key (compact UTF-8 JSON; being raised by the maintainer), 128 KiB total per user, depth 8, body cap about 33 KiB |
 | Value | Must be a JSON object. PUT replaces the whole value. No PATCH, no ETag, no versioning |
 | Concurrency | Last writer wins (server serializes with a row lock) |
 | Visibility | Any admin can view and clear any user's data in the web UI |
@@ -33,8 +36,13 @@ see the same favorites, progress, and reminders.
 
 ## 2. Keys
 
-Prefix: `app.molinete.aerio.` One key per category. All keys are written with the profile's own
-token to `users/me/app-data/<key>/`.
+ONE App Data key, `app.molinete.aerio`, holds every category as a sub-object (section 3): settings,
+profiles, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder, collections, remoteMap,
+radioDefault, favorites, recents, and progress. It is written with the profile's own token to
+`users/me/app-data/app.molinete.aerio/`.
+
+Categories (the "Key" column below is the v1 key name; in v2 the category name is the part after
+`app.molinete.aerio.`, for example `hiddenTitles`):
 
 | Key | Category | Synced? | Default | Why |
 |---|---|---|---|---|
@@ -61,35 +69,49 @@ Device-local, never synced here, and why:
 - DVR recordings: server-side (Dispatcharr) or local files.
 - EPG, logos, VOD catalog caches: rebuilt from the server.
 
-Budget: 13 keys leaves 12 of 25 free for future categories.
+Budget: 1 key leaves 24 of 25 free for the user's other apps. New categories go inside the key, never
+into new keys.
 
-## 3. Envelope (every key)
+## 3. Envelope (every key) and category sub-objects
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "deviceId": "6F1C2A9E-4B7D-4C1E-9E1A-0D2B8C3F5A11",
   "platform": "ios",
   "appVersion": "1.8.44",
   "updatedAt": "2026-10-17T18:04:05Z",
-  "data": { }
+  "categories": {
+    "favorites": {"updatedAt": "2026-10-17T18:04:05Z", "deviceId": "6F1C...5A11", "data": {"ids": [1042, 77]}},
+    "recents": {"updatedAt": "2026-10-17T17:50:00Z", "deviceId": "A2B9...0C44", "data": {"rows": [[1042, 1760724245]]}}
+  }
 }
 ```
 
+The envelope fields describe the last write of the whole key. Each category is a sub-object under
+`categories` with its own `updatedAt` (ISO 8601, same rule as below), `deviceId` (the device that last
+wrote THAT category), `data` (section 4), and optional `extra`. Merge, round-trip, and caps apply per
+category exactly as in v1 (section 6): the envelope fields of v1 map to the sub-object's
+`updatedAt`/`deviceId`/`data`/`extra`.
+
+A write of a key re-emits every category it holds: it reads the key first (section 7.4a), replaces
+only the categories it rebuilt, and round-trips every other category (including ones this device has
+not read, has turned off, or does not know) untouched.
+
 | Field | Type | Rule |
 |---|---|---|
-| `schemaVersion` | int | Per key. Starts at 1. Bump only on a breaking change to `data` |
+| `schemaVersion` | int | 3 for the single-key layout (2 was the three-key layout, 1 one key per category). Bump only on a breaking change |
 | `deviceId` | string | Random UUID generated once per install, stored locally, never tied to hardware ids |
 | `platform` | string | `"ios"` (iPhone, iPad, Mac), `"tvos"`, `"android"` (phone, tablet, TV) |
 | `appVersion` | string | Diagnostics only |
 | `updatedAt` | string | ISO 8601 UTC, second precision, `Z` suffix |
-| `data` | object | The payload in section 4 |
-| `extra` | object, optional | Fields a newer writer added within the same `schemaVersion` (section 6.2) |
+| `categories` | object | Category name to sub-object (`updatedAt`, `deviceId`, `data`, optional `extra`) |
+| `extra` (in a sub-object) | object, optional | Fields a newer writer added within the same `schemaVersion` (section 6.2) |
 
 Reader rules:
-1. Missing envelope fields or wrong types: ignore the key, log `[DSYNC] malformed <key>`, do not overwrite it.
+1. Missing envelope fields or wrong types: ignore the key, log `[DSYNC] malformed <key>`, do not overwrite it. A sub-object missing `updatedAt` or `data` is ignored the same way, alone.
 2. `schemaVersion` greater than the reader knows: ignore the key, log `[DSYNC] skip <key> v<n> > v<known>`, and do not write that key until the app updates (writing would downgrade it).
-3. `schemaVersion` lower: upgrade in memory, write back at the current version on the next local change.
+3. `schemaVersion` lower: upgrade in memory, write back at the current version on the next local change. Older builds read the v3 key as a higher `schemaVersion` and skip it (rule 2).
 
 Encoding: compact JSON (no spaces), UTF-8, no NUL characters, max nesting depth 4 in practice.
 Timestamps inside `data` are integer Unix seconds (UTC) to save bytes; only the envelope uses ISO 8601.
@@ -341,17 +363,27 @@ Each platform stores the raw last-pulled JSON for every key and, on write:
 Settings rows it does not support (for example Android today for `categoryColor.*`) are therefore
 preserved byte for byte.
 
+### 6.4 Migration from v1 and v2
+On the first v3 session, if any other `app.molinete.aerio.*` key exists (the 13 v1 keys, or the v2
+`app.molinete.aerio.favorites` and `app.molinete.aerio.progress` keys) or `app.molinete.aerio` still
+holds a v2 value, the app reads all of them and merges PER CATEGORY by `updatedAt` (ties: higher
+`deviceId`) into the single key; each category keeps its `updatedAt`, `deviceId`, `data`, and
+`extra`. It PUTs the single key, then DELETEs every other `app.molinete.aerio.*` key. Log
+`[DSYNC] migrated to the single key (N keys removed)`. If the PUT fails, the old keys stay and
+migration runs again on the next pull.
+
 ### 6.3 Removals
 Removal is absence from the array. There are no tombstones in v1. Android's local `removedAt` and
 `unhiddenAt` fields stay local.
 
 ## 7. Cadence and errors
 
-1. Pull all enabled keys: on launch, on profile switch, on return to foreground after 5 minutes or more, and every 15 minutes while foregrounded. One `GET users/me/app-data/` lists sizes first; only keys present are fetched.
+1. Pull all enabled categories: on launch, on profile switch, on return to foreground after 5 minutes or more, and every 15 minutes while foregrounded. One `GET users/me/app-data/` lists sizes first; then one GET of `app.molinete.aerio` when present. A category absent from the key counts as read (empty).
 2. Never write a key not read since launch (or since profile switch). A 404 `key_not_found` counts as read (empty).
 3. Debounce writes: 5 s after the last local change per key; flush pending writes on background.
 4. Skip a PUT whose compact JSON equals the last pushed body.
-5. 413 `value_too_large` or `total_too_large`: trim by the order in section 8, retry once. If it fails again, stop writing that key until the next local change and show "Sync data too large" on the Dispatcharr Sync row in Settings.
+4a. Every PUT first GETs the key: row categories (favorites, recents, progress, collections, reminders) merge the server rows into local state, whole-value categories keep the newer side, and all other categories are re-emitted at their server value. An unsent local change is never overwritten by a pull without that merge.
+5. No app-side byte guard: the full value is sent. On 413 (`value_too_large`, `body_too_large`, or `total_too_large`), apply the next trim step of section 8 (one step per retry, log each) and PUT again. After the last step still fails, stop writing until the next local change and show "Sync data too large" on the Dispatcharr Sync row in Settings.
 6. 409 `max_apps`: do not create new keys; show "Sync storage on the server is full". Existing keys keep syncing.
 7. 401 or 403: refresh the token per existing login flow; if it still fails, pause Dispatcharr Sync for that profile and show "Sign in again to sync".
 8. 5xx or network errors: retry with backoff 30 s, 2 min, 10 min; keep the pending write.
@@ -360,9 +392,20 @@ Removal is absence from the array. There are no tombstones in v1. Android's loca
 ## 8. Size budget (heavy user)
 
 Heavy user: 600 favorites, 10 collections of 40 channels, 300 progress entries, 100 reminders, 50 recents, 200 My List, 50 hidden
-titles, 40 hidden groups, 60 ordered groups, 6 profiles. Envelope about 160 B per key.
+titles, 40 hidden groups, 60 ordered groups, 6 profiles. One envelope about 160 B, about 90 B per
+category sub-object (13 x 90 B = 1.2 KB).
 
-| Key | Row estimate | Total | Under 32 KiB |
+| Key | Contents | Total |
+|---|---|---|
+| `app.molinete.aerio` | every category below plus sub-objects | about 60 KB (worst case about 65 KB) |
+
+The server's per-key limit was 32 KiB when this was written; Dispatcharr's maintainer is raising it,
+so the heavy user above fits once that ships. Until then a large value gets a 413 and the trim order
+below runs one step per retry.
+
+Per-category estimates (unchanged from v1):
+
+| Category | Row estimate | Total | Alone under 32 KiB |
 |---|---|---|---|
 | favorites | 600 x 5 B (4-digit id plus comma) | 3.2 KB | Yes |
 | recents | 50 x 19 B | 1.1 KB | Yes |
@@ -380,14 +423,13 @@ titles, 40 hidden groups, 60 ordered groups, 6 profiles. Envelope about 160 B pe
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
 | Total | | about 59 KB (worst case about 64 KB) | Under 128 KiB |
 
-Trim order when a write would exceed a limit (applied per key, then across keys for total):
-1. progress: drop finished rows, then oldest rows down to 200, then shorten titles to 20 B.
-2. reminders: drop rows starting more than 14 days out.
-3. recents: down to 25.
-4. watchlist and hiddenTitles: oldest first down to 300 each.
-5. settings: drop `customCategories`.
-Favorites, collections, hiddenGroups, groupOrder, and profiles are never trimmed; at 1000 favorites
-the key is still about 6 KB, and the collections caps (50 x 500 members) bound that key near 26 KB.
+Trim order on a 413, one step per retry (no trimming before the first PUT):
+1. progress: oldest rows down to 200, then down to 100.
+2. recents: down to 25.
+3. watchlist and hiddenTitles: oldest first down to 300 each, then down to 150 each.
+4. favorites: down to 500 (from the end of the list).
+Reminders, settings, collections, hiddenGroups, groupOrder, profiles, remoteMap, and radioDefault are
+never trimmed. After the last step still fails: "Sync data too large".
 
 ## 9. Security
 
