@@ -6661,7 +6661,7 @@ struct MainTabView: View {
                         title: ch.name,
                         status: radio.statusLine,
                         artURL: ch.logoURL?.absoluteString,
-                        isPlaying: !p.isPaused && !radio.isFailed,
+                        isPlaying: (!p.isPaused || radio.isBuffering) && !radio.isFailed,
                         showTransport: true,
                         detailLines: radio.isFailed ? [radio.retryLine] : [],
                         onTap: { showRadioSheet = true },
@@ -6845,12 +6845,12 @@ struct MainTabView: View {
             ProgressStoreReader(progress: ps) { p in
                 RemoteSessionSheet(
                     transport: .radio,
-                    mode: .playing,
+                    mode: radio.isBuffering ? .connecting : .playing,
                     channelName: ch.name,
                     statusText: radio.statusLine,
                     artURL: ch.logoURL?.absoluteString,
                     channelID: ch.id,
-                    isPlaying: !p.isPaused && !radio.isFailed,
+                    isPlaying: (!p.isPaused || radio.isBuffering) && !radio.isFailed,
                     item: ch,
                     onTogglePlayPause: { radio.togglePause() },
                     // Radio Mode's own in-place switch, never the video flip.

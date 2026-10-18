@@ -345,6 +345,10 @@ final class FeedRateWindow: @unchecked Sendable {
     private var samples: [(wall: Date, media: Double, excess: Double)] = []
     private var lastWall: Date?
     private var published = 0
+    /// Monotonic media seconds closed since launch (never resets), so the
+    /// audio-only pause-to-fill hold can measure how much the local window
+    /// grew while AVPlayer sits paused and is not reloading the playlist.
+    private var publishedMedia = 0.0
 
     func record(closeWall: Date, mediaDuration: Double) {
         lock.lock(); defer { lock.unlock() }
@@ -354,6 +358,7 @@ final class FeedRateWindow: @unchecked Sendable {
         lastWall = closeWall
         samples.append((wall: closeWall, media: mediaDuration, excess: excess))
         published &+= 1
+        if mediaDuration.isFinite, mediaDuration > 0 { publishedMedia += mediaDuration }
         let cutoff = closeWall.addingTimeInterval(-windowSeconds)
         while let first = samples.first, first.wall < cutoff { samples.removeFirst() }
     }
@@ -382,6 +387,13 @@ final class FeedRateWindow: @unchecked Sendable {
     func publishedCount() -> Int {
         lock.lock(); defer { lock.unlock() }
         return published
+    }
+
+    /// Monotonic media seconds closed since launch. Compare two reads for
+    /// "how much media arrived in between".
+    func mediaPublished() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        return publishedMedia
     }
 
     func reset() {

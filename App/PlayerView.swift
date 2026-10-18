@@ -5108,6 +5108,24 @@ enum LiveEdgeHoldback {
     /// trained ESPN HD to 12 s and every later tune joined 12 s back even
     /// though the feed was fine. A fresh stall re-learns it exactly as before.
     static let ttl: TimeInterval = 30 * 60
+    /// Audio-only programs keep a learned value for 30 DAYS (2026-10-18,
+    /// Apple TV Octane): a radio feed's burst cadence is a property of the
+    /// provider's proxy, not of one evening, and the 30-minute expiry made
+    /// every tune after a break ("learned 11s expired (age 3979m)") start at
+    /// the 6 s base and stall in the first 10 s. Video keeps 30 minutes.
+    static let audioOnlyTTL: TimeInterval = 30 * 24 * 60 * 60
+    /// Keys whose learned value came from an audio-only program (true), in
+    /// their own dictionary so the value and stamp formats stay untouched.
+    private static let audioOnlyKey = "playback.liveEdgeHoldbackAudioOnly"
+
+    private static func isAudioOnlyEntry(_ key: String) -> Bool {
+        let flags = UserDefaults.standard.dictionary(forKey: audioOnlyKey) as? [String: Bool]
+        return flags?[key] ?? false
+    }
+
+    private static func ttlLabel(_ audioOnly: Bool) -> String {
+        audioOnly ? "30d TTL" : String(format: "%.0fm TTL", ttl / 60)
+    }
 
     static func offset(for key: String) -> Double {
         let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]
@@ -5125,24 +5143,30 @@ enum LiveEdgeHoldback {
             forget(key)
             return base
         }
+        let audioOnly = isAudioOnlyEntry(key)
+        let limit = audioOnly ? audioOnlyTTL : ttl
         let age = Date().timeIntervalSince1970 - stamp
         // Expired (or a stamp from the future, e.g. the clock moved back):
         // discard and fall back to the base computation at the call site.
-        guard age >= 0, age < ttl else {
+        guard age >= 0, age < limit else {
             // Cap the printed age so a nonsense stamp can never produce a
             // nonsense number; the clear below stops it repeating next tune.
-            let minutes = min(max(age, 0) / 60, 9999)
-            debugLog(String(format: "[HOLDBACK] learned %.0fs expired (age %.0fm), using base %.0fs",
-                            learned, minutes, base))
+            let minutes = min(max(age, 0) / 60, 99999)
+            debugLog(String(format: "[HOLDBACK] learned %.0fs expired (%@age %.0fm, %@), using base %.0fs",
+                            learned, audioOnly ? "audio-only, " : "", minutes, ttlLabel(audioOnly), base))
             forget(key)
             return base
         }
         // Roll the TTL on use (2026-10-05): a successful read re-stamps the
-        // entry, so expiry is 30 minutes from the last tune that used it. A
+        // entry, so expiry is measured from the last tune that used it. A
         // value still never persists forever. offset(for:) runs more than once
         // per tune (player host, remuxer join floor), so only re-stamp when the
         // stamp is older than the debounce window; that logs once per tune.
         if age >= restampDebounce {
+            if audioOnly {
+                debugLog(String(format: "[HOLDBACK] learned %.0fs (audio-only, age %.0fm, 30d TTL)",
+                                learned, age / 60))
+            }
             var fresh = stamps ?? [:]
             fresh[key] = Date().timeIntervalSince1970
             UserDefaults.standard.set(fresh, forKey: learnedAtKey)
@@ -5160,9 +5184,14 @@ enum LiveEdgeHoldback {
     private static func forget(_ key: String) {
         var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
         var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
-        guard map.removeValue(forKey: key) != nil || stamps.removeValue(forKey: key) != nil else { return }
+        var flags = (UserDefaults.standard.dictionary(forKey: audioOnlyKey) as? [String: Bool]) ?? [:]
+        let hadFlag = flags.removeValue(forKey: key) != nil
+        let hadValue = map.removeValue(forKey: key) != nil
+        let hadStamp = stamps.removeValue(forKey: key) != nil
+        guard hadValue || hadStamp || hadFlag else { return }
         UserDefaults.standard.set(map, forKey: defaultsKey)
         UserDefaults.standard.set(stamps, forKey: learnedAtKey)
+        UserDefaults.standard.set(flags, forKey: audioOnlyKey)
     }
 
     /// Ceiling for the audio-only bursty-feed rule (2026-10-15): a proxied
@@ -5172,24 +5201,31 @@ enum LiveEdgeHoldback {
     /// 20 s ceiling could not cover them.
     static let audioOnlyCap = 32.0
 
-    static func record(_ seconds: Double, for key: String, cap: Double = 18) {
+    /// `audioOnly` marks the entry for the 30-day TTL; a later video learn on
+    /// the same key clears the mark (30 minutes again).
+    static func record(_ seconds: Double, for key: String, cap: Double = 18, audioOnly: Bool = false) {
         var map = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double]) ?? [:]
         var stamps = (UserDefaults.standard.dictionary(forKey: learnedAtKey) as? [String: Double]) ?? [:]
+        var flags = (UserDefaults.standard.dictionary(forKey: audioOnlyKey) as? [String: Bool]) ?? [:]
         let value = min(cap, max(base, seconds))
         map[key] = value
         // Stamp every learn (a raise OR a re-confirm by another stall) so the
-        // 30-minute clock restarts while a channel keeps stalling.
+        // TTL clock restarts while a channel keeps stalling.
         let now = Date().timeIntervalSince1970
         stamps[key] = now
+        if audioOnly { flags[key] = true } else { flags.removeValue(forKey: key) }
         // Bounded: one entry per channel the user has stalled on, and a
         // playlist change rotates keys out on its own.
-        if map.count > 200 { map.removeAll(); stamps.removeAll() }
+        if map.count > 200 { map.removeAll(); stamps.removeAll(); flags.removeAll() }
         stamps = stamps.filter { map[$0.key] != nil }
+        flags = flags.filter { map[$0.key] != nil }
         UserDefaults.standard.set(map, forKey: defaultsKey)
         UserDefaults.standard.set(stamps, forKey: learnedAtKey)
-        debugLog(String(format: "[HOLDBACK] learned %.0fs at %@ (expires in %.0fm)",
+        UserDefaults.standard.set(flags, forKey: audioOnlyKey)
+        debugLog(String(format: "[HOLDBACK] learned %.0fs at %@ (%@expires in %@)",
                         value, ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: now)),
-                        ttl / 60))
+                        audioOnly ? "audio-only, " : "",
+                        audioOnly ? "30d" : String(format: "%.0fm", ttl / 60)))
     }
 }
 
@@ -5334,7 +5370,6 @@ final class AVPlayerProgressDriver {
     /// local window holds enough to rejoin at it.
     private var audioOnlyBurstHandled = false
     private var audioOnlyPendingRejoin: Double?
-    private var audioOnlyRejoinDeferredLogged = false
     /// In-session growth (2026-10-15): the hold-back this session currently
     /// runs for an audio-only program, the starvation stamp already handled,
     /// how many in-session raises happened, when the last audio-only rejoin
@@ -5718,7 +5753,7 @@ final class AVPlayerProgressDriver {
                 // "unchanged" / not-received entry while the user has
                 // paused is the pause itself, not a dead feed. Reset the
                 // counters and wait for the resume.
-                if self.store.userPaused {
+                if self.store.userPaused || self.audioOnlyFill != nil {
                     if self.playlistStaleSince != nil || self.softErrorCount > 0 {
                         debugLog("[AVP-STREAM] error log ignored: user paused (no escalation)")
                     }
@@ -5799,6 +5834,10 @@ final class AVPlayerProgressDriver {
             }
             let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
             debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
+            if self.beginAudioOnlyStallFill() {
+                self.lastStallAt = Date()
+                return
+            }
             self.armStallResumeGate()
         })
 
@@ -5941,7 +5980,7 @@ final class AVPlayerProgressDriver {
                     "[AVP-FREEZE] waiting (%@) tick %d, pos %.1fs",
                     reason, freezeConsecutiveTicks, item.currentTime().seconds))
                 maybeNudgeOutOfWait(item: item, reason: reason)
-            } else if expectPlaying {
+            } else if expectPlaying, audioOnlyFill == nil {
                 // Device 2026-10-12: a held DVR start left rate 0 with no
                 // wait reason and this detector said nothing for minutes.
                 pausedWhileExpectedTicks += 1
@@ -6158,7 +6197,7 @@ final class AVPlayerProgressDriver {
             let base = LiveEdgeHoldback.offset(for: key)
             let target = max(base, want)
             if want > base + 0.5 {
-                LiveEdgeHoldback.record(want, for: key, cap: cap)
+                LiveEdgeHoldback.record(want, for: key, cap: cap, audioOnly: true)
             }
             audioOnlyHoldback = target
             sessionHoldback = max(sessionHoldback, target)
@@ -6167,7 +6206,9 @@ final class AVPlayerProgressDriver {
                 "[AVP-HOLDBACK] audio-only bursty feed: gap %.1fs -> hold-back %.1fs now (and for the next tune) channel=%@",
                 gap, target, channel))
             logAudioOnlyCapIfNeeded(gap: gap, wanted: wanted, cap: cap, channel: channel)
-            audioOnlyPendingRejoin = target
+            if !extendAudioOnlyFill(to: target) {
+                audioOnlyPendingRejoin = target
+            }
             retryAudioOnlyRejoin()
             return
         }
@@ -6179,23 +6220,24 @@ final class AVPlayerProgressDriver {
         }
         audioOnlyRaiseCount += 1
         audioOnlyHoldback = want
-        LiveEdgeHoldback.record(want, for: key, cap: cap)
+        LiveEdgeHoldback.record(want, for: key, cap: cap, audioOnly: true)
         sessionHoldback = max(sessionHoldback, want)
         liveOffsetFloor = max(liveOffsetFloor, want)
         debugLog(String(format:
             "[AVP-HOLDBACK] audio-only bursty feed: gap %.1fs -> hold-back %.0fs now (was %.0fs, in-session raise #%d) channel=%@",
             gap, want, was, audioOnlyRaiseCount, channel))
         logAudioOnlyCapIfNeeded(gap: gap, wanted: wanted, cap: cap, channel: channel)
-        if want - was >= Self.audioOnlyMinReseekRaise {
+        if extendAudioOnlyFill(to: want) {
+            // A hold is already filling: it now waits for the new value.
+        } else if want - was >= Self.audioOnlyMinReseekRaise {
             audioOnlyPendingRejoin = max(audioOnlyPendingRejoin ?? 0, want)
-            audioOnlyRejoinDeferredLogged = false
             audioOnlySpacingLogged = false
         } else {
             if let pending = audioOnlyPendingRejoin {
                 audioOnlyPendingRejoin = max(pending, want)
             }
             debugLog(String(format:
-                "[AVP-NUDGE] audio-only raise %.0fs -> %.0fs under %.0f s, no rejoin seek",
+                "[AVP-NUDGE] audio-only raise %.0fs -> %.0fs under %.0f s, no hold",
                 was, want, Self.audioOnlyMinReseekRaise))
         }
         retryAudioOnlyRejoin()
@@ -6211,34 +6253,30 @@ final class AVPlayerProgressDriver {
             cap, gap, wanted, channel))
     }
 
-    /// Moves the playhead to `audioOnlyPendingRejoin` seconds behind the live
-    /// edge when the local window holds that much; otherwise keeps it pending
-    /// and tries again on the next tick (the window grows by a segment per
-    /// burst). Skipped when the playhead is already that far back.
+    /// Pause-to-fill (2026-10-18, Apple TV Octane): a raised audio-only
+    /// hold-back used to SEEK the playhead backwards into the local window
+    /// ("seeking to 19.0 s behind the edge (was 8.2 s)"), which replays audio
+    /// the listener already heard and sounds like a loop. Now the player
+    /// PAUSES at its current position until the content ahead of the playhead
+    /// reaches the new hold-back (or the window is about to slide past the
+    /// playhead), then resumes. Nothing is replayed; the listener hears one
+    /// "Buffering" gap. One hold per 15 s at most; a raise under 2 s starts
+    /// none. If the ingest delivers nothing for 25 s the hold gives up and
+    /// playback resumes into the regular stall handling.
     private func retryAudioOnlyRejoin() {
+        if audioOnlyFill != nil { tickAudioOnlyFill(); return }
         guard let holdback = audioOnlyPendingRejoin else { return }
         guard isLive, !externalRenderSuspended, !store.userPaused,
               let item = player.currentItem,
               let range = item.seekableTimeRanges.last?.timeRangeValue else { return }
         let now = item.currentTime()
-        let end = CMTimeRangeGetEnd(range)
-        let fromEdge = (end - now).seconds
-        let window = (end - range.start).seconds
-        guard fromEdge.isFinite, window.isFinite else { return }
+        let fromEdge = (CMTimeRangeGetEnd(range) - now).seconds
+        guard fromEdge.isFinite else { return }
         if fromEdge >= holdback - 0.5 {
             audioOnlyPendingRejoin = nil
             debugLog(String(format:
-                "[AVP-NUDGE] audio-only rejoin not needed: playhead already %.1f s from the edge (hold-back %.1f s)",
+                "[AVP-NUDGE] audio-only hold not needed: playhead already %.1f s from the edge (hold-back %.1f s)",
                 fromEdge, holdback))
-            return
-        }
-        guard window >= holdback + 0.5 else {
-            if !audioOnlyRejoinDeferredLogged {
-                audioOnlyRejoinDeferredLogged = true
-                debugLog(String(format:
-                    "[AVP-NUDGE] audio-only rejoin waiting: local window %.1f s, needs %.1f s",
-                    window, holdback))
-            }
             return
         }
         if let last = audioOnlyLastRejoinSeekAt,
@@ -6246,24 +6284,169 @@ final class AVPlayerProgressDriver {
             if !audioOnlySpacingLogged {
                 audioOnlySpacingLogged = true
                 debugLog(String(format:
-                    "[AVP-NUDGE] audio-only rejoin to %.1f s held: last rejoin seek %.1f s ago (min %.0f s)",
+                    "[AVP-NUDGE] audio-only hold to %.1f s deferred: last hold %.1f s ago (min %.0f s)",
                     holdback, Date().timeIntervalSince(last), Self.audioOnlyRejoinSpacing))
             }
             return
         }
         audioOnlyPendingRejoin = nil
-        audioOnlyLastRejoinSeekAt = Date()
-        lastRejoinAt = Date()
+        beginAudioOnlyFill(target: holdback, ahead: max(0, fromEdge), item: item)
+    }
+
+    /// Pause-to-fill state (see `retryAudioOnlyRejoin`).
+    private struct AudioOnlyFill {
+        weak var item: AVPlayerItem?
+        let startedAt: Date
+        let position: Double
+        let aheadAtStart: Double
+        let mediaBase: Double
+        var target: Double
+        var lastMedia: Double
+        var lastGrowthAt: Date
+    }
+    private var audioOnlyFill: AudioOnlyFill?
+    /// The hold gives up when the ingest closes nothing for this long.
+    private static let audioOnlyFillIngestTimeout: TimeInterval = 25
+
+    private func beginAudioOnlyFill(target: Double, ahead: Double, item: AVPlayerItem) {
+        let media = TSHLSRemuxer.feedRateWindow.mediaPublished()
+        let now = Date()
+        let pos = item.currentTime().seconds
+        audioOnlyFill = AudioOnlyFill(item: item, startedAt: now, position: pos.isFinite ? pos : 0,
+                                      aheadAtStart: ahead, mediaBase: media, target: target,
+                                      lastMedia: media, lastGrowthAt: now)
+        audioOnlyLastRejoinSeekAt = now
+        lastRejoinAt = now
         stallGateSince = nil
-        let target = end - CMTime(seconds: holdback, preferredTimescale: 600)
+        player.pause()
+        RadioModeSession.shared.setBuffering(true)
         debugLog(String(format:
-            "[AVP-NUDGE] audio-only rejoin: seeking to %.1f s behind the edge (was %.1f s, window %.1f s)",
-            holdback, fromEdge, window))
-        player.seek(to: target, toleranceBefore: .zero,
-                    toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
-            guard let self, self.autoPlayAllowed("audio-only rejoin") else { return }
-            self.player.playImmediately(atRate: 1.0)
+            "[AVP-NUDGE] audio-only hold: pausing at pos %.1f until %.1f s ahead (hold-back %.1f)",
+            pos.isFinite ? pos : 0, target, target))
+    }
+
+    /// A raise while a hold is filling moves its target; true when a hold
+    /// was active.
+    @discardableResult
+    private func extendAudioOnlyFill(to target: Double) -> Bool {
+        guard var fill = audioOnlyFill else { return false }
+        if target > fill.target + 0.05 {
+            debugLog(String(format:
+                "[AVP-NUDGE] audio-only hold: target raised %.1f -> %.1f s ahead",
+                fill.target, target))
+            fill.target = target
+            audioOnlyFill = fill
         }
+        return true
+    }
+
+    /// 1 Hz: resume once the content ahead of the playhead reaches the hold
+    /// target, the window is about to slide past the playhead, or the ingest
+    /// stalled for 25 s.
+    private func tickAudioOnlyFill() {
+        guard var fill = audioOnlyFill else { return }
+        guard let item = player.currentItem, fill.item === item,
+              isLive, !externalRenderSuspended else {
+            endAudioOnlyFill(resume: false, reason: "item changed or receiver took over")
+            return
+        }
+        if store.userPaused {
+            endAudioOnlyFill(resume: false, reason: "user paused")
+            return
+        }
+        if player.timeControlStatus != .paused {
+            // Someone else (a user seek, Return to Live) started playback.
+            endAudioOnlyFill(resume: false, reason: "playback resumed elsewhere")
+            return
+        }
+        let now = Date()
+        let media = TSHLSRemuxer.feedRateWindow.mediaPublished()
+        if media > fill.lastMedia + 0.01 {
+            fill.lastMedia = media
+            fill.lastGrowthAt = now
+        }
+        audioOnlyFill = fill
+        // A paused AVPlayer may stop reloading the playlist, so count what the
+        // remuxer closed since the hold began, and take the item's own range
+        // when it is further along.
+        var ahead = fill.aheadAtStart + (media - fill.mediaBase)
+        var nearWindowStart = false
+        if let range = item.seekableTimeRanges.last?.timeRangeValue {
+            let cur = item.currentTime()
+            let seekAhead = (CMTimeRangeGetEnd(range) - cur).seconds
+            if seekAhead.isFinite { ahead = max(ahead, seekAhead) }
+            let behind = (cur - range.start).seconds
+            if behind.isFinite, behind < 1.0 { nearWindowStart = true }
+        }
+        // Resume on target only once the newest closure is a tick old: the
+        // remuxer counts a closure's media a moment before it stamps the
+        // starvation that may raise the target (checkAudioOnlyBurstyFeed).
+        if ahead >= fill.target - 0.5, now.timeIntervalSince(fill.lastGrowthAt) >= 0.9 {
+            endAudioOnlyFill(resume: true, ahead: ahead, reason: nil)
+        } else if nearWindowStart {
+            endAudioOnlyFill(resume: true, ahead: ahead, reason: "live window start reached")
+        } else if now.timeIntervalSince(fill.lastGrowthAt) > Self.audioOnlyFillIngestTimeout {
+            debugLog(String(format:
+                "[AVP-NUDGE] audio-only hold: ingest closed nothing for %.0f s, %.1f s ahead (wanted %.1f s); resuming into the stall handler",
+                now.timeIntervalSince(fill.lastGrowthAt), ahead, fill.target))
+            endAudioOnlyFill(resume: true, ahead: ahead, reason: "ingest stalled")
+        }
+    }
+
+    private func endAudioOnlyFill(resume: Bool, ahead: Double = 0, reason: String?) {
+        guard let fill = audioOnlyFill else { return }
+        audioOnlyFill = nil
+        RadioModeSession.shared.setBuffering(false)
+        let waited = Date().timeIntervalSince(fill.startedAt)
+        guard resume else {
+            debugLog(String(format: "[AVP-NUDGE] audio-only hold: ended after %.0f s without resume (%@)",
+                            waited, reason ?? "-"))
+            return
+        }
+        debugLog(String(format: "[AVP-NUDGE] audio-only hold: resumed after %.0f s with %.1f s ahead%@",
+                        waited, ahead, reason.map { " (\($0))" } ?? ""))
+        guard autoPlayAllowed("audio-only hold") else { return }
+        player.playImmediately(atRate: 1.0)
+    }
+
+    /// Cancels an active hold without resuming (user pause, Return to Live,
+    /// teardown); the caller decides what plays next.
+    func cancelAudioOnlyFill(_ reason: String) {
+        endAudioOnlyFill(resume: false, reason: reason)
+    }
+
+    /// First-tune stall on an audio-only program (2026-10-18, Octane: "STALL
+    /// at +10433ms" before any learned value). Instead of the resume gate and
+    /// the repeat-stall backward seek, pause at the playhead until the hold-
+    /// back is ahead of it, and persist the value so the next tune joins
+    /// there. Returns false when the regular stall handling should run.
+    private func beginAudioOnlyStallFill() -> Bool {
+        guard isLive, !externalRenderSuspended, store.isAudioOnlyProgram,
+              let key = liveHoldbackKey, !store.userPaused,
+              let item = player.currentItem else { return false }
+        if audioOnlyFill != nil { return true }
+        let td = liveTargetDuration?() ?? 2.0
+        let gap = TSHLSRemuxer.feedRateWindow.worstGap()
+        let cap = LiveEdgeHoldback.audioOnlyCap
+        let base = max(learnedHoldback(), audioOnlyHoldback, sessionHoldback)
+        let target = min(cap, max(base, 3 * max(td, 2.0), (gap + 2.0).rounded(.up)))
+        if target > LiveEdgeHoldback.offset(for: key) + 0.5 {
+            LiveEdgeHoldback.record(target, for: key, cap: cap, audioOnly: true)
+        }
+        audioOnlyHoldback = max(audioOnlyHoldback, target)
+        sessionHoldback = max(sessionHoldback, target)
+        liveOffsetFloor = max(liveOffsetFloor, target)
+        audioOnlyPendingRejoin = nil
+        var ahead = 0.0
+        if let loaded = item.loadedTimeRanges.last?.timeRangeValue {
+            let a = (CMTimeRangeGetEnd(loaded) - item.currentTime()).seconds
+            if a.isFinite { ahead = max(0, a) }
+        }
+        debugLog(String(format:
+            "[AVP-NUDGE] audio-only stall: pause-to-fill instead of the resume gate (gap %.1f s, hold-back %.1f s)",
+            gap, target))
+        beginAudioOnlyFill(target: target, ahead: ahead, item: item)
+        return true
     }
 
     /// Arm the post-stall resume gate. Target = worst observed delivery gap
@@ -6467,7 +6650,7 @@ final class AVPlayerProgressDriver {
                 let base = audioOnly ? max(learnedBase, audioOnlyHoldback) : learnedBase
                 let next = min(ceiling, max(base + 3, worstGap + (td > 0 ? td : 2.0)))
                 if next > base + 0.5 {
-                    LiveEdgeHoldback.record(next, for: key, cap: ceiling)
+                    LiveEdgeHoldback.record(next, for: key, cap: ceiling, audioOnly: audioOnly)
                 }
                 // Applied to THIS session as well (2026-09-13): the raise is
                 // the session's target live-edge offset from here on, and the
@@ -6765,6 +6948,16 @@ final class AVPlayerProgressDriver {
     private func wireCommands(_ player: AVPlayer) {
         store.togglePauseAction = { [weak self, weak player] in
             guard let player else { return }
+            // Pause during an audio-only Buffering hold: the card shows
+            // Pause there, so the tap is a pause; the hold ends, the player
+            // stays paused, and the user's next Play resumes it.
+            if let self, self.audioOnlyFill != nil {
+                self.cancelAudioOnlyFill("user pause")
+                self.store.noteUserPause(true, positionSeconds: player.currentTime().seconds)
+                self.expectPlaying = false
+                player.pause()
+                return
+            }
             let resuming = player.timeControlStatus == .paused
             self?.store.noteUserPause(!resuming, positionSeconds: player.currentTime().seconds)
             // Live, no rewind window: a long pause can outlive the sliding
@@ -6860,6 +7053,8 @@ final class AVPlayerProgressDriver {
             self?.store.behindLiveEdge = false
             let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
             guard end.isFinite else { return }
+            // Return to Live keeps its explicit seek; a Buffering hold ends.
+            self?.cancelAudioOnlyFill("Return to Live")
             // Never rejoin closer to the edge than this channel has taught
             // us it can sustain (2026-09-13): landing 1 s back on a bursty
             // feed just books the next stall.
@@ -6909,6 +7104,7 @@ final class AVPlayerProgressDriver {
         aspectCancellable?.cancel()
         aspectCancellable = nil
         onUnrecoverable = nil
+        cancelAudioOnlyFill("teardown")
         // Drop the closures so a torn-down driver can't drive a dead player.
         store.togglePauseAction = nil
         store.seekAction = nil

@@ -2128,6 +2128,7 @@ final class RadioModeSession: ObservableObject {
                 DispatchQueue.main.async { RadioModeSession.shared.adoptTileFailure() }
             } else {
                 clearFailure()
+                isBuffering = false
             }
         }
     }
@@ -2148,8 +2149,24 @@ final class RadioModeSession: ObservableObject {
     private var retryTask: Task<Void, Never>?
     /// True while Radio Mode is on and its stream is unavailable.
     var isFailed: Bool { isActive && failureMessage != nil }
+    /// True while the radio tile holds paused to fill its buffer after an
+    /// audio-only hold-back raise (AVPlayerProgressDriver pause-to-fill).
+    /// The card and sheet read "Buffering" in the Connecting style, and the
+    /// lock screen shows paused.
+    @Published private(set) var isBuffering = false
+
+    func setBuffering(_ on: Bool) {
+        let next = on && isActive
+        guard next != isBuffering else { return }
+        isBuffering = next
+        publishNowPlaying()
+    }
+
     /// Status line for the card, sheet, and banner.
-    var statusLine: String { isFailed ? PlaybackFailureCopy.title : "Playing in Radio Mode" }
+    var statusLine: String {
+        if isFailed { return PlaybackFailureCopy.title }
+        return isBuffering ? "Buffering" : "Playing in Radio Mode"
+    }
     /// "Retrying in Ns", or "Reconnecting..." while a retry runs.
     var retryLine: String {
         retryCountdown > 0 ? PlaybackFailureCopy.retrying(retryCountdown) : PlaybackFailureCopy.reconnecting
@@ -2615,7 +2632,7 @@ final class RadioModeSession: ObservableObject {
 
     private func publishPlaybackRate() {
         guard isActive else { return }
-        NowPlayingBridge.shared.updateElapsed(0, rate: (isPaused || isFailed) ? 0 : 1)
+        NowPlayingBridge.shared.updateElapsed(0, rate: (isPaused || isFailed || isBuffering) ? 0 : 1)
     }
 
     /// Lock screen / Control Center for Radio Mode. The AVPlayer tile path
@@ -2645,14 +2662,15 @@ final class RadioModeSession: ObservableObject {
         guard isActive, let ch = channel else { return }
         let lines = nowAiringLines(ch)
         let failed = isFailed
-        publishedNowPlayingKey = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(failed)"
+        let buffering = isBuffering && !failed
+        publishedNowPlayingKey = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(failed)|\(buffering)"
         // Title = channel, subtitle (artist) = program, album = the
         // program's episode subtitle. Live stream: the LIVE bar, no times.
         NowPlayingBridge.shared.configure(
             title: ch.name,
             // Failed stream: the player's wording, never the program as if
             // it were playing.
-            subtitle: failed ? PlaybackFailureCopy.title : (lines.title ?? "AerioTV"),
+            subtitle: failed ? PlaybackFailureCopy.title : (buffering ? "Buffering" : (lines.title ?? "AerioTV")),
             artworkURL: ch.logoURL,
             duration: nil,
             isLive: true,
@@ -2678,7 +2696,7 @@ final class RadioModeSession: ObservableObject {
     private func refreshNowPlayingIfChanged() {
         guard isActive, let ch = channel else { return }
         let lines = nowAiringLines(ch)
-        let key = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(isFailed)"
+        let key = "\(ch.id)|\(lines.title ?? "")|\(lines.sub ?? "")|\(isFailed)|\(isBuffering && !isFailed)"
         if key != publishedNowPlayingKey { publishNowPlaying() }
     }
 
