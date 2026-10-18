@@ -87,8 +87,19 @@ enum HLSSessionResolver {
         return out
     }
 
-    static func resolve(entry: URL, headers: [String: String]) async -> Resolved? {
-        await withCheckedContinuation { (cont: CheckedContinuation<Resolved?, Never>) in
+    /// Outcome of the entry GET. `notHLS` means the entry proved it is not
+    /// an HLS session (Redirect stream profile: 302 straight to the raw
+    /// provider .ts, or a 200 body that does not start with #EXTM3U), so the
+    /// tile must take the TS remuxer path. `unknown` keeps the old behavior
+    /// (open the entry URL directly).
+    enum Outcome {
+        case hls(Resolved)
+        case notHLS(String)
+        case unknown
+    }
+
+    static func resolve(entry: URL, headers: [String: String]) async -> Outcome {
+        await withCheckedContinuation { (cont: CheckedContinuation<Outcome, Never>) in
             let box = ResolveBox(cont)
             var request = URLRequest(url: entry)
             request.timeoutInterval = 15
@@ -117,9 +128,9 @@ enum HLSSessionResolver {
 
     private final class ResolveBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var cont: CheckedContinuation<Resolved?, Never>?
-        init(_ c: CheckedContinuation<Resolved?, Never>) { cont = c }
-        func finish(_ r: Resolved?) {
+        private var cont: CheckedContinuation<Outcome, Never>?
+        init(_ c: CheckedContinuation<Outcome, Never>) { cont = c }
+        func finish(_ r: Outcome) {
             lock.lock(); let c = cont; cont = nil; lock.unlock()
             c?.resume(returning: r)
         }
@@ -127,12 +138,13 @@ enum HLSSessionResolver {
 
     private final class ResolveDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
         private let entry: URL
-        private let done: @Sendable (Resolved?) -> Void
+        private let done: @Sendable (Outcome) -> Void
         private var reported = false
-        init(entry: URL, done: @escaping @Sendable (Resolved?) -> Void) {
+        private var head = Data()
+        init(entry: URL, done: @escaping @Sendable (Outcome) -> Void) {
             self.entry = entry; self.done = done
         }
-        private func report(_ r: Resolved?) {
+        private func report(_ r: Outcome) {
             guard !reported else { return }
             reported = true
             done(r)
@@ -143,10 +155,16 @@ enum HLSSessionResolver {
                         completionHandler: @escaping (URLRequest?) -> Void) {
             let token = response.value(forHTTPHeaderField: tokenHeader)
             if let target = request.url, HLSCapabilityStore.redirectLooksLikeHLS(target) {
-                report(Resolved(playlistURL: target, token: token, status: response.statusCode))
+                report(.hls(Resolved(playlistURL: target, token: token, status: response.statusCode)))
             } else {
+                // Redirect stream profile: the 302 goes to the raw provider
+                // stream. Not followed (no extra upstream connection).
+                let path = request.url?.path.lowercased() ?? ""
+                let why = path.hasSuffix(".ts")
+                    ? "entry 302 target path ends in .ts"
+                    : "entry 302 target is not an HLS playlist"
                 debugLog("[FORCE-HLS] entry 302 went to a non-HLS target \(request.url?.absoluteString ?? "-")")
-                report(nil)
+                report(.notHLS(why))
             }
             completionHandler(nil)
         }
@@ -155,13 +173,59 @@ enum HLSSessionResolver {
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if !reported { debugLog("[FORCE-HLS] entry answered \(status) with no redirect") }
-            report(nil)
+            if (200..<300).contains(status), !reported {
+                if (response.url?.path.lowercased() ?? "").hasSuffix(".ts") {
+                    report(.notHLS("entry final URL path ends in .ts"))
+                    completionHandler(.cancel)
+                    return
+                }
+                // Peek at the first bytes: a playlist starts with #EXTM3U.
+                completionHandler(.allow)
+                return
+            }
+            report(.unknown)
             completionHandler(.cancel)
+        }
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            guard !reported else { dataTask.cancel(); return }
+            head.append(data)
+            let marker = Data("#EXTM3U".utf8)
+            // Tolerate a UTF-8 BOM ahead of the tag.
+            var body = head
+            if body.starts(with: [0xEF, 0xBB, 0xBF]) { body = body.dropFirst(3) }
+            if body.count >= marker.count {
+                if body.starts(with: marker) {
+                    report(.unknown)
+                } else {
+                    report(.notHLS("first bytes are not #EXTM3U"))
+                }
+                dataTask.cancel()
+            }
         }
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             if let error, !reported { debugLog("[FORCE-HLS] entry request failed: \(error.localizedDescription)") }
-            report(nil)
+            if !reported, !head.isEmpty { report(.notHLS("first bytes are not #EXTM3U")) }
+            report(.unknown)
         }
+    }
+}
+
+/// Force HLS (developer): channels whose HLS entry proved not to be HLS in
+/// this app session (Redirect stream profile). The next tune of the channel
+/// goes straight to the TS remuxer. In memory only: a new session re-tries.
+@MainActor
+enum ForceHLSNotHLSMemory {
+    private static var keys: Set<String> = []
+
+    private static func key(_ url: URL) -> String {
+        LiveConnectionRegistry.key(for: removingHLSOutputFormat(url))
+    }
+    static func remember(_ url: URL, channelID: String) {
+        keys.insert(key(url))
+        if !channelID.isEmpty { keys.insert("id:" + channelID) }
+    }
+    static func contains(_ url: URL, channelID: String) -> Bool {
+        keys.contains(key(url)) || (!channelID.isEmpty && keys.contains("id:" + channelID))
     }
 }
 

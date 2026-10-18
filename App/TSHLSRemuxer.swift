@@ -7138,6 +7138,8 @@ struct AVPlayerMultiviewTile: View {
             let plain = removingHLSOutputFormat(streamURL)
             if PlaybackFeatureFlags.forceHLS {
                 debugLog("[FORCE-HLS] direct HLS FAILED channel=\(channelName) reason=\(reason); falling back to TS remux on \(plain.absoluteString)")
+                debugLog("[FORCE-HLS] entry is not HLS (AVPlayer: \(reason)); falling back to TS for this tune")
+                ForceHLSNotHLSMemory.remember(streamURL, channelID: channelID)
             }
             debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
             directHLSFallbackURL = plain
@@ -7488,12 +7490,26 @@ struct AVPlayerMultiviewTile: View {
     }
     #endif
 
+    /// Force HLS entry proved not HLS before AVPlayer opened it: remember
+    /// the channel for the session and start the TS remuxer arm at once.
+    private func fallBackFromForceHLS(entry: URL, reason: String) {
+        debugLog("[FORCE-HLS] entry is not HLS (\(reason)); falling back to TS for this tune")
+        ForceHLSNotHLSMemory.remember(entry, channelID: channelID)
+        forceHLSStartedAt = nil
+        forceHLSKeep = nil
+        directHLSFallbackURL = removingHLSOutputFormat(entry)
+        start()
+    }
+
     /// Why this tile must not take Force HLS's direct HLS path, or nil.
     private var forceHLSBypassReason: String? {
         #if os(iOS)
         if AirPlayMonitor.shared.willServeReceiver { return "AirPlay needs the TS remuxer" }
         #endif
         if KeptLiveChannels.shared.ids.contains(channelID) { return "Kept Live needs the TS remuxer" }
+        if ForceHLSNotHLSMemory.contains(streamURL, channelID: channelID) {
+            return "entry proved not HLS earlier this session"
+        }
         return nil
     }
 
@@ -7577,10 +7593,16 @@ struct AVPlayerMultiviewTile: View {
                 statusText = "Preparing..."
                 Task { @MainActor in
                     let t0 = Date()
-                    let resolved = await HLSSessionResolver.resolve(entry: entry, headers: hdrs)
+                    let outcome = await HLSSessionResolver.resolve(entry: entry, headers: hdrs)
                     guard token == teardownToken else { return }
                     let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                    if let resolved {
+                    if case .notHLS(let why) = outcome {
+                        // Redirect stream profile: no direct HLS attempt, no
+                        // retry, no Channel Unavailable. TS remuxer now.
+                        fallBackFromForceHLS(entry: entry, reason: why)
+                        return
+                    }
+                    if case .hls(let resolved) = outcome {
                         forceHLSSession = resolved
                         debugLog("[FORCE-HLS] tile channel=\(channelName) entry 302 -> \(resolved.playlistURL.absoluteString) token=\(resolved.token?.prefix(8) ?? "none") in \(ms)ms")
                         debugLog("[FORCE-HLS] tile channel=\(channelName) AVPlayer opening token playlist (engine=AVPlayer direct HLS, no TS remuxer, no mpv)")
