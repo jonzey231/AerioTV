@@ -801,7 +801,7 @@ enum GuideDayChoices {
         SettingsChoice(3, "3 Days"),
         SettingsChoice(7, "7 Days (Default)"),
         SettingsChoice(14, "14 Days"),
-        SettingsChoice(0, "All Available"),
+        SettingsChoice(0, "All"),
     ] }
 }
 
