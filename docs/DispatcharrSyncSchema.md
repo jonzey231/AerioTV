@@ -125,9 +125,12 @@ IDs:
   in both directions. A local key or a remote id it cannot translate (cache not built yet, channel
   gone) is never deleted: it is left out of the translation and kept as is on both sides. Apple
   follows the same rule.
-- VOD: the Dispatcharr movie, series, and episode UUIDs as strings (`"vodId"`, `seriesId`), byte for
-  byte exactly as `/api/vod/...` returns them. Never a numeric id, never reformatted (no case change,
-  no added or removed hyphens).
+- VOD: the Dispatcharr INTEGER primary keys (the `id` field `/api/vod/...` returns for movies,
+  episodes, and series) as JSON ints in `vodId` and `seriesId` (Dispatcharr maintainer's request).
+  Never the UUID. Apple must use the same integer ids. Each app maps them to whatever it keys local
+  rows by (Android: movie and episode UUIDs locally, resolved through its VOD catalog and the series
+  episode lists); a local row it cannot resolve yet stays on that device and is not written, and a
+  pulled id it cannot resolve is skipped (never deleted on either side).
 - Program: XMLTV programme id is not stable across EPG refreshes, so reminders key on `channelId` plus `start` (Unix seconds). That pair is the identity on both platforms.
 - Group: group name (string), as the server sends it.
 - Rows are compact arrays (positional). Position meanings are fixed per `schemaVersion`; new positions may only be appended (readers ignore extra trailing positions).
@@ -146,18 +149,18 @@ Row: `[channelId:int, watchedAt:int]`.
 
 ### 4.3 progress (cap 300, newest `updatedAt` first)
 ```json
-{"rows":[["8812","e",1834,2640,1760724245,0,"301",2,5,"The Pilot"]]}
+{"rows":[[8812,"e",1834,2640,1760724245,0,301,2,5,"The Pilot"]]}
 ```
 Row positions:
 | # | Field | Type | Notes |
 |---|---|---|---|
-| 0 | vodId | string | movie id or episode id |
+| 0 | vodId | int | Dispatcharr movie id or episode id |
 | 1 | type | string | `"m"` movie, `"e"` episode |
 | 2 | position | int | seconds |
 | 3 | duration | int | seconds, 0 if unknown |
 | 4 | updatedAt | int | Unix seconds |
 | 5 | finished | int | 0 or 1 |
-| 6 | seriesId | string or null | null for movies |
+| 6 | seriesId | int or null | Dispatcharr series id; null for movies |
 | 7 | season | int | 0 if unknown or movie |
 | 8 | episode | int | 0 if unknown or movie |
 | 9 | title | string | max 40 UTF-8 bytes, truncated on a character boundary |
@@ -179,17 +182,17 @@ alarm (Android) 5 minutes before `start`, and cancel local reminders absent from
 
 ### 4.5 watchlist (cap 500, newest first)
 ```json
-{"rows":[["5531","m",1760700000],["301","s",1760600000]]}
+{"rows":[[5531,"m",1760700000],[301,"s",1760600000]]}
 ```
-Row: `[vodId:string, type:"m"|"s", addedAt:int]`. Removal = absence (full replace replaces Android's
+Row: `[vodId:int, type:"m"|"s", addedAt:int]` (movie id or series id). Removal = absence (full replace replaces Android's
 `removedAt` tombstones; see 6.3). Rows carry no title: the app fills title, poster, year, and rating
 from the VOD catalog by `vodId`.
 
 ### 4.6 hiddenTitles (cap 500)
 ```json
-{"rows":[["5531","m",1760700000]]}
+{"rows":[[5531,"m",1760700000]]}
 ```
-Row: `[vodId:string, type:"m"|"s", hiddenAt:int]`.
+Row: `[vodId:int, type:"m"|"s", hiddenAt:int]`.
 
 ### 4.7 hiddenGroups
 ```json
@@ -397,7 +400,7 @@ category sub-object (13 x 90 B = 1.2 KB).
 
 | Key | Contents | Total |
 |---|---|---|
-| `app.molinete.aerio` | every category below plus sub-objects | about 60 KB (worst case about 65 KB) |
+| `app.molinete.aerio` | every category below plus sub-objects | about 56 KB (worst case about 59 KB) |
 
 The server's per-key limit was 32 KiB when this was written; Dispatcharr's maintainer is raising it,
 so the heavy user above fits once that ships. Until then a large value gets a 413 and the trim order
@@ -409,11 +412,11 @@ Per-category estimates (unchanged from v1):
 |---|---|---|---|
 | favorites | 600 x 5 B (4-digit id plus comma) | 3.2 KB | Yes |
 | recents | 50 x 19 B | 1.1 KB | Yes |
-| progress | 300 x 85 B (ids 6 B each, ints, 30 B title) | 25.7 KB | Yes, about 6 KiB margin |
-| progress worst case | 300 x 100 B (40 B titles, long ids) | 30.2 KB | Yes, tight |
+| progress | 300 x 75 B (integer ids, ints, 30 B title) | 22.5 KB | Yes |
+| progress worst case | 300 x 85 B (40 B titles, 7-digit ids) | 25.5 KB | Yes |
 | reminders | 100 x 95 B | 9.7 KB | Yes |
-| watchlist | 200 x 24 B | 5.0 KB | Yes |
-| hiddenTitles | 50 x 24 B | 1.4 KB | Yes |
+| watchlist | 200 x 16 B | 3.2 KB | Yes |
+| hiddenTitles | 50 x 16 B | 0.8 KB | Yes |
 | hiddenGroups | 40 x 14 B | 0.7 KB | Yes |
 | groupOrder | 60 x 14 B | 1.0 KB | Yes |
 | settings | about 60 names x 35 B, plus customCategories up to 4 KiB | 6.3 KB | Yes |
@@ -421,7 +424,7 @@ Per-category estimates (unchanged from v1):
 | radioDefault | | 0.2 KB | Yes |
 | profiles | 6 x 130 B | 1.0 KB | Yes |
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
-| Total | | about 59 KB (worst case about 64 KB) | Under 128 KiB |
+| Total | | about 55 KB (worst case about 58 KB) | Under 128 KiB |
 
 Trim order on a 413, one step per retry (no trimming before the first PUT):
 1. progress: oldest rows down to 200, then down to 100.
