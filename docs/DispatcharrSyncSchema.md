@@ -318,13 +318,23 @@ Row: `[id:string, name:string(max 40 B), placement:"b"|"e", members:int[]]`, row
 ### 4.12 profiles (admin user only)
 Written only by a device signed in as the admin profile, under the admin's own `me` key.
 ```json
-{"rows":[[1,"admin","Logan","none","","","admin",1760724245],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000]]}
+{"rows":[[1,"admin","Logan","none","","","admin",1760724245,{}],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000,{"icon":"paw","color":"orange"}]]}
 ```
-Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int]`, cap 25 rows.
-- `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, or role on the
-  writing device. Absent (older writer) reads as 0.
+Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int, avatar:object]`, cap 25 rows.
+- `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, role, or avatar on
+  the writing device. Absent (older writer) reads as 0.
+- `avatar` = `{"icon":string, "color":string}`, either member optional; `{}` = the default. App
+  defined (Dispatcharr's `avatar_config` has no defined shape, the web UI ignores it, and
+  `PATCH /api/accounts/users/me/` drops it, so it is not used).
+  - `icon`: `person`, `face`, `child`, `paw`, `cat`, `fish`, `star`, `rocket`, `music`, `soccer`,
+    `gamepad`, `movie`. Absent or unknown = the display name's first letter.
+  - `color`: `teal` #1AC4D8, `blue` #3B82F6, `orange` #FB923C, `ember` #C2410C, `green` #22C55E,
+    `purple` #8B5CF6, `slate` #94A3B8, `sea` #2B7A86 (theme palette). Absent or unknown = the
+    default: index (sum of the lowercased username's character codes) mod 8 in this order.
+  - Position absent (older writer) = keep the local avatar. Admin edits any profile's avatar; a
+    User or Child edits its own.
 - Merge is PER ROW, not last writer wins for the whole key: on every pull, a pulled row replaces the
-  local displayName, role, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
+  local displayName, role, avatar, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
   local row's; otherwise the local row stays and goes back up on the next write. A row for a user
   this device has no profile for is added (section 5). A writer keeps rows it does not have locally,
   except a profile it removed itself after that row's `updatedAt`.
