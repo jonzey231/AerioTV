@@ -1428,14 +1428,6 @@ struct RootView: View {
     /// sheet rises after the splash → root transition settles.
     @State private var showWhatsNew = false
 
-    /// Live Rewind one-time feature prompt (task #145 P2). The P1 field
-    /// test proved the need: the feature ships OFF by default and the
-    /// toggle sat unnoticed in Settings, so the player showed no
-    /// transport at all. Asked once; both answers write the seen flag.
-    @AppStorage("liveRewindPromptSeen") private var liveRewindPromptSeen = false
-    @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
-    @State private var showLiveRewindPrompt = false
-
     private var hasAnySource: Bool {
         !servers.isEmpty || !playlists.isEmpty
     }
@@ -1450,17 +1442,6 @@ struct RootView: View {
                 .preferredColorScheme(theme.resolvedColorScheme)
             }
             .whatsNewSheet(isPresented: $showWhatsNew)
-            .alert("New: Live Rewind", isPresented: $showLiveRewindPrompt) {
-                Button("Enable") {
-                    liveRewindEnabled = true
-                    liveRewindPromptSeen = true
-                }
-                Button("Not Now", role: .cancel) {
-                    liveRewindPromptSeen = true
-                }
-            } message: {
-                Text("Pause and rewind live TV. While you watch a channel fullscreen, AerioTV keeps a rolling buffer on this device so you can skip back, scrub the timeline, or pause and pick up where you left off.\n\nBuffered video is deleted automatically. You can change this anytime in Settings > Player > Live Rewind.")
-            }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 
@@ -1532,27 +1513,7 @@ struct RootView: View {
                     }
                 }
 
-                // Live Rewind one-time prompt: never stacked over
-                // onboarding or What's New. If either modal claims this
-                // launch, the next clean launch asks instead. Users who
-                // already found the toggle are seeded silently.
-                // Skipped entirely on a screenshot launch (-settingsPage /
-                // AERIO_SETTINGS_PAGE or a parked aerio://settings link):
-                // the alert would cover the Settings page being captured.
-                // Nothing is written, so the prompt still arrives on the
-                // user's next ordinary launch.
-                if !liveRewindPromptSeen && !SettingsDeepLink.shared.isAutomatedLaunch {
-                    if liveRewindEnabled {
-                        liveRewindPromptSeen = true
-                    } else {
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 1_200_000_000)
-                            if !showOnboarding && !showWhatsNew && !liveRewindPromptSeen {
-                                showLiveRewindPrompt = true
-                            }
-                        }
-                    }
-                }
+                // The one-time "New: Live Rewind" prompt was retired 2026-10-27.
                 // One-time cleanup: purge EPGProgram rows belonging to any
                 // server that no longer exists. Fixes historical damage
                 // from an earlier build where server deletion didn't
