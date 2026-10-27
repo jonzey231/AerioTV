@@ -520,7 +520,7 @@ AerioTV always opens from the cache on your device first and refreshes in the ba
 
 | Data | On launch | While open | While closed |
 |---|---|---|---|
-| Channels and guide | Painted from the cache, then refreshed quietly after the guide appears | Refreshed again when you return and the data is more than 30 minutes old | Background Refresh interval in Settings, General (1 to 48 hours, or a time of day) |
+| Channels and guide | Painted from the cache, then refreshed quietly after the guide appears | Refreshed again when you return and the data is more than 30 minutes old | Background Refresh interval in Settings, General (1 to 48 hours, or a time of day; the About Refreshing note there summarizes this table) |
 | Movies and TV Shows | Library restored from the cache | Re-scanned in the background on the Refresh Library schedule in Settings, Movies and TV Shows (every launch, daily, or weekly), or when the server reports a change | Same background job |
 | DVR recordings | Restored from the cache | Updated every 30 seconds while the app is in the foreground | Not polled |
 | Favorites, progress, reminders, settings (sync) | Pulled on launch and on profile switch | Pulled again after 5 minutes away and every 15 minutes; your changes are sent a few seconds after you make them | Not synced |
