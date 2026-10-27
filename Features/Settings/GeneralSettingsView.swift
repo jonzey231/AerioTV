@@ -326,7 +326,13 @@ struct GeneralSettingsView: View {
                     let desc = bgRefreshType == "interval"
                         ? "Refresh every \(intervalLabel(bgRefreshInterval))."
                         : "Refresh daily at \(timeLabel(hour: bgRefreshHour, minute: bgRefreshMinute))."
-                    Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
+                    Group {
+                        #if os(tvOS)
+                        Text(desc)
+                        #else
+                        Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
+                        #endif
+                    }
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 } else {
                     Text("Automatically refresh channel lists and guide data while the app is in the background.")
