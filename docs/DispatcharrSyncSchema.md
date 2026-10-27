@@ -30,7 +30,7 @@ see the same favorites, progress, and reminders.
 | Endpoints | `GET/PUT/DELETE /api/accounts/users/me/app-data/<key>/`, `GET /api/accounts/users/me/app-data/` (list keys and sizes) |
 | Admin cross-user | `/api/accounts/users/<id>/app-data/<key>/` (user_level >= 10). AerioTV does not use it for writes in v1 |
 | Key pattern | `^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$` |
-| Limits | 25 keys per user, 32 KiB per key (compact UTF-8 JSON; being raised by the maintainer), 128 KiB total per user, depth 8, body cap about 33 KiB |
+| Limits | 25 keys per user, 128 KiB per key (compact UTF-8 JSON), 1 MiB total per user, depth 8 (Dispatcharr dev c1920131, 2026-10-18; one database row per key). Servers before that commit cap at 32 KiB per key and 128 KiB per user and answer 413 the same way |
 | Value | Must be a JSON object. PUT replaces the whole value. No PATCH, no ETag, no versioning |
 | Concurrency | Last writer wins (server serializes with a row lock) |
 | Visibility | Any admin can view and clear any user's data in the web UI |
@@ -421,13 +421,13 @@ category sub-object (13 x 90 B = 1.2 KB).
 |---|---|---|
 | `app.molinete.aerio` | every category below plus sub-objects | about 56 KB (worst case about 59 KB) |
 
-The server's per-key limit was 32 KiB when this was written; Dispatcharr's maintainer is raising it,
-so the heavy user above fits once that ships. Until then a large value gets a 413 and the trim order
-below runs one step per retry.
+The server's per-key limit is 128 KiB (1 MiB per user) since Dispatcharr dev c1920131, so the heavy
+user above fits with room to spare. On an older server (32 KiB per key, 128 KiB per user) a large value
+gets a 413 and the trim order below runs one step per retry; the client never assumes the new caps.
 
 Per-category estimates (unchanged from v1):
 
-| Category | Row estimate | Total | Alone under 32 KiB |
+| Category | Row estimate | Total | Alone under 32 KiB (old cap) |
 |---|---|---|---|
 | favorites | 600 x 5 B (4-digit id plus comma) | 3.2 KB | Yes |
 | recents | 50 x 19 B | 1.1 KB | Yes |
@@ -443,7 +443,7 @@ Per-category estimates (unchanged from v1):
 | radioDefault | | 0.2 KB | Yes |
 | profiles | 6 x 130 B | 1.0 KB | Yes |
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
-| Total | | about 55 KB (worst case about 58 KB) | Under 128 KiB |
+| Total | | about 55 KB (worst case about 58 KB) | Under 128 KiB (new per-key cap) |
 
 Trim order on a 413, one step per retry (no trimming before the first PUT):
 1. progress: oldest rows down to 200, then down to 100.
