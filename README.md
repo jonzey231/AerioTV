@@ -514,6 +514,19 @@ the single `/api/*` rule.
 
 </details>
 
+## When does AerioTV refresh?
+
+AerioTV always opens from the cache on your device first and refreshes in the background. The spinner only appears when there is nothing cached yet or when you refresh by hand.
+
+| Data | On launch | While open | While closed |
+|---|---|---|---|
+| Channels and guide | Painted from the cache, then refreshed quietly after the guide appears | Refreshed again when you return after 30 minutes away | Background Refresh interval in Settings, General (1 to 48 hours, or a time of day) |
+| Movies and TV Shows | Library restored from the cache | Re-scanned in the background when it is older than the Library Refresh interval in Settings, Movies and TV Shows, or when the server reports a change | Same background job |
+| DVR recordings | Restored from the cache | Updated every 30 seconds while the app is in the foreground | Not polled |
+| Favorites, progress, reminders, settings (sync) | Pulled on launch and on profile switch | Pulled again after 5 minutes away and every 15 minutes; your changes are sent a few seconds after you make them | Not synced |
+
+Switching profiles on a Dispatcharr playlist keeps the server's guide and library on screen; only your channel visibility and personal data change. Pull down (phone) or press Refresh (TV) to force an update at any time.
+
 ## OTA / HDHomeRun Channels (MPEG-2)
 
 Over-the-air broadcast channels (ATSC tuners such as HDHomeRun) carry
