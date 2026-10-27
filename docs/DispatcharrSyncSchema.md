@@ -8,6 +8,8 @@ Any change bumps the affected key's `schemaVersion` and lands in both repos in t
 v3 (2026-10-18): ONE App Data key, `app.molinete.aerio`, holds every category (section 2), at the
 request of Dispatcharr's maintainer, so AerioTV uses 1 of a user's 25 keys. v1 used 13 keys and v2
 used three; both migrate (section 6.4). Payloads (section 4), caps, and merges are unchanged.
+v3 note (2026-10-27): `profiles` rows gain position 9, `order` (section 4.12). Appended position,
+so `schemaVersion` stays 3: older readers ignore it, and a row without it keeps insertion order.
 
 ## 1. What it is
 
@@ -318,11 +320,16 @@ Row: `[id:string, name:string(max 40 B), placement:"b"|"e", members:int[]]`, row
 ### 4.12 profiles (admin user only)
 Written only by a device signed in as the admin profile, under the admin's own `me` key.
 ```json
-{"rows":[[1,"admin","Logan","none","","","admin",1760724245,{}],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000,{"icon":"paw","color":"orange"}]]}
+{"rows":[[1,"admin","Logan","none","","","admin",1760724245,{},0],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000,{"icon":"paw","color":"orange"},1]]}
 ```
-Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int, avatar:object]`, cap 25 rows.
-- `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, role, or avatar on
-  the writing device. Absent (older writer) reads as 0.
+Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int, avatar:object, order:int]`, cap 25 rows.
+- `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, role, avatar, or
+  order on the writing device. Absent (older writer) reads as 0.
+- `order` = the profile's list position, 0 first, set by an Admin (picker Move Left, Move Right,
+  and Move to Front; Settings Move Up and Move Down). Every list of profiles (pickers, switcher,
+  Settings) uses it; the default profile moves like any other. Absent (older writer) = keep the
+  local position; a profile never moved sorts after moved ones in insertion order (default first).
+  A move stamps `updatedAt` on every row whose position changed, and the per-row merge applies it.
 - `avatar` = `{"icon":string, "color":string}`, either member optional; `{}` = the default. App
   defined (Dispatcharr's `avatar_config` has no defined shape, the web UI ignores it, and
   `PATCH /api/accounts/users/me/` drops it, so it is not used).
@@ -334,10 +341,12 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   - Position absent (older writer) = keep the local avatar. Admin edits any profile's avatar; a
     User or Child edits its own.
 - Merge is PER ROW, not last writer wins for the whole key: on every pull, a pulled row replaces the
-  local displayName, role, avatar, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
+  local displayName, role, avatar, order, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
   local row's; otherwise the local row stays and goes back up on the next write. A row for a user
-  this device has no profile for is added (section 5). A writer keeps rows it does not have locally,
-  except a profile it removed itself after that row's `updatedAt`.
+  this device has no profile for is added (section 5), except a profile this device removed at or
+  after that row's `updatedAt`: the pull skips it (never re-creates it). A writer keeps rows it does
+  not have locally, except such a removed profile, which leaves the list; the local removed stamp
+  clears once a pull shows the server copy without that row.
 - `role` is the app-local role set by an Admin on the device (default: `"admin"` when the Dispatcharr user level is Admin, else `"user"`). `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs an Admin PIN.
 - `pinHash` = lowercase hex SHA-256 of `pinSalt bytes || UTF-8 PIN` where the PIN is digits for
   numbers and the letters `U D L R` for directions (example `"UULR"`). Empty when `pinType` is `"none"`.
