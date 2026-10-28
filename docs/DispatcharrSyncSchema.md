@@ -453,9 +453,17 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   supersedes it, or it expires.
 - Merge is PER ROW, not last writer wins for the whole key: on every pull, a pulled row replaces the
   local displayName, role, avatar, order, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
-  local row's; otherwise the local row stays and goes back up on the next write. A row for a user
-  this device has no profile for is added (section 5) unless a tombstone covers it. A writer keeps
+  local row's; otherwise the local row stays and goes back up on the next write. A writer keeps
   rows it does not have locally unless a tombstone covers them.
+- Catalog semantics: the rows are the profiles AVAILABLE to devices, not a mandate. A pull never
+  creates a local profile. Metadata (displayName, role, avatar, order, PIN) merges only into
+  profiles already present on the device; rows for users with no local profile are offered as
+  suggestions under "From your other devices" (onboarding Add Profiles step, after the Dispatcharr
+  Sync step has pulled, and Settings > Playlists > (playlist) > Add Profile) and are added only by
+  an explicit choice on that device. Adding one uses the normal credential path (admin-listed
+  `api_key`, else a typed password or API key) and then applies the row's role, PIN, avatar,
+  displayName, and order. A Child row needs an Admin PIN on the device first. Tombstones apply on
+  every device. Each pull logs `[DSYNC] profiles: N roster rows available, not added (opt-in)`.
 - Stale-device rule: a writer does not send a local row the server list lacks when that row has no
   unsent local change (its `updatedAt` is at or before this device's last acknowledged write) and
   either its `updatedAt` is older than the server `profiles` sub-object's `updatedAt`, or every local
@@ -469,13 +477,22 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   or change, unique per user.
 - Non-admin devices never read this key (they cannot reach it through `me`). A profile signed in
   alone has no picker and no PIN prompt for itself on that device.
+- Device Admin PIN (device-local, never synced, not in this key): when onboarding signs in as a
+  Standard Dispatcharr user, "Who is this profile for?" offers User (default) or Child. Child sets a
+  Device Admin PIN (Numbers or Directions) tied to no profile, and the profile becomes a Child: a
+  kid-only device. Every "Enter an Admin PIN" gate (leaving a Child, Manage Profiles, Add Profile,
+  role changes, removing a Child) accepts the Device Admin PIN as well as any Admin profile's PIN,
+  and it stays valid after an Admin profile is added. It is changed or removed in Settings >
+  Playlists > Profiles (Admin profiles) or Manage Profiles behind the PIN, both needing the current
+  Device Admin PIN; the last Admin PIN stays while any profile is a Child.
 
 ## 5. Profiles flow
 
 1. Admin device: lists server users, adds profiles, writes `profiles` under the admin.
-2. A second device signed in as the admin pulls `profiles`, then reads the admin user list
-   (`GET /api/accounts/users/`, which returns each user's `api_key`) and adds the same profiles
-   without typing anything. Only a device signed in as a non-admin user needs that user's password
+2. A second device signed in as the admin pulls `profiles` and offers its rows as suggestions;
+   for each one the user picks, it reads the admin user list (`GET /api/accounts/users/`, which
+   returns each user's `api_key`) and adds that profile without typing anything. Nothing is added
+   without a choice. Only a device signed in as a non-admin user needs that user's password
    or API key typed. Credentials are still never written to App Data.
 3. Each profile's own data lives under its own user. The device switches tokens on profile switch.
 4. Wrong-PIN backoff (5 tries, then 30 s doubling) is device-local state and is not synced.
