@@ -16,7 +16,7 @@ it, its profiles, and the sync choice to the TV over the local network.
 | Side | Who | What it does |
 |------|-----|--------------|
 | Receiver | TV (Android TV, Apple TV) | Welcome > "Set up from your phone". Generates a code and key pair, listens, advertises, shows a QR code and the code, applies the payload. |
-| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up a TV" (Admin or default profile only), and "Set up a TV with this playlist" on the phone onboarding's Add Profiles step. |
+| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up a TV" (list and playlist detail; Admin or default profile only), a dock card above the tab bar while a TV is advertising ("<name> is waiting for setup", fingerprint, Set up, dismiss), and "Set up a TV with this playlist" on the phone onboarding's Add Profiles step. |
 
 ## Receiver session
 
@@ -30,11 +30,12 @@ it, its profiles, and the sync choice to the TV over the local network.
    | Key | Value |
    |-----|-------|
    | `v` | `1` |
-   | `code` | first 8 lowercase hex characters of SHA-256 over the 6 ASCII digits |
    | `name` | device name (at most 60 characters) |
    | `pk` | TV public key, 32 raw bytes, standard base64 with padding |
 
-4. Show the QR code, the code in large type, the device name, and the line
+   The TXT record carries nothing derived from the code.
+4. Show the QR code, the code in large type, next to it the key
+   fingerprint as "Key XXXX" (see Security), the device name, and the line
    "Open AerioTV on your phone, then Settings > Playlists > Set up a TV, or
    scan this code."
 5. The session lasts 10 minutes, then shows "The setup code expired" with
@@ -63,12 +64,12 @@ is the fallback on every platform.
 ## Sender flow
 
 1. Browse `_aeriotv-setup._tcp`; list each TV by `name` with the subtitle
-   "Waiting for setup". Ignore adverts whose `v` is not `1` or whose `pk` is
+   "Check that the TV shows XXXX", where XXXX is the key fingerprint
+   computed from the advertised `pk`. Ignore adverts whose `v` is not `1` or whose `pk` is
    not 32 bytes.
-2. Pick a TV, then enter the code shown on it. The sender compares the TXT
-   `code` hash with the hash of the typed code (constant time) and refuses a
-   mismatch locally, so a typo does not spend one of the TV's attempts. A QR
-   link skips this step.
+2. Pick a TV, then enter the code shown on it. The sender does not check
+   the code locally; only the TV verifies it, by decryption (a typo spends
+   one of the TV's 3 attempts). A QR link skips this step.
 3. Choose what to send:
    - The playlist, always.
    - Dispatcharr only: profiles, a checkbox per local profile of that
@@ -215,12 +216,16 @@ Non-interactive, with a progress line on screen:
   session; the phone's key pair lives for one send.
 - QR path: the QR code carries both the TV's key and the code, so the phone
   is talking to the TV on screen.
-- List path: the phone trusts the advert it picked by name. The TXT `code`
-  hash only catches typos; 6 digits can be brute forced from it offline, so
-  a hostile device on the same LAN that copies a TV's advert under its own
-  key could receive a payload meant for that TV during the window. Prefer
-  the QR code on shared networks. A future version can drop the TXT hash or
-  replace it with a short key fingerprint shown on the TV.
+- List path: the TXT record carries no code material, so nothing on the
+  LAN reveals the code. The code is verified only on the TV, by decryption:
+  a wrong code fails the AES-GCM tag and counts as one of the 3 attempts.
+- Key fingerprint: 4 characters, the first 20 bits of SHA-256 over the
+  TV's 32-byte public key, encoded 5 bits at a time (most significant
+  first) with the alphabet `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (no 0, 1, I,
+  or O). The TV shows it next to the code; the phone shows it for each
+  listed TV. A device advertising its own key under a TV's name shows a
+  different fingerprint, and without the code (shown only on the real TV)
+  it cannot decrypt a payload anyway.
 
 ## Platform status
 
