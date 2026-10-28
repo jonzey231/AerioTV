@@ -113,7 +113,7 @@ struct SyncCategoriesSettingsView: View {
     /// UserDefaults (the items have no @AppStorage of their own).
     @State private var revision = 0
 
-    private static let scopeOptions: [SettingsChoice<String>] = SyncScope.allCases.map {
+    private static let scopeOptions: [SettingsChoice<String>] = SyncScope.offeredCases.map {
         SettingsChoice($0.rawValue, $0.title)
     }
 
@@ -170,7 +170,11 @@ struct SyncCategoriesSettingsView: View {
     }
 
     private var scopeFooter: String {
-        "All devices syncs the setting everywhere. TVs only syncs it between your Apple TVs, and Phones and tablets only syncs it between your iPhones and iPads. Off keeps it on this device. These choices apply to this device only."
+        #if os(tvOS)
+        "All devices syncs the setting everywhere. TVs only syncs it between your Apple TVs and starts from this TV's current value. Off keeps it on this device. These choices apply to this device only."
+        #else
+        "All devices syncs the setting everywhere. Phones and tablets only syncs it between your iPhones and iPads and starts from this device's current value. Off keeps it on this device. These choices apply to this device only."
+        #endif
     }
 
     // MARK: - iOS Body

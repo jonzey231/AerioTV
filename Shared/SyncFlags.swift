@@ -181,6 +181,9 @@ enum SyncScope: String, CaseIterable, Identifiable {
         #endif
     }
 
+    /// The choices this device offers: its own class lane only.
+    static var offeredCases: [SyncScope] { [.all, deviceLane, .off] }
+
     static let tvLaneKey = "tv"
     static let mobileLaneKey = "mobile"
     var laneKey: String? {
@@ -229,7 +232,12 @@ struct SyncItem: Identifiable, Hashable {
             if ud.object(forKey: toggleKey) == nil { return .all }
             return ud.bool(forKey: toggleKey) ? .all : .off
         }
-        return ud.string(forKey: scopeKey).flatMap(SyncScope.init(rawValue:)) ?? .all
+        let stored = ud.string(forKey: scopeKey).flatMap(SyncScope.init(rawValue:)) ?? .all
+        // A device never uses the other class's lane: a stored scope for
+        // the other class (for example a restored defaults file) reads as
+        // All devices.
+        if (stored == .tv || stored == .mobile), stored != SyncScope.deviceLane { return .all }
+        return stored
     }
 
     /// True when this device writes and reads the item on some lane.
@@ -241,6 +249,8 @@ struct SyncItem: Identifiable, Hashable {
     var isEnabled: Bool { scope != .off }
 
     func setScope(_ s: SyncScope) {
+        // Only this device's own class lane is accepted.
+        let s = ((s == .tv || s == .mobile) && s != SyncScope.deviceLane) ? .all : s
         let ud = UserDefaults.standard
         if isData {
             if let category { ud.set(s != .off, forKey: category.defaultsKey) }
