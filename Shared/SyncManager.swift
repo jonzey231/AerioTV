@@ -1254,6 +1254,13 @@ final class SyncManager: ObservableObject {
         if server.epgRetentionDays != 7 {
             dict["epgRetentionDays"] = server.epgRetentionDays
         }
+        // Per-playlist settings that a user expects to follow the playlist
+        // to another device: DVR default destination, Fetch On Demand, and
+        // the catch-up time offset. Older clients ignore the keys; an absent
+        // key leaves the receiving device's value untouched.
+        dict["defaultRecordingDestination"] = server.defaultRecordingDestinationRaw
+        dict["vodEnabled"] = server.vodEnabled
+        dict["catchupTimeOffsetMinutes"] = CatchupSupport.timeOffsetMinutes(serverID: server.id)
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -1359,7 +1366,10 @@ final class SyncManager: ObservableObject {
             dispatcharrSelectedProfileID: dict["dispatcharrSelectedProfileID"] as? Int,
             // Catch-up: absent (older sender or untouched default)
             // means 7 days of retained guide history.
-            epgRetentionDays: dict["epgRetentionDays"] as? Int ?? 7
+            epgRetentionDays: dict["epgRetentionDays"] as? Int ?? 7,
+            defaultRecordingDestinationRaw: dict["defaultRecordingDestination"] as? String,
+            vodEnabled: dict["vodEnabled"] as? Bool,
+            catchupTimeOffsetMinutes: dict["catchupTimeOffsetMinutes"] as? Int
         )
     }
 
@@ -1814,6 +1824,21 @@ struct SyncedServer: Sendable {
     /// Catch-up: per-server guide-history retention in days. Absent
     /// in payloads from older clients; deserialize defaults it to 7.
     let epgRetentionDays: Int
+    /// Per-playlist DVR default destination, Fetch On Demand flag, and
+    /// catch-up time offset (minutes). nil = absent from an older sender,
+    /// so the receiving device keeps its own value.
+    let defaultRecordingDestinationRaw: String?
+    let vodEnabled: Bool?
+    let catchupTimeOffsetMinutes: Int?
+
+    /// Applies the optional per-playlist fields to a local server record.
+    @MainActor func applyPlaylistSettings(to server: ServerConnection) {
+        if let v = defaultRecordingDestinationRaw, !v.isEmpty { server.defaultRecordingDestinationRaw = v }
+        if let v = vodEnabled { server.vodEnabled = v }
+        if let v = catchupTimeOffsetMinutes {
+            UserDefaults.standard.set(v, forKey: CatchupSupport.timeOffsetKey(serverID: id))
+        }
+    }
 }
 
 // MARK: - Notification Names

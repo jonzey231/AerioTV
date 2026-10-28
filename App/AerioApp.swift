@@ -2077,6 +2077,7 @@ struct RootView: View {
                     // Catch-up: adopt the remote guide-history retention
                     // so the replay window matches across devices.
                     local.epgRetentionDays = remote.epgRetentionDays
+                    remote.applyPlaylistSettings(to: local)
                     // Which playlist is selected is normally a per-device
                     // choice and never synced. A replace is the exception:
                     // the user asked this device to mirror the cloud, and
@@ -2159,6 +2160,7 @@ struct RootView: View {
                 newServer.dispatcharrSelectedProfileID = remote.dispatcharrSelectedProfileID
                 // Catch-up: inherit the guide-history retention setting.
                 newServer.epgRetentionDays = remote.epgRetentionDays
+                remote.applyPlaylistSettings(to: newServer)
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
