@@ -248,6 +248,9 @@ string[] each, cap 500 names each.
 | liveTvEdgeSwipeOpensSidebar | bool | (Android only) | liveTvEdgeSwipeOpensSidebar |
 | skipLoadingScreen | bool | (Android only) | skipLoadingScreen |
 | appleTVChannelFlip | bool | (Android only) | appleTVChannelFlip |
+| defaultGroup | string | defaultGroup | defaultGroup |
+
+defaultGroup lands on Apple in the parity pass; until then Apple round-trips it (6.2).
 
 Values (what Android writes; Apple maps to exactly these strings and numbers). On read, an unknown
 value or a value of the wrong type is ignored and the local setting is left unchanged:
@@ -263,6 +266,7 @@ value or a value of the wrong type is ignored and the local setting is left unch
 | guideGroupSelector | `"pills"`, `"sidebar"` |
 | phoneGroupSelector | `"sidebar"` (default), `"pills"` |
 | guideSidebarLayout | `"overlay"` (default), `"shift"` |
+| defaultGroup | the active playlist's Default Group token exactly as stored, any string up to 200 characters; `""` = none. An unknown group is stored as is and the launch falls back |
 | every bool row | JSON `true` or `false`, never a string |
 
 Excluded from settings (own keys or device-local): `remoteControlMap`, `radioModeByDefault`,
