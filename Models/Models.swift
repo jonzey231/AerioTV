@@ -201,7 +201,7 @@ final class ServerConnection {
     /// days back / 60 ahead); a legacy stored 30 reads as All Available.
     /// Inline default = SwiftData lightweight migration, same pattern as
     /// every post-v1.6 field on this model.
-    var epgRetentionDays: Int = 7
+    var epgRetentionDays: Int = 0  // 0 = All (owner, 2026-10-28)
 
     /// v1.6.20: per-server Dispatcharr auth header shape, auto-detected
     /// during Test Connection and persisted so subsequent API calls and

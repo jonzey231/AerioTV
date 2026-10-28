@@ -26,7 +26,7 @@ final class ServerConnectionViewModel {
     /// a huge guide pulled the 7-day default before the user had any say
     /// (Logan, 2026-08-10). Same option set and default as the Edit
     /// Server picker, so the two screens agree.
-    var epgRetentionDays: Int = 7
+    var epgRetentionDays: Int = 0  // 0 = All (owner, 2026-10-28)
     var epgURL: String = ""       // Optional EPG URL for m3uPlaylist
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
@@ -723,7 +723,7 @@ final class ServerConnectionViewModel {
         dispatcharrXMLTVURL = ""
         xtreamXMLTVURL = ""
         vodEnabled = true
-        epgRetentionDays = 7
+        epgRetentionDays = 0
         epgURL = ""
         localURL = ""
         localEPGURL = ""
