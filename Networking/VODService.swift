@@ -1962,6 +1962,8 @@ enum AppCacheDirectory {
 /// replaces the snapshot when it finishes; the store's partial-over-full
 /// guard keeps early batches from collapsing the restored list.
 enum VODLibraryCache {
+    /// Largest catalog written as one JSON snapshot.
+    static let maxSnapshotItems = 20_000
     /// Bump when the encoded models change shape; a mismatch is a miss.
     private static let schema = 2
 
@@ -2022,6 +2024,12 @@ enum VODLibraryCache {
     static func save(kind: VODItemType, identity: String, items: [VODDisplayItem], categories: [VODCategory],
                      remoteCount: Int? = nil, remoteNewest: String? = nil) {
         guard !items.isEmpty else { return }
+        // Whole-file encode grows with the catalog; past this size it risks
+        // the same allocation failure the TMDB art cache hit. Skip, log.
+        guard items.count <= maxSnapshotItems else {
+            debugLog("[VOD-CACHE] save skipped: \(items.count) items over cap \(maxSnapshotItems)")
+            return
+        }
         let url = fileURL(kind: kind, identity: identity)
         let snap = Snapshot(identity: identity, items: items, categories: categories, at: Date(),
                             remoteCount: remoteCount, remoteNewest: remoteNewest)
@@ -2150,11 +2158,67 @@ final class TMDBArtCache: ObservableObject {
 
     /// Bumped (throttled) as entries land so poster cards re-read.
     @Published private(set) var version = 0
+    /// In memory, `overview` is always nil: synopses live only in
+    /// `overviews` (session LRU) so the cache stays small.
     private var entries: [String: Entry] = [:]
     private var loaded = false
     private var dirty = false
     private var saveTask: Task<Void, Never>?
+    private var lastSaveAt: Date = .distantPast
     private var enrichTasks: [String: Task<Void, Never>] = [:]
+
+    /// TestFlight crash 1.8.44 (iPad): an uncapped cache (tens of thousands
+    /// of titles with full synopses) re-encoded whole on every save until
+    /// the allocation failed. Caps keep the file a few MB at most.
+    static let maxEntries = 20_000
+    static let hardPruneEntries = 10_000
+    nonisolated static let maxFileBytes = 8 * 1024 * 1024
+    static let overviewLRUCapacity = 500
+    static let minSaveInterval: TimeInterval = 30
+
+    /// Synopses fetched this session, newest last. Not persisted.
+    private var overviews: [String: String] = [:]
+    private var overviewOrder: [String] = []
+
+    /// On-disk row, encoded as a compact array
+    /// `[key, poster, backdrop, tmdbID, at]` (at = seconds since 1970).
+    struct Row: Codable, Sendable {
+        var key: String
+        var poster: String
+        var backdrop: String
+        var tmdbID: String
+        var at: Double
+
+        init(key: String, entry e: Entry) {
+            self.key = key; poster = e.poster; backdrop = e.backdrop
+            tmdbID = e.tmdbID; at = e.at.timeIntervalSince1970
+        }
+
+        init(from decoder: Decoder) throws {
+            var c = try decoder.unkeyedContainer()
+            key = try c.decode(String.self)
+            poster = try c.decode(String.self)
+            backdrop = try c.decode(String.self)
+            tmdbID = try c.decode(String.self)
+            at = try c.decode(Double.self)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.unkeyedContainer()
+            try c.encode(key); try c.encode(poster); try c.encode(backdrop)
+            try c.encode(tmdbID); try c.encode(at)
+        }
+
+        var entry: Entry {
+            Entry(tmdbID: tmdbID, poster: poster, backdrop: backdrop,
+                  at: Date(timeIntervalSince1970: at), overview: nil)
+        }
+    }
+
+    struct DiskFile: Codable, Sendable {
+        var v: Int
+        var rows: [Row]
+    }
 
     private static var fileURL: URL {
         AppCacheDirectory.url.appendingPathComponent("tmdb-art-cache.json")
@@ -2167,10 +2231,37 @@ final class TMDBArtCache: ObservableObject {
     func loadIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        if let data = try? Data(contentsOf: Self.fileURL),
-           let map = try? JSONDecoder().decode([String: Entry].self, from: data) {
+        guard let data = try? Data(contentsOf: Self.fileURL) else { return }
+        if let file = try? JSONDecoder().decode(DiskFile.self, from: data) {
+            var map: [String: Entry] = [:]
+            map.reserveCapacity(file.rows.count)
+            for r in file.rows { map[r.key] = r.entry }
             entries = map
+        } else if let legacy = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            // Pre-1.8.45 format: a dictionary of structs with synopses.
+            // Strip the synopses and rewrite in the compact format.
+            entries = legacy.mapValues { var e = $0; e.overview = nil; return e }
+            dirty = true
+            debugLog("[TMDB-ART] migrating legacy cache (\(legacy.count) entries, \(data.count / 1024) KB)")
         }
+        if prune(to: Self.maxEntries) { dirty = true }
+        if dirty { scheduleSave() }
+    }
+
+    /// Keeps at most `limit` entries: confirmed misses (empty poster) go
+    /// first, then the oldest by `at`. Returns true when anything was dropped.
+    @discardableResult
+    private func prune(to limit: Int) -> Bool {
+        guard entries.count > limit else { return false }
+        let before = entries.count
+        let kept = entries.sorted { a, b in
+            let ah = !a.value.poster.isEmpty, bh = !b.value.poster.isEmpty
+            if ah != bh { return ah }
+            return a.value.at > b.value.at
+        }.prefix(limit)
+        entries = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
+        debugLog("[TMDB-ART] pruned \(before - entries.count) entries (now \(entries.count))")
+        return true
     }
 
     func entry(for item: VODDisplayItem) -> Entry? {
@@ -2188,8 +2279,10 @@ final class TMDBArtCache: ObservableObject {
         return TMDBService.imageURL(path: e.backdrop, size: size)
     }
 
+    /// Session-only: nil when the synopsis was not fetched this launch, and
+    /// callers fetch details on demand as they do for misses.
     func overview(for item: VODDisplayItem) -> String? {
-        guard let o = entry(for: item)?.overview, !o.isEmpty else { return nil }
+        guard let o = overviews[Self.key(for: item)], !o.isEmpty else { return nil }
         return o
     }
 
@@ -2198,31 +2291,76 @@ final class TMDBArtCache: ObservableObject {
         return e.tmdbID
     }
 
+    private func rememberOverview(_ text: String?, key: String) {
+        guard let text, !text.isEmpty else { return }
+        if overviews.updateValue(text, forKey: key) != nil {
+            overviewOrder.removeAll { $0 == key }
+        }
+        overviewOrder.append(key)
+        while overviewOrder.count > Self.overviewLRUCapacity {
+            overviews.removeValue(forKey: overviewOrder.removeFirst())
+        }
+    }
+
     private func store(_ e: Entry, key: String) {
-        entries[key] = e
+        rememberOverview(e.overview, key: key)
+        var slim = e
+        slim.overview = nil
+        entries[key] = slim
         dirty = true
         scheduleSave()
     }
 
+    /// 2 s debounce after the last change, and at most one save per 30 s
+    /// while enrichment keeps storing.
     private func scheduleSave() {
         guard saveTask == nil else { return }
+        let sinceLast = Date().timeIntervalSince(lastSaveAt)
+        let delay = max(2, Self.minSaveInterval - sinceLast)
         saveTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(delay))
             saveTask = nil
             guard dirty else { return }
             dirty = false
             version += 1
-            let snapshot = entries
+            prune(to: Self.maxEntries)
+            guard entries.count <= Self.maxEntries else {
+                debugLog("[TMDB-ART] save skipped: \(entries.count) entries over cap")
+                return
+            }
+            lastSaveAt = Date()
+            let rows = entries.map { Row(key: $0.key, entry: $0.value) }
             let url = Self.fileURL
             Task.detached(priority: .utility) {
+                let data: Data
                 do {
-                    let data = try JSONEncoder().encode(snapshot)
+                    data = try JSONEncoder().encode(DiskFile(v: 2, rows: rows))
+                } catch {
+                    debugLog("[TMDB-ART] encode failed: \(error.localizedDescription)")
+                    return
+                }
+                if data.count > TMDBArtCache.maxFileBytes {
+                    debugLog("[TMDB-ART] save skipped: \(data.count / 1024) KB over \(TMDBArtCache.maxFileBytes / 1024) KB, pruning harder")
+                    await TMDBArtCache.shared.pruneHardAndSave()
+                    return
+                }
+                do {
+                    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                            withIntermediateDirectories: true)
                     try data.write(to: url, options: .atomic)
+                    debugLog("[TMDB-ART] saved \(rows.count) entries (\(data.count / 1024) KB)")
                 } catch {
                     debugLog("[TMDB-ART] save failed: \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    private func pruneHardAndSave() {
+        guard entries.count > Self.hardPruneEntries else { return }
+        prune(to: Self.hardPruneEntries)
+        dirty = true
+        scheduleSave()
     }
 
     /// Catalog-paged variant of `enrich`. The VOD catalog no longer fits in
