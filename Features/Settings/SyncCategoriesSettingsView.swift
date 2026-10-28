@@ -107,17 +107,124 @@ struct SyncCategoriesSettingsView: View {
         }
     }
 
+    // MARK: - Per-item rows
+
+    /// Bumped after every scope or toggle write so rows re-read
+    /// UserDefaults (the items have no @AppStorage of their own).
+    @State private var revision = 0
+
+    private static let scopeOptions: [SettingsChoice<String>] = SyncScope.allCases.map {
+        SettingsChoice($0.rawValue, $0.title)
+    }
+
+    private func groupScopeBinding(_ group: SyncItemGroup) -> Binding<String> {
+        Binding(
+            get: {
+                _ = revision
+                let scopes = Set(group.items.filter { !$0.isData }.map(\.storedScope))
+                return scopes.count == 1 ? scopes.first!.rawValue : "mixed"
+            },
+            set: { raw in
+                guard let scope = SyncScope(rawValue: raw) else { return }
+                for item in group.items where !item.isData { item.setScope(scope) }
+                didChangeItems()
+            }
+        )
+    }
+
+    private func itemScopeBinding(_ item: SyncItem) -> Binding<String> {
+        Binding(
+            get: { _ = revision; return item.storedScope.rawValue },
+            set: { raw in
+                guard let scope = SyncScope(rawValue: raw) else { return }
+                item.setScope(scope)
+                didChangeItems()
+            }
+        )
+    }
+
+    private func itemToggleBinding(_ item: SyncItem) -> Binding<Bool> {
+        Binding(
+            get: { _ = revision; return item.storedScope != .off },
+            set: { on in
+                item.setScope(on ? .all : .off)
+                didChangeItems()
+            }
+        )
+    }
+
+    private func didChangeItems() {
+        SyncItemCatalog.syncPreferencesCategoryFlag()
+        revision += 1
+        SyncManager.shared.pushPreferences()
+    }
+
+    private var settingsGroups: [SyncItemGroup] {
+        SyncItemCatalog.groups.filter { $0.items.contains { !$0.isData } }
+    }
+
+    /// Data rows: the data group plus data items living in settings groups
+    /// (Remote Button Map sits with Remote Control).
+    private var dataItems: [SyncItem] {
+        SyncItemCatalog.groups.flatMap { $0.items.filter(\.isData) }
+    }
+
+    private var scopeFooter: String {
+        "All devices syncs the setting everywhere. TVs only syncs it between your Apple TVs, and Phones and tablets only syncs it between your iPhones and iPads. Off keeps it on this device. These choices apply to this device only."
+    }
+
     // MARK: - iOS Body
     #if os(iOS)
     private var iOSBody: some View {
         List {
-            Section {
-                ForEach(SyncCategory.allCases) { category in
-                    iOSRow(for: category)
+            ForEach(settingsGroups) { group in
+                Section {
+                    SettingsChoicePicker("All \(group.title) Settings",
+                                         options: Self.scopeOptions,
+                                         selection: groupScopeBinding(group),
+                                         footer: scopeFooter,
+                                         unmatchedTitle: "Mixed")
                         .listRowBackground(Color.cardBackground)
+                    ForEach(group.items.filter { !$0.isData }) { item in
+                        SettingsChoicePicker(item.label,
+                                             options: Self.scopeOptions,
+                                             selection: itemScopeBinding(item),
+                                             footer: scopeFooter)
+                            .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text(group.title).sectionHeaderStyle()
+                }
+                .disabled(!iCloudSyncEnabled)
+                .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+            }
+            Section {
+                ForEach(dataItems) { item in
+                    Toggle(isOn: itemToggleBinding(item)) {
+                        Text(item.label).scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
                 }
             } header: {
-                Text("Categories").sectionHeaderStyle()
+                Text("Your Data").sectionHeaderStyle()
+            }
+            .disabled(!iCloudSyncEnabled)
+            .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+
+            Section {
+                ForEach(SyncCategory.allCases) { category in
+                    Button(role: .destructive) {
+                        pendingDeleteCategory = category
+                    } label: {
+                        Label("Delete \(category.displayName)", systemImage: "icloud.slash")
+                            .scaledFont(.bodyMedium)
+                    }
+                    .tint(.red)
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Delete from iCloud").sectionHeaderStyle()
             } footer: {
                 Text(footerText)
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -125,41 +232,11 @@ struct SyncCategoriesSettingsView: View {
             .listSectionSeparator(.hidden)
         }
         .scrollContentBackground(.hidden)
-        #if os(iOS)
         // Phase 3 (Logan 2026-09-18): floating tab bar parity -
         // content runs under the bar, the bar tucks away on scroll,
         // and the last row clears it.
         .settingsPhoneTabBarChrome()
-        #endif
         .listStyle(.insetGrouped)
-    }
-
-    @ViewBuilder
-    private func iOSRow(for category: SyncCategory) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Toggle(isOn: binding(for: category)) {
-                SettingsRow(icon: category.icon, iconColor: theme.accent,
-                            title: category.displayName,
-                            subtitle: category.subtitle)
-            }
-            .tint(theme.accent)
-            .disabled(!iCloudSyncEnabled)
-            .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
-
-            HStack {
-                Spacer()
-                Button(role: .destructive) {
-                    pendingDeleteCategory = category
-                } label: {
-                    Label("Delete from iCloud", systemImage: "icloud.slash")
-                        .scaledFont(.footnote.weight(.semibold))
-                }
-                .buttonStyle(.bordered)
-                .tint(.red)
-            }
-            .padding(.top, 2)
-        }
-        .padding(.vertical, 4)
     }
     #endif
 
@@ -174,19 +251,37 @@ struct SyncCategoriesSettingsView: View {
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 24)
 
-                SettingsSection("Categories", style: .compactCard) {
-                    ForEach(SyncCategory.allCases) { category in
+                ForEach(settingsGroups) { group in
+                    SettingsSection(group.title, style: .compactCard) {
+                        SettingsChoicePicker("All \(group.title) Settings",
+                                             options: Self.scopeOptions,
+                                             selection: groupScopeBinding(group),
+                                             footer: scopeFooter,
+                                             unmatchedTitle: "Mixed")
+                        ForEach(group.items.filter { !$0.isData }) { item in
+                            SettingsChoicePicker(item.label,
+                                                 options: Self.scopeOptions,
+                                                 selection: itemScopeBinding(item),
+                                                 footer: scopeFooter)
+                        }
+                    }
+                    .disabled(!iCloudSyncEnabled)
+                    .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+                }
+
+                SettingsSection("Your Data", style: .compactCard) {
+                    ForEach(dataItems) { item in
                         TVSettingsToggleRow(
-                            icon: category.icon,
+                            icon: "icloud",
                             iconColor: theme.accent,
-                            title: category.displayName,
-                            subtitle: category.subtitle,
-                            isOn: binding(for: category)
+                            title: item.label,
+                            subtitle: "",
+                            isOn: itemToggleBinding(item)
                         ) { _ in }
-                        .disabled(!iCloudSyncEnabled)
-                        .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
                     }
                 }
+                .disabled(!iCloudSyncEnabled)
+                .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
 
                 SettingsSection("Delete from iCloud", style: .compactCard) {
                     ForEach(SyncCategory.allCases) { category in
@@ -212,7 +307,6 @@ struct SyncCategoriesSettingsView: View {
             .padding(.top, 32)
         }
     }
-
     #endif
 
     // MARK: - Copy
@@ -224,9 +318,9 @@ struct SyncCategoriesSettingsView: View {
             // pushes itself a couple of seconds later, and an incoming change
             // from another device is applied as soon as iCloud delivers it.
             // Sync Now only forces the round trip early.
-            return "Syncing is automatic: a change you make here is sent a few seconds later, and a change from another device is applied as soon as iCloud delivers it. Sync Now on the previous screen just forces that round trip immediately.\n\nEach toggle controls whether this device pushes and pulls that category. The category-toggle states themselves sync across your devices, so flipping one here will reach your other Apple-ID-signed-in devices. Use the Delete buttons to remove a category's cloud copy without affecting local data."
+            return "Syncing is automatic: a change you make here is sent a few seconds later, and a change from another device is applied as soon as iCloud delivers it. Sync Now on the previous screen just forces that round trip immediately.\n\nEach row controls whether and where this device pushes and pulls that item. Use the Delete buttons to remove a category's cloud copy without affecting local data."
         } else {
-            return "iCloud Sync is off. Per-category toggles take effect when you re-enable Sync at the top. The Delete buttons still work: useful for scrubbing stale iCloud state before re-enabling Sync."
+            return "iCloud Sync is off. These choices take effect when you re-enable Sync at the top. The Delete buttons still work: useful for scrubbing stale iCloud state before re-enabling Sync."
         }
     }
 }

@@ -77,6 +77,9 @@ struct SettingsChoicePicker<Value: Hashable>: View {
     /// iOS: an extra card shown first on the pushed page (e.g. toggles
     /// that scope where the choice applies). Ignored on tvOS.
     var leadingSection: AnyView? = nil
+    /// Trailing label when the selection matches no option (for example
+    /// a group header whose items carry different values).
+    var unmatchedTitle: String = "Not set"
 
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -87,8 +90,10 @@ struct SettingsChoicePicker<Value: Hashable>: View {
          icon: String? = nil,
          iconColor: Color = .accentPrimary,
          leadingSection: AnyView? = nil,
+         unmatchedTitle: String = "Not set",
          onChange: ((Value) -> Void)? = nil) {
         self.leadingSection = leadingSection
+        self.unmatchedTitle = unmatchedTitle
         self.title = title
         self.options = options
         self._selection = selection
@@ -102,7 +107,7 @@ struct SettingsChoicePicker<Value: Hashable>: View {
     /// em-dash-free placeholder when the stored value is not one of the
     /// offered options (a stale preference, or a group that went away).
     private var currentTitle: String {
-        options.first(where: { $0.value == selection })?.title ?? "Not set"
+        options.first(where: { $0.value == selection })?.title ?? unmatchedTitle
     }
 
     private func select(_ value: Value) {
