@@ -24,7 +24,7 @@ struct SyncSettingsView: View {
     ])
     private var servers: [ServerConnection]
 
-    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
     @AppStorage("syncLastDate") private var syncLastDate: Double = 0
 
     @State private var showClearICloudConfirm = false

@@ -71,7 +71,7 @@ struct SettingsView: View {
     @State private var showDeleteAlert = false
     /// Read-only here: the Sync row's value on the Settings root. The
     /// toggle itself lives on SyncSettingsView.
-    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
     #if os(tvOS)
     @State private var navPath = NavigationPath()
     /// Tracks classic-`NavigationLink` pushes that bypass `navPath`

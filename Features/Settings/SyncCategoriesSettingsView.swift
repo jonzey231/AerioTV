@@ -17,7 +17,7 @@ struct SyncCategoriesSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var servers: [ServerConnection]
     @ObservedObject private var theme = ThemeManager.shared
-    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = true
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
 
     // One @AppStorage per category, written through SyncCategory.defaultsKey,
     // round-trips via SyncManager.buildPreferencesDict so a flip on one

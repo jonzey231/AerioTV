@@ -2,7 +2,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Binding var hasCompletedOnboarding: Bool
-    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
     @ObservedObject private var syncManager = SyncManager.shared
 
     /// Discord (Glitzbr): he turned iCloud sync on during setup and a

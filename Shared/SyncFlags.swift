@@ -138,3 +138,10 @@ extension SyncCategory {
             .map(\.defaultsKey)
     }
 }
+
+// MARK: - Shared master default
+
+/// Default for the master `iCloudSyncEnabled` toggle when the user has
+/// never chosen. Every @AppStorage binding reads this one constant so the
+/// screens cannot disagree about whether sync is on.
+let iCloudSyncEnabledDefault = false
