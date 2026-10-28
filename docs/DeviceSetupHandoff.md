@@ -16,7 +16,7 @@ it, its profiles, and the sync choice to the TV over the local network.
 | Side | Who | What it does |
 |------|-----|--------------|
 | Receiver | TV (Android TV, Apple TV) | Welcome > "Set up from your phone". Generates a code and key pair, listens, advertises, shows a QR code and the code, applies the payload. |
-| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up a TV" (list and playlist detail; Admin or default profile only), a dock card above the tab bar while a TV is advertising ("<name> is waiting for setup", fingerprint, Set up, dismiss), and "Set up a TV with this playlist" on the phone onboarding's Add Profiles step. |
+| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up a TV" (list and playlist detail; Admin or default profile only), a dock card directly above the tab bar while a TV is advertising (the TV name, "Waiting for setup, key XXXX", Set up, and dismiss; it shares a row with the Control a TV button when that button shows), a banner at the top of the Settings root for the same TV (same lines, Set up, and dismiss; one shared discovery, gating, and dismissal with the dock card), and "Set up a TV with this playlist" on the phone onboarding's Add Profiles step. |
 
 ## Receiver session
 
@@ -36,8 +36,8 @@ it, its profiles, and the sync choice to the TV over the local network.
    The TXT record carries nothing derived from the code.
 4. Show the QR code, the code in large type, next to it the key
    fingerprint as "Key XXXX" (see Security), the device name, and the line
-   "Open AerioTV on your phone, then Settings > Playlists > Set up a TV, or
-   scan this code."
+   "Open AerioTV on your phone, then Settings > Playlists > open your
+   playlist > Set up a TV, or scan this code."
 5. The session lasts 10 minutes, then shows "The setup code expired" with
    New Code and Cancel. Cancel returns to Welcome. Leaving the screen stops
    the listener and the advert.
