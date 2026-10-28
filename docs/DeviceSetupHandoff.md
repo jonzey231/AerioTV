@@ -57,9 +57,27 @@ base64, padded or not, for every key field. The QR is generated on the TV
 
 The sender registers the `aeriotv` scheme with host `setup`, so the system
 camera opens AerioTV on the Set up a TV screen with the TV and code already
-filled in. Android has no in-app camera scanner (the project carries no
-camera or barcode dependency); the discovered TV list plus typing the code
-is the fallback on every platform.
+filled in. On Android phones and tablets the Set up a TV screen also has
+"Scan QR code" (in-app camera scanner) and "Choose from Photos" (system photo
+picker), and an image of the code shared to AerioTV opens the same flow. The
+discovered TV list plus typing the code is the fallback on every platform.
+
+### Related: Dispatcharr user QR
+
+Dispatcharr's web UI (User modal, Dispatcharr dev commit 52bdb33e) shows a QR
+for a user's API key. Its text is JSON:
+`{"v":1,"type":"user_api_key","api_key":"<key>","base_url":"<https://server>","username":"<advisory>","first_name":"","last_name":"","email":""}`.
+A client parses it as JSON and accepts it only when `type` is `user_api_key`
+and `v` is 1; it then uses `api_key` with `base_url`. The identity fields are
+advisory and may be blank, and a long payload may be trimmed to `api_key`
+and `base_url` only. AerioTV reads this code and the `aeriotv://setup` code
+with the same scanner (camera, photo, or a shared image): a user code fills
+the Dispatcharr connect form or an Add Profile form and signs in the same way
+as a typed key; a setup code opens Set up a TV; anything else shows "This is
+not a Dispatcharr user code or an AerioTV setup code." The key is never
+logged. After a QR sign-in the existing App Data list
+(`/api/accounts/users/me/app-data/`) tells the app whether the user already
+has AerioTV sync data, and if so Dispatcharr Sync is offered as a restore.
 
 ## Sender flow
 
@@ -232,6 +250,6 @@ Non-interactive, with a progress line on screen:
 | Platform | Receiver | Sender |
 |----------|----------|--------|
 | Android TV | Done | n/a |
-| Android phone and tablet | n/a | Done (QR via the system camera and the `aeriotv://setup` link) |
+| Android phone and tablet | n/a | Done (in-app scanner, Choose from Photos, a shared image, and the system camera via the `aeriotv://setup` link) |
 | Apple TV | Planned, same wire format | n/a |
 | iPhone and iPad | n/a | Planned, same wire format |
