@@ -58,8 +58,10 @@ base64, padded or not, for every key field. The QR is generated on the TV
 The sender registers the `aeriotv` scheme with host `setup`, so the system
 camera opens AerioTV on the Set up a TV screen with the TV and code already
 filled in. On Android phones and tablets the Set up a TV screen also has
-"Scan QR code" (in-app camera scanner) and "Choose from Photos" (system photo
-picker), and an image of the code shared to AerioTV opens the same flow. The
+"Scan QR code" (in-app camera scanner), "Choose from Photos" (system photo
+picker), and "Import file" (system document picker, a text file holding the
+link), and an image, text, or file of the code shared to AerioTV opens the
+same flow. The
 discovered TV list plus typing the code is the fallback on every platform.
 
 ### Related: Dispatcharr user QR
@@ -70,12 +72,28 @@ for a user's API key. Its text is JSON:
 A client parses it as JSON and accepts it only when `type` is `user_api_key`
 and `v` is 1; it then uses `api_key` with `base_url`. The identity fields are
 advisory and may be blank, and a long payload may be trimmed to `api_key`
-and `base_url` only. AerioTV reads this code and the `aeriotv://setup` code
-with the same scanner (camera, photo, or a shared image): a user code fills
-the Dispatcharr connect form or an Add Profile form and signs in the same way
-as a typed key; a setup code opens Set up a TV; anything else shows "This is
-not a Dispatcharr user code or an AerioTV setup code." The key is never
-logged. After a QR sign-in the existing App Data list
+and `base_url` only. The same payload may also arrive as a file or as text
+instead of an image. AerioTV reads this code and the `aeriotv://setup` code
+through four inputs, all with one parser (phones and tablets; TVs have none
+of them):
+
+1. Camera: the in-app scanner ("Scan QR code").
+2. Photos: a QR code image from the system photo picker ("Choose from
+   Photos").
+3. File: the system document picker ("Import file"; `application/json`,
+   `text/plain`, any type as a fallback). At most 64 KiB is read; the file
+   holds the JSON above or a setup link (a link may sit among other text).
+   Anything else shows "That file is not a Dispatcharr user code or an
+   AerioTV setup code."
+4. Share and clipboard: a QR code image, text, or a JSON or text file shared
+   to AerioTV from the share sheet, or, on the Dispatcharr connect form, a
+   one-tap "Paste from clipboard" when the clipboard holds the JSON or a
+   setup link as the form opens.
+
+A user code fills the Dispatcharr connect form or an Add Profile form and
+signs in the same way as a typed key; a setup code opens Set up a TV;
+anything else shows "This is not a Dispatcharr user code or an AerioTV setup
+code." The key is never logged. After a QR sign-in the existing App Data list
 (`/api/accounts/users/me/app-data/`) tells the app whether the user already
 has AerioTV sync data, and if so Dispatcharr Sync is offered as a restore.
 
@@ -250,6 +268,6 @@ Non-interactive, with a progress line on screen:
 | Platform | Receiver | Sender |
 |----------|----------|--------|
 | Android TV | Done | n/a |
-| Android phone and tablet | n/a | Done (in-app scanner, Choose from Photos, a shared image, and the system camera via the `aeriotv://setup` link) |
+| Android phone and tablet | n/a | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link) |
 | Apple TV | Planned, same wire format | n/a |
 | iPhone and iPad | n/a | Planned, same wire format |
