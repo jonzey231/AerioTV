@@ -2170,8 +2170,8 @@ final class TMDBArtCache: ObservableObject {
     /// TestFlight crash 1.8.44 (iPad): an uncapped cache (tens of thousands
     /// of titles with full synopses) re-encoded whole on every save until
     /// the allocation failed. Caps keep the file a few MB at most.
-    static let maxEntries = 20_000
-    static let hardPruneEntries = 10_000
+    static let maxEntries = 60_000
+    static let hardPruneEntries = 40_000
     nonisolated static let maxFileBytes = 8 * 1024 * 1024
     static let overviewLRUCapacity = 500
     static let minSaveInterval: TimeInterval = 30
