@@ -417,7 +417,7 @@ Row: `[id:string, name:string(max 40 B), placement:"b"|"e", members:int[]]`, row
 ### 4.12 profiles (admin user only)
 Written only by a device signed in as the admin profile, under the admin's own `me` key.
 ```json
-{"rows":[[1,"admin","Logan","none","","","admin",1760724245,{},0],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000,{"icon":"paw","color":"orange"},1]]}
+{"rows":[[1,"admin","Logan","none","","","admin",1760724245,{},0],[7,"test1","Kids","directions","9f2c...64hex","b81e...32hex","child",1760730000,{"icon":"paw","color":"orange"},1]],"removed":[["test2",1760800000,8]]}
 ```
 Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"|"numbers"|"directions", pinHash:string, pinSalt:string, role:"admin"|"user"|"child", updatedAt:int, avatar:object, order:int]`, cap 25 rows.
 - `updatedAt` = Unix seconds of the last change to that row's displayName, PIN, role, avatar, or
@@ -437,13 +437,31 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
     default: index (sum of the lowercased username's character codes) mod 8 in this order.
   - Position absent (older writer) = keep the local avatar. Admin edits any profile's avatar; a
     User or Child edits its own.
+- `removed` (optional; absent = none) = removal tombstones: `[username:string (lowercased),
+  removedAt:int (Unix seconds), userId:int (optional)]`, one per username. A removal stamps a local
+  tombstone and the next write adds it to `removed`. Every writer carries the union of the server
+  `removed` list and its local stamps (newest `removedAt` per username) and drops a tombstone 90
+  days after its `removedAt`. Tombstones live in the payload because a device-local stamp cannot
+  stop a third device with a stale roster from writing the row back.
+- Tombstone rule, on every pull and on the read-merge before every write: a row (server or local)
+  whose username has a tombstone with `removedAt >= updatedAt` is removed. A server row is dropped;
+  a local profile is deleted with the same local cleanup as a user remove (no PIN prompt, no new
+  tombstone) and is never re-sent. A row edited after the tombstone (`updatedAt > removedAt`) wins:
+  it stays and the tombstone leaves `removed` (an intentional re-add). The default profile is never
+  removed. The local stamp is a cache for the window with no session; it clears once a write that
+  carries it in `removed` gets a 200 (or the server copy already carries it), a newer row
+  supersedes it, or it expires.
 - Merge is PER ROW, not last writer wins for the whole key: on every pull, a pulled row replaces the
   local displayName, role, avatar, order, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
   local row's; otherwise the local row stays and goes back up on the next write. A row for a user
-  this device has no profile for is added (section 5), except a profile this device removed at or
-  after that row's `updatedAt`: the pull skips it (never re-creates it). A writer keeps rows it does
-  not have locally, except such a removed profile, which leaves the list; the local removed stamp
-  clears once a pull shows the server copy without that row.
+  this device has no profile for is added (section 5) unless a tombstone covers it. A writer keeps
+  rows it does not have locally unless a tombstone covers them.
+- Stale-device rule: a writer does not send a local row the server list lacks when that row has no
+  unsent local change (its `updatedAt` is at or before this device's last acknowledged write) and
+  either its `updatedAt` is older than the server `profiles` sub-object's `updatedAt`, or every local
+  row is older than the server's newest row by more than the 90-day tombstone window. The writer
+  logs `[DSYNC] profiles: local row <user> older than server roster, not re-sent` and adopts the
+  server list; the local profile stays on that device until a tombstone or the user removes it.
 - `role` is the app-local role set by an Admin on the device (default: `"admin"` when the Dispatcharr user level is Admin, else `"user"`). `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs an Admin PIN.
 - `pinHash` = lowercase hex SHA-256 of `pinSalt bytes || UTF-8 PIN` where the PIN is digits for
   numbers and the letters `U D L R` for directions (example `"UULR"`). Empty when `pinType` is `"none"`.
@@ -538,7 +556,7 @@ Per-category estimates (unchanged from v1):
 | settings | about 110 names x 35 B in `v`, up to 40 names in each of `tv` and `mobile`, plus customCategories up to 4 KiB | 10.7 KB | Yes |
 | remoteMap | about 20 entries | 0.8 KB | Yes |
 | radioDefault | | 0.2 KB | Yes |
-| profiles | 6 x 130 B | 1.0 KB | Yes |
+| profiles | 6 x 130 B rows plus up to 25 x 30 B `removed` tombstones | 1.8 KB | Yes |
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
 | Total | | about 59 KB (worst case about 62 KB) | Under 128 KiB (new per-key cap) |
 
