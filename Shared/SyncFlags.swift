@@ -60,7 +60,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .reminders:
             return "Upcoming-program reminders you scheduled from the EPG."
         case .preferences:
-            return "Theme, appearance mode, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
+            return "Theme, appearance mode, accent color, default tab, hidden groups, and Guide Display settings."
         case .remoteControl:
             return "Your customized Apple TV remote button assignments. Turn this off on a TV whose remote is a different model from your others."
         case .radioModeDefault:
@@ -145,3 +145,254 @@ extension SyncCategory {
 /// never chosen. Every @AppStorage binding reads this one constant so the
 /// screens cannot disagree about whether sync is on.
 let iCloudSyncEnabledDefault = false
+
+// MARK: - Per-item sync choices (2026-10-27)
+//
+// Owner decision: every synced option is selectable on its own in Sync
+// Categories. Settings items take a four-way scope (All devices, TVs only,
+// Phones and tablets only, Off) stored per device under
+// "syncScope.<item id>" (missing = All devices). Data items keep a plain
+// on/off stored under "syncItem.<id>" (missing = on), or bind to their
+// existing SyncCategory flag. In the iCloud preferences blob, All devices
+// rides the shared map; TVs only rides the `tv` lane (written by tvOS) and
+// Phones and tablets only rides the `mobile` lane (written by iOS and
+// iPadOS), mirroring the Android and Dispatcharr `v` / `tv` / `mobile`
+// lanes. Off neither writes nor reads, and leaves the cloud value alone.
+
+enum SyncScope: String, CaseIterable, Identifiable {
+    case all, tv, mobile, off
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all:    return "All devices"
+        case .tv:     return "TVs only"
+        case .mobile: return "Phones and tablets only"
+        case .off:    return "Off"
+        }
+    }
+
+    /// The lane this device form factor owns.
+    static var deviceLane: SyncScope {
+        #if os(tvOS)
+        return .tv
+        #else
+        return .mobile
+        #endif
+    }
+
+    static let tvLaneKey = "tv"
+    static let mobileLaneKey = "mobile"
+    var laneKey: String? {
+        switch self {
+        case .tv: return Self.tvLaneKey
+        case .mobile: return Self.mobileLaneKey
+        default: return nil
+        }
+    }
+}
+
+struct SyncItem: Identifiable, Hashable {
+    let id: String
+    /// Same wording as the Settings row it controls.
+    let label: String
+    /// UserDefaults keys this item carries. Empty for data items that
+    /// ride a dedicated blob (recents, My List, hidden titles).
+    let keys: [String]
+    /// When set, the toggle is the existing category flag itself.
+    let category: SyncCategory?
+    /// Data items show an on/off toggle; settings items show a scope.
+    let isData: Bool
+
+    init(_ id: String, _ label: String, _ keys: [String] = [],
+         category: SyncCategory? = nil, isData: Bool = false) {
+        self.id = id; self.label = label; self.keys = keys; self.category = category
+        self.isData = isData || category != nil
+    }
+
+    var toggleKey: String { "syncItem.\(id)" }
+    var scopeKey: String { "syncScope.\(id)" }
+
+    /// Effective scope. Items that ride the preferences payload are Off
+    /// while the "App Preferences" category flag (the compatibility switch
+    /// older builds and the onboarding chooser write) is off.
+    var scope: SyncScope {
+        if category == nil, !SyncCategory.preferences.isEnabled { return .off }
+        return storedScope
+    }
+
+    /// Settings items: the chosen scope. Data items: .all or .off.
+    var storedScope: SyncScope {
+        let ud = UserDefaults.standard
+        if isData {
+            if let category { return category.isEnabled ? .all : .off }
+            if ud.object(forKey: toggleKey) == nil { return .all }
+            return ud.bool(forKey: toggleKey) ? .all : .off
+        }
+        return ud.string(forKey: scopeKey).flatMap(SyncScope.init(rawValue:)) ?? .all
+    }
+
+    /// True when this device writes and reads the item on some lane.
+    var isActiveHere: Bool {
+        let s = scope
+        return s == .all || s == SyncScope.deviceLane
+    }
+
+    var isEnabled: Bool { scope != .off }
+
+    func setScope(_ s: SyncScope) {
+        let ud = UserDefaults.standard
+        if isData {
+            if let category { ud.set(s != .off, forKey: category.defaultsKey) }
+            else { ud.set(s != .off, forKey: toggleKey) }
+        } else {
+            ud.set(s.rawValue, forKey: scopeKey)
+        }
+    }
+}
+
+struct SyncItemGroup: Identifiable {
+    let id: String
+    let title: String
+    let items: [SyncItem]
+}
+
+enum SyncItemCatalog {
+    // Data item ids that have no plain UserDefaults keys.
+    static let recentsID = "recents"
+    static let watchlistID = "watchlist"
+    static let hiddenTitlesID = "hiddenTitles"
+
+    static let groups: [SyncItemGroup] = [
+        SyncItemGroup(id: "appearance", title: "Appearance", items: [
+            SyncItem("selectedTheme", "Color Theme", ["selectedTheme"]),
+            SyncItem("appearanceMode", "Light and Dark Mode", ["appearanceMode"]),
+            SyncItem("trueBlack", "True Black Background", ["appearance.trueBlack"]),
+            SyncItem("customAccent", "Custom Accent Color", ["useCustomAccent", "customAccentHex"]),
+            SyncItem("glassEffect", "Glass Effect", ["liquidGlassStyle"]),
+            SyncItem("textScale", "Text Size", ["textScale"]),
+            SyncItem("subtextScale", "Subtext Size", ["subtextScale"]),
+            SyncItem("textContrast", "Text Contrast", ["textContrast"]),
+            SyncItem("timeFormat", "Time Format", ["timeFormat"]),
+        ]),
+        SyncItemGroup(id: "general", title: "General", items: [
+            SyncItem("defaultTab", "Default Tab", ["defaultTab"]),
+            SyncItem("skipLoadingScreen", "Skip Loading Screen", ["appBehaviorsSkipLoadingScreen"]),
+            SyncItem("resumeLastChannel", "Resume Last Channel", ["appBehaviorsAutoResumeLastChannel"]),
+        ]),
+        SyncItemGroup(id: "liveTV", title: "Live TV", items: [
+            SyncItem("defaultLiveTVView", "Default View", ["defaultLiveTVView"]),
+            SyncItem("guideLayout", "Guide Layout", ["liveTVLayout"]),
+            SyncItem("groupSelection", "Group Selection",
+                     ["phoneGroupSelector", "guideGroupSelector.tv", "guideSidebarLayout.tv"]),
+            SyncItem("edgeSwipeSidebar", "Swipe from Left Edge Opens Sidebar", ["liveTVEdgeSwipeOpensSidebar"]),
+            SyncItem("showChannelLogos", "Show Channel Logos", ["ui.showChannelLogos"]),
+            SyncItem("showChannelNumbers", "Show Channel Numbers", ["ui.showChannelNumbers"]),
+            SyncItem("showChannelNames", "Show Channel Names", ["ui.showChannelNames"]),
+            SyncItem("showProgramSubtitles", "Show Program Subtitles", ["ui.showProgramSubtitles"]),
+            SyncItem("logoSize", "Logo Size", ["ui.channelLogoSize"]),
+            SyncItem("programBadges", "Show Program Badges",
+                     ["showEpgBadges.tv", "showEpgBadges.mobile", "ui.hiddenEpgBadges"]),
+            SyncItem("programInfoButton", "Program Info Button",
+                     ["guideProgramInfoButton", "guideProgramInfoButtonGuideView", "guideProgramInfoButtonListView"]),
+            SyncItem("roundedGuideLogos", "Rounded Guide Logos", ["ui.roundedLogoCornersGuide"]),
+            SyncItem("roundedProgramCells", "Rounded Program Cells", ["guide.roundedProgramCells"]),
+            SyncItem("roundedListLogos", "Rounded List Logos and Artwork",
+                     ["ui.roundedLogoCornersList", "ui.roundedLogoCorners"]),
+            SyncItem("liveTVDisplayScale", "Display Scale", ["guideScale", "listScale"]),
+            SyncItem("categoryColors", "Color Programs by Category",
+                     ["enableCategoryColors", "customCategoryColors.v1"]
+                     + ["sports", "movie", "kids", "news", "documentary", "drama",
+                        "comedy", "reality", "educational", "scifi", "music"].map { "categoryColor.\($0)" }
+                     + ["documentary", "drama", "comedy", "reality", "educational", "scifi",
+                        "music"].map { "categoryBucketEnabled.\($0)" }),
+            SyncItem("tintChannelCards", "Tint Channel Cards", ["tintChannelCards"]),
+        ]),
+        SyncItemGroup(id: "player", title: "Player", items: [
+            SyncItem("infoCard", "Pop Up Info Card on Channel Change",
+                     ["playerShowChannelInfoCard", "playerInfoCardChannelLogo", "playerInfoCardChannelName",
+                      "playerInfoCardProgramName", "playerInfoCardProgramTime",
+                      "playerInfoCardProgramSubtitle", "playerInfoCardProgramDescription"]),
+            SyncItem("liveRewind", "Pause & Rewind Live TV",
+                     ["liveRewindEnabled", "liveRewindDepthMinutes", "liveRewindRetainChannels", "liveRewindRetainCount"]),
+            SyncItem("skipIntervals", "Skip Back and Skip Forward", ["skipBackSeconds", "skipForwardSeconds"]),
+            SyncItem("skipWithoutControls", "Skip Without Controls", ["player.skipWithoutControls"]),
+            SyncItem("autoRecover", "Auto-Recover Frozen Streams", ["appBehaviorsAutoRecoverFrozenStreams"]),
+            SyncItem("channelFlip", "Up / Down Channel Change", ["appBehaviorsAppleTVChannelFlip"]),
+            SyncItem("edgeBrightness", "Edge Slide for Brightness",
+                     ["appBehaviorsEdgeBrightnessGesture", "appBehaviorsBrightnessEdge"]),
+            SyncItem("edgeVolume", "Edge Slide for Volume", ["appBehaviorsEdgeVolumeGesture"]),
+            SyncItem("multiviewAudioFocus", "Audio Focus Indicator", ["multiviewAudioFocusStyle"]),
+            SyncItem("multiviewPadding", "Padding Between Tiles", ["multiviewTilePadding"]),
+            SyncItem("multiviewCorners", "Tile Corners", ["multiviewTileCornersRounded"]),
+            SyncItem("multiviewLogos", "Multiview Channel Logos",
+                     ["multiview.showLogos", "multiview.logoPosition", "multiview.logoSize"]),
+            SyncItem("multiviewSubtitles", "Multiview Subtitles", ["multiviewPickerShowSubtitles"]),
+            SyncItem("multiviewDescriptions", "Multiview Descriptions", ["multiviewPickerShowDescriptions"]),
+        ]),
+        SyncItemGroup(id: "vod", title: "Movies & TV Shows", items: [
+            SyncItem("refreshLibrary", "Refresh Library", ["vodLibraryRefreshHours"]),
+            SyncItem("tmdb", "Use TMDB for Movies and TV Shows", ["programPostersTMDBEnabled"]),
+            SyncItem("vodDisplayScale", "Display Scale", ["uiScale"]),
+            SyncItem("hiddenCategory", "Hidden Category", ["vod.hiddenCategoryVisible.v1"]),
+        ]),
+        SyncItemGroup(id: "dvr", title: "DVR", items: [
+            SyncItem("preRoll", "Start Early (Pre-Roll)", ["dvrDefaultPreRollMins"]),
+            SyncItem("postRoll", "End Late (Post-Roll)", ["dvrDefaultPostRollMins"]),
+        ]),
+        SyncItemGroup(id: "remote", title: "Remote Control", items: [
+            SyncItem("remoteHints", "Show Remote Hints", ["showRemoteHints"]),
+            SyncItem("playChannelsIn", "Play Channels In", ["guideTuneInMini.tv"]),
+            SyncItem("remoteMap", "Remote Button Map", category: .remoteControl),
+        ]),
+        SyncItemGroup(id: "data", title: "Your Data", items: [
+            SyncItem("servers", "Playlists & Servers", category: .servers),
+            SyncItem("credentials", "Credentials", category: .credentials),
+            SyncItem("favorites", "Favorites", ["favoriteChannelIDs", "favoriteOrder"], isData: true),
+            SyncItem(recentsID, "Recently Watched", isData: true),
+            SyncItem("collections", "Collections", ["channelCollections"], isData: true),
+            SyncItem("watchProgress", "Watch Progress", category: .watchProgress),
+            SyncItem("reminders", "Reminders", category: .reminders),
+            SyncItem(watchlistID, "My List", isData: true),
+            SyncItem(hiddenTitlesID, "Hidden Titles", isData: true),
+            SyncItem("hiddenGroups", "Hidden Groups",
+                     ["hiddenChannelGroups", "hiddenMovieGroups", "hiddenSeriesGroups"], isData: true),
+            SyncItem("groupOrder", "Group Order",
+                     ["channelGroupOrder", "channelGroupOrder.sortMode", "defaultChannelGroup"], isData: true),
+            SyncItem("radioDefault", "Radio Mode by Default", category: .radioModeDefault),
+        ]),
+    ]
+
+    static var allItems: [SyncItem] { groups.flatMap(\.items) }
+
+    /// Key -> owning item, for the push and pull filters.
+    private static let itemByKey: [String: SyncItem] = {
+        var map: [String: SyncItem] = [:]
+        for item in groups.flatMap(\.items) { for k in item.keys { map[k] = item } }
+        return map
+    }()
+
+    /// Every key some item carries, for the type-agnostic preferences lane.
+    static var allKeys: [String] { allItems.flatMap(\.keys) }
+
+    /// Scope of the item that owns this key; keys no item owns are .all.
+    static func scope(of key: String) -> SyncScope {
+        itemByKey[key]?.scope ?? .all
+    }
+
+    /// True when this device syncs the key on the shared map.
+    static func allows(_ key: String) -> Bool { scope(of: key) == .all }
+
+    static func isEnabled(_ id: String) -> Bool {
+        allItems.first { $0.id == id }?.isActiveHere ?? true
+    }
+
+    /// Keeps the "App Preferences" category flag in step with the
+    /// per-item choices: on while any item that rides the preferences
+    /// payload is not Off. The category flag remains the compatibility
+    /// switch older builds understand.
+    static func syncPreferencesCategoryFlag() {
+        let anyOn = allItems.contains { $0.category == nil && $0.storedScope != .off }
+        UserDefaults.standard.set(anyOn, forKey: SyncCategory.preferences.defaultsKey)
+    }
+}

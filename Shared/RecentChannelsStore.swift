@@ -19,8 +19,9 @@ import SwiftUI
 /// `ChannelStore` calls `setScope(playlistID:)` whenever the active
 /// server changes.
 ///
-/// NOT intended for cross-device sync; UserDefaults is fine, no
-/// iCloud mirror needed.
+/// Synced through iCloud (2026-10-27 owner decision) as one
+/// playlist -> IDs map inside the preferences payload; see
+/// `syncSnapshot()` / `applySyncSnapshot(_:replace:)`.
 @MainActor
 final class RecentChannelsStore: ObservableObject {
     static let shared = RecentChannelsStore()
@@ -85,6 +86,61 @@ final class RecentChannelsStore: ObservableObject {
 
     private func save() {
         UserDefaults.standard.set(recentIDs, forKey: defaultsKey)
+        if let scopeID, !scopeID.isEmpty { Self.addToIndex(scopeID) }
+    }
+
+    // MARK: - iCloud sync
+
+    /// Playlist IDs that have a scoped recents list, so the sync payload
+    /// can be built without scanning every UserDefaults key.
+    private static let indexKey = "aerio.recent.channels.index"
+
+    private static func addToIndex(_ id: String) {
+        var ids = UserDefaults.standard.stringArray(forKey: indexKey) ?? []
+        guard !ids.contains(id) else { return }
+        ids.append(id)
+        UserDefaults.standard.set(ids, forKey: indexKey)
+    }
+
+    private static func indexedIDs() -> [String] {
+        let ud = UserDefaults.standard
+        if let ids = ud.stringArray(forKey: indexKey) { return ids }
+        // First run with the index: find existing scoped lists once.
+        let prefix = legacyDefaultsKey + "."
+        let ids = ud.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(prefix) }
+            .map { String($0.dropFirst(prefix.count)) }
+            .sorted()
+        ud.set(ids, forKey: indexKey)
+        return ids
+    }
+
+    /// playlist ID -> recent channel IDs (most recent first).
+    static func syncSnapshot() -> [String: [String]] {
+        var out: [String: [String]] = [:]
+        for id in indexedIDs() {
+            if let list = UserDefaults.standard.stringArray(forKey: "\(legacyDefaultsKey).\(id)"), !list.isEmpty {
+                out[id] = list
+            }
+        }
+        return out
+    }
+
+    /// Writes the cloud lists. A merge only touches the playlists the
+    /// cloud carries; a replace also clears playlists it does not.
+    static func applySyncSnapshot(_ snapshot: [String: [String]], replace: Bool) {
+        let ud = UserDefaults.standard
+        if replace {
+            for id in indexedIDs() where snapshot[id] == nil {
+                ud.removeObject(forKey: "\(legacyDefaultsKey).\(id)")
+            }
+        }
+        for (id, list) in snapshot {
+            ud.set(Array(list.prefix(maxEntries)), forKey: "\(legacyDefaultsKey).\(id)")
+            addToIndex(id)
+        }
+        shared.recentIDs = []
+        shared.load()
     }
 
     // MARK: - Public API

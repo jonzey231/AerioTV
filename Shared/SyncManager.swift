@@ -151,125 +151,31 @@ final class SyncManager: ObservableObject {
 
     // MARK: - Preference Key Sets
 
-    private let syncStringKeys = [
-        "selectedTheme", "liquidGlassStyle", "customAccentHex",
-        // Appearance mode (dark / light / system). Rides the same prefs lane
-        // as the accent hex so it syncs across ALL of the user's devices (not
-        // per-device-type). Absent on older clients / fresh installs resolves
-        // to .dark in ThemeManager, preserving the dark default.
-        "appearanceMode",
-        // NOTE: "defaultLiveTVView" is intentionally NOT synced. The correct
-        // default is form-factor specific (Apple TV / iPad -> Guide, iPhone ->
-        // List), so a single synced value let an iPhone's "list" clobber the
-        // Apple TV's Guide default across devices. Kept per-device (@AppStorage).
-        "defaultTab", "streamBufferSize",
-        // Live TV group the guide opens on (Manage Groups). "" = All.
-        "defaultChannelGroup",
-        // Guide Program Info Button (Settings > Live TV): off|current|all.
-        "guideProgramInfoButton",
-        "guideProgramInfoButtonGuideView", "guideProgramInfoButtonListView",
-        // Time Format (Settings > Appearance): "system" | "12" | "24".
-        ClockFormat.defaultsKey,
-        "bgRefreshType",
-        // Guide Display palette overrides, one hex string per
-        // category bucket. Missing keys fall through to the defaults
-        // in `ProgramCategory.defaultHex`, so clients running older
-        // builds that don't know about these keys are safe.
-        "categoryColor.sports", "categoryColor.movie",
-        "categoryColor.kids",   "categoryColor.news",
-        // Additional buckets added with the "Add more categories"
-        // disclosure section. Same safety property as above,
-        // older clients ignore unknown keys.
-        "categoryColor.documentary", "categoryColor.drama",
-        "categoryColor.comedy",      "categoryColor.reality",
-        "categoryColor.educational", "categoryColor.scifi",
-        "categoryColor.music",
-        // Live TV group sort mode (default/alphabetical/manual). The
-        // manual order itself rides syncStringArrayKeys (order-preserving).
-        "channelGroupOrder.sortMode",
-        // TV guide group-selection surface (pills/sidebar), per-device-type.
-        // Mutually exclusive with the pills row. See RemoteControlStore.
-        RemoteControlStore.groupSelectorKey,
-        // TV guide sidebar layout (overlay/shift), per-device-type, beside
-        // the group selector it modifies. See RemoteControlStore.
-        RemoteControlStore.sidebarLayoutKey
+    /// Every synced setting rides one type-agnostic lane: the value is
+    /// copied as the property-list object UserDefaults holds (String,
+    /// NSNumber, Data, or [String]), so a new setting needs only a
+    /// SyncItemCatalog entry. Older clients read the same keys with typed
+    /// casts, which NSNumber and String bridge for. Hidden groups (JSON
+    /// Data locally, [String] on the wire) and the remote map (own
+    /// category) keep their dedicated handling below.
+    private var syncPlistKeys: [String] {
+        SyncItemCatalog.allKeys.filter {
+            !syncHiddenGroupKeys.contains($0) && $0 != RemoteControlStore.mapKey
+        }
+    }
+    /// Device-local by owner decision (2026-10-27): buffer, network,
+    /// background refresh, and the AVPlayer developer flag. No longer
+    /// pushed. For one version a pull still adopts the cloud value when
+    /// this device has none, so a fresh install restoring from an older
+    /// snapshot keeps the user's choice.
+    private let legacyReadOnlyKeys = [
+        "streamBufferSize", "appBehaviorsStreamBufferSeconds", "networkTimeout", "maxRetries",
+        "bgRefreshEnabled", "bgRefreshType", "bgRefreshIntervalMins", "bgRefreshHour",
+        "bgRefreshMinute", "preferAVPlayer"
     ]
-    /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
-    /// holds the user-defined `[CustomCategory]` list from
-    /// `CategoryColor.loadCustomCategories()`, it needs its own
-    /// sync lane because it's stored as Data in UserDefaults, not
-    /// a plain String/Bool/Number.
-    private let syncDataKeys: [String] = [
-        CategoryColor.customCategoriesKey,
-        // TV remote-control button map (JSON blob). Per-device-type: the `.tv`
-        // key syncs across the user's Apple TVs only. Older clients / phones
-        // ignore the unknown key. See RemoteControlStore.
-        RemoteControlStore.mapKey
-    ]
-    private let syncBoolKeys = [
-        "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
-        // Settings > Appearance > True Black Background.
-        "appearance.trueBlack",
-        // EPG program badges visibility, PER DEVICE TYPE: both keys sync so a
-        // TV's choice mirrors to the user's other Apple TVs and a phone/tablet's
-        // to their iPhones/iPads, independently. Each device reads its own via
-        // epgBadgesVisibleKey.
-        "showEpgBadges.tv", "showEpgBadges.mobile",
-        // TMDB program-posters enable toggle. The API key already syncs via
-        // the iCloud Keychain (TMDBPosters.saveAPIKey synchronizable), so the
-        // enable state follows it across reinstalls/devices instead of needing
-        // a manual re-toggle after every install.
-        TMDBPosters.enabledDefaultsKey,
-        // Guide Display master toggle + channel-card stripe companion.
-        "enableCategoryColors", "tintChannelCards",
-        // Per-bucket enable flags for the additional (non-default)
-        // buckets surfaced in "Add more categories". Default buckets
-        // are always on, so we only sync the additional flags.
-        "categoryBucketEnabled.documentary", "categoryBucketEnabled.drama",
-        "categoryBucketEnabled.comedy",      "categoryBucketEnabled.reality",
-        "categoryBucketEnabled.educational", "categoryBucketEnabled.scifi",
-        "categoryBucketEnabled.music",
-        // TV "Play Channels In" mini-player toggle, per-device-type. See
-        // RemoteControlStore.
-        RemoteControlStore.tuneInMiniKey,
-        // On-screen remote hint strips (Live TV + player). Android
-        // stores the same preference as `show_remote_hints` and the two
-        // are mapped by name.
-        showRemoteHintsKey,
-        // Settings > Appearance > "Rounded corners in List view" and
-        // "Rounded corners in Guide view". App-wide look, so both sync like
-        // the theme and Text Size rather than staying per device. The
-        // pre-split key is carried too, so a device still on the old build
-        // keeps receiving the List choice.
-        LogoCorners.listKey,
-        LogoCorners.guideKey,
-        LogoCorners.guideCellsKey,
-        LogoCorners.legacyKey
-    ] + PlayerInfoCardSettings.allKeys + [PlayerInfoCardSettings.showOnChannelChangeKey]
-    // Player Info Card row visibility (Settings > App Behaviors). All
-    // six default ON and are only written once the user flips a row,
-    // so an absent key stays absent and older clients ignore them.
-    private let syncDoubleKeys  = [
-        "networkTimeout",
-        // Settings > Appearance > Text Size (0.85 to 1.5). Synced across
-        // ALL devices like the theme; see TextScale in Typography.swift.
-        TextScale.key,
-        // Subtext Size (0.85 to 1.5) and Text Contrast (0 to 1), same
-        // section; see SubtextScale / TextContrast in Typography.swift.
-        SubtextScale.key,
-        TextContrast.key
-    ]
-    private let syncIntKeys = [
-        "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",
-        // Skip Intervals (Settings > App Behaviors): one global pair.
-        SkipIntervals.backKey, SkipIntervals.forwardKey,
-    ]
-    // `favoriteChannelIDs` carries the membership Set; `favoriteOrder`
-    // carries the user's manual drag-reorder positions from the iOS
-    // Favorites tab. Both are plain `[String]` so they share the same
-    // sync path. Kept distinct so older clients that only know about
-    // the membership key keep working.
-    private let syncStringArrayKeys  = ["favoriteChannelIDs", "favoriteOrder", "channelGroupOrder"]
+    /// Payload keys for the data items without plain UserDefaults keys.
+    private static let recentsSyncKey = "recentChannels.sync.v1"
+    private static let watchlistSyncKey = "watchlist.sync.v1"
     private let syncHiddenGroupKeys = [
         "hiddenChannelGroups", "hiddenMovieGroups", "hiddenSeriesGroups"
     ]
@@ -773,7 +679,9 @@ final class SyncManager: ObservableObject {
             MainActor.assumeIsolated {
                 let mgr = SyncManager.shared
                 mgr.lastPushTime = ProcessInfo.processInfo.systemUptime
-                NSUbiquitousKeyValueStore.default.set(snapshot, forKey: key)
+                let cloud = NSUbiquitousKeyValueStore.default.dictionary(forKey: key)
+                let merged = mgr.mergeWithCloudPreferences(snapshot, cloud: cloud)
+                NSUbiquitousKeyValueStore.default.set(merged, forKey: key)
                 debugLog("🔵 SyncManager: pushed preferences")
                 mgr.prefsDirtySince = nil
                 var plain = snapshot
@@ -803,6 +711,38 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 60.0, execute: work)
         }
         debugLog("🔵 SyncManager.pushPrefs: scheduled (immediate=\(immediate))")
+    }
+
+    /// Keeps what this device does not own in the cloud blob: values of
+    /// items scoped Off, TVs only, or Phones and tablets only on the
+    /// shared map, the other form factor's lane, keys of this lane this
+    /// device no longer writes, and data blobs whose item is off here.
+    private func mergeWithCloudPreferences(_ local: [String: Any], cloud: [String: Any]?) -> [String: Any] {
+        guard let cloud else { return local }
+        var out = local
+        for k in syncPlistKeys + syncHiddenGroupKeys where !SyncItemCatalog.allows(k) {
+            if let v = cloud[k] { out[k] = v }
+        }
+        let blobs: [(String, String)] = [
+            (SyncItemCatalog.hiddenTitlesID, HiddenVODStore.syncKey),
+            (SyncItemCatalog.recentsID, Self.recentsSyncKey),
+            (SyncItemCatalog.watchlistID, Self.watchlistSyncKey)
+        ]
+        for (id, k) in blobs where !SyncItemCatalog.isEnabled(id) {
+            if let v = cloud[k] { out[k] = v }
+        }
+        let own = SyncScope.deviceLane.laneKey ?? SyncScope.mobileLaneKey
+        let other = own == SyncScope.tvLaneKey ? SyncScope.mobileLaneKey : SyncScope.tvLaneKey
+        if let v = cloud[other] { out[other] = v }
+        var ownLane = cloud[own] as? [String: Any] ?? [:]
+        for (k, v) in (local[own] as? [String: Any] ?? [:]) { ownLane[k] = v }
+        if !ownLane.isEmpty { out[own] = ownLane }
+        return out
+    }
+
+    /// Property-list types KVS accepts.
+    private static func isPlistValue(_ v: Any) -> Bool {
+        v is String || v is NSNumber || v is Data || v is Date || v is [Any] || v is [String: Any]
     }
 
     private func buildPreferencesDict() -> [String: Any] {
@@ -841,26 +781,20 @@ final class SyncManager: ObservableObject {
             return dict
         }
 
-        for k in syncStringKeys      { if let v = ud.string(forKey: k)      { dict[k] = v } }
-        for k in syncBoolKeys        { if ud.object(forKey: k) != nil       { dict[k] = ud.bool(forKey: k) } }
-        for k in syncDoubleKeys      { if ud.object(forKey: k) != nil       { dict[k] = ud.double(forKey: k) } }
-        for k in syncIntKeys         { if ud.object(forKey: k) != nil       { dict[k] = ud.integer(forKey: k) } }
-        // Data-typed keys are mirrored through KVS as Data so
-        // complex blobs like the custom-categories JSON list
-        // round-trip intact across devices.
-        //
-        // The remote button map is carved out under its own category
-        // (Discord: Glitzbr). It rode "App Preferences", so the only way to
-        // stop a customised map reaching a second Apple TV - one that is a
-        // different generation with a physically different remote - was to
-        // turn off preference sync wholesale and lose theme, default tab and
-        // everything else with it. See SyncCategory.remoteControl.
-        for k in syncDataKeys {
-            if k == RemoteControlStore.mapKey, !SyncCategory.remoteControl.isEnabled { continue }
-            if let v = ud.data(forKey: k) { dict[k] = v }
+        // All devices rides the shared map; TVs only / Phones and tablets
+        // only ride this form factor's lane. Off writes nothing.
+        var lane: [String: Any] = [:]
+        let deviceLane = SyncScope.deviceLane
+        for k in syncPlistKeys {
+            let scope = SyncItemCatalog.scope(of: k)
+            guard scope == .all || scope == deviceLane,
+                  let v = ud.object(forKey: k), Self.isPlistValue(v) else { continue }
+            if scope == .all { dict[k] = v } else { lane[k] = v }
         }
-        for k in syncStringArrayKeys { if let v = ud.stringArray(forKey: k) { dict[k] = v } }
-        for k in syncHiddenGroupKeys {
+        if !lane.isEmpty, let laneKey = deviceLane.laneKey { dict[laneKey] = lane }
+        // The remote button map is carved out under its own category
+        // (Discord: Glitzbr) and handled above the preferences gate.
+        for k in syncHiddenGroupKeys where SyncItemCatalog.allows(k) {
             if let data = ud.data(forKey: k),
                let arr = try? JSONDecoder().decode([String].self, from: data) {
                 dict[k] = arr
@@ -870,8 +804,17 @@ final class SyncManager: ObservableObject {
         // (playlist, title) entry with its hidden flag and timestamp, so the
         // merge on the other side is entry-wise last writer wins and an
         // unhide survives as a tombstone. Older clients ignore the key.
-        if let blob = HiddenVODStore.shared.syncBlob() {
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID),
+           let blob = HiddenVODStore.shared.syncBlob() {
             dict[HiddenVODStore.syncKey] = blob
+        }
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.recentsID) {
+            let recents = RecentChannelsStore.syncSnapshot()
+            if !recents.isEmpty { dict[Self.recentsSyncKey] = recents }
+        }
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.watchlistID),
+           let blob = WatchlistManager.syncBlob() {
+            dict[Self.watchlistSyncKey] = blob
         }
         return dict
     }
@@ -1022,19 +965,22 @@ final class SyncManager: ObservableObject {
             return
         }
 
-        for k in syncStringKeys      { if let v = dict[k] as? String   { ud.set(v, forKey: k) } }
-        for k in syncBoolKeys        { if let v = dict[k] as? Bool     { ud.set(v, forKey: k) } }
-        for k in syncDoubleKeys      { if let v = dict[k] as? Double   { ud.set(v, forKey: k) } }
-        for k in syncIntKeys         { if let v = dict[k] as? Int      { ud.set(v, forKey: k) } }
-        // Remote button map is gated separately - see the matching carve-out
-        // on the push side. Applied here as well as pushed, so a TV that opts
-        // out both stops publishing its map AND stops accepting one.
-        for k in syncDataKeys {
-            if k == RemoteControlStore.mapKey, !SyncCategory.remoteControl.isEnabled { continue }
-            if let v = dict[k] as? Data { ud.set(v, forKey: k) }
+        let deviceLane = SyncScope.deviceLane
+        let laneDict = deviceLane.laneKey.flatMap { dict[$0] as? [String: Any] } ?? [:]
+        for k in syncPlistKeys {
+            switch SyncItemCatalog.scope(of: k) {
+            case .all:
+                if let v = dict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
+            case deviceLane:
+                if let v = laneDict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
+            default:
+                break
+            }
         }
-        for k in syncStringArrayKeys { if let v = dict[k] as? [String] { ud.set(v, forKey: k) } }
-        for k in syncHiddenGroupKeys {
+        for k in legacyReadOnlyKeys where ud.object(forKey: k) == nil {
+            if let v = dict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
+        }
+        for k in syncHiddenGroupKeys where SyncItemCatalog.allows(k) {
             if let arr = dict[k] as? [String],
                let data = try? JSONEncoder().encode(arr.sorted()) {
                 ud.set(data, forKey: k)
@@ -1047,14 +993,31 @@ final class SyncManager: ObservableObject {
             // Pull from iCloud replaces outright: a synced key the cloud copy
             // does not carry returns to its default here instead of keeping
             // this device's value, and hidden titles take the cloud table.
-            let allKeys = syncStringKeys + syncBoolKeys + syncDoubleKeys + syncIntKeys
-                + syncDataKeys.filter { $0 != RemoteControlStore.mapKey || SyncCategory.remoteControl.isEnabled }
-                + syncStringArrayKeys + syncHiddenGroupKeys
+            let allKeys = (syncPlistKeys + syncHiddenGroupKeys).filter { SyncItemCatalog.allows($0) }
             for k in allKeys where dict[k] == nil { ud.removeObject(forKey: k) }
-            HiddenVODStore.shared.replaceWithRemote(dict[HiddenVODStore.syncKey] as? Data)
-        } else if let blob = dict[HiddenVODStore.syncKey] as? Data {
+            if SyncCategory.remoteControl.isEnabled, dict[RemoteControlStore.mapKey] == nil {
+                ud.removeObject(forKey: RemoteControlStore.mapKey)
+            }
+            if SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID) {
+                HiddenVODStore.shared.replaceWithRemote(dict[HiddenVODStore.syncKey] as? Data)
+            }
+        } else if SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID),
+                  let blob = dict[HiddenVODStore.syncKey] as? Data {
             HiddenVODStore.shared.mergeRemote(blob)
         }
+        // Recently watched rides the blob last writer wins, like every
+        // other preference; My List merges row-wise with tombstones.
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.recentsID),
+           let recents = dict[Self.recentsSyncKey] as? [String: [String]] {
+            RecentChannelsStore.applySyncSnapshot(recents, replace: replace)
+        }
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.watchlistID),
+           let blob = dict[Self.watchlistSyncKey] as? Data {
+            WatchlistManager.mergeSyncBlob(blob, replace: replace)
+        }
+        // Stores that cache their keys in memory reload from defaults.
+        ChannelCollectionsStore.shared.reloadFromDefaults()
+        HiddenVODStore.shared.reloadCategoryVisibility()
 
         // What was just applied is the cloud state, not a local change.
         lastPushedPrefs = buildPreferencesDict() as NSDictionary

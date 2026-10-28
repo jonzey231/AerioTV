@@ -316,6 +316,14 @@ final class ChannelCollectionsStore: ObservableObject {
         collections = decoded
     }
 
+    /// Re-reads the stored list after an iCloud pull wrote it. Guarded so
+    /// an unchanged list does not re-render every observer.
+    func reloadFromDefaults() {
+        let decoded = UserDefaults.standard.data(forKey: Self.storageKey)
+            .flatMap { try? JSONDecoder().decode([ChannelCollection].self, from: $0) } ?? []
+        if decoded != collections { collections = decoded }
+    }
+
     private func persist() {
         if let data = try? JSONEncoder().encode(collections) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

@@ -136,12 +136,116 @@ enum WatchlistManager {
             vodType: item.type == .series ? "series" : "movie",
             serverID: item.serverID.uuidString, releaseYear: item.releaseYear, rating: item.rating))
         try? context.save()
+        clearTombstone(syncKey(item.id, item.serverID.uuidString))
+        SyncManager.shared.pushPreferences()
     }
 
     static func remove(vodID: String, serverID: String?) {
         guard let context = modelContext, let row = entry(vodID: vodID, serverID: serverID) else { return }
+        let key = syncKey(row.vodID, row.serverID)
         context.delete(row)
         try? context.save()
+        addTombstone(key)
+        SyncManager.shared.pushPreferences()
+    }
+
+    // MARK: iCloud sync (2026-10-27)
+    //
+    // My List rides the preferences payload as one JSON blob of rows plus
+    // removal tombstones, keyed by serverID + item id. A pull merges row
+    // wise: a row is added unless a newer tombstone exists, and a tombstone
+    // newer than the local row removes it, so a removal on one device is
+    // not undone by another device's next push. Tombstones expire after
+    // 90 days.
+
+    private static let tombstonesKey = "watchlist.tombstones.v1"
+    private static let tombstoneLifetime: TimeInterval = 90 * 24 * 60 * 60
+
+    private struct SyncRow: Codable {
+        var vodID: String
+        var title: String
+        var posterURL: String?
+        var vodType: String
+        var serverID: String?
+        var releaseYear: String
+        var rating: String
+        var addedAt: Date
+    }
+
+    private struct SyncBlob: Codable {
+        var rows: [SyncRow]
+        var removed: [String: Date]
+    }
+
+    static func syncKey(_ vodID: String, _ serverID: String?) -> String { "\(serverID ?? "")|\(vodID)" }
+
+    private static func tombstones() -> [String: Date] {
+        guard let data = UserDefaults.standard.data(forKey: tombstonesKey),
+              let map = try? JSONDecoder().decode([String: Date].self, from: data) else { return [:] }
+        let cutoff = Date().addingTimeInterval(-tombstoneLifetime)
+        return map.filter { $0.value > cutoff }
+    }
+
+    private static func saveTombstones(_ map: [String: Date]) {
+        if let data = try? JSONEncoder().encode(map) {
+            UserDefaults.standard.set(data, forKey: tombstonesKey)
+        }
+    }
+
+    private static func addTombstone(_ key: String) {
+        var map = tombstones(); map[key] = Date(); saveTombstones(map)
+    }
+
+    private static func clearTombstone(_ key: String) {
+        var map = tombstones()
+        guard map.removeValue(forKey: key) != nil else { return }
+        saveTombstones(map)
+    }
+
+    static func syncBlob() -> Data? {
+        guard let context = modelContext,
+              let rows = try? context.fetch(FetchDescriptor<WatchlistEntry>()) else { return nil }
+        let blob = SyncBlob(
+            rows: rows.map { SyncRow(vodID: $0.vodID, title: $0.title, posterURL: $0.posterURL,
+                                     vodType: $0.vodType, serverID: $0.serverID,
+                                     releaseYear: $0.releaseYear, rating: $0.rating, addedAt: $0.addedAt) }
+                .sorted { syncKey($0.vodID, $0.serverID) < syncKey($1.vodID, $1.serverID) },
+            removed: tombstones())
+        if blob.rows.isEmpty && blob.removed.isEmpty { return nil }
+        let enc = JSONEncoder(); enc.outputFormatting = .sortedKeys
+        return try? enc.encode(blob)
+    }
+
+    static func mergeSyncBlob(_ data: Data, replace: Bool) {
+        guard let context = modelContext,
+              let blob = try? JSONDecoder().decode(SyncBlob.self, from: data),
+              let locals = try? context.fetch(FetchDescriptor<WatchlistEntry>()) else { return }
+        var localTomb = tombstones()
+        for (k, t) in blob.removed where (localTomb[k] ?? .distantPast) < t { localTomb[k] = t }
+        let localByKey = Dictionary(locals.map { (syncKey($0.vodID, $0.serverID), $0) },
+                                    uniquingKeysWith: { a, _ in a })
+        let remoteKeys = Set(blob.rows.map { syncKey($0.vodID, $0.serverID) })
+        var changed = false
+        for row in blob.rows {
+            let k = syncKey(row.vodID, row.serverID)
+            if localByKey[k] != nil { continue }
+            if !replace, let t = localTomb[k], t >= row.addedAt { continue }
+            context.insert(WatchlistEntry(vodID: row.vodID, title: row.title, posterURL: row.posterURL,
+                                          vodType: row.vodType, serverID: row.serverID,
+                                          releaseYear: row.releaseYear, rating: row.rating,
+                                          addedAt: row.addedAt))
+            localTomb.removeValue(forKey: k)
+            changed = true
+        }
+        for (k, local) in localByKey {
+            let tombstoned = (localTomb[k].map { $0 > local.addedAt } ?? false) && !remoteKeys.contains(k)
+            if tombstoned || (replace && !remoteKeys.contains(k)) {
+                context.delete(local)
+                changed = true
+            }
+        }
+        saveTombstones(localTomb)
+        if changed { try? context.save() }
     }
 
     static func toggle(_ item: VODDisplayItem) {
@@ -1513,6 +1617,12 @@ final class HiddenVODStore: ObservableObject {
             entries = decoded
         }
         categoryVisible = Set(UserDefaults.standard.stringArray(forKey: Self.categoryKey) ?? [])
+    }
+
+    /// Re-reads category visibility after an iCloud pull wrote the key.
+    func reloadCategoryVisibility() {
+        let v = Set(UserDefaults.standard.stringArray(forKey: Self.categoryKey) ?? [])
+        if v != categoryVisible { categoryVisible = v }
     }
 
     func isCategoryVisible(type: String, serverID: String?) -> Bool {

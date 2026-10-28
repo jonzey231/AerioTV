@@ -289,7 +289,7 @@ struct PlayerSettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Pause & Rewind Live TV")
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Buffer fullscreen live playback on this device")
+                        Text("Buffer fullscreen live playback")
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     }
                 }
