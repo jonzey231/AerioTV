@@ -60,9 +60,8 @@ camera opens AerioTV on the Set up a TV screen with the TV and code already
 filled in. On Android phones and tablets the Set up a TV screen also has
 "Scan QR code" (in-app camera scanner), "Choose from Photos" (system photo
 picker), and "Import file" (system document picker, a text file holding the
-link), and an image, text, or file of the code shared to AerioTV opens the
-same flow. The
-discovered TV list plus typing the code is the fallback on every platform.
+link). The discovered TV list plus typing the code is the fallback on every
+platform.
 
 ### Related: Dispatcharr user QR
 
@@ -74,8 +73,9 @@ and `v` is 1; it then uses `api_key` with `base_url`. The identity fields are
 advisory and may be blank, and a long payload may be trimmed to `api_key`
 and `base_url` only. The same payload may also arrive as a file or as text
 instead of an image. AerioTV reads this code and the `aeriotv://setup` code
-through four inputs, all with one parser (phones and tablets; TVs have none
-of them):
+through three inputs, all with one parser (phones and tablets; TVs have none
+of them). Import is manual only: AerioTV is not a share target and never
+reads the clipboard.
 
 1. Camera: the in-app scanner ("Scan QR code").
 2. Photos: a QR code image from the system photo picker ("Choose from
@@ -85,10 +85,16 @@ of them):
    holds the JSON above or a setup link (a link may sit among other text).
    Anything else shows "That file is not a Dispatcharr user code or an
    AerioTV setup code."
-4. Share and clipboard: a QR code image, text, or a JSON or text file shared
-   to AerioTV from the share sheet, or, on the Dispatcharr connect form, a
-   one-tap "Paste from clipboard" when the clipboard holds the JSON or a
-   setup link as the form opens.
+
+After a successful import from Photos, AerioTV asks "Delete this image from
+Photos? It contains your sign-in code." with Delete and Keep. Delete hands
+the image to the system delete request (Android 11 and later), so the system
+asks for confirmation and the OS deletes it; Android 10 and earlier get no
+prompt. After a successful Import file, the same offer ("Delete this file?
+It contains your sign-in code.") appears only when the document picker
+granted a URI that supports deletion; otherwise there is no prompt. Nothing
+is deleted without the user's tap, and the log records only whether the
+source was deleted or kept, never its path.
 
 A user code fills the Dispatcharr connect form or an Add Profile form and
 signs in the same way as a typed key; a setup code opens Set up a TV;
