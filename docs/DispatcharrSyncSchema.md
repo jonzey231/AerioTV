@@ -10,6 +10,9 @@ request of Dispatcharr's maintainer, so AerioTV uses 1 of a user's 25 keys. v1 u
 used three; both migrate (section 6.4). Payloads (section 4), caps, and merges are unchanged.
 v3 note (2026-10-27): `profiles` rows gain position 9, `order` (section 4.12). Appended position,
 so `schemaVersion` stays 3: older readers ignore it, and a row without it keeps insertion order.
+v3 note (2026-10-27): `settings` gains the full allowlist (section 4.9, every setting iCloud or Drive
+backs up), optional `tv` and `mobile` lanes beside `v`, and per-item scopes chosen in Sync
+Categories. All optional, so `schemaVersion` stays 3: older readers read `v` and round-trip the rest.
 
 ## 1. What it is
 
@@ -62,14 +65,29 @@ Categories (the "Key" column below is the v1 key name; in v2 the category name i
 | `app.molinete.aerio.collections` | Channel Collections (named channel sets shown as Live TV filter pills) | Yes | On | Exists on both platforms (Apple ChannelCollectionsStore in Features/Home/FavoritesStore.swift, Android `channel_collections` in AppPreferences); device-local today on both |
 | `app.molinete.aerio.profiles` | Profile list (admin only) | Yes | On | Device pickers (section 5) |
 
-Device-local, never synced here, and why:
+Device-local, never synced here (nor through iCloud or Drive), and why:
 - Kept Live / background Radio auto-start: tied to one device's power and network.
-- Default Live TV view (List or Guide): form-factor specific (an iPhone's List would clobber a TV's Guide).
-- Buffer size, network timeout, retries, LAN URL, home SSID, DVR folder, background refresh schedule: per-device network and storage.
-- Active profile: per device by design.
+- Buffer size, network timeout, max retries, LAN URL, home SSID, background refresh schedule: per-device network.
+- Display matching (Match Content Resolution, Match Frame Rate, Startup Refresh Rate), Surround Sound Passthrough, Auto-Rotate: per-device display and audio hardware.
+- DVR storage cap, DVR storage folder, Keep Device Awake: per-device storage.
+- Learned remote buttons: tied to one physical remote.
+- Debug and developer options, update checks: per install.
+- Playlist URLs and credentials: Drive and iCloud Keychain only, never Dispatcharr (section 10).
+- TMDB API key: a secret; Drive stopped carrying it in cleartext on 2026-10-27 (section 10.2).
+- Sync provider, Sync Categories choices (`syncScope.<item>`, `syncItem.<item>`), and the active profile: per device by design.
 - Channel profile selection: server-side state (admin assigns it per user).
 - DVR recordings: server-side (Dispatcharr) or local files.
 - EPG, logos, VOD catalog caches: rebuilt from the server.
+
+Default Live TV view (List or Guide) syncs since 2026-10-27 (owner decision); a device that wants its
+own form-factor default sets that item to its class lane or Off (section 4.9).
+
+Per-item choices: every synced option is its own row in Settings > Sync > Sync Categories, shared by
+Drive and Dispatcharr Sync. Settings rows take a scope (section 4.9 lanes); data rows (favorites,
+recents, collections, progress, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder,
+profiles, remoteMap, radioDefault) take a plain on/off. A data row that is off neither writes nor
+applies its category. The old category toggles remain the defaults and the group-level All devices
+and Off mapping, so an upgrade changes nothing until the user picks.
 
 Budget: 1 key leaves 24 of 25 free for the user's other apps. New categories go inside the key, never
 into new keys.
@@ -85,7 +103,8 @@ into new keys.
   "updatedAt": "2026-10-17T18:04:05Z",
   "categories": {
     "favorites": {"updatedAt": "2026-10-17T18:04:05Z", "deviceId": "6F1C...5A11", "data": {"ids": [1042, 77]}},
-    "recents": {"updatedAt": "2026-10-17T17:50:00Z", "deviceId": "A2B9...0C44", "data": {"rows": [[1042, 1760724245]]}}
+    "recents": {"updatedAt": "2026-10-17T17:50:00Z", "deviceId": "A2B9...0C44", "data": {"rows": [[1042, 1760724245]]}},
+    "settings": {"updatedAt": "2026-10-17T18:04:05Z", "deviceId": "6F1C...5A11", "data": {"v": {"selectedTheme": "Midnight"}, "tv": {"textScale": 1.3}, "mobile": {"textScale": 1.0}}}
   }
 }
 ```
@@ -210,70 +229,144 @@ string[] each, cap 500 names each.
 
 ### 4.9 settings
 ```json
-{"v":{"selectedTheme":"Midnight","appearanceMode":"dark","trueBlack":true,"textScale":1.1}}
+{"v":{"selectedTheme":"Midnight","appearanceMode":"dark","trueBlack":true},"tv":{"textScale":1.3},"mobile":{"textScale":1.0}}
 ```
-`v`: map of schema name to bool, int, double, or string. Only names in this allowlist are written:
+`v`, `tv`, `mobile`: maps of schema name to bool, int, double, or string. Only names in this
+allowlist are written; `tv` and `mobile` are optional, and unknown lanes round-trip.
 
-| Schema name | Type | Apple key | Android key |
-|---|---|---|---|
-| selectedTheme | string | selectedTheme | selectedTheme |
-| appearanceMode | string | appearanceMode | appearanceMode |
-| trueBlack | bool | appearance.trueBlack | appearanceTrueBlack |
-| useCustomAccent | bool | useCustomAccent | (Apple only) |
-| customAccentHex | string | customAccentHex | (Apple only) |
-| defaultTab | string | defaultTab | defaultTab |
-| timeFormat | string | ClockFormat.defaultsKey | timeFormat |
-| textScale | double | TextScale.key | textScale |
-| subtextScale | double | SubtextScale.key | subtextScale |
-| textContrast | double | TextContrast.key | textContrast |
-| guideProgramInfoButton | string | guideProgramInfoButton | guideProgramInfoButton |
-| programInfoButtonGuide | bool | guideProgramInfoButtonGuideView | programInfoButtonGuide |
-| programInfoButtonList | bool | guideProgramInfoButtonListView | programInfoButtonList |
-| showEpgBadgesTv | bool | showEpgBadges.tv | showEpgBadgesTv |
-| showEpgBadgesMobile | bool | showEpgBadges.mobile | (Apple only) |
-| showRemoteHints | bool | showRemoteHintsKey | showRemoteHints |
-| guideGroupSelector | string | RemoteControlStore.groupSelectorKey | guideGroupSelector |
-| guideSidebarLayout | string | RemoteControlStore.sidebarLayoutKey | guideSidebarLayout |
-| guideTuneInMini | bool | RemoteControlStore.tuneInMiniKey | guideTuneInMini |
-| defaultChannelGroup | string | defaultChannelGroup | (Apple only) |
-| skipBack / skipForward | int | SkipIntervals.backKey / forwardKey | (Apple only) |
-| enableCategoryColors, tintChannelCards | bool | same | (Apple only) |
-| categoryColor.<bucket> | string | categoryColor.<bucket> | (Apple only) |
-| categoryBucketEnabled.<bucket> | bool | same | (Apple only) |
-| customCategories | string (JSON, max 4 KiB) | CategoryColor.customCategoriesKey | (Apple only) |
-| logoCornersList / logoCornersGuide / logoCornersGuideCells | bool | LogoCorners.* | (Apple only) |
-| playerInfoCard.<row> | bool | PlayerInfoCardSettings.allKeys | playerShowChannelInfoCard maps to showOnChannelChange |
-| tmdbPostersEnabled | bool | TMDBPosters.enabledDefaultsKey | (Apple only) |
-| phoneGroupSelector | string | (Android only) | phoneGroupSelector |
-| liveTvEdgeSwipeOpensSidebar | bool | (Android only) | liveTvEdgeSwipeOpensSidebar |
-| skipLoadingScreen | bool | (Android only) | skipLoadingScreen |
-| appleTVChannelFlip | bool | (Android only) | appleTVChannelFlip |
-| defaultGroup | string | defaultGroup | defaultGroup |
+Lanes and scopes. Each Sync Categories row has a per-device scope (`syncScope.<item>`, device-local,
+never synced itself):
+1. A device offers only its own class. A TV shows All devices, TVs only, and Off; a phone or tablet
+   shows All devices, Phones and tablets only, and Off. A stored scope for the other class (for example
+   after a restore onto a different device class) is treated as All devices.
+2. A device writes only to `v` or its own class lane (`tv` on a TV, `mobile` on a phone or tablet),
+   and reads only `v` or its own class lane.
+3. All devices writes and reads `v`. TVs only / Phones and tablets only writes and reads the class
+   lane. Changing an item from All devices to the class lane seeds the class lane from the CURRENT
+   LOCAL value on the next push, and from then on that device ignores `v` for the item; changing back
+   to All devices pushes the local value to `v`.
+4. Precedence is scope only: no merging across lanes, and no fallback from the class lane to `v` or
+   back. A name missing from the lane this device reads is simply not applied.
+5. Off writes nothing and reads nothing; the value already stored in any lane is left untouched.
+6. A group row (for example Appearance) shows the same class-filtered choices, reads "Mixed" when
+   its items differ, and picking a value sets every item in the group.
+7. Names a device does not write (other items, other lanes, other platforms' names) round-trip (6.2).
+The Drive preferences snapshot carries the same lanes (`keys` is `v`, plus `tv` and `mobile`) with the
+same rules.
 
-defaultGroup lands on Apple in the parity pass; until then Apple round-trips it (6.2).
+Allowlist. Item = the Sync Categories row (same ids and labels on both platforms). Dispatcharr names
+are canonical; the Drive column lists Drive's wire name where it differs (kept for backward
+compatibility):
 
-Values (what Android writes; Apple maps to exactly these strings and numbers). On read, an unknown
-value or a value of the wrong type is ignored and the local setting is left unchanged:
+| Schema name | Type | Item | Apple key | Android key | Drive name |
+|---|---|---|---|---|---|
+| selectedTheme | string | selectedTheme | selectedTheme | selected_theme | |
+| appearanceMode | string | appearanceMode | appearanceMode | appearance_mode | |
+| trueBlack | bool | trueBlack | appearance.trueBlack | appearance_true_black | appearanceTrueBlack |
+| useCustomAccent | bool | customAccent | useCustomAccent | use_custom_accent | |
+| customAccentHex | string | customAccent | customAccentHex | custom_accent_hex | |
+| liquidGlassStyle | string | glassEffect | liquidGlassStyle | (Apple only: round-trip) | |
+| textScale, subtextScale, textContrast | double | textScale, subtextScale, textContrast | TextScale.key, SubtextScale.key, TextContrast.key | text_scale, subtext_scale, text_contrast | |
+| timeFormat | string | timeFormat | ClockFormat.defaultsKey | ui_time_format | |
+| defaultTab | string | defaultTab | defaultTab | default_tab | |
+| skipLoadingScreen | bool | skipLoadingScreen | appBehaviorsSkipLoadingScreen | app_behaviors_skip_loading_screen | |
+| autoResumeLastChannel | bool | resumeLastChannel | appBehaviorsAutoResumeLastChannel | app_behaviors_auto_resume_last_channel | |
+| defaultLiveTvView | string | defaultLiveTVView | defaultLiveTVView | default_live_tv_view | |
+| guideLayout | string | guideLayout | liveTVLayout | live_tv_layout | |
+| guideGroupSelector, phoneGroupSelector, guideSidebarLayout | string | groupSelection | RemoteControlStore keys, phoneGroupSelector | guide_group_selector, phone_group_selector, guide_sidebar_layout | |
+| liveTvEdgeSwipeOpensSidebar | bool | edgeSwipeSidebar | liveTVEdgeSwipeOpensSidebar | live_tv_edge_swipe_opens_sidebar | |
+| channelListShowLogos, channelListShowNumbers, channelListShowNames, channelListShowProgramSubtitles | bool | showChannelLogos, showChannelNumbers, showChannelNames, showProgramSubtitles | ui.showChannelLogos, ui.showChannelNumbers, ui.showChannelNames, ui.showProgramSubtitles | ui_show_channel_logos, ui_show_channel_numbers, ui_show_channel_names, ui_show_program_subtitles | |
+| channelLogoSize | int | logoSize | ui.channelLogoSize | ui_channel_logo_size_tenths | |
+| showEpgBadgesTv, showEpgBadgesMobile | bool | programBadges | showEpgBadges.tv, showEpgBadges.mobile | ui_show_epg_badges_tv, ui_show_epg_badges_mobile | |
+| hiddenEpgBadges | string | programBadges | ui.hiddenEpgBadges | ui_hidden_epg_badges | |
+| guideProgramInfoButton | string | programInfoButton | guideProgramInfoButton | guideProgramInfoButton | |
+| programInfoButtonGuide, programInfoButtonList | bool | programInfoButton | guideProgramInfoButtonGuideView, guideProgramInfoButtonListView | programInfoButtonGuide, programInfoButtonList | |
+| logoCornersGuide | bool | roundedGuideLogos | LogoCorners.guideKey | ui_rounded_artwork_guide | |
+| logoCornersGuideCells | bool | roundedProgramCells | LogoCorners.guideCellsKey | guide_rounded_program_cells | |
+| logoCornersList | bool | roundedListLogos | LogoCorners.listKey | ui_rounded_artwork | |
+| displayScaleLiveTv, displayScaleGuide | double | liveTVDisplayScale | listScale, guideScale | display_scale_live_tv, guide_scale | |
+| enableCategoryColors | bool | categoryColors | enableCategoryColors | category master key | |
+| categoryColor.<bucket> | string | categoryColors | categoryColor.<bucket> | categoryColor.<bucket> | |
+| categoryBucketEnabled.<bucket> | bool | categoryColors | categoryBucketEnabled.<bucket> | categoryBucketEnabled.<bucket> | |
+| customCategories | string (JSON, max 4 KiB) | categoryColors | CategoryColor.customCategoriesKey | category custom JSON key | customCategoryColors.v1 |
+| tintChannelCards | bool | tintChannelCards | tintChannelCards | (Apple only: round-trip) | |
+| playerInfoCard.showOnChannelChange | bool | infoCard | playerShowChannelInfoCard | playerShowChannelInfoCard | playerShowChannelInfoCard |
+| playerInfoCard.channelLogo, .channelName, .programName, .programTime, .programSubtitle, .programDescription | bool | infoCard | playerInfoCardChannelLogo (and siblings) | player_card_show_channel_logo (and siblings) | |
+| liveRewindEnabled, liveRewindKeepRecent | bool | liveRewind | liveRewindEnabled, liveRewindRetainChannels | live_rewind_enabled, live_rewind_keep_recent | |
+| liveRewindDepthMinutes, liveRewindKeepCount | int | liveRewind | liveRewindDepthMinutes, liveRewindRetainCount | live_rewind_depth_minutes, live_rewind_keep_count | |
+| liveRewindRetentionHours, liveRewindBudgetGb | int | liveRewind | (Android only) | live_rewind_retention_hours, live_rewind_budget_gb | |
+| skipBack, skipForward | int | skipIntervals | skipBackSeconds, skipForwardSeconds | skip_back_seconds, skip_forward_seconds | skipBackSeconds, skipForwardSeconds |
+| skipWithoutControls | bool | skipWithoutControls | player.skipWithoutControls | skip_without_controls | |
+| autoRecoverFrozenStreams | bool | autoRecover | appBehaviorsAutoRecoverFrozenStreams | app_behaviors_auto_recover_frozen_streams | |
+| appleTVChannelFlip | bool | channelFlip | appBehaviorsAppleTVChannelFlip | app_behaviors_apple_tv_channel_flip | |
+| edgeBrightnessGesture, brightnessEdge | bool, string | edgeBrightness | appBehaviorsEdgeBrightnessGesture, appBehaviorsBrightnessEdge | in_player_gesture_brightness, in_player_gesture_brightness_edge | |
+| edgeVolumeGesture | bool | edgeVolume | appBehaviorsEdgeVolumeGesture | in_player_gesture_volume | |
+| multiview.audioFocusStyle | string | multiviewAudioFocus | multiviewAudioFocusStyle | multiview_audio_focus_style | |
+| multiview.tilePadding | bool | multiviewPadding | multiviewTilePadding | multiview_tile_padding | |
+| multiview.tileCornersRounded | bool | multiviewCorners | multiviewTileCornersRounded | multiview_tile_corners_rounded | |
+| multiview.showLogos, multiview.logoPosition, multiview.logoSize | bool, string, int | multiviewLogos | multiview.showLogos, multiview.logoPosition, multiview.logoSize | multiview_show_logos, multiview_logo_position, multiview_logo_size | |
+| multiview.pickerShowSubtitles, multiview.pickerShowDescriptions | bool | multiviewSubtitles, multiviewDescriptions | multiviewPickerShowSubtitles, multiviewPickerShowDescriptions | multiview_picker_show_subtitles, multiview_picker_show_descriptions | |
+| vodLibraryRefreshHours | int | refreshLibrary | vodLibraryRefreshHours | vod_library_refresh_hours | |
+| tmdbPostersEnabled | bool | tmdb | TMDBPosters.enabledDefaultsKey | app_behaviors_program_posters_tmdb_enabled | programPostersTmdbEnabled |
+| displayScaleMovies | double | vodDisplayScale | uiScale | display_scale_movies | |
+| moviesSortOrder, seriesSortOrder | string | vodSortOrder | moviesSortOrder, seriesSortOrder | movies_sort_order, series_sort_order | |
+| dvrPreRollMins, dvrPostRollMins | int | preRoll, postRoll | dvrDefaultPreRollMins, dvrDefaultPostRollMins | dvr_default_pre_roll_mins, dvr_default_post_roll_mins | |
+| dvrDefaultDestination | string | defaultDestination | (Android only) | dvr_default_destination | |
+| dvrSortOrder | string | dvrSortOrder | dvrSortOrder | dvr_sort_order | |
+| showRemoteHints | bool | remoteHints | showRemoteHintsKey | show_remote_hints | |
+| guideTuneInMini | bool | playChannelsIn | RemoteControlStore.tuneInMiniKey | guide_tune_in_mini | |
+| defaultGroup | string | groupOrder | defaultChannelGroup | default_group_token_<playlistId> | defaultGroup (JSON object, playlist id to token) |
+| lastGroup | string | groupOrder | (Android only) | live_group_token_<playlistId> | lastGroup (JSON object) |
+| recentGroupVisible | bool | groupOrder | (Android only) | recent_group_visible_<playlistId> | recentGroupVisible (JSON object) |
+
+`defaultChannelGroup` (Apple's key) and `defaultGroup` are one setting; the schema name is
+`defaultGroup`. The three per-playlist names carry the session's playlist only on Dispatcharr (its data
+is already per profile and per playlist) and follow the Group Order data row, not a scope.
+
+Values (Apple maps to exactly these strings and numbers). On read, an unknown value or a value of the
+wrong type is ignored and the local setting is left unchanged:
 | Schema name | Values |
 |---|---|
 | selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"` (Android AppTheme enum names, case sensitive) |
 | appearanceMode | `"dark"` (default), `"light"`, `"system"` |
 | defaultTab | `"LiveTV"`, `"DVR"`, `"Movies"`, `"TVShows"`, `"Settings"` (Android AppTab enum names); absent or `""` = Live TV |
 | timeFormat | `"system"` (default), `"12"`, `"24"` |
-| textScale, subtextScale | number 0.85 to 1.50 in 0.05 steps, default 1.0; readers clamp and snap |
+| textScale, subtextScale, displayScaleLiveTv, displayScaleMovies | number 0.85 to 1.50, default 1.0; text scales snap to 0.05 steps |
+| displayScaleGuide | number 0.5 to 2.0, default 1.0 |
 | textContrast | number 0.0 to 1.0 in 0.1 steps, default 0.0; readers clamp and snap |
 | guideProgramInfoButton | `"off"`, `"current"`, `"all"` |
 | guideGroupSelector | `"pills"`, `"sidebar"` |
 | phoneGroupSelector | `"sidebar"` (default), `"pills"` |
 | guideSidebarLayout | `"overlay"` (default), `"shift"` |
-| defaultGroup | the active playlist's Default Group token exactly as stored, any string up to 200 characters; `""` = none. An unknown group is stored as is and the launch falls back |
+| guideLayout | `"basic"` (default), `"preview"` |
+| defaultLiveTvView | the Android wire value as stored, up to 20 characters; `""` = the device's form-factor default |
+| customAccentHex, categoryColor.<bucket> | `"RRGGBB"` hex, an optional leading `#` accepted; customAccentHex `""` = the theme's accent |
+| hiddenEpgBadges | one string, badge ids separated by commas (no spaces), up to 1024 characters; `""` = none hidden |
+| customCategories | JSON array string, up to 4 KiB |
+| skipBack, skipForward | int seconds, one of 5, 10, 15, 30, 60 |
+| channelLogoSize | int 25 to 250 (Android tenths, 100 = default size) |
+| dvrPreRollMins, dvrPostRollMins | int minutes 0 to 240 |
+| dvrDefaultDestination | `"server"` (default), `"local"` |
+| vodLibraryRefreshHours | int hours 0 to 720 |
+| liveRewindDepthMinutes | int minutes 1 to 1440 |
+| liveRewindKeepCount | int 1 to 5 |
+| liveRewindRetentionHours | int 1 to 720 |
+| liveRewindBudgetGb | int 1 to 500 |
+| brightnessEdge | `"left"` (default), `"right"` |
+| multiview.logoSize | int 5 to 25 |
+| moviesSortOrder, seriesSortOrder, dvrSortOrder, multiview.audioFocusStyle, multiview.logoPosition | the Android wire value, up to 40 characters; an unknown value falls back to the default |
+| defaultGroup, lastGroup | the active playlist's group token exactly as stored, any string up to 200 characters; `""` = none. An unknown group is stored as is and the launch falls back |
 | every bool row | JSON `true` or `false`, never a string |
 
-Excluded from settings (own keys or device-local): `remoteControlMap`, `radioModeByDefault`,
+Excluded from settings (own keys or device-local, section 2): `remoteControlMap`, `radioModeByDefault`,
 `favoriteChannelIDs`, `favoriteOrder`, `channelGroupOrder*`, `hiddenChannelGroups` and siblings,
-`defaultLiveTVView`, `streamBufferSize`, `networkTimeout`, `maxRetries`, `bgRefresh*`, `preferAVPlayer`.
+`streamBufferSize`, `networkTimeout`, `maxRetries`, `bgRefresh*`, display matching, passthrough, DVR
+storage, learned remote buttons, debug and update options, `tmdbApiKey`, `preferAVPlayer`.
 Parity rule: an "(Apple only)" or "(Android only)" row is a parity gap to close, not a design choice;
 until closed, the other platform round-trips it (6.2).
+
+Settings are per profile on both platforms: a pulled `settings` applies to the profile whose token
+made the request, never to another profile on the device.
 
 ### 4.10 remoteMap
 ```json
@@ -423,7 +516,7 @@ category sub-object (13 x 90 B = 1.2 KB).
 
 | Key | Contents | Total |
 |---|---|---|
-| `app.molinete.aerio` | every category below plus sub-objects | about 56 KB (worst case about 59 KB) |
+| `app.molinete.aerio` | every category below plus sub-objects | about 60 KB (worst case about 63 KB) |
 
 The server's per-key limit is 128 KiB (1 MiB per user) since Dispatcharr dev c1920131, so the heavy
 user above fits with room to spare. On an older server (32 KiB per key, 128 KiB per user) a large value
@@ -442,12 +535,12 @@ Per-category estimates (unchanged from v1):
 | hiddenTitles | 50 x 16 B | 0.8 KB | Yes |
 | hiddenGroups | 40 x 14 B | 0.7 KB | Yes |
 | groupOrder | 60 x 14 B | 1.0 KB | Yes |
-| settings | about 60 names x 35 B, plus customCategories up to 4 KiB | 6.3 KB | Yes |
+| settings | about 110 names x 35 B in `v`, up to 40 names in each of `tv` and `mobile`, plus customCategories up to 4 KiB | 10.7 KB | Yes |
 | remoteMap | about 20 entries | 0.8 KB | Yes |
 | radioDefault | | 0.2 KB | Yes |
 | profiles | 6 x 130 B | 1.0 KB | Yes |
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
-| Total | | about 55 KB (worst case about 58 KB) | Under 128 KiB (new per-key cap) |
+| Total | | about 59 KB (worst case about 62 KB) | Under 128 KiB (new per-key cap) |
 
 Trim order on a 413, one step per retry (no trimming before the first PUT):
 1. progress: oldest rows down to 200, then down to 100.
@@ -497,7 +590,10 @@ never trimmed. After the last step still fails: "Sync data too large".
 | WatchlistSnapshotEntry vodId, vodType, addedAt, removedAt | watchlist row | Rows with removedAt are omitted; title, poster, year, rating, serverId dropped |
 | HiddenTitleSnapshotEntry vodId, vodType, hiddenAt, unhiddenAt | hiddenTitles row | Same |
 | PreferencesSnapshot.keys (string-encoded) | settings.v typed | Decode to real types; `remoteControlMap`, `radioModeByDefault` move to their own keys |
-| ChannelCollection id, name, memberIds, placement (AppPreferences `channel_collections`, not in Drive) | collections row | Same conversion as Apple |
+| PreferencesSnapshot.tv, .mobile (2026-10-27) | settings.tv, settings.mobile | Same lanes and scope rules as section 4.9; absent in older files |
+| PreferencesSnapshot `recents.v1`, `channelCollections.v1`, `hiddenMovieGroups.v1`, `hiddenSeriesGroups.v1`, `lastGroup`, `recentGroupVisible` (2026-10-27) | recents, collections, hiddenGroups, settings | Drive gaps closed; raw stored strings, default profile only |
+| PreferencesSnapshot `tmdbApiKey` | not synced | No longer written (it was cleartext); still read for one version so an older snapshot restores it, then dropped |
+| ChannelCollection id, name, memberIds, placement (AppPreferences `channel_collections`, in Drive as `channelCollections.v1` since 2026-10-27) | collections row | Same conversion as Apple |
 | Playlists, Credentials | not synced here | Stay on Drive |
 
 ## 11. README rows (both repos, same commit as the code)
