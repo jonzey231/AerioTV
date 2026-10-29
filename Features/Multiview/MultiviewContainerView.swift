@@ -1646,7 +1646,7 @@ struct MultiviewContainerView: View {
                         speed: audioStore.speed,
                         // A solo VOD tile (beginVOD) is the one non-live
                         // container session; everything else stays live.
-                        isLive: store.vodSoloTile == nil,
+                        isLive: store.vodSoloTile == nil && store.catchupTile == nil,
                         sleepTimerEnd: $sleepTimerEnd,
                         showStreamInfo: $showStreamInfo,
                         setAudioTrack: { audioStore.setAudioTrackAction?($0) },

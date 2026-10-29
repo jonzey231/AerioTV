@@ -335,7 +335,7 @@ struct PlaybackChromeOverlay: View {
                         versionOptions: store.vodSoloTile != nil ? store.vodVersionOptions : [],
                         currentVersionOptionID: store.vodCurrentVersionID,
                         onSelectVersion: store.vodSoloTile == nil ? nil : { store.switchVODVersion($0) },
-                        isVODSession: store.vodSoloTile != nil,
+                        isVODSession: store.vodSoloTile != nil || store.catchupTile != nil,
                         // Pin the chrome up while the overflow menu (and
                         // its sub-menus) is open; release + restart the
                         // fade clock on dismiss. Without this the 5s

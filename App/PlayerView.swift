@@ -1134,6 +1134,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var isStreamInfoVisible: Bool = false
 
     static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+
+    /// Option wording shared with Android and the remote-session sheet:
+    /// 0.5x, 0.75x, Normal (1.0x), 1.25x, 1.5x, 2.0x.
+    static func speedLabel(_ s: Double) -> String {
+        if s == 1.0 { return "Normal (1.0x)" }
+        return (s == s.rounded() ? String(format: "%.1f", s) : String(format: "%g", s)) + "x"
+    }
 }
 
 // MARK: - Shared Error UI
@@ -3913,7 +3920,7 @@ private struct PlayerRootView: View {
                 // Speed / subtitle hints above scrubber
                 HStack(spacing: 24) {
                     if !isLive {
-                        hintPill(icon: "chevron.up", text: "Speed")
+                        hintPill(icon: "chevron.up", text: "Playback Speed")
                     }
                     hintPill(icon: "circle.fill", text: "Play/Pause", size: 8)
                     if !progressStore.subtitleTracks.isEmpty {
@@ -4200,7 +4207,7 @@ struct PlayerOverflowMenu: View, Equatable {
                             Button {
                                 setSpeed?(spd)
                             } label: {
-                                let label = spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x"
+                                let label = PlayerProgressStore.speedLabel(spd)
                                 if spd == speed {
                                     Label(label, systemImage: "checkmark")
                                 } else {
@@ -4209,8 +4216,7 @@ struct PlayerOverflowMenu: View, Equatable {
                             }
                         }
                     } label: {
-                        let speedLabel = speed == 1.0 ? "1x" : "\(String(format: "%g", speed))x"
-                        Label("Speed: \(speedLabel)", systemImage: "gauge.with.dots.needle.67percent")
+                        Label("Playback Speed", systemImage: "gauge.with.dots.needle.67percent")
                     }
                 }
 
@@ -4546,12 +4552,12 @@ struct TVPlayerOptionsPanel: View {
 
     @ViewBuilder private var speedSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionHeader("Speed")
+            sectionHeader("Playback Speed")
             ForEach(PlayerProgressStore.speedOptions, id: \.self) { spd in
                 let selected = spd == speed
                 optionPill(
                     id: "speed-\(spd)",
-                    text: spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x",
+                    text: PlayerProgressStore.speedLabel(spd),
                     isSelected: selected
                 ) {
                     setSpeed?(spd); onDismiss?()
@@ -5472,6 +5478,12 @@ final class AVPlayerProgressDriver {
         self.isLive = isLive
         self.applyGravity = applyGravity
         wireCommands(player)
+        // Re-prepare (MKV remux restart, failover, new player) keeps the
+        // user's chosen speed: the store outlives the player it drives.
+        if !isLive, store.speed != 1.0 {
+            player.defaultRate = Float(store.speed)
+            if player.timeControlStatus != .paused { player.rate = Float(store.speed) }
+        }
         observe(player)
         // Apply the persisted aspect immediately and on every change.
         applyGravity(store.effectiveVideoGravity)
@@ -7070,8 +7082,12 @@ final class AVPlayerProgressDriver {
         }
         store.setSpeedAction = { [weak self, weak player] rate in
             guard let player else { return }
-            player.rate = Float(rate)
-            self?.store.speed = rate
+            // defaultRate is what play() resumes at, so the chosen speed
+            // survives play/pause, stall recovery, and seeks. A paused
+            // player stays paused; only a playing one changes rate now.
+            player.defaultRate = Float(rate)
+            if player.timeControlStatus != .paused { player.rate = Float(rate) }
+            self?.store.speed = Double(player.defaultRate)
         }
         store.setAudioTrackAction = { [weak self] id in
             guard let self, let group = self.audibleGroup else { return }
