@@ -12,6 +12,14 @@ struct AddServerView: View {
     @State private var lanExpanded = false
 
     var onSave: ((ServerConnection) -> Void)? = nil
+    /// When set, skip the type picker and open this type's form directly
+    /// (Welcome > "Sign in with Dispatcharr").
+    var initialType: ServerType? = nil
+    /// Onboarding shows the step indicator and the TV footer hints.
+    var isOnboarding: Bool = false
+    @State private var appliedInitialType = false
+    /// "Other source types" expands in place on every platform.
+    @State private var otherTypesExpanded = false
 
     /// Server that was just saved, triggers the sync loading screen.
     @State private var savedServer: ServerConnection?
@@ -63,7 +71,15 @@ struct AddServerView: View {
                 .padding(20)
             }
         }
-        .navigationTitle(typeChosen ? "Configure" : "Add Playlist")
+        .onAppear {
+            guard !appliedInitialType else { return }
+            appliedInitialType = true
+            if let initialType {
+                viewModel.serverType = initialType
+                typeChosen = true
+            }
+        }
+        .navigationTitle(typeChosen ? "Configure" : (isOnboarding ? "" : "Add Playlist"))
         .navigationBarBackButtonHidden(typeChosen)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
@@ -101,66 +117,193 @@ struct AddServerView: View {
         }
     }
 
-    // MARK: - Type Picker (Step 1)
+    // MARK: - Type Picker (Step 1): Connect a Server
+
+    /// Onboarding redesign 2026-10-29: AerioTV is built around Dispatcharr,
+    /// so Dispatcharr is the one hero card with what it unlocks, and the
+    /// other source types sit behind a pill that expands in place (no new
+    /// screen), so they stay available without competing for the first look.
+    private var isTV: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    private func choose(_ type: ServerType) {
+        viewModel.serverType = type
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            typeChosen = true
+        }
+    }
 
     private var typePickerSection: some View {
-        VStack(spacing: 20) {
-            VStack(spacing: 6) {
-                Text("Choose Source Type")
-                    .scaledFont(.headlineLarge)
+        VStack(spacing: isTV ? 28 : 20) {
+            VStack(spacing: isTV ? 12 : 8) {
+                if isOnboarding && !isTV {
+                    OnboardingStepDots(current: 1, total: 3)
+                }
+                Text("Connect a Server")
+                    .scaledFont(isTV ? .system(size: 48, weight: .bold) : .headlineLarge)
                     .foregroundColor(.textPrimary)
-                Text("Select how you want to connect to your media source.")
-                    .scaledFont(.bodyMedium.subtext())
+                Text("AerioTV is built around Dispatcharr. Other playlist types work too, with fewer features.")
+                    .scaledFont(isTV ? .system(size: 24).subtext() : .bodyMedium.subtext())
                     .foregroundColor(Color.contrastText(.textSecondary))
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 8)
 
-            ForEach(ServerType.allCases, id: \.self) { type in
-                Button {
-                    viewModel.serverType = type
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        typeChosen = true
-                    }
-                } label: {
-                    HStack(spacing: 16) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(type.color.opacity(0.15))
-                                .frame(width: 52, height: 52)
-                            Image(systemName: type.systemIcon)
-                                .scaledFont(.system(size: 22, weight: .medium))
-                                .foregroundColor(type.color)
-                        }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(type.displayName)
-                                .scaledFont(.headlineMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(type.description)
-                                .scaledFont(.bodySmall.subtext())
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .scaledFont(.system(size: 14, weight: .semibold))
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                    }
-                    .padding(16)
-                    .background(Color.cardBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Color.borderSubtle, lineWidth: 1)
-                    )
-                }
-                #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
-                #else
-                .buttonStyle(.plain)
-                #endif
+            dispatcharrHeroCard
+
+            otherSourceTypes
+
+            if isOnboarding && isTV {
+                tvFooter
             }
         }
+        .frame(maxWidth: isTV ? 1200 : 640)
+        .frame(maxWidth: .infinity)
+    }
+
+    private static let dispatcharrFeatures: [(icon: String, title: String)] = [
+        ("clock.arrow.circlepath", "Catch-up from the server"),
+        ("arrow.triangle.swap", "Stream switching and reordering"),
+        ("record.circle", "Server-side DVR with series rules"),
+        ("person.2.fill", "Multiple user profiles"),
+        ("qrcode", "Set up any device with a QR code"),
+        ("arrow.triangle.2.circlepath", "Syncs across platforms"),
+    ]
+
+    private var dispatcharrHeroCard: some View {
+        VStack(alignment: .leading, spacing: isTV ? 20 : 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Dispatcharr")
+                    .scaledFont(isTV ? .system(size: 32, weight: .bold) : .headlineMedium)
+                    .foregroundColor(.textPrimary)
+                Text("Your own server, and everything AerioTV can do.")
+                    .scaledFont(isTV ? .system(size: 22).subtext() : .bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
+
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: isTV ? 14 : 8, alignment: .top),
+                               count: isTV ? 3 : 2),
+                alignment: .leading,
+                spacing: isTV ? 14 : 8
+            ) {
+                ForEach(Self.dispatcharrFeatures, id: \.title) { feature in
+                    HStack(alignment: .top, spacing: isTV ? 12 : 8) {
+                        Image(systemName: feature.icon)
+                            .scaledFont(.system(size: isTV ? 20 : 13, weight: .semibold))
+                            .foregroundColor(.accentPrimary)
+                            .frame(width: isTV ? 26 : 18)
+                        Text(feature.title)
+                            .scaledFont(isTV ? .system(size: 20, weight: .medium) : .labelMedium)
+                            .foregroundColor(.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(isTV ? 14 : 10)
+                    .frame(maxWidth: .infinity, minHeight: isTV ? 72 : 52, alignment: .topLeading)
+                    .background(
+                        RoundedRectangle(cornerRadius: isTV ? 12 : 10, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+                }
+            }
+
+            (Text("YOU WILL NEED ").fontWeight(.semibold)
+                + Text(isTV
+                    ? "server address, plus a username and password (with API key access on) or an API key. Have the QR code from the Users page? Scan it with AerioTV on your phone and set up from there."
+                    : "server address, plus a username and password (with API key access on), or an API key."))
+                .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
+                .fixedSize(horizontal: false, vertical: true)
+
+            OnboardingPillButton(title: isTV ? "Continue with Dispatcharr" : "Enter details",
+                                 filled: true, fullWidth: true) {
+                choose(.dispatcharrAPI)
+            }
+        }
+        .padding(isTV ? 32 : 18)
+        .background(OnboardingCardBackground())
+    }
+
+    @ViewBuilder
+    private var otherSourceTypes: some View {
+        if otherTypesExpanded {
+            VStack(alignment: .leading, spacing: isTV ? 14 : 10) {
+                HStack {
+                    OnboardingSectionLabel("Other source types")
+                    Spacer()
+                    Button("Hide") {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            otherTypesExpanded = false
+                        }
+                    }
+                    .scaledFont(.system(size: isTV ? 22 : 15, weight: .semibold))
+                    .foregroundColor(.accentPrimary)
+                    #if os(tvOS)
+                    .buttonStyle(TVNoHighlightButtonStyle())
+                    .tvFocusRingShape(.capsule)
+                    #else
+                    .buttonStyle(.plain)
+                    #endif
+                }
+                OnboardingActionCard(
+                    icon: ServerType.xtreamCodes.systemIcon,
+                    title: "Xtream Codes",
+                    detail: isTV
+                        ? "Live TV, guide, movies, and series. Needs server address, username, and password."
+                        : "Server address, username, and password"
+                ) { choose(.xtreamCodes) }
+                OnboardingActionCard(
+                    icon: ServerType.m3uPlaylist.systemIcon,
+                    title: "M3U Playlist",
+                    detail: isTV
+                        ? "Live TV, with a guide from an XMLTV link. Needs a playlist URL."
+                        : "Playlist URL, and an XMLTV URL for the guide"
+                ) { choose(.m3uPlaylist) }
+            }
+            .transition(.opacity.combined(with: .move(edge: .top)))
+        } else {
+            VStack(spacing: 8) {
+                OnboardingPillButton(title: "Other source types", filled: false) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        otherTypesExpanded = true
+                    }
+                }
+                Text(isTV
+                     ? "Xtream Codes login, or an M3U playlist with an XMLTV guide"
+                     : "Xtream Codes, or an M3U playlist with a guide")
+                    .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .multilineTextAlignment(.center)
+            }
+        }
+    }
+
+    /// TV footer: Back hint left, dots centered between equal-width sides.
+    private var tvFooter: some View {
+        HStack {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.left")
+                Text("Back to Welcome")
+            }
+            .scaledFont(.system(size: 20).subtext())
+            .foregroundColor(Color.contrastText(.textTertiary))
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            OnboardingStepDots(current: 1, total: 3)
+
+            // Right column reserved for the phone-handoff link; kept empty
+            // and equal width so the dots stay centered.
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: 1)
+        }
+        .padding(.top, 12)
     }
 
     // MARK: - Chosen Type Header (Step 2)
