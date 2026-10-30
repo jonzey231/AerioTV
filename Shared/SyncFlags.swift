@@ -363,7 +363,7 @@ enum SyncItemCatalog {
             SyncItem("collections", "Collections", ["channelCollections"], isData: true),
             SyncItem("watchProgress", "Watch Progress", category: .watchProgress),
             SyncItem("reminders", "Reminders", category: .reminders),
-            SyncItem(watchlistID, "My List", isData: true),
+            SyncItem(watchlistID, "Watchlist", isData: true),
             SyncItem(hiddenTitlesID, "Hidden Titles", isData: true),
             SyncItem("hiddenGroups", "Hidden Groups",
                      ["hiddenChannelGroups", "hiddenMovieGroups", "hiddenSeriesGroups"], isData: true),
