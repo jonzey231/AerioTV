@@ -130,7 +130,19 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     private var task: URLSessionDataTask?
 
     private let cond = NSCondition()
-    private var buffer = Data()
+    /// The buffered window [bufferStart, bufferStart + bufferedCount) as a
+    /// list of ~1 MB chunks. A single Data had to be trimmed by copying
+    /// the whole kept tail into a fresh allocation on every read (Data
+    /// keeps its backing store on removeFirst), so a 470 MB window held
+    /// two 470 MB copies at once and every span read paid a full memcpy
+    /// under the lock (2026-10-30 field log: 6 to 8 s segment builds and
+    /// a 1.07 GB footprint). Chunks trim by dropping whole elements: no
+    /// copy, and never more than one partly trimmed chunk of slack.
+    private var chunks: [Data] = []
+    /// Bytes already trimmed off the front of chunks[0].
+    private var chunkSkip = 0
+    private var bufferedCount = 0
+    private static let chunkSize = 1 * 1024 * 1024
     private var bufferStart: Int64 = 0
     private var finished = false
     private var failed: String?
@@ -138,6 +150,16 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// and no task may ever be created again (see open's guard).
     private var cancelled = false
     private var suspended = false
+    /// The task was cancelled by the hard cap or a memory warning while
+    /// the window stays valid. The next read that needs bytes past the
+    /// head continues with a new ranged request AT the head, so the
+    /// window is kept instead of refetched.
+    private var parked = false
+    /// One [MKV-MEM] cap line per episode; cleared once the window falls
+    /// back well under the cap.
+    private var capEpisode = false
+    /// Bytes received since the last periodic [MKV-MEM] sample.
+    private var bytesSinceSample: Int64 = 0
 
     /// Suspend past this much unread look-ahead; resume below the low mark.
     /// Both scale with the file's largest cue span (setSpanSize): fixed
@@ -157,6 +179,12 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// reopens rather than waits; span-aware so a one-span forward step
     /// on a high-bitrate file streams through instead of reconnecting.
     private var farAhead: Int64 = 48 * 1024 * 1024
+    private var maxSpan = 0
+    /// Hard ceiling on the window: keepBehind + highWater + farAhead +
+    /// one span. The high-water suspend alone let the window reach
+    /// 469 MB against a 96 MB mark (2026-10-30 field log), so this
+    /// holds regardless of why flow control did not.
+    private var capLimit: Int { Int(keepBehind) + highWater + Int(farAhead) + maxSpan }
     /// Byte offset the current task asked for, checked against the
     /// response's Content-Range: a reply that starts elsewhere (a proxy
     /// ignoring Range, or adopting another session's position) would be
@@ -199,48 +227,81 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         session = URLSession(configuration: config, delegate: self, delegateQueue: delegateQueue)
     }
 
-    /// Size flow control so the stream never idles holding less than one
-    /// full span: resume once fewer than (span + 8MB) bytes are unread,
-    /// suspend only past a further span of look-ahead.
-    func setSpanSize(_ maxSpan: Int) {
-        cond.lock()
-        lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
-        highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
-        keepBehind = Int64(max(8 * 1024 * 1024, maxSpan + 4 * 1024 * 1024))
-        // 16 MB floor (was 48): a forward read this far past the head
-        // used to stream THROUGH everything in between while the read
-        // waited, holding it all in `buffer`. User seeks now reposition
-        // explicitly (reposition(at:)); this only covers AVPlayer's own
-        // re-requests, which land within a span or two of the head.
-        farAhead = Int64(max(16 * 1024 * 1024, 2 * maxSpan))
-        cond.unlock()
-        debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB",
-                        Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576))
+    // MARK: Chunked window (lock held)
+
+    private var bufferHead: Int64 { bufferStart + Int64(bufferedCount) }
+
+    private func clearBuffer() {
+        chunks.removeAll(keepingCapacity: false)
+        chunkSkip = 0
+        bufferedCount = 0
     }
 
-    func open(at offset: Int64) {
-        cond.lock()
-        // A cancelled stream can NEVER reopen: cancel() invalidated the
-        // URLSession, and dataTask(with:) on an invalidated session
-        // throws an ObjC exception = SIGABRT. Hit live 2026-08-26:
-        // rapid version switches - stop() cancels the old engine while
-        // its queue is mid-build; the build's read fails, ensureSpans
-        // retries via open(), crash. Marking failed makes the pending
-        // read throw and the build die as a clean segment error instead.
-        guard !cancelled else {
-            failed = "stream cancelled"
-            cond.broadcast()
-            cond.unlock()
-            return
+    private func appendBytes(_ d: Data) {
+        if !chunks.isEmpty, chunks[chunks.count - 1].count + d.count <= Self.chunkSize {
+            chunks[chunks.count - 1].append(d)
+        } else {
+            // Copy into an allocation we own so the window never pins a
+            // larger CFNetwork backing store behind a small slice.
+            var c = Data(capacity: max(Self.chunkSize, d.count))
+            c.append(d)
+            chunks.append(c)
         }
+        bufferedCount += d.count
+    }
+
+    /// Drops bytes before `newStart` by releasing whole chunks; the only
+    /// slack is the unread remainder of one partly trimmed chunk.
+    private func trimFront(to newStart: Int64) {
+        guard newStart > bufferStart else { return }
+        var drop = Int(min(newStart - bufferStart, Int64(bufferedCount)))
+        while drop > 0, !chunks.isEmpty {
+            let avail = chunks[0].count - chunkSkip
+            if drop >= avail {
+                chunks.removeFirst()
+                chunkSkip = 0
+                drop -= avail
+                bufferedCount -= avail
+                bufferStart += Int64(avail)
+            } else {
+                chunkSkip += drop
+                bufferedCount -= drop
+                bufferStart += Int64(drop)
+                drop = 0
+            }
+        }
+    }
+
+    /// Copies [lo, lo + length) (relative to bufferStart) out of the
+    /// chunks into one Data of exactly that size.
+    private func copyOut(lo: Int, length: Int) -> Data {
+        var out = Data(capacity: length)
+        var pos = 0
+        var remainingSkip = lo
+        for (i, c) in chunks.enumerated() {
+            let start = c.startIndex + (i == 0 ? chunkSkip : 0)
+            let avail = c.endIndex - start
+            if remainingSkip >= avail { remainingSkip -= avail; continue }
+            let from = start + remainingSkip
+            remainingSkip = 0
+            let take = min(c.endIndex - from, length - pos)
+            out.append(c[from..<(from + take)])
+            pos += take
+            if pos >= length { break }
+        }
+        return out
+    }
+
+    /// Starts a ranged request at `offset` WITHOUT touching the window
+    /// (lock held). open() clears the window first; a parked stream
+    /// continues at its head.
+    private func startTask(at offset: Int64) {
         task?.cancel()
-        buffer.removeAll(keepingCapacity: false)
-        bufferStart = offset
-        consumePoint = offset
         requestedOffset = offset
         finished = false
         failed = nil
         suspended = false
+        parked = false
         var request = URLRequest(url: url)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
@@ -253,49 +314,144 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // credits scrub; the server's bytes at those offsets were fine).
         task = t
         requestsMade += 1
-        cond.unlock()
         debugLog(String(format: "[MKV] stream opened at %.1f MB (request #%d this session)",
                         Double(offset) / 1_048_576, requestsMade))
         t.resume()
     }
 
+    /// Cancels the task but keeps the window (lock held). Replacing the
+    /// task with a cancelled one makes every late callback from it fail
+    /// the identity guard only after the next startTask, so the parked
+    /// flag is what tells read() to continue at the head.
+    private func park() {
+        task?.cancel()
+        suspended = false
+        parked = true
+    }
+
+    // MARK: Public API
+
+    /// Size flow control so the stream never idles holding less than one
+    /// full span: resume once fewer than (span + 8MB) bytes are unread,
+    /// suspend only past a further span of look-ahead.
+    func setSpanSize(_ maxSpan: Int) {
+        cond.lock()
+        self.maxSpan = maxSpan
+        lowWater = max(32 * 1024 * 1024, maxSpan + 8 * 1024 * 1024)
+        highWater = max(96 * 1024 * 1024, lowWater + maxSpan + 8 * 1024 * 1024)
+        keepBehind = Int64(max(8 * 1024 * 1024, maxSpan + 4 * 1024 * 1024))
+        // 16 MB floor (was 48): a forward read this far past the head
+        // used to stream THROUGH everything in between while the read
+        // waited, holding it all in the window. User seeks now reposition
+        // explicitly (reposition(at:)); this only covers AVPlayer's own
+        // re-requests, which land within a span or two of the head.
+        farAhead = Int64(max(16 * 1024 * 1024, 2 * maxSpan))
+        let cap = capLimit
+        cond.unlock()
+        debugLog(String(format: "[MKV] flow control: span %.1f MB -> low %.0f MB, high %.0f MB, cap %.0f MB",
+                        Double(maxSpan) / 1_048_576, Double(lowWater) / 1_048_576, Double(highWater) / 1_048_576,
+                        Double(cap) / 1_048_576))
+    }
+
+    func open(at offset: Int64) {
+        cond.lock()
+        defer { cond.unlock() }
+        // A cancelled stream can NEVER reopen: cancel() invalidated the
+        // URLSession, and dataTask(with:) on an invalidated session
+        // throws an ObjC exception = SIGABRT. Hit live 2026-08-26:
+        // rapid version switches - stop() cancels the old engine while
+        // its queue is mid-build; the build's read fails, ensureSpans
+        // retries via open(), crash. Marking failed makes the pending
+        // read throw and the build die as a clean segment error instead.
+        guard !cancelled else {
+            failed = "stream cancelled"
+            cond.broadcast()
+            return
+        }
+        clearBuffer()
+        bufferStart = offset
+        consumePoint = offset
+        capEpisode = false
+        startTask(at: offset)
+    }
+
     /// Worst-case bytes this stream can hold: history behind the consume
     /// point, the high-water look-ahead, and a read waiting at most
-    /// farAhead past the head for one span. Feeds the [MKV-MEM] cap line.
+    /// farAhead past the head for one span. Feeds the [MKV-MEM] cap line
+    /// and is enforced in didReceive.
     func capBytes(maxSpan: Int) -> Int {
         cond.lock()
         defer { cond.unlock() }
-        return Int(keepBehind) + highWater + Int(farAhead) + maxSpan
+        return Int(keepBehind) + highWater + Int(farAhead) + max(maxSpan, self.maxSpan)
     }
 
-    /// Locked snapshot for the periodic [MKV-MEM] line.
+    /// Locked snapshot of the window (seek log line).
     var memorySnapshot: (buffered: Int, lookAhead: Int) {
         cond.lock()
         defer { cond.unlock() }
-        let head = bufferStart + Int64(buffer.count)
-        return (buffer.count, Int(max(0, head - consumePoint)))
+        return (bufferedCount, Int(max(0, bufferHead - consumePoint)))
+    }
+
+    /// Locked snapshot for the periodic [MKV-MEM] line. `streamedSince`
+    /// resets on every call (the 15 s timer is the only caller), so a
+    /// field log shows whether the task was still pulling bytes and
+    /// whether flow control believed it was suspended.
+    func sampleForMemoryLog() -> (buffered: Int, lookAhead: Int, streamedSince: Int64, suspended: Bool, parked: Bool) {
+        cond.lock()
+        defer { cond.unlock() }
+        let since = bytesSinceSample
+        bytesSinceSample = 0
+        return (bufferedCount, Int(max(0, bufferHead - consumePoint)), since, suspended, parked)
     }
 
     /// User seek: when the target lies outside the bytes already held,
     /// drop the buffer and the in-flight request NOW and reopen at the
     /// target, instead of letting the next read stream through (and
     /// hold) everything between the old position and the target.
+    /// Inside the window the consume point MOVES to the target (either
+    /// direction) and history behind it is trimmed: before, a forward
+    /// seek inside the window left consumePoint behind, so the bytes
+    /// between the old and new playhead stayed held as "behind" and the
+    /// look-ahead math ran against a stale point.
     /// Returns the bytes dropped, or nil when the target was already
-    /// buffered (or the stream is not open) and nothing changed.
+    /// buffered (or the stream is not open) and no reopen happened.
     func reposition(at offset: Int64) -> Int? {
         cond.lock()
         if cancelled || task == nil {
             cond.unlock()
             return nil
         }
-        let head = bufferStart + Int64(buffer.count)
+        let head = bufferHead
         if offset >= bufferStart, offset <= head {
+            consumePoint = offset
+            trimFront(to: offset - keepBehind)
+            if suspended, !finished, head - consumePoint < Int64(lowWater) {
+                suspended = false
+                task?.resume()
+            }
             cond.unlock()
             return nil
         }
-        let dropped = buffer.count
+        let dropped = bufferedCount
         cond.unlock()
         open(at: offset)
+        return dropped
+    }
+
+    /// Memory-warning response, safe from any thread (the server queue
+    /// can sit inside a 45 s span read, so this must not hop onto it):
+    /// drop the whole window and park at the consume point. The next
+    /// read continues with one ranged request there. Returns bytes freed.
+    func dropLookAhead() -> Int {
+        cond.lock()
+        defer { cond.unlock() }
+        guard !cancelled, task != nil else { return 0 }
+        let dropped = bufferedCount
+        park()
+        clearBuffer()
+        bufferStart = consumePoint
+        capEpisode = false
+        cond.broadcast()
         return dropped
     }
 
@@ -319,22 +475,37 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // seek and failed instantly (2026-08-26 field failure, In the
         // Grey: "span 91 unreadable" in the same millisecond as open,
         // -> watchdog -> mpv fallback).
-        if offset > bufferStart + Int64(buffer.count) + farAhead {
+        if offset > bufferHead + farAhead {
             debugLog(String(format: "[MKV] read far ahead (%.1f MB > head %.1f MB); reopening",
-                            Double(offset) / 1_048_576, Double(bufferStart + Int64(buffer.count)) / 1_048_576))
+                            Double(offset) / 1_048_576, Double(bufferHead) / 1_048_576))
             return nil
         }
-        neededThrough = max(neededThrough, offset + Int64(length))
+        // Hard cap: a read whose end lies past what the capped window can
+        // hold reopens at its own offset instead of streaming through.
+        let end = offset + Int64(length)
+        trimFront(to: min(offset, consumePoint) - keepBehind)
+        if end > bufferHead, end - bufferStart > Int64(capLimit) {
+            debugLog(String(format: "[MKV-MEM] read to %.1f MB exceeds cap %.0f MB from window start %.1f MB; reopening",
+                            Double(end) / 1_048_576, Double(capLimit) / 1_048_576, Double(bufferStart) / 1_048_576))
+            return nil
+        }
+        neededThrough = max(neededThrough, end)
+        // Single reader (the server queue), so resetting here cannot
+        // clobber another waiter's mark.
         defer { neededThrough = 0 }
         let deadline = Date().addingTimeInterval(timeout)
-        while bufferStart + Int64(buffer.count) < offset + Int64(length) {
+        while bufferHead < end {
             if let failed { throw MKVRemuxError(reason: "stream failed: \(failed)") }
             if finished { break }
-            // A waiting read is the one thing that must always wake a
-            // suspended task: flow control only ever resumed AFTER data
-            // arrived, so a range ending past the head deadlocked here
-            // until the 45s timeout (or the watchdog) killed the build.
-            if suspended {
+            // A memory warning can drop the window under a waiting read.
+            if offset < bufferStart { return nil }
+            if parked {
+                startTask(at: bufferHead)
+            } else if suspended {
+                // A waiting read is the one thing that must always wake a
+                // suspended task: flow control only ever resumed AFTER data
+                // arrived, so a range ending past the head deadlocked here
+                // until the 45s timeout (or the watchdog) killed the build.
                 suspended = false
                 task?.resume()
             }
@@ -342,33 +513,20 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
                 throw MKVRemuxError(reason: "stream read timed out")
             }
         }
+        if offset < bufferStart { return nil }
         let lo = Int(offset - bufferStart)
-        let hi = min(buffer.count, lo + length)
+        let hi = min(bufferedCount, lo + length)
         guard lo >= 0, hi > lo else { return finished ? Data() : nil }
-        let out = buffer.subdata(in: lo..<hi)
-        // Advance the consume point, trim history, and resume the task if
-        // the look-ahead fell below the low mark.
+        let out = copyOut(lo: lo, length: hi - lo)
+        // Advance the consume point, trim history (chunk drops, no
+        // copy), and resume the task if the look-ahead fell below the
+        // low mark.
         consumePoint = max(consumePoint, offset + Int64(out.count))
-        let trimTo = consumePoint - keepBehind
-        if trimTo > bufferStart {
-            // Data keeps its backing allocation on removeFirst (Apple #74
-            // lesson), so copy the kept tail into a fresh allocation.
-            // Never re-seat with Data(buffer) on a slice: an empty slice
-            // has a nil base address and Data's init force-unwraps it
-            // (1.8.40 TestFlight crash). Clamp the drop to what is held
-            // so bufferStart stays contiguous with what the writer appends.
-            let want = trimTo - bufferStart
-            let drop = Int(min(want, Int64(buffer.count)))
-            if want > Int64(drop) {
-                debugLog(String(format: "[MKV] read clamped trim %lld -> %d bytes (buffer %d)",
-                                want, drop, buffer.count))
-            }
-            buffer = drop >= buffer.count ? Data() : buffer.subdata(in: drop..<buffer.count)
-            bufferStart += Int64(drop)
-        }
-        let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
-        if suspended, !finished,
-           ahead < lowWater || bufferStart + Int64(buffer.count) < neededThrough {
+        trimFront(to: consumePoint - keepBehind)
+        if capEpisode, bufferedCount < capLimit - 16 * 1024 * 1024 { capEpisode = false }
+        let ahead = Int(bufferHead - consumePoint)
+        if suspended, !finished, !parked,
+           ahead < lowWater || bufferHead < neededThrough {
             suspended = false
             task?.resume()
         }
@@ -394,8 +552,8 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         cond.lock()
         defer { cond.unlock() }
         return "state[task=\(task != nil) cancelled=\(cancelled) finished=\(finished) "
-            + "failed=\(failed ?? "nil") bufStart=\(bufferStart) buffered=\(buffer.count) "
-            + "streamed=\(bytesStreamed) suspended=\(suspended)]"
+            + "failed=\(failed ?? "nil") bufStart=\(bufferStart) buffered=\(bufferedCount) "
+            + "streamed=\(bytesStreamed) suspended=\(suspended) parked=\(parked)]"
     }
 
     func cancel() {
@@ -406,7 +564,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         failed = "stream cancelled"
         task?.cancel()
         task = nil
-        buffer.removeAll(keepingCapacity: false)
+        clearBuffer()
         cond.broadcast()
         cond.unlock()
         session.invalidateAndCancel()
@@ -428,7 +586,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         cond.lock()
         defer { cond.unlock() }
-        guard dataTask === task else { completionHandler(.cancel); return }
+        guard dataTask === task, !parked else { completionHandler(.cancel); return }
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? 200
         let rangeHeader = http?.value(forHTTPHeaderField: "Content-Range") ?? ""
@@ -474,15 +632,41 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // the stale task's bytes - from the OLD file position - append
         // into a buffer whose bufferStart describes the NEW position:
         // corrupt spans ("no video samples"), failed segments, and the
-        // watchdog's mpv fallback restarting the title.
-        guard dataTask === task else { cond.unlock(); return }
-        buffer.append(data)
+        // watchdog's mpv fallback restarting the title. A parked task is
+        // cancelled; its late bytes are dropped too, because the
+        // continuation request restarts exactly at the head.
+        guard dataTask === task, !parked else { cond.unlock(); return }
+        appendBytes(data)
         bytesStreamed += Int64(data.count)
-        let head = bufferStart + Int64(buffer.count)
+        bytesSinceSample += Int64(data.count)
+        let head = bufferHead
         let ahead = Int(head - consumePoint)
-        // Never suspend below what a waiting read() needs: a span larger
-        // than the high-water mark must still stream to completion.
-        if !suspended, ahead > highWater, head >= neededThrough + 1_048_576 || neededThrough == 0 {
+        if bufferedCount > capLimit {
+            // Hard cap, regardless of why the high-water suspend did not
+            // hold. First over-cap chunk: suspend unconditionally and log
+            // the state that let it get here. Bytes still arriving well
+            // past the cap while flagged suspended mean the suspend is not
+            // holding, so cancel and park; the next read past the head
+            // continues with one new request there.
+            if !capEpisode {
+                capEpisode = true
+                debugLog(String(format: "[MKV-MEM] cap hit: buffered %.1f MB, ahead %.1f MB, consume %.1f MB, needed %.1f MB, suspended=%@",
+                                Double(bufferedCount) / 1_048_576, Double(ahead) / 1_048_576,
+                                Double(consumePoint) / 1_048_576, Double(neededThrough) / 1_048_576,
+                                suspended ? "true" : "false"))
+            }
+            if !suspended {
+                suspended = true
+                dataTask.suspend()
+                scheduleKeepalive(for: dataTask)
+            } else if bufferedCount > capLimit + 8 * 1024 * 1024 {
+                debugLog(String(format: "[MKV-MEM] cap: %.1f MB still arriving while suspended; parking the request at %.1f MB",
+                                Double(bufferedCount - capLimit) / 1_048_576, Double(head) / 1_048_576))
+                park()
+            }
+        } else if !suspended, ahead > highWater, head >= neededThrough + 1_048_576 || neededThrough == 0 {
+            // Never suspend below what a waiting read() needs: a span larger
+            // than the high-water mark must still stream to completion.
             suspended = true
             dataTask.suspend()
             scheduleKeepalive(for: dataTask)
@@ -507,11 +691,11 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             guard let self else { return }
             self.cond.lock()
             defer { self.cond.unlock() }
-            guard self.suspended, !self.cancelled, suspendedTask === self.task else { return }
+            guard self.suspended, !self.cancelled, !self.parked, suspendedTask === self.task else { return }
             self.suspended = false
             self.keepaliveTicks += 1
             if self.keepaliveTicks == 1 || self.keepaliveTicks % 20 == 0 {
-                debugLog("[MKV] keepalive resume #\(self.keepaliveTicks) (look-ahead \(Int((self.bufferStart + Int64(self.buffer.count) - self.consumePoint) / 1_048_576)) MB)")
+                debugLog("[MKV] keepalive resume #\(self.keepaliveTicks) (look-ahead \(Int((self.bufferHead - self.consumePoint) / 1_048_576)) MB)")
             }
             suspendedTask.resume()
         }
@@ -522,8 +706,9 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // Same identity guard, and the sharper half of the field bug: the
         // CANCELLED old task's completion arrived after open() reset
         // state and set finished=true on the NEW stream - every read then
-        // returned empty instantly instead of waiting for data.
-        guard task === self.task else { cond.unlock(); return }
+        // returned empty instantly instead of waiting for data. A parked
+        // task's cancel completion is ignored the same way.
+        guard task === self.task, !parked else { cond.unlock(); return }
         if let error {
             if (error as NSError).code != NSURLErrorCancelled {
                 failed = error.localizedDescription
@@ -1657,6 +1842,13 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     }
     /// Stream buffer and look-ahead, safe from any thread.
     var streamMemorySnapshot: (buffered: Int, lookAhead: Int) { stream.memorySnapshot }
+    /// Periodic-sample variant (resets the streamed-since counter).
+    func streamMemorySample() -> (buffered: Int, lookAhead: Int, streamedSince: Int64, suspended: Bool, parked: Bool) {
+        stream.sampleForMemoryLog()
+    }
+    /// Thread-safe: drops the stream window on a memory warning without
+    /// waiting for the server queue (which may be blocked in a read).
+    func dropStreamLookAhead() -> Int { streamOpen ? stream.dropLookAhead() : 0 }
     /// Worst-case bytes of the stream buffer plus the span cache.
     var remuxerCapBytes: Int { stream.capBytes(maxSpan: maxSpanBytes) + spanCacheByteLimit }
     /// Scales with the file: a high-bitrate 4K remux has ~54MB cue spans
@@ -2571,16 +2763,17 @@ final class MKVVODServer: @unchecked Sendable {
         t.schedule(deadline: .now() + 15, repeating: 15)
         t.setEventHandler { [weak self] in
             guard let self, !self.stopped else { return }
-            let s = remux.streamMemorySnapshot
+            let s = remux.streamMemorySample()
             let spans = remux.spanCacheBytesSnapshot
             self.statLock.lock()
             let segCount = self.cacheCountMirror
             let segBytes = self.cacheBytesMirror
             let audBytes = self.audBytesMirror
             self.statLock.unlock()
-            debugLog(String(format: "[MKV-MEM] buffers=%.0f MB segments=%d (%.1f MB) lookahead=%.0f MB (stream %.0f MB, spans %.0f MB, audio %.1f MB)",
+            debugLog(String(format: "[MKV-MEM] buffers=%.0f MB segments=%d (%.1f MB) lookahead=%.0f MB (stream %.0f MB, spans %.0f MB, audio %.1f MB) streamed=%.1f MB/15s suspended=%@ parked=%@",
                             mb(s.buffered + spans + audBytes), segCount, mb(segBytes), mb(s.lookAhead),
-                            mb(s.buffered), mb(spans), mb(audBytes)))
+                            mb(s.buffered), mb(spans), mb(audBytes), Double(s.streamedSince) / 1_048_576,
+                            s.suspended ? "true" : "false", s.parked ? "true" : "false"))
         }
         t.resume()
         memTimer = t
@@ -2660,6 +2853,12 @@ final class MKVVODServer: @unchecked Sendable {
     /// Memory-warning response: drop every cache; steady playback
     /// refetches what it needs at ~1x.
     func purgeOnMemoryWarning() {
+        // The stream window first, from the calling thread: the server
+        // queue can be blocked inside a span read for up to 45 s, and a
+        // queued purge then never ran before jetsam (2026-10-30 field
+        // log: two warnings at 1.69 GB, killed 5 s later, nothing logged).
+        let dropped = stopped ? 0 : remuxer.dropStreamLookAhead()
+        debugLog(String(format: "[MKV-MEM] memory warning: dropped %.1f MB", Double(dropped) / 1_048_576))
         queue.async { [weak self] in
             guard let self else { return }
             self.cache.removeAll()
