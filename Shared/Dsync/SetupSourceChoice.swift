@@ -163,6 +163,18 @@ enum SetupSourceChoice {
         return decide(cloud, dsync)
     }
 
+    /// Rule 4 probe gate: the iCloud side is probed whenever an iCloud account is signed in.
+    /// The iCloud Sync switch is deliberately not an input: when iCloud Sync is the second
+    /// provider being turned on, the probe runs before the switch commits (Android enableSecond).
+    static func cloudProbeReady(accountPresent: Bool) -> Bool { accountPresent }
+
+    /// The probe's decision once both sides were read: nil when the iCloud gate is closed or either
+    /// side is unknown (no choice to make yet).
+    static func probeDecision(accountPresent: Bool, cloud: Summary?, dsync: Summary?) -> Decision? {
+        guard cloudProbeReady(accountPresent: accountPresent) else { return nil }
+        return decideKnown(cloud, dsync)
+    }
+
     /// Plain name for logs.
     static func decisionName(_ d: Decision) -> String {
         switch d {

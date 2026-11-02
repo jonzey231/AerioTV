@@ -789,5 +789,21 @@ do {
     eq(Set(CloudCanon.SHARED_FILES), DsyncCoexistence.SHARED_CATEGORIES, "the iCloud snapshot files are the shared categories")
 }
 
+// MARK: - Settings second-provider probe (iCloud Sync still off)
+
+do {
+    // Dispatcharr Sync on, iCloud Sync being turned on: the iCloud copy is read while the
+    // switch is still off, so the gate depends on the signed-in account only.
+    let cloudCopy = sum(("favorites", Cat(rows: 3, updatedAt: 2_000, fingerprint: SetupSourceChoice.fingerprint(["a|1", "b|2", "c|3"]))))
+    let dsyncCopy = sum(("favorites", Cat(rows: 2, updatedAt: 1_000, fingerprint: SetupSourceChoice.fingerprint(["a|1", "b|2"]))))
+    check(SetupSourceChoice.cloudProbeReady(accountPresent: true), "signed-in account opens the probe with iCloud Sync off")
+    eq(SetupSourceChoice.probeDecision(accountPresent: true, cloud: cloudCopy, dsync: dsyncCopy),
+       .ask(cloud: cloudCopy, dsync: dsyncCopy), "differing copies ask before the iCloud switch commits")
+    eq(SetupSourceChoice.defaultSelection(cloud: cloudCopy, dsync: dsyncCopy), .dispatcharr, "prompt default is Dispatcharr")
+    eq(SetupSourceChoice.probeDecision(accountPresent: true, cloud: cloudCopy, dsync: .EMPTY), .useCloud, "empty Dispatcharr uses iCloud")
+    check(SetupSourceChoice.probeDecision(accountPresent: false, cloud: cloudCopy, dsync: dsyncCopy) == nil, "no account: plain switch")
+    check(SetupSourceChoice.probeDecision(accountPresent: true, cloud: nil, dsync: dsyncCopy) == nil, "unreadable iCloud: unknown, no decision")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

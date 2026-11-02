@@ -18,8 +18,10 @@ import Foundation
 /// What the coordinator needs from the iCloud side (Android DriveSyncManager calls).
 /// Every hook defaults to "no cloud side", so the coordinator is inert until part 4 registers them.
 struct DsyncCloudHooks {
-    /// False when the user never turned iCloud Sync on (no cloud side to choose from).
-    var available: @MainActor () -> Bool = { false }
+    /// True when an iCloud account is signed in on this device. Independent of the iCloud Sync
+    /// switch (Android reads the Drive summary whenever the account is signed in), so turning
+    /// iCloud Sync on as the second provider can probe the iCloud copy before the switch commits.
+    var accountPresent: @MainActor () -> Bool = { false }
     /// The shared categories of the iCloud copy, or nil when iCloud could not be read (unknown).
     var readSharedSummary: @MainActor () async -> SetupSourceChoice.Summary? = { nil }
     var markUnknown: @MainActor () -> Void = {}
@@ -74,7 +76,7 @@ final class SetupSourceCoordinator: ObservableObject {
     /// Dispatcharr Direct Connect playlist, no iCloud side, or either side unreadable.
     func probe() async -> Probe? {
         guard let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString else { return nil }
-        guard cloud.available() else { return nil }
+        guard SetupSourceChoice.cloudProbeReady(accountPresent: cloud.accountPresent()) else { return nil }
         let d = await cloud.readSharedSummary()
         guard let x = await dsync.serverSummary(pid) else { return nil }
         guard let decision = SetupSourceChoice.decideKnown(d, x) else {

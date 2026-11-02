@@ -1083,7 +1083,7 @@ final class CloudSnapshotSync: ObservableObject {
     /// The coordinator's iCloud hooks (Android DriveSyncManager calls).
     private func registerHooks() {
         var h = DsyncCloudHooks()
-        h.available = { CloudSnapshotSync.shared.available }
+        h.accountPresent = { FileManager.default.ubiquityIdentityToken != nil }
         h.readSharedSummary = { CloudSnapshotSync.shared.readSharedSummary() }
         h.markUnknown = { CloudSnapshotSync.shared.markCloudUnknown() }
         h.clearUnknown = { CloudSnapshotSync.shared.clearCloudUnknown() }
