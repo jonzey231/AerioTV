@@ -56,6 +56,7 @@
 		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
+		5F1EDF33B4DC2BB4B6F3E47C /* SyncPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54395452D0E3EB11C09E483A /* SyncPrompts.swift */; };
 		2BF99C26CF25FEDC6460A79C /* AboutSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B5E9F08316B8E04572BCA96 /* AboutSettingsView.swift */; };
 		2D246927DDE0C2E0B2BA2B5B /* SettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46392B1A3F9F7A8DAB800DC8 /* SettingsControls.swift */; };
 		2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
@@ -68,6 +69,7 @@
 		36B1927A52630A63A061D530 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
+		408C7EF33BAC0BD8DE7DE515 /* SyncPrompts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54395452D0E3EB11C09E483A /* SyncPrompts.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
 		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
@@ -411,6 +413,7 @@
 		0D4994E16D37F74AE4F116EC /* RemoteControlMap.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteControlMap.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DVRSettingsView.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SyncCategoriesSettingsView.swift; sourceTree = "<group>"; };
+		54395452D0E3EB11C09E483A /* SyncPrompts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SyncPrompts.swift; sourceTree = "<group>"; };
 		14605A25B0401FBE3A055716 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHTTPClient.swift; sourceTree = "<group>"; };
@@ -983,6 +986,7 @@
 				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
 				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
 				0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */,
+				54395452D0E3EB11C09E483A /* SyncPrompts.swift */,
 				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
 				C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */,
 				A1BB2C3D4E5F60789ABCDEF1 /* LiveTVSettingsView.swift */,
@@ -1564,6 +1568,7 @@
 				B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */,
 				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
 				2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */,
+				5F1EDF33B4DC2BB4B6F3E47C /* SyncPrompts.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006001 /* LiveTVSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
 				DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */,
@@ -1735,6 +1740,7 @@
 				B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */,
 				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
 				38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */,
+				408C7EF33BAC0BD8DE7DE515 /* SyncPrompts.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006002 /* LiveTVSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
 				C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */,

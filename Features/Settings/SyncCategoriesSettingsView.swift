@@ -18,6 +18,12 @@ struct SyncCategoriesSettingsView: View {
     @Query private var servers: [ServerConnection]
     @ObservedObject private var theme = ThemeManager.shared
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
+    @AppStorage(DispatcharrSyncManager.enabledKey) private var dsyncOn = false
+
+    /// One shared list for both providers (Android): the rows apply while either is on.
+    private var anyProviderOn: Bool { iCloudSyncEnabled || dsyncOn }
+    /// Dispatcharr Sync is the sole provider: the per-category iCloud Delete rows hide.
+    private var dsyncOnly: Bool { dsyncOn && !iCloudSyncEnabled }
 
     // One @AppStorage per category, written through SyncCategory.defaultsKey,
     // round-trips via SyncManager.buildPreferencesDict so a flip on one
@@ -199,8 +205,8 @@ struct SyncCategoriesSettingsView: View {
                 } header: {
                     Text(group.title).sectionHeaderStyle()
                 }
-                .disabled(!iCloudSyncEnabled)
-                .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+                .disabled(!anyProviderOn)
+                .opacity(anyProviderOn ? 1.0 : 0.5)
             }
             Section {
                 ForEach(dataItems) { item in
@@ -213,9 +219,16 @@ struct SyncCategoriesSettingsView: View {
             } header: {
                 Text("Your Data").sectionHeaderStyle()
             }
-            .disabled(!iCloudSyncEnabled)
-            .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+            .disabled(!anyProviderOn)
+            .opacity(anyProviderOn ? 1.0 : 0.5)
 
+            if dsyncOnly {
+                Section {
+                } footer: {
+                    Text(footerText)
+                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
+                }
+            } else {
             Section {
                 ForEach(SyncCategory.allCases) { category in
                     Button(role: .destructive) {
@@ -234,6 +247,7 @@ struct SyncCategoriesSettingsView: View {
                     .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
             }
             .listSectionSeparator(.hidden)
+            }
         }
         .scrollContentBackground(.hidden)
         // Phase 3 (Logan 2026-09-18): floating tab bar parity -
@@ -269,8 +283,8 @@ struct SyncCategoriesSettingsView: View {
                                                  footer: scopeFooter)
                         }
                     }
-                    .disabled(!iCloudSyncEnabled)
-                    .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+                    .disabled(!anyProviderOn)
+                    .opacity(anyProviderOn ? 1.0 : 0.5)
                 }
 
                 SettingsSection("Your Data", style: .compactCard) {
@@ -284,17 +298,19 @@ struct SyncCategoriesSettingsView: View {
                         ) { _ in }
                     }
                 }
-                .disabled(!iCloudSyncEnabled)
-                .opacity(iCloudSyncEnabled ? 1.0 : 0.5)
+                .disabled(!anyProviderOn)
+                .opacity(anyProviderOn ? 1.0 : 0.5)
 
-                SettingsSection("Delete from iCloud", style: .compactCard) {
-                    ForEach(SyncCategory.allCases) { category in
-                        TVSettingsActionRow(
-                            icon: "icloud.slash",
-                            label: "Delete \(category.displayName)",
-                            isDestructive: true,
-                            action: { pendingDeleteCategory = category }
-                        )
+                if !dsyncOnly {
+                    SettingsSection("Delete from iCloud", style: .compactCard) {
+                        ForEach(SyncCategory.allCases) { category in
+                            TVSettingsActionRow(
+                                icon: "icloud.slash",
+                                label: "Delete \(category.displayName)",
+                                isDestructive: true,
+                                action: { pendingDeleteCategory = category }
+                            )
+                        }
                     }
                 }
 
@@ -316,6 +332,9 @@ struct SyncCategoriesSettingsView: View {
     // MARK: - Copy
 
     private var footerText: String {
+        if dsyncOnly {
+            return "Each choice controls whether this device sends and receives that item through your Dispatcharr server: on all devices, only on devices like this one, or not at all. The choices apply to this device only."
+        }
         if iCloudSyncEnabled {
             // Discord (Glitzbr) had to ask what actually triggers a sync,
             // which means the answer was invisible. It is: a local change

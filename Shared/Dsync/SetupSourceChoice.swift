@@ -8,9 +8,9 @@
 //  sides fingerprint. Port of the pure parts of the Android
 //  core/sync/SetupSourceChoice.kt and core/sync/DriveCanon.kt. Android's
 //  "Drive" names are "Cloud" here (Source.cloud, Decision.useCloud,
-//  cloudFile). The Drive snapshot enrichment, the backup id-migration
-//  offer and its copy, and the probe failure reasons are Drive specific
-//  and not ported; the iCloud side lands in a later part.
+//  cloudFile). The backup update copy is ported here; the Drive snapshot
+//  enrichment and the probe failure reasons are Drive specific and not
+//  ported.
 //
 //  Pure: no UIKit, no SwiftData, no singletons.
 
@@ -180,9 +180,19 @@ enum SetupSourceChoice {
     static let TITLE = "Which setup should this device start from?"
     static let FOOTER = "The other will be replaced with the setup you choose."
     static let DISPATCHARR = "Dispatcharr"
+    /// Android GOOGLE_DRIVE ("Google Drive"): iCloud here.
+    static let ICLOUD = "iCloud"
     static let CONTINUE = "Continue"
     static let CANCEL = "Cancel"
     static let NOTHING = "Nothing saved yet"
+
+    // ---- "Your backup needs an update" (iCloud canonical-id update offer) ----
+
+    static let UPDATE_TITLE = "Your backup needs an update"
+    static let UPDATE_BODY = "AerioTV backups changed format. Updating keeps your backup working with the newest " +
+        "version of AerioTV on every device. This takes a moment and does not change your favorites, progress, or settings."
+    static let UPDATE_ACCEPT = "Update backup"
+    static let UPDATE_NOT_NOW = "Not now"
 
     private static func label(_ name: String, _ n: Int) -> String {
         switch name {
