@@ -1,0 +1,256 @@
+//  OnboardingSyncSteps.swift
+//  Aerio
+//
+//  The onboarding sync steps the Welcome chain walks (Dispatcharr Sync port,
+//  part 4): "Turn on Dispatcharr Sync?" (Android DispatcharrSyncStepScreen.kt),
+//  "Also back up to iCloud?" (Android DriveBackupOfferStepScreen.kt, iCloud in
+//  place of Google Drive), and the restore progress screen. Every string is
+//  Android's word for word except where iCloud replaces Google Drive. Buttons
+//  are never disabled mid-flow (tvOS focus); taps are ignored while busy.
+//  Nothing here calls the server: the coordinator and the manager do.
+
+import SwiftUI
+
+// MARK: - "Turn on Dispatcharr Sync?"
+
+struct DispatcharrSyncStepView: View {
+    /// Came from the Welcome "Sync with Dispatcharr" card: turn on without asking.
+    let autoEnable: Bool
+    let onDone: () -> Void
+    /// Cancel on the "Which setup" prompt.
+    let onCancel: () -> Void
+
+    @ObservedObject private var coordinator = SetupSourceCoordinator.shared
+    @State private var ready = false
+    @State private var busy = false
+    @State private var ask: SetupSourceCoordinator.Probe?
+    @State private var started = false
+    #if os(tvOS)
+    @FocusState private var turnOnFocused: Bool
+    #endif
+
+    var body: some View {
+        Group {
+            if ready {
+                content
+            } else {
+                SyncStepFrame {
+                    ProgressView()
+                        .tint(.accentPrimary)
+                        .accessibilityLabel("Turning on Dispatcharr Sync")
+                }
+            }
+        }
+        .navigationBarHidden(true)
+        .task {
+            guard !started else { return }
+            started = true
+            if DispatcharrSyncManager.shared.isEnabled {
+                // Already on (for example a second Dispatcharr playlist): nothing to ask.
+                onDone()
+            } else if autoEnable {
+                await runTurnOn(fromCard: true)
+            } else {
+                ready = true
+            }
+        }
+        .sheet(item: Binding(get: { ask.map(AskBox.init) }, set: { if $0 == nil { ask = nil } })) { box in
+            SetupSourcePromptView(
+                cloud: box.probe.cloud,
+                dsync: box.probe.dsync,
+                onContinue: { source in
+                    // Dismiss at once; the step's progress view shows while the choice applies.
+                    ask = nil
+                    ready = false
+                    Task { @MainActor in
+                        await coordinator.choose(source, playlistId: box.probe.playlistId)
+                        await turnOn(fromCard: autoEnable)
+                        onDone()
+                    }
+                },
+                onCancel: {
+                    ask = nil
+                    busy = false
+                    coordinator.cancelPrompt()
+                    onCancel()
+                }
+            )
+        }
+    }
+
+    private struct AskBox: Identifiable {
+        let probe: SetupSourceCoordinator.Probe
+        var id: String { probe.playlistId }
+    }
+
+    private var content: some View {
+        let tv: Bool = {
+            #if os(tvOS)
+            return true
+            #else
+            return false
+            #endif
+        }()
+        return SyncStepFrame {
+            VStack(spacing: tv ? 20 : 12) {
+                Text("Turn on Dispatcharr Sync?")
+                    .scaledFont(tv ? .system(size: 38, weight: .semibold) : .headlineLarge)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Your favorites, watch progress, reminders, and preferences are stored on your Dispatcharr server under each profile and follow you to every device. Admins on the server can view this data.")
+                    .scaledFont(tv ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                SyncStepPrimaryButton(title: "Turn On", busy: busy) {
+                    guard !busy else { return }
+                    busy = true
+                    Task { @MainActor in await runTurnOn(fromCard: false) }
+                }
+                #if os(tvOS)
+                .focused($turnOnFocused)
+                #endif
+                .padding(.top, 8)
+                SyncStepSecondaryButton(title: "Skip") {
+                    guard !busy else { return }
+                    Task { @MainActor in
+                        await coordinator.releaseHeld()
+                        debugLog("[DSYNC] onboarding step skipped")
+                        onDone()
+                    }
+                }
+                Text("You can change this later in Settings > Sync.")
+                    .scaledFont(tv ? .system(size: 20).subtext() : .bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: tv ? 900 : 520)
+        }
+        #if os(tvOS)
+        .onAppear { turnOnFocused = true }
+        .onExitCommand { }
+        #endif
+    }
+
+    /// Rule 4: both iCloud and Dispatcharr hold data for this user? The prompt decides before Turn On.
+    private func runTurnOn(fromCard: Bool) async {
+        let p = await coordinator.probe()
+        switch p?.decision {
+        case .ask?:
+            ready = true
+            ask = p
+        case .useCloud?:
+            await coordinator.choose(.cloud, playlistId: p!.playlistId)
+            await turnOn(fromCard: fromCard)
+            onDone()
+        case .useDispatcharr?:
+            await coordinator.choose(.dispatcharr, playlistId: p!.playlistId)
+            await turnOn(fromCard: fromCard)
+            onDone()
+        case nil:
+            await coordinator.releaseHeld()
+            await turnOn(fromCard: fromCard)
+            onDone()
+        }
+    }
+
+    /// Turns Dispatcharr Sync on (iCloud Sync is independent) and waits for the first pull,
+    /// so the guide opens with restored data.
+    private func turnOn(fromCard: Bool) async {
+        DispatcharrSyncManager.shared.setEnabled(true)
+        debugLog(fromCard ? "[DSYNC] enabled from onboarding (sync card)" : "[DSYNC] enabled from onboarding")
+        let ok = await DispatcharrSyncManager.shared.awaitFirstPull()
+        debugLog("[DSYNC] onboarding first pull \(ok ? "done" : "not finished; continuing")")
+        SyncProvidersOfferStore.arm("onboarding first pull")
+        coordinator.afterDispatcharrOn()
+    }
+}
+
+// MARK: - "Also back up to iCloud?"
+
+struct CloudBackupOfferStepView: View {
+    let busy: Bool
+    let onTurnOn: () -> Void
+    let onNotNow: () -> Void
+
+    var body: some View {
+        let tv: Bool = {
+            #if os(tvOS)
+            return true
+            #else
+            return false
+            #endif
+        }()
+        SyncStepFrame {
+            VStack(spacing: tv ? 20 : 12) {
+                Text("Also back up to iCloud?")
+                    .scaledFont(tv ? .system(size: 38, weight: .semibold) : .headlineLarge)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text("iCloud keeps a backup of your playlists and settings for a new phone or TV. Dispatcharr Sync stays in charge of your favorites, progress, and reminders.")
+                    .scaledFont(tv ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                SyncStepPrimaryButton(title: "Turn On iCloud Sync", busy: busy) { if !busy { onTurnOn() } }
+                    .padding(.top, 8)
+                SyncStepSecondaryButton(title: "Not now") { if !busy { onNotNow() } }
+            }
+            .frame(maxWidth: tv ? 900 : 520)
+        }
+        .navigationBarHidden(true)
+    }
+}
+
+// MARK: - Restore progress
+
+/// Shown for the whole iCloud restore stretch; replaces Welcome so its cards are not focusable underneath.
+struct OnboardingRestoreProgressView: View {
+    var body: some View {
+        SyncStepFrame {
+            VStack(spacing: 16) {
+                ProgressView().tint(.accentPrimary)
+                Text("Importing from iCloud...")
+                    .scaledFont(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                Text("Looking for an existing configuration.")
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .navigationBarHidden(true)
+        #if os(tvOS)
+        .onExitCommand { }
+        #endif
+    }
+}
+
+// MARK: - Providers offer arming (Android SyncProvidersStore.arm/offerShown)
+
+/// The one-time "Keep your devices in sync" offer: armed after onboarding's first
+/// iCloud restore or first Dispatcharr Sync pull, evaluated once in Main, shown once per playlist.
+@MainActor
+enum SyncProvidersOfferStore {
+    private static let shownKey = "syncProvidersOfferShown"
+    static var armed = false
+
+    static func arm(_ why: String) {
+        armed = true
+        debugLog("[SYNC] providers offer armed (\(why))")
+    }
+
+    static func disarm() { armed = false }
+
+    static func offerShown(_ playlistId: String) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: shownKey) ?? []).contains(playlistId)
+    }
+
+    static func markOfferShown(_ playlistId: String) {
+        var s = UserDefaults.standard.stringArray(forKey: shownKey) ?? []
+        if !s.contains(playlistId) { s.append(playlistId) }
+        UserDefaults.standard.set(s, forKey: shownKey)
+    }
+}

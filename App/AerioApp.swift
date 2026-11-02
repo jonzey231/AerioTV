@@ -1614,6 +1614,13 @@ struct RootView: View {
                 }
             }
             .onChange(of: hasAnySource) { _, has in
+                // The Welcome sync chain (restore, backup update, Dispatcharr
+                // Sync step) keeps onboarding up after the playlist lands and
+                // finishes it itself through hasCompletedOnboarding.
+                if has && showOnboarding && OnboardingHold.shared.holding {
+                    debugLog("[SYNC] onboarding kept up: chain in progress")
+                    return
+                }
                 if has && showOnboarding {
                     showOnboarding = false
                     if !hasCompletedOnboarding {

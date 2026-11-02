@@ -80,6 +80,8 @@
 		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		58753215820D219D87D24402 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
+		BFDFC37CFD67AE5D56606A1B /* OnboardingSyncSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1152A486413F697C7356293F /* OnboardingSyncSteps.swift */; };
+		0F4B69220FA8BC283C66A689 /* WelcomeSyncChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 726BF4C46D7BD370C1BC6735 /* WelcomeSyncChain.swift */; };
 		5A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
 		5B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */; };
 		5B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */; };
@@ -156,6 +158,8 @@
 		8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
+		5A0B9F5CC2E3B26FD8D10C19 /* OnboardingSyncSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1152A486413F697C7356293F /* OnboardingSyncSteps.swift */; };
+		679F035F27ED2C931722FEE2 /* WelcomeSyncChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 726BF4C46D7BD370C1BC6735 /* WelcomeSyncChain.swift */; };
 		8EC20C6A2D535793E6EBA3B1 /* RecordingActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49D3D628E066566A26EEA9 /* RecordingActions.swift */; };
 		8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
 		901047E69DDB4F9633B3CCC3 /* PhoneMediaPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E74BEC0CC7E72B10B46A328 /* PhoneMediaPage.swift */; };
@@ -444,6 +448,8 @@
 		4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncFlags.swift; sourceTree = "<group>"; };
 		4C548BC428D32F3966A46C27 /* VODService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODService.swift; sourceTree = "<group>"; };
 		4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
+		1152A486413F697C7356293F /* OnboardingSyncSteps.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingSyncSteps.swift; sourceTree = "<group>"; };
+		726BF4C46D7BD370C1BC6735 /* WelcomeSyncChain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeSyncChain.swift; sourceTree = "<group>"; };
 		5044B9CD69C05A6836588548 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
 		57682A46B5DF82B13C9A906D /* Pods-Aerio_iOS-umbrella.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Pods-Aerio_iOS-umbrella.h"; sourceTree = "<group>"; };
 		57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistParsers.swift; sourceTree = "<group>"; };
@@ -759,6 +765,8 @@
 				B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */,
 				CC1061A736638618318B7F01 /* ServerSyncView.swift */,
 				4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */,
+				1152A486413F697C7356293F /* OnboardingSyncSteps.swift */,
+				726BF4C46D7BD370C1BC6735 /* WelcomeSyncChain.swift */,
 			);
 			path = Onboarding;
 			sourceTree = "<group>";
@@ -1512,6 +1520,8 @@
 				AA10CA7A0001000000000002 /* VODCatalogModels.swift in Sources */,
 				BA33A33C572E086E61AA73AB /* VODService.swift in Sources */,
 				8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */,
+				5A0B9F5CC2E3B26FD8D10C19 /* OnboardingSyncSteps.swift in Sources */,
+				679F035F27ED2C931722FEE2 /* WelcomeSyncChain.swift in Sources */,
 				1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */,
 				2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */,
 				2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */,
@@ -1684,6 +1694,8 @@
 				AA10CA7A0001000000000003 /* VODCatalogModels.swift in Sources */,
 				D707545F75A250B3657868F5 /* VODService.swift in Sources */,
 				58753215820D219D87D24402 /* WelcomeView.swift in Sources */,
+				BFDFC37CFD67AE5D56606A1B /* OnboardingSyncSteps.swift in Sources */,
+				0F4B69220FA8BC283C66A689 /* WelcomeSyncChain.swift in Sources */,
 				98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */,
 				3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */,
 				3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */,

@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 /// Welcome screen (onboarding redesign, approved 2026-10-29).
 ///
@@ -17,6 +18,33 @@ struct WelcomeView: View {
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
     @ObservedObject private var syncManager = SyncManager.shared
+    @ObservedObject private var hold = OnboardingHold.shared
+    @Query private var servers: [ServerConnection]
+
+    /// Where the Welcome chain is (WelcomeSyncChain). Each stage replaces Welcome
+    /// entirely, so Welcome's cards are never focusable underneath on tvOS.
+    private enum Stage: Equatable {
+        case welcome
+        case restoring
+        case backupUpdate(String)
+        case dispatcharrSync(auto: Bool)
+        case cloudOffer
+    }
+    @State private var stage: Stage = .welcome
+
+    /// Welcome card selections (Android: the cards toggle selection; Continue runs the chain).
+    /// A Cancel on the setup prompt comes back with the last selections kept.
+    @State private var cloudSelected = WelcomeSyncChain.kept?.cloud ?? false
+    @State private var dispatcharrSelected = WelcomeSyncChain.kept?.dispatcharr ?? false
+    /// Continue with Dispatcharr selected alongside iCloud: the Dispatcharr part runs after the restore.
+    @State private var chainDispatcharr = false
+    /// Connect a Server pushed from Welcome (nil type: the picker; Dispatcharr: the sync card).
+    @State private var showConnect = false
+    @State private var connectType: ServerType?
+    /// Dispatcharr Sync on after the connect (the "Sync with Dispatcharr" card).
+    @State private var enableAfterConnect = false
+    @State private var backupBusy = false
+    @State private var cloudOfferBusy = false
 
     /// Discord (Glitzbr): he turned iCloud sync on during setup and a
     /// customised remote map from a different-generation Apple TV landed on
@@ -30,7 +58,7 @@ struct WelcomeView: View {
     #endif
 
     #if os(tvOS)
-    private enum Field: Hashable { case connect, cloudSync, dispatcharr, skip }
+    private enum Field: Hashable { case connect, cloudSync, dispatcharr, proceed, skip }
     @FocusState private var focus: Field?
     #endif
 
@@ -69,14 +97,8 @@ struct WelcomeView: View {
             : "Dispatcharr, Xtream Codes, or an M3U playlist with an EPG."
     }
 
-    private var cloudSyncTitle: String {
-        if syncManager.isImporting { return "Importing from iCloud..." }
-        return iCloudSyncEnabled ? "iCloud sync is on" : "Sync with iCloud"
-    }
-
     private var cloudSyncDetail: String {
-        if syncManager.isImporting { return "Looking for an existing configuration." }
-        return isTV
+        isTV
             ? "Turns on sync from here on. If you already have a backup, it restores it too."
             : "Turns on sync. Restores a backup if you have one."
     }
@@ -96,6 +118,72 @@ struct WelcomeView: View {
     // MARK: Body
 
     var body: some View {
+        stageView
+            .navigationDestination(isPresented: $showConnect) {
+                AddServerView(initialType: connectType, isOnboarding: true)
+            }
+            .onChange(of: showConnect) { _, shown in
+                if !shown { Task { @MainActor in await afterConnect() } }
+            }
+            .onAppear {
+                if WelcomeSyncChain.consumeReturnedFromChoice() {
+                    debugLog("[SYNC] welcome: back from the setup prompt, selections kept")
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var stageView: some View {
+        switch stage {
+        case .welcome:
+            welcomeBody
+        case .restoring:
+            OnboardingRestoreProgressView()
+        case .backupUpdate(let key):
+            BackupUpdateStepView(
+                busy: backupBusy,
+                onUpdate: {
+                    guard !backupBusy else { return }
+                    backupBusy = true
+                    CloudSnapshotSync.shared.acceptIdUpdate(key)
+                    backupBusy = false
+                    Task { @MainActor in await afterRestoreSteps() }
+                },
+                onNotNow: {
+                    BackupUpdateOffer.decline(key)
+                    Task { @MainActor in await afterRestoreSteps() }
+                }
+            )
+            .navigationBarHidden(true)
+        case .dispatcharrSync(let auto):
+            DispatcharrSyncStepView(
+                autoEnable: auto,
+                onDone: { afterDispatcharrStep() },
+                onCancel: {
+                    // Rule 4 prompt Cancel: back to Welcome, selections kept.
+                    WelcomeSyncChain.markReturnedFromChoice()
+                    chainDispatcharr = false
+                    enableAfterConnect = false
+                    stage = .welcome
+                }
+            )
+        case .cloudOffer:
+            CloudBackupOfferStepView(
+                busy: cloudOfferBusy,
+                onTurnOn: {
+                    cloudOfferBusy = true
+                    iCloudSyncEnabled = true
+                    SyncManager.shared.syncSettingChanged(enabled: true)
+                    debugLog("[CLOUD] enabled from onboarding (backup offer)")
+                    cloudOfferBusy = false
+                    finish("cloud offer on")
+                },
+                onNotNow: { finish("cloud offer not now") }
+            )
+        }
+    }
+
+    private var welcomeBody: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
 
@@ -136,13 +224,14 @@ struct WelcomeView: View {
                     // user just chose are already written, and
                     // syncSettingChanged is what kicks off the first pull.
                     // Sync stays on from here whether or not a backup exists.
-                    iCloudSyncEnabled = true
-                    SyncManager.shared.syncSettingChanged(enabled: true)
+                    Task { @MainActor in await runCloudRestore() }
                 },
                 onCancel: {
                     showCategoryChooser = false
                     // Backing out leaves sync off entirely - nothing was
                     // pulled, so there is nothing to undo.
+                    chainDispatcharr = false
+                    hold.end("category chooser cancelled")
                 }
             )
         }
@@ -178,73 +267,206 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: isTV ? 16 : 10) {
             OnboardingSectionLabel("Start here")
 
-            OnboardingNavCard(
-                destination: AddServerView(isOnboarding: true),
+            OnboardingActionCard(
                 icon: "server.rack",
                 title: "Connect a Server",
                 detail: connectDetail,
                 highlighted: true
-            )
+            ) {
+                startConnect(type: nil, enableSync: false)
+            }
             #if os(tvOS)
             .focused($focus, equals: .connect)
             #endif
 
             OnboardingSectionLabel("Keep your devices in sync")
                 .padding(.top, isTV ? 20 : 14)
+            Text("Pick one or both, then Continue.")
+                .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
 
+            // Dispatcharr first, iCloud second (Android order).
             OnboardingActionCard(
-                icon: iCloudSyncEnabled ? "checkmark.icloud.fill" : "icloud.fill",
-                title: cloudSyncTitle,
-                detail: cloudSyncDetail,
-                isOn: iCloudSyncEnabled,
-                isBusy: syncManager.isImporting
-            ) {
-                guard !syncManager.isImporting else { return }
-                toggleICloudSync()
-            }
-            .disabled(syncManager.isImporting)
-            #if os(tvOS)
-            .focused($focus, equals: .cloudSync)
-            #endif
-
-            OnboardingNavCard(
-                destination: AddServerView(initialType: .dispatcharrAPI, isOnboarding: true),
                 icon: "key.fill",
-                title: "Sign in with Dispatcharr",
+                title: "Sync with Dispatcharr",
                 detail: dispatcharrDetail,
-                highlighted: false
-            )
+                isOn: dispatcharrSelected
+            ) {
+                dispatcharrSelected.toggle()
+            }
+            .accessibilityAddTraits(dispatcharrSelected ? .isSelected : [])
             #if os(tvOS)
             .focused($focus, equals: .dispatcharr)
             #endif
 
+            OnboardingActionCard(
+                icon: "icloud.fill",
+                title: "Sync with iCloud",
+                detail: cloudSyncDetail,
+                isOn: cloudSelected,
+                isBusy: syncManager.isImporting
+            ) {
+                guard !syncManager.isImporting else { return }
+                cloudSelected.toggle()
+            }
+            .accessibilityAddTraits(cloudSelected ? .isSelected : [])
+            #if os(tvOS)
+            .focused($focus, equals: .cloudSync)
+            #endif
+
             // Directly under the sync rows: one press down from the last row.
-            VStack(alignment: .leading, spacing: 8) {
-                OnboardingPillButton(title: "Skip for now", filled: false) {
-                    hasCompletedOnboarding = true
+            // Continue replaces Skip while a card is selected.
+            if cloudSelected || dispatcharrSelected {
+                OnboardingPillButton(title: "Continue", filled: true, fullWidth: true) {
+                    continueSync(cloud: cloudSelected, dispatcharr: dispatcharrSelected)
                 }
                 #if os(tvOS)
-                .focused($focus, equals: .skip)
+                .focused($focus, equals: .proceed)
                 #endif
-                Text(skipFootnote)
-                    .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, isTV ? 16 : 10)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    OnboardingPillButton(title: "Skip for now", filled: false) {
+                        Task { @MainActor in await SetupSourceCoordinator.shared.releaseHeld() }
+                        hold.end("skip")
+                        hasCompletedOnboarding = true
+                    }
+                    #if os(tvOS)
+                    .focused($focus, equals: .skip)
+                    #endif
+                    Text(skipFootnote)
+                        .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, isTV ? 16 : 10)
             }
-            .padding(.top, isTV ? 16 : 10)
         }
     }
 
-    /// Turning sync ON opens the chooser first and defers the pull until the
-    /// user confirms; turning it OFF is immediate.
-    private func toggleICloudSync() {
-        if iCloudSyncEnabled {
-            iCloudSyncEnabled = false
-            SyncManager.shared.syncSettingChanged(enabled: false)
+    // MARK: - Welcome chain (WelcomeSyncChain)
+
+    /// Continue: iCloud first (chooser, then restore), then the Dispatcharr part.
+    private func continueSync(cloud: Bool, dispatcharr: Bool) {
+        guard !syncManager.isImporting else { return }
+        if cloud { WelcomeSyncChain.markAnswered(SyncProvidersRules.ICLOUD) }
+        if dispatcharr { WelcomeSyncChain.markAnswered(SyncProvidersRules.DISPATCHARR) }
+        WelcomeSyncChain.keepSelection(cloud: cloud, dispatcharr: dispatcharr)
+        debugLog("[SYNC] welcome continue plan=\(WelcomeSyncChain.plan(cloud: cloud, dispatcharr: dispatcharr, restoredIsDispatcharr: false, cloudAvailable: cloudAvailable).map(\.rawValue).joined(separator: ","))")
+        hold.begin("welcome continue")
+        // Rule 4: with both selected, iCloud restores playlists and credentials
+        // first; shared data waits for the setup choice.
+        if cloud && dispatcharr { SetupSourceCoordinator.shared.holdShared() }
+        if !cloud {
+            startConnect(type: .dispatcharrAPI, enableSync: true)
+            return
+        }
+        chainDispatcharr = dispatcharr
+        // Ask what should come in BEFORE any of it does.
+        showCategoryChooser = true
+    }
+
+    private var cloudAvailable: Bool { FileManager.default.ubiquityIdentityToken != nil }
+
+    private func startConnect(type: ServerType?, enableSync: Bool) {
+        hold.begin(enableSync ? "connect for Dispatcharr Sync" : "connect a server")
+        connectType = type
+        enableAfterConnect = enableSync
+        showConnect = true
+    }
+
+    /// iCloud Sync on, then wait for the restore; the playlist arrives first.
+    private func runCloudRestore() async {
+        stage = .restoring
+        iCloudSyncEnabled = true
+        SyncManager.shared.syncSettingChanged(enabled: true)
+        debugLog("[CLOUD] enabled from onboarding (sync card), restoring")
+        // syncSettingChanged sets isImporting at once and clears it when the
+        // import lands or its own 12 s timeout fires.
+        let end = Date().addingTimeInterval(20)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        while syncManager.isImporting && Date() < end { try? await Task.sleep(nanoseconds: 250_000_000) }
+        let restored = await waitForActivePlaylist(seconds: servers.isEmpty ? 3 : 10)
+        SyncProvidersOfferStore.arm("onboarding iCloud restore")
+        debugLog("[CLOUD] onboarding restore done playlists=\(servers.count) activated=\(restored)")
+        if restored, let key = BackupUpdateOffer.offerAfterRestore(),
+           WelcomeSyncChain.showBackupUpdate(cloud: true, backupNeedsUpdate: true) {
+            stage = .backupUpdate(key)
+            return
+        }
+        await afterRestoreSteps()
+    }
+
+    /// After the restore (and the backup update step): Connect a Server, the sync
+    /// step on the restored playlist, Main, or back to Welcome when nothing came in.
+    private func afterRestoreSteps() async {
+        backupBusy = false
+        let restoredIsD = DsyncLocal.activeDispatcharrPlaylist() != nil
+        if WelcomeSyncChain.connectAfterRestore(dispatcharr: chainDispatcharr, restoredIsDispatcharr: restoredIsD) {
+            chainDispatcharr = false
+            stage = .welcome
+            startConnect(type: .dispatcharrAPI, enableSync: true)
+            return
+        }
+        if restoredIsD && !DispatcharrSyncManager.shared.isEnabled {
+            // Both selected: the step turns on without another tap. iCloud only: it asks.
+            let auto = chainDispatcharr
+            chainDispatcharr = false
+            stage = .dispatcharrSync(auto: auto)
+            return
+        }
+        chainDispatcharr = false
+        if !servers.isEmpty {
+            finish("restore done")
         } else {
-            showCategoryChooser = true
+            // Nothing to restore: back on Welcome with iCloud Sync on, as Android.
+            stage = .welcome
+            cloudSelected = false
+            hold.end("no backup")
         }
     }
+
+    /// Back from Connect a Server: a Dispatcharr Direct Connect playlist goes to the sync step.
+    private func afterConnect() async {
+        guard hold.holding, stage == .welcome else { return }
+        if servers.isEmpty {
+            enableAfterConnect = false
+            hold.end("connect backed out")
+            return
+        }
+        if await waitForActivePlaylist(seconds: 10), DsyncLocal.activeDispatcharrPlaylist() != nil {
+            stage = .dispatcharrSync(auto: enableAfterConnect)
+            enableAfterConnect = false
+            return
+        }
+        enableAfterConnect = false
+        finish("connected")
+    }
+
+    /// The active playlist loads under the cover (MainTabView); wait for it (bounded).
+    private func waitForActivePlaylist(seconds: Double) async -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            if ChannelStore.shared.activeServer != nil && !servers.isEmpty { return true }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return ChannelStore.shared.activeServer != nil && !servers.isEmpty
+    }
+
+    private func afterDispatcharrStep() {
+        if WelcomeSyncChain.showCloudOffer(cloudOn: iCloudSyncEnabled, cloudAvailable: cloudAvailable) {
+            WelcomeSyncChain.markAnswered(SyncProvidersRules.ICLOUD)
+            stage = .cloudOffer
+            return
+        }
+        finish("dispatcharr step done")
+    }
+
+    private func finish(_ why: String) {
+        hold.end(why)
+        hasCompletedOnboarding = true
+    }
+
 }
 
 // MARK: - Shared onboarding components
