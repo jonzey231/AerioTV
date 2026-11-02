@@ -185,9 +185,9 @@ struct ServerDetailView: View {
     /// Set up a TV with this playlist (docs/DeviceSetupHandoff.md).
     @State private var showSetUpTv = false
     #endif
+    @State private var isRefreshingPlaylist = false
     /// Profiles section (Dispatcharr playlists): one presentation for every profile prompt.
     @StateObject private var profilesFlow = ProfilesFlowModel()
-    @State private var isRefreshingPlaylist = false
     /// "Refresh Permissions" row: an unthrottled capability probe.
     @State private var isRefreshingPermissions = false
     @State private var playlistRefreshDone = false
@@ -715,6 +715,10 @@ struct ServerDetailView: View {
     // Danger Zone last. Every action and confirmation is the same call
     // the List rows made. iOS / iPadOS keep `iosList` unchanged.
     private var tvBody: some View {
+        tvScroll.profilesFlowPresentation(server.type == .dispatcharrAPI ? server.id.uuidString : nil, model: profilesFlow)
+    }
+
+    private var tvScroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 Text(server.name)
@@ -723,12 +727,18 @@ struct ServerDetailView: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 4)
 
-                tvActionsSection
-                tvConnectionDetailsSection
-                tvPermissionsSection
-                tvEPGCacheSection
-                tvFullRefreshSection
-                tvDangerZoneSection
+                Group { tvActionsSection }.disabled(profilesFlow.liftActive)
+                if server.type == .dispatcharrAPI {
+                    ProfilesTVSection(playlistId: server.id.uuidString, model: profilesFlow)
+                }
+                Group {
+                    tvConnectionDetailsSection
+                    tvPermissionsSection
+                    tvEPGCacheSection
+                    tvFullRefreshSection
+                    tvDangerZoneSection
+                }
+                .disabled(profilesFlow.liftActive)
             }
             .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
             .padding(.horizontal, 48)

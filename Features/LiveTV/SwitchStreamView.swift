@@ -1009,7 +1009,7 @@ private struct SwitchStreamRowLabel: View {
 /// while Select is still held, and never takes focus or cancels the press
 /// (the row Button still gets its release, which the sheet swallows).
 /// Attached only while the sheet is mounted and `isEnabled` is true.
-private struct SwitchStreamSelectHoldDetector: UIViewRepresentable {
+struct SwitchStreamSelectHoldDetector: UIViewRepresentable {
     var minimumPressDuration: TimeInterval
     var isEnabled: Bool
     let onBegan: () -> Void
@@ -1035,7 +1035,7 @@ private struct SwitchStreamSelectHoldDetector: UIViewRepresentable {
     static func dismantleUIView(_ uiView: SelectHoldHostView, coordinator: ()) { uiView.detach() }
 }
 
-private final class SelectHoldHostView: UIView, UIGestureRecognizerDelegate {
+final class SelectHoldHostView: UIView, UIGestureRecognizerDelegate {
     var onBegan: (() -> Void)?
     var onEnded: (() -> Void)?
     var minimumPressDuration: TimeInterval = 0.5

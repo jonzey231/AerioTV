@@ -33,6 +33,8 @@ final class ProfilesFlowModel: ObservableObject {
     @Published var route: ProfileRoute?
     @Published var presented = false
     @Published var status: String?
+    /// Apple TV: a row is lifted for reorder; the rest of the page holds still.
+    @Published var liftActive = false
 
     func open(_ r: ProfileRoute) {
         route = r
@@ -277,6 +279,164 @@ struct ProfilesSettingsSection: View {
         debugLog("[PROFILES] actions opened")
         model.status = nil
         model.open(.actions(p))
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Apple TV: the PROFILES section with hold-to-reorder (Android pick-up,
+/// Apple f67bfbd pattern). A Select hold lifts the focused row (scale 1.03,
+/// accent stroke, "Moving", the others dimmed); Up and Down move it, Select
+/// places it with one setOrder save, Menu cancels.
+struct ProfilesTVSection: View {
+    let playlistId: String
+    @ObservedObject var model: ProfilesFlowModel
+    @ObservedObject private var manager = ProfileManager.shared
+    @FocusState private var focusedRow: String?
+    @State private var liftedId: String?
+    @State private var liftOrder: [DispatcharrProfile] = []
+    @State private var orderBeforeLift: [DispatcharrProfile]?
+    /// The hold lifts while Select is still held; its release must not place the row.
+    @State private var swallowNextSelect = false
+
+    var body: some View {
+        let g = ProfileGates(playlistId: playlistId)
+        let profiles = manager.profilesByPlaylist[playlistId] ?? []
+        let _ = manager.pinChanges
+        let canReorder = profiles.count > 1 && g.isRoleAdmin
+        let shown = liftedId != nil ? liftOrder : profiles
+        if RoleRules.canSeeSwitcher(manager.activeRoleNow), profiles.count >= 2 || g.isAdmin {
+            SettingsSection("Profiles", style: .plain) {
+                if canReorder {
+                    Text(liftedId != nil ? "Up / Down to move, OK to place, Menu to cancel" : "Long press to select and reorder")
+                        .scaledFont(ProfileUI.small)
+                        .foregroundColor(.textSecondary)
+                        .padding(.horizontal, 20)
+                }
+                ScrollViewReader { proxy in
+                    VStack(spacing: 12) {
+                        ForEach(shown) { p in
+                            let lifted = liftedId == p.id
+                            let dimmed = liftedId != nil && !lifted
+                            Button { rowPressed(p) } label: {
+                                ProfileRowContent(profile: p, isActive: p.id == g.activeId, locked: manager.hasPin(p.id),
+                                                  trailingLabel: lifted ? "Moving" : nil)
+                                    .frame(minHeight: 80)
+                            }
+                            .buttonStyle(ProfileRowButtonStyle(lifted: lifted))
+                            .focused($focusedRow, equals: p.id)
+                            // Only the lifted row stays focusable while lifted; it is never disabled.
+                            .disabled(dimmed)
+                            .opacity(dimmed ? 0.45 : 1)
+                            .id(p.id)
+                        }
+                    }
+                    .onChange(of: liftOrder.map(\.id)) { _, _ in
+                        if let id = liftedId { withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) } }
+                    }
+                }
+                .onMoveCommand { d in
+                    guard liftedId != nil else { return }
+                    switch d {
+                    case .up: moveLifted(-1)
+                    case .down: moveLifted(1)
+                    default: break
+                    }
+                }
+                .onExitCommand(perform: liftedId != nil ? { cancelLifted() } : nil)
+                .background(
+                    SwitchStreamSelectHoldDetector(
+                        minimumPressDuration: 0.5,
+                        isEnabled: canReorder && liftedId == nil && !model.presented,
+                        onBegan: { lift(profiles) },
+                        onEnded: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { swallowNextSelect = false } }
+                    )
+                    .allowsHitTesting(false)
+                )
+                if g.isAdmin {
+                    TVSettingsTileActionRow(icon: "plus", title: "Add Profile", titleColor: .accentPrimary) {
+                        model.status = nil; model.open(.add)
+                    }
+                    .disabled(liftedId != nil)
+                    let has = manager.hasDeviceAdminPin(playlistId)
+                    TVSettingsTileActionRow(icon: "lock.fill", title: has ? "Change Device Admin PIN" : "Set Device Admin PIN",
+                                            subtitle: "Works on this device only, alongside Admin profile PINs. Never synced.") {
+                        model.status = nil; model.open(.deviceSet)
+                    }
+                    .disabled(liftedId != nil)
+                    if has {
+                        TVSettingsTileActionRow(icon: "lock.fill", iconColor: ProfileUI.errorColor, title: "Remove Device Admin PIN",
+                                                titleColor: ProfileUI.errorColor) {
+                            model.status = nil; model.open(.deviceRemove)
+                        }
+                        .disabled(liftedId != nil)
+                    }
+                }
+                if manager.switching { ProgressView().tint(.accentPrimary).padding(.horizontal, 20) }
+                if let s = model.status {
+                    Text(s).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor).padding(.horizontal, 20)
+                }
+                Text(ProfileCopy.sectionFooter)
+                    .scaledFont(ProfileUI.small)
+                    .foregroundColor(.textSecondary)
+                    .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    private func rowPressed(_ p: DispatcharrProfile) {
+        if swallowNextSelect { swallowNextSelect = false; return }
+        if liftedId != nil { placeLifted(); return }
+        guard !manager.switching else { return }
+        debugLog("[PROFILES] actions opened")
+        model.status = nil
+        model.open(.actions(p))
+    }
+
+    private func lift(_ profiles: [DispatcharrProfile]) {
+        guard liftedId == nil, !manager.switching, let id = focusedRow,
+              let at = profiles.firstIndex(where: { $0.id == id }) else { return }
+        orderBeforeLift = profiles
+        liftOrder = profiles
+        swallowNextSelect = true
+        withAnimation(.easeInOut(duration: 0.15)) { liftedId = id }
+        model.liftActive = true
+        debugLog("[PROFILES] pick-up start from=\(at)")
+    }
+
+    private func moveLifted(_ delta: Int) {
+        guard let id = liftedId, let i = liftOrder.firstIndex(where: { $0.id == id }) else { return }
+        let target = i + delta
+        guard target >= 0, target < liftOrder.count else { return }
+        withAnimation(.easeInOut(duration: 0.12)) { liftOrder.swapAt(i, target) }
+        focusedRow = id
+    }
+
+    private func placeLifted() {
+        guard let id = liftedId, let before = orderBeforeLift else { return }
+        let from = before.firstIndex { $0.id == id } ?? -1
+        let to = liftOrder.firstIndex { $0.id == id } ?? -1
+        let order = liftOrder.map(\.id)
+        withAnimation(.easeInOut(duration: 0.15)) { liftedId = nil }
+        orderBeforeLift = nil
+        model.liftActive = false
+        debugLog("[PROFILES] pick-up drop id=\(from) from=\(from) to=\(to) save=\(from != to)")
+        // Placed where it started: nothing is saved and no sheet opens.
+        if from != to {
+            do { _ = try manager.setOrder(playlistId, order) } catch { model.status = error.localizedDescription }
+        }
+        focusedRow = id
+    }
+
+    private func cancelLifted() {
+        guard let id = liftedId else { return }
+        let from = orderBeforeLift?.firstIndex { $0.id == id } ?? -1
+        if let before = orderBeforeLift { liftOrder = before }
+        withAnimation(.easeInOut(duration: 0.15)) { liftedId = nil }
+        orderBeforeLift = nil
+        model.liftActive = false
+        debugLog("[PROFILES] pick-up cancel from=\(from)")
+        focusedRow = id
     }
 }
 #endif

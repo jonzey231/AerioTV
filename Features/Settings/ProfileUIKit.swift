@@ -183,7 +183,8 @@ struct ProfileRowButtonStyle: ButtonStyle {
             .overlay(shape.stroke(lifted ? Color.accentPrimary : (focused ? Color.accentPrimary : .clear),
                                   lineWidth: lifted ? 3 : 2))
             .contentShape(shape)
-            .scaleEffect(lifted ? 1.03 : (focused ? 1.02 : (configuration.isPressed ? 0.98 : 1)))
+            // No focus scale (a focused Settings row keeps its siblings' frame); a lifted row grows.
+            .scaleEffect(lifted ? 1.03 : (configuration.isPressed ? 0.98 : 1))
             .animation(.easeInOut(duration: 0.15), value: focused)
             .animation(.easeInOut(duration: 0.15), value: lifted)
     }
