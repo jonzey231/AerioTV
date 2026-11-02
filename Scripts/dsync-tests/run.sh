@@ -22,5 +22,7 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/dsync_tests" \
     "$SRC/DsyncManagerRules.swift" \
     "$SRC/DsyncSettingsMap.swift" \
     "$SRC/CloudSnapshots.swift" \
-    ../../Shared/Profiles/ProfileRules.swift
+    ../../Shared/Profiles/ProfileRules.swift \
+    ../../Shared/Profiles/ProfileStore.swift \
+    ../../Shared/Profiles/ProfilePinStore.swift
 "$OUT/dsync_tests"

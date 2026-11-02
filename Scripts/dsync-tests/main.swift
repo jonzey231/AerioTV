@@ -910,4 +910,82 @@ do {
 }
 
 print("\(checks) checks, \(failures) failures")
+// MARK: - Profile stores (Android ProfileStore, ProfilePinStore, ProfilePinTest, per-profile settings)
+
+do {
+    let suite = "aerio.dsync-tests.profiles.\(UUID().uuidString)"
+    let ud = UserDefaults(suiteName: suite)!
+    defer { ud.removePersistentDomain(forName: suite) }
+    let box = MemorySecretBox()
+    let store = ProfileStore(defaults: ud, secrets: box)
+    var base = DispatcharrProfile(id: "a", playlistId: "p", displayName: "Base", username: "base", isDefault: true)
+    base.createdAt = 0
+    var kid = DispatcharrProfile(id: "b", playlistId: "p", displayName: "Kid", username: "kid")
+    kid.createdAt = 5
+    kid.role = .child
+    kid.avatar = AvatarSpec(icon: "cat", color: "teal")
+    store.upsert(kid)
+    store.upsert(base)
+    store.setApiKey("b", "k-secret")
+    eq(store.forPlaylist("p").map(\.id), ["a", "b"], "default first, then insertion")
+    let reloaded = ProfileStore(defaults: ud, secrets: box)
+    eq(reloaded.byId("b"), kid, "profile round trips through UserDefaults")
+    eq(reloaded.apiKey("b"), "k-secret", "api key from the secret box")
+    check(ud.dictionaryRepresentation().values.allSatisfy { !"\($0)".contains("k-secret") }, "api key never in UserDefaults")
+    store.setOrder("p", ["b", "a"])
+    eq(store.forPlaylist("p").map(\.id), ["b", "a"], "explicit order wins")
+    store.setActiveProfileId("p", "b")
+    eq(store.activeProfileId("p"), "b", "active profile")
+    check(store.askAtLaunch("p"), "ask at launch defaults on")
+    store.remove("b")
+    eq(store.activeProfileId("p"), nil, "removing the active profile clears it")
+    eq(store.apiKey("b"), nil, "removing a profile clears its key")
+
+    let pins = ProfilePinStore(defaults: ud, secrets: box)
+    check(pins.check("x", ["1"]), "no PIN checks true")
+    check(!pins.set("x", .numbers, ["1", "2", "3"]), "3 digits rejected")
+    check(pins.set("x", .numbers, ["1", "2", "3", "4"]), "4 digits set")
+    check(pins.syncRecord("x") != nil, "a fresh PIN is v2 (syncable)")
+    eq(pins.length("x"), 4, "length kept")
+    check(pins.check("x", ["1", "2", "3", "4"]), "right PIN")
+    check(!pins.check("x", ["1", "2", "3", "5"]), "wrong PIN")
+    let rec = pins.syncRecord("x")!
+    let other = ProfilePinStore(defaults: UserDefaults(suiteName: suite + ".2")!, secrets: MemorySecretBox())
+    other.importSynced("x", rec.type, hash: rec.hash, salt: rec.salt!)
+    check(other.check("x", ["1", "2", "3", "4"]), "a synced v2 record verifies on another device")
+    UserDefaults(suiteName: suite + ".2")!.removePersistentDomain(forName: suite + ".2")
+    pins.writeLegacyForTesting("y", .directions, ["Up", "Up", "Left", "Right"])
+    check(pins.isLegacy("y") && pins.syncRecord("y") == nil, "v1 record is legacy, not synced")
+    check(!pins.check("y", ["U", "U", "L", "L"]), "v1 wrong")
+    check(pins.check("y", ["U", "U", "L", "R"]), "v1 right")
+    check(!pins.isLegacy("y") && pins.syncRecord("y") != nil, "first correct v1 entry migrates to v2")
+    check(pins.check("y", ["up", "up", "left", "right"]), "migrated record still verifies")
+    let dev = DevicePin.id("p")
+    check(pins.set(dev, .numbers, ["9", "9", "9", "9"]) && pins.hasPin(dev), "device admin PIN under the reserved id")
+    pins.saveBackoff("x", PinBackoff().onWrong(1000))
+    eq(pins.backoff("x").fails, 1, "backoff persisted")
+    pins.remove("x")
+    check(!pins.hasPin("x") && pins.backoff("x") == PinBackoff(), "remove clears the record and the backoff")
+
+    let settings = ProfileSettingsStore(defaults: ud)
+    check(ProfileSettingsStore.scopedKeys(present: ["categoryColor.sports", "favoriteChannelIDs"]).contains("categoryColor.sports"), "color family is per profile")
+    check(!ProfileSettingsStore.scopedKeys(present: ["favoriteChannelIDs"]).contains("favoriteChannelIDs"), "favorites are not a setting")
+    check(ProfileSettingsStore.scopedKeys(present: []).isSuperset(of: ["selectedTheme", "radioModeByDefault", "channelGroupOrder"]), "synced settings, group order, radio default")
+    ud.set("midnight", forKey: "selectedTheme")
+    settings.seed("b", source: settings.capture())
+    ud.set("sunset", forKey: "selectedTheme")
+    ud.set(true, forKey: "radioModeByDefault")
+    settings.swap(from: "a", to: "b")
+    eq(ud.string(forKey: "selectedTheme"), "midnight", "switch loads the incoming profile's theme")
+    check(ud.object(forKey: "radioModeByDefault") == nil, "a value the incoming profile never had is cleared")
+    ud.set("forest", forKey: "selectedTheme")
+    settings.swap(from: "b", to: "a")
+    eq(ud.string(forKey: "selectedTheme"), "sunset", "switch back restores the outgoing profile's values")
+    eq(settings.slot("b")?["selectedTheme"] as? String, "forest", "outgoing values were saved")
+    eq(settings.seedExistingOnce(["b", "c"], source: ["selectedTheme": "light"]), 1, "seed once, only unseeded profiles")
+    eq(settings.slot("c")?["selectedTheme"] as? String, "light", "existing profile seeded")
+    settings.deleteScope("c")
+    check(settings.slot("c") == nil, "delete scope")
+}
+
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

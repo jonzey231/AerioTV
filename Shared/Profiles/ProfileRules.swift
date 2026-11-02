@@ -303,6 +303,20 @@ struct DispatcharrProfile: Equatable, Sendable, Identifiable {
     var avatar: AvatarSpec? = nil
     /// List position (0 first); -1 = never moved (insertion order).
     var order = -1
+    // Per-user facts from /api/accounts/users/me/ for a non-default profile
+    // (Android DispatcharrProfile). The default profile keeps them on the
+    // playlist row. Credentials are never here: ProfileStore keeps the API
+    // key and password in the Keychain.
+    var streamLimit = 0
+    var hideAdultContent = false
+    var dvrAccess = ""
+    var catchupEnabled = true
+    var vodMoviesEnabled = true
+    var vodSeriesEnabled = true
+    var isStaff = false
+    var isSuperuser = false
+    var customProperties = ""
+    var capabilitiesFetchedAt: Int64 = 0
 
     var effectiveRole: ProfileRole { ProfileRole.resolve(userLevel, role) }
 }
