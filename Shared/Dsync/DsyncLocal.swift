@@ -65,11 +65,11 @@ enum DsyncLocal {
                                                                 userAgent: server.effectiveUserAgent,
                                                                 authMode: server.dispatcharrHeaderMode))
         }
-        let key = server.effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let jwt = server.dispatcharrCredentialType == .usernamePassword
         guard jwt || !key.isEmpty else { return nil }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode,
                                  serverID: server.id,

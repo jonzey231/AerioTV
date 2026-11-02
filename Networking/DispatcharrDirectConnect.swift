@@ -1074,7 +1074,7 @@ struct DispatcharrCredentialSnapshot: Equatable {
         DispatcharrCredentialSnapshot(
             username: server.username,
             password: server.password.isEmpty ? server.effectivePassword : server.password,
-            apiKey: server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey,
+            apiKey: server.apiKey.isEmpty ? server.baseApiKey : server.apiKey,
             credentialTypeRaw: server.dispatcharrCredentialTypeRaw
         )
     }
@@ -1154,7 +1154,7 @@ enum ServerCredentialChange {
         // means "unchanged", so fall back to the stored credential.
         let username = server.username
         let password = server.password.isEmpty ? server.effectivePassword : server.password
-        let apiKey   = server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey
+        let apiKey   = server.apiKey.isEmpty ? server.baseApiKey : server.apiKey
         // An M3U playlist has no account model, so no login runs and no
         // "Verifying credentials" row is published for it.
         if server.type != .m3uPlaylist { onStep?(.verify) }
@@ -1449,7 +1449,7 @@ enum PlaylistHostChange {
             }
         }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode)
         if let info = try? await api.verifyConnection() {

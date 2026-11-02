@@ -57,6 +57,17 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Storage
 
+    /// The defaults key, for the per-profile data swap (ProfileDataStore).
+    static let defaultsKey = "programReminders"
+
+    /// Re-reads the stored reminders after a profile switch swapped them.
+    /// Scheduled notifications are left as they are (Android keeps each
+    /// profile's alarms too).
+    func reloadFromDefaults() {
+        activeReminders = [:]
+        loadReminders()
+    }
+
     private func loadReminders() {
         guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
 

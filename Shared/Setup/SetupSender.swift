@@ -271,7 +271,7 @@ enum SetupSender {
         if isD {
             // No local profiles on Apple yet: the default profile only (it
             // signs in with the playlist login and is always sent).
-            let label: String? = nonEmpty(server.effectiveApiKey) != nil ? "API key saved"
+            let label: String? = nonEmpty(server.baseApiKey) != nil ? "API key saved"
                 : (nonEmpty(server.effectivePassword) != nil ? "Password saved" : nil)
             choices = [ProfileChoice(id: "default", displayName: defaultDisplayName(server), isDefault: true,
                                      isCurrent: true, credentialLabel: label)]
@@ -295,7 +295,7 @@ enum SetupSender {
             }
         }()
         let cred = SetupProtocol.Credential(
-            apiKey: server.type == .dispatcharrAPI ? nonEmpty(server.effectiveApiKey) : nil,
+            apiKey: server.type == .dispatcharrAPI ? nonEmpty(server.baseApiKey) : nil,
             username: server.type == .m3uPlaylist ? nil : nonEmpty(server.username),
             password: server.type == .m3uPlaylist ? nil : nonEmpty(server.effectivePassword))
         let playlist = SetupProtocol.PlaylistPart(

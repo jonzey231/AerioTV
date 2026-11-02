@@ -3331,7 +3331,9 @@ final class ChannelStore: ObservableObject {
         var effectiveProfileIDs = channelProfileIDs
         if let user = try? await dAPI.fetchCurrentUser() {
             effectiveProfileIDs = user.channelProfiles
-            if let server = activeServer,
+            // A non-default profile's /me/ never lands on the playlist row
+            // (the default profile's home; Android EncryptingPlaylistDao).
+            if let server = activeServer, ProfileOverlay.values(server.id.uuidString) == nil,
                server.dispatcharrProfileIDList != user.channelProfiles {
                 server.dispatcharrChannelProfileIDs =
                     user.channelProfiles.map(String.init).joined(separator: ",")

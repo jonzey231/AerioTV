@@ -461,6 +461,8 @@ struct AerioApp: App {
         // About page "Last Updated": note this launch's version, build and
         // bundle date; a change since the previous launch is an update.
         DeviceInfo.recordLaunch()
+        // Profiles: the request overlay (the active profile's API key) is in place before any load.
+        _ = ProfileManager.shared
         // Carries a pre-split "Rounded corners on logos and artwork" choice
         // into the List key before any view reads it, so nobody's current
         // setting changes (Logan 2026-09-16).

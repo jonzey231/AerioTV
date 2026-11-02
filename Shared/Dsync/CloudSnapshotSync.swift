@@ -498,6 +498,11 @@ final class CloudSnapshotSync: ObservableObject {
     func pushCategory(_ c: DsyncCategory, _ label: String? = nil) async -> Bool {
         let shared = CloudCanon.SHARED_FILES.contains(c)
         let file = CloudCanon.fileName(c)
+        // iCloud backs up the default profile only (Android Drive sync runs under defaultOnly).
+        if shared && ProfileManager.shared.nonDefaultActive() {
+            debugLog("[CLOUD] push \(file) held: a non-default profile is active")
+            return true
+        }
         // Rule 4: never push this device's (not yet chosen) shared data over the backup.
         if let why = CloudPushRules.hold(shared: shared, choiceHeld: sharedHeld(), unknown: cloudUnknown(), deferred: replaceDeferred()) {
             debugLog(CloudPushRules.heldLine(file, why))

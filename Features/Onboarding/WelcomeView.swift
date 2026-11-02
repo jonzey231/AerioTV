@@ -439,7 +439,7 @@ struct WelcomeView: View {
         }
         if await waitForActivePlaylist(seconds: 10), let d = DsyncLocal.activeDispatcharrPlaylist() {
             // Signed in from a Dispatcharr user QR (iPhone and iPad): the step checks for a restore.
-            qrSignIn = QrImportBus.takeSignIn(savedApiKey: d.effectiveApiKey)
+            qrSignIn = QrImportBus.takeSignIn(savedApiKey: d.baseApiKey)
             stage = .dispatcharrSync(auto: enableAfterConnect)
             enableAfterConnect = false
             return

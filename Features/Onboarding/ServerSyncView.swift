@@ -595,7 +595,7 @@ struct ServerSyncView: View {
             return "Not available for this server type"
         }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode)
         if let remote = try? await api.listRecordings() {

@@ -44,6 +44,7 @@ final class ProfileManager: ObservableObject {
     let store: ProfileStore
     let pinStore: ProfilePinStore
     let settings: ProfileSettingsStore
+    let data: ProfileDataStore
 
     // MARK: Published state for the UI (part 3) and onboarding (part 4)
 
@@ -98,6 +99,7 @@ final class ProfileManager: ObservableObject {
         store = ProfileStore(defaults: .standard, secrets: box)
         pinStore = ProfilePinStore(defaults: .standard, secrets: box)
         settings = ProfileSettingsStore(defaults: .standard)
+        data = ProfileDataStore(defaults: .standard)
         store.onChange = { [weak self] in self?.publish() }
         pinStore.onChange = { [weak self] in
             guard let self else { return }
@@ -121,6 +123,25 @@ final class ProfileManager: ObservableObject {
         for (pid, rows) in rosterRows { s[pid] = ProfileRoster.suggestions(rows, store.forPlaylist(pid).map(\.username)) }
         if s != rosterSuggestions { rosterSuggestions = s }
         refreshActiveRole()
+        refreshOverlay(act)
+    }
+
+    /// The request overlay (ProfileOverlay): every playlist whose active profile is not the default.
+    private func refreshOverlay(_ act: [String: String]) {
+        var next: [String: ProfileOverlay.Values] = [:]
+        for (pid, id) in act {
+            guard let p = store.byId(id), !p.isDefault, let key = store.apiKey(id), !key.isEmpty else { continue }
+            let ids = p.accountProfileIds.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
+        }
+        if ProfileOverlay.set(next) { debugLog("[PROFILE] request overlay: \(next.count) playlist(s) on a non-default profile") }
+    }
+
+    /// True while [playlistId] (default: the active Dispatcharr playlist) runs a non-default profile.
+    /// iCloud backs up the default profile only (Android Drive sync runs under defaultOnly).
+    func nonDefaultActive(_ playlistId: String? = nil) -> Bool {
+        guard let pid = playlistId ?? DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString else { return false }
+        return ProfileOverlay.values(pid) != nil
     }
 
     // MARK: Lifecycle
@@ -180,7 +201,7 @@ final class ProfileManager: ObservableObject {
         var username = server.dispatcharrCredentialType == .usernamePassword ? server.username : ""
         if username.trimmingCharacters(in: .whitespaces).isEmpty {
             // API-key login: ask the server who the key belongs to.
-            username = (await fetchMe(server, server.effectiveApiKey))?.username ?? ""
+            username = (await fetchMe(server, server.baseApiKey))?.username ?? ""
         }
         if store.forPlaylist(pid).contains(where: \.isDefault) { return }
         var p = DispatcharrProfile(id: UUID().uuidString, playlistId: pid,
@@ -214,7 +235,7 @@ final class ProfileManager: ObservableObject {
     /// The API key requests for [playlistId] use: the active profile's own key, or the playlist's for the default.
     func activeApiKey(_ playlistId: String) -> String? {
         guard let p = activeProfile(playlistId) else { return nil }
-        if p.isDefault { return DsyncLocal.server(playlistId)?.effectiveApiKey }
+        if p.isDefault { return DsyncLocal.server(playlistId)?.baseApiKey }
         return store.apiKey(p.id)
     }
 
@@ -271,7 +292,7 @@ final class ProfileManager: ObservableObject {
     /// The playlist's own (base) credential, with its normal recovery.
     private func baseApi(_ server: ServerConnection) -> DispatcharrAPI {
         let jwt = server.dispatcharrCredentialType == .usernamePassword
-        return DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey),
+        return DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.baseApiKey),
                               userAgent: server.effectiveUserAgent, authMode: server.dispatcharrHeaderMode,
                               serverID: server.id, savedUsername: jwt ? server.username : nil)
     }
@@ -930,6 +951,7 @@ final class ProfileManager: ObservableObject {
         }
         pinStore.remove(p.id)
         settings.deleteScope(p.id)
+        data.deleteScope(p.id)
         if tomb { onProfilesMutated?(p.playlistId, p.username, "remove", 0) }
         else if !fromSync { onProfilesMutated?(p.playlistId, p.username, "undo-add", 0) }
         store.remove(p.id)
@@ -990,7 +1012,7 @@ final class ProfileManager: ObservableObject {
         // The outgoing profile's pending sync changes go first (Android flushes the old session).
         await beforeSwitch?(playlistId)
         if target.isDefault {
-            if let me = await fetchMe(server, server.effectiveApiKey) {
+            if let me = await fetchMe(server, server.baseApiKey) {
                 store.update(target.id) { var c = $0; c.userId = me.id; return c }
                 followServerRole(target.id, me.effectiveUserLevel)
             }
@@ -1003,8 +1025,26 @@ final class ProfileManager: ObservableObject {
         settings.swap(from: from?.id, to: target.id)
         store.setActiveProfileId(playlistId, target.isDefault ? nil : target.id)
         publish()
+        // After the overlay moved, so iCloud (default profile only) never sees the incoming data as a change.
+        data.swap(playlistId, from: from?.id, to: target.id)
         debugLog("[PROFILE] switch \(from.map { Self.tag($0.id) } ?? "?") -> \(Self.tag(target.id))")
         debugLog("[SWITCH] profile gate=\(Self.nowMs() - t0)ms")
         onSwitched?(playlistId, from?.id, target.id)
+        if from?.id != target.id { await reloadAfterSwitch(server) }
+    }
+
+    /// Android Reload: channels, groups, guide, VOD, and DVR load again as the new
+    /// profile's user. Channels reload here; the credentialGeneration bump re-runs
+    /// the load orchestrator for the guide, VOD (its cache is per profile), and DVR.
+    private func reloadAfterSwitch(_ server: ServerConnection) async {
+        PlayerSession.shared.stop()
+        DispatcharrTokenStore.shared.clear(serverID: server.id)
+        CatchupSupport.invalidateCredentials(serverID: server.id)
+        let t0 = Self.nowMs()
+        await ChannelStore.shared.reloadChannelsAndWait(servers: [server])
+        server.credentialGeneration &+= 1
+        try? server.modelContext?.save()
+        NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
+        debugLog("[SWITCH] channels reloaded in \(Self.nowMs() - t0)ms; guide, VOD, and DVR reload sent")
     }
 }

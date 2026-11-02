@@ -1006,7 +1006,7 @@ struct AddServerView: View {
         // and transitions to MainTabView, which handles initial data loading itself.
         if onSave != nil {
             #if os(iOS)
-            qrRestoreSignIn = server.type == .dispatcharrAPI ? QrImportBus.takeSignIn(savedApiKey: server.effectiveApiKey) : nil
+            qrRestoreSignIn = server.type == .dispatcharrAPI ? QrImportBus.takeSignIn(savedApiKey: server.baseApiKey) : nil
             #endif
             savedServer = server
         } else {

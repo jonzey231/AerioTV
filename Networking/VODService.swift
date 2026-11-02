@@ -2006,7 +2006,8 @@ enum VODLibraryCache {
     /// VODStore.beginDisplaying): another server, URL or account is a
     /// different library and must not be served from this file.
     static func identity(for server: ServerConnection) -> String {
-        "v\(schema)|\(server.id.uuidString)|\(server.effectiveBaseURL)|\(server.username)"
+        // A non-default profile has its own library cache (Android "<playlist>@<profile>").
+        "v\(schema)|\(server.id.uuidString)|\(server.effectiveBaseURL)|\(server.username)\(ProfileOverlay.cacheSuffix(server.id.uuidString))"
     }
 
     /// Decodes off the main actor. nil when there is no file, it belongs to

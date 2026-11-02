@@ -661,6 +661,7 @@ final class SyncManager: ObservableObject {
     }
 
     private func doPushPreferences(immediate: Bool) {
+        if ProfileManager.shared.nonDefaultActive() { return }  // iCloud carries the default profile only
         guard isSyncEnabled, !isMerging else {
             debugLog("🔵 SyncManager.pushPrefs: skipped (enabled=\(isSyncEnabled), merging=\(isMerging))")
             return
@@ -915,6 +916,10 @@ final class SyncManager: ObservableObject {
     /// apply. iCloud keeps pushing the full snapshot as the backup; a held or owned category waits.
     private func cloudPullBlocked(_ c: DsyncCategory, ignoreOwnership: Bool) -> Bool {
         let file = CloudCanon.fileName(c)
+        if ProfileManager.shared.nonDefaultActive() {
+            debugLog("[CLOUD] pull \(file) held: a non-default profile is active (iCloud carries the default profile)")
+            return true
+        }
         let cloud = CloudSnapshotSync.shared
         if cloud.sharedHeld() {
             debugLog("[CLOUD] pull \(file) held: waiting for the setup choice")
@@ -1120,7 +1125,7 @@ final class SyncManager: ObservableObject {
         // rotate credentials on this device even when an older value is still
         // present locally or in iCloud Keychain.
         let pw  = server.password.isEmpty ? server.effectivePassword : server.password
-        let key = server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey
+        let key = server.apiKey.isEmpty ? server.baseApiKey : server.apiKey
         let id  = server.id.uuidString
 
         // Only drop the in-memory copy AFTER the credential is safely
@@ -1289,7 +1294,7 @@ final class SyncManager: ObservableObject {
         // in `saveCredentialsSynced`.
         if SyncCategory.credentials.isEnabled {
             let pw  = server.effectivePassword
-            let key = server.effectiveApiKey
+            let key = server.baseApiKey
             if !pw.isEmpty  { dict["_password"] = pw }
             if !key.isEmpty { dict["_apiKey"]   = key }
         }
@@ -1433,6 +1438,7 @@ final class SyncManager: ObservableObject {
     /// Push all local watch progress entries to KVS (debounced).
     func pushWatchProgress(_ entries: [WatchProgress], immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
+        if ProfileManager.shared.nonDefaultActive() { return }  // iCloud carries the default profile only
         // v1.6.17, granular per-category gate.
         guard SyncCategory.watchProgress.isEnabled else {
             debugLog("🔵 SyncManager.pushWatchProgress: category disabled by user")
@@ -1586,6 +1592,7 @@ final class SyncManager: ObservableObject {
     /// Push local reminders to iCloud KVS (debounced).
     func pushReminders(immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
+        if ProfileManager.shared.nonDefaultActive() { return }  // iCloud carries the default profile only
         // v1.6.17, granular per-category gate.
         guard SyncCategory.reminders.isEnabled else {
             debugLog("🔵 SyncManager.pushReminders: category disabled by user")

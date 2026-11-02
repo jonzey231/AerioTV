@@ -46,7 +46,7 @@ struct EditServerPage: View {
     /// Task #189: load the server's Channel Profiles for the picker.
     private func loadChannelProfiles() async {
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode)
         do {
@@ -218,7 +218,7 @@ struct EditServerPage: View {
             var apiKeyRotated = false
             if let user = try? await bearerAPI.fetchCurrentUser(),
                !user.apiKey.isEmpty,
-               user.apiKey != server.effectiveApiKey {
+               user.apiKey != server.baseApiKey {
                 server.apiKey = user.apiKey
                 SyncManager.shared.saveCredentialsSynced(for: server)
                 apiKeyRotated = true
@@ -315,13 +315,13 @@ struct EditServerPage: View {
                                     SettingsTextField("Password", text: $server.password,
                                                       helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
                                                       isSecure: true)
-                                    if !server.effectiveApiKey.isEmpty {
+                                    if !server.baseApiKey.isEmpty {
                                         HStack {
                                             Text("API Key (cached)")
                                                 .scaledFont(.system(size: 28, weight: .medium).subtext())
                                                 .foregroundColor(Color.contrastText(.textSecondary))
                                             Spacer()
-                                            Text(maskedAPIKey(server.effectiveApiKey))
+                                            Text(maskedAPIKey(server.baseApiKey))
                                                 .scaledFont(.system(size: 22, design: .monospaced).subtext())
                                                 .foregroundColor(Color.contrastText(.textTertiary))
                                         }

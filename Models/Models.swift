@@ -420,7 +420,16 @@ final class ServerConnection {
 
     /// The effective API key. When credential sync is enabled, prefers the
     /// iCloud Keychain copy so cross-device updates beat stale local items.
+    /// Requests use the ACTIVE profile's key: a non-default AerioTV profile
+    /// overlays its own Dispatcharr user's key (Android ProfileScope.Overlay
+    /// on the playlist row). Credential edits, iCloud, and the capability
+    /// probe use `baseApiKey`, the playlist's own (default profile) key.
     var effectiveApiKey: String {
+        ProfileOverlay.values(id.uuidString)?.apiKey ?? baseApiKey
+    }
+
+    /// The playlist's own API key (the default profile's), never overlaid.
+    var baseApiKey: String {
         let key = "apiKey_\(id.uuidString)"
         return resolvedCredential(for: key, fallback: apiKey)
     }
@@ -673,7 +682,8 @@ final class ServerConnection {
     /// array (the common case: no profile assigned, or a non-Dispatcharr
     /// server) signals "show every channel" to the load path.
     var dispatcharrProfileIDList: [Int] {
-        dispatcharrChannelProfileIDs
+        if let o = ProfileOverlay.values(id.uuidString) { return o.channelProfileIds }
+        return dispatcharrChannelProfileIDs
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
@@ -1637,7 +1647,7 @@ enum DispatcharrCapabilityProbe {
         let oldLevel = levelDescription(server)
 
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode,
                                  serverID: server.id,

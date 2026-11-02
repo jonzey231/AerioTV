@@ -1619,6 +1619,16 @@ final class HiddenVODStore: ObservableObject {
         categoryVisible = Set(UserDefaults.standard.stringArray(forKey: Self.categoryKey) ?? [])
     }
 
+    /// The defaults key, for the per-profile data swap (ProfileDataStore).
+    static var storageKey: String { key }
+
+    /// Re-reads the hidden titles after a profile switch swapped the stored value.
+    func reloadFromDefaults() {
+        let decoded = UserDefaults.standard.data(forKey: Self.key)
+            .flatMap { try? JSONDecoder().decode([String: [String: Entry]].self, from: $0) } ?? [:]
+        if decoded != entries { entries = decoded }
+    }
+
     /// Re-reads category visibility after an iCloud pull wrote the key.
     func reloadCategoryVisibility() {
         let v = Set(UserDefaults.standard.stringArray(forKey: Self.categoryKey) ?? [])

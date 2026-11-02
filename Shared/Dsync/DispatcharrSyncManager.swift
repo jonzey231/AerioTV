@@ -438,7 +438,11 @@ final class DispatcharrSyncManager: ObservableObject {
     private static let swiftDataKeys: Set<DsyncKey> = [.progress, .watchlist]
 
     private func scan(swiftData: Bool) {
+        // A switch swaps every local store (ProfileDataStore): that is not a local edit
+        // of either profile (Android: a changed token re-keys every flow and is never marked).
+        if ProfileManager.shared.switching { return }
         if let s = session {
+            if currentToken(s.playlistId) != s.token { return }
             for key in DsyncKey.allCases where key != .profiles {
                 if Self.swiftDataKeys.contains(key) != swiftData { continue }
                 let sig = DsyncLocal.signature(key, s.playlistId)
@@ -451,7 +455,7 @@ final class DispatcharrSyncManager: ObservableObject {
             return
         }
         // Between sessions: mark the change on the last session's persisted keys so the next one sends it.
-        guard let old = lastEnded else { return }
+        guard let old = lastEnded, currentToken(old.playlistId) == old.token else { return }
         for key in DsyncKey.allCases where key != .profiles {
             if Self.swiftDataKeys.contains(key) != swiftData { continue }
             let sig = DsyncLocal.signature(key, old.playlistId)
@@ -726,15 +730,9 @@ final class DispatcharrSyncManager: ObservableObject {
 
     // MARK: - Per-key enablement
 
-    /// The keys whose local copy is per profile on Apple today (settings and the
-    /// group order and radio default swap on a switch). A non-default profile's
-    /// session syncs only these until favorites, recents, and the rest are per profile.
-    static let PROFILE_LOCAL_KEYS: Set<DsyncKey> = [.profiles, .settings, .radioDefault, .groupOrder]
-
     /// Per-item choices: data keys follow their item's on/off; settings is gated per name.
     /// Profiles: written and applied by the local Admin or Standard profile only.
     private func enabled(_ key: DsyncKey, _ s: DsyncSession) -> Bool {
-        if !isBase(s) && !Self.PROFILE_LOCAL_KEYS.contains(key) { return false }
         if key == .settings { return true }
         if let item = DsyncItemCatalog.itemForDsync(key.suffix), DsyncLocal.scopes()[item.id] == .off { return false }
         return key == .profiles ? isAdmin(s) : true

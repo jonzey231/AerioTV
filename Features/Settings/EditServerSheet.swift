@@ -253,7 +253,7 @@ struct EditServerSheet: View {
             var apiKeyRotated = false
             if let user = try? await bearerAPI.fetchCurrentUser(),
                !user.apiKey.isEmpty,
-               user.apiKey != server.effectiveApiKey {
+               user.apiKey != server.baseApiKey {
                 server.apiKey = user.apiKey
                 SyncManager.shared.saveCredentialsSynced(for: server)
                 apiKeyRotated = true
@@ -444,12 +444,12 @@ struct EditServerSheet: View {
                         // working. Hidden in this row when empty
                         // (e.g. server was just switched and warmup
                         // hasn't completed yet).
-                        if !server.effectiveApiKey.isEmpty {
+                        if !server.baseApiKey.isEmpty {
                             HStack {
                                 Text("API Key (cached)")
                                     .foregroundColor(Color.contrastText(.textTertiary))
                                 Spacer()
-                                Text(maskedAPIKey(server.effectiveApiKey))
+                                Text(maskedAPIKey(server.baseApiKey))
                                     .scaledFont(.system(.footnote, design: .monospaced).subtext())
                                     .foregroundColor(Color.contrastText(.textSecondary))
                             }
@@ -775,7 +775,7 @@ private struct ChannelProfilePickerSection: View {
 
     private func loadProfiles() async {
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
+                                 auth: .apiKey(server.baseApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode)
         do {
