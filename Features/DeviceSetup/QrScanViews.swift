@@ -13,6 +13,8 @@
 import SwiftUI
 import AVFoundation
 import PhotosUI
+import Vision
+import CoreImage
 import Photos
 import Vision
 import UniformTypeIdentifiers
@@ -23,7 +25,8 @@ enum QrImageImport {
     private static let maxSide = 1600
 
     /// The QR text in an image (EXIF orientation applied, at most 1600 px on
-    /// the long side): the whole image, then the middle 60 percent.
+    /// the long side): the whole image, the middle 60 percent, then the whole
+    /// image rotated 90 degrees (Android QrLuminanceDecoder.decodeStill passes).
     nonisolated static func decode(_ data: Data) -> String? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let opts: [CFString: Any] = [
@@ -35,15 +38,28 @@ enum QrImageImport {
         if let s = detect(img) { return s }
         let w = Double(img.width), h = Double(img.height)
         let rect = CGRect(x: w * 0.2, y: h * 0.2, width: w * 0.6, height: h * 0.6).integral
-        if rect.width >= 21, rect.height >= 21, let crop = img.cropping(to: rect) { return detect(crop) }
-        return nil
+        if rect.width >= 21, rect.height >= 21, let crop = img.cropping(to: rect), let s = detect(crop) { return s }
+        return detect(CIImage(cgImage: img).oriented(.right))
     }
 
     nonisolated private static func detect(_ img: CGImage) -> String? {
+        detect(CIImage(cgImage: img))
+    }
+
+    /// Vision first; Core Image's QR detector when Vision finds nothing or fails
+    /// (Vision's barcode request errors out where no inference context exists,
+    /// e.g. the Simulator, and the error was swallowed).
+    nonisolated private static func detect(_ img: CIImage) -> String? {
         let req = VNDetectBarcodesRequest()
         req.symbologies = [.qr]
-        try? VNImageRequestHandler(cgImage: img, options: [:]).perform([req])
-        return req.results?.compactMap(\.payloadStringValue).first
+        do {
+            try VNImageRequestHandler(ciImage: img, options: [:]).perform([req])
+        } catch {
+            debugLog("[SETUP-QR] image decode: Vision failed (\((error as NSError).code)), trying Core Image")
+        }
+        if let s = req.results?.compactMap(\.payloadStringValue).first { return s }
+        let det = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+        return det?.features(in: img).compactMap { ($0 as? CIQRCodeFeature)?.messageString }.first
     }
 }
 
