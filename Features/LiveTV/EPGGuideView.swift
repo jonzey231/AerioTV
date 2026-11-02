@@ -8654,6 +8654,7 @@ private struct GuideChannelButton: View {
     /// tvOS number column is measured from both (see `ChannelNumberColumn`).
     @Environment(\.aerioChannelNumberChars) private var numberChars
     @Environment(\.aerioTextScale) private var textScale
+    @Environment(\.liveSearchMatchLines) private var searchMatchLines
 
     /// Rail logo sizing. Both shown keeps the stock box; a hidden number
     /// and/or name lets the box grow to the cell's free width and height.
@@ -8783,6 +8784,21 @@ private struct GuideChannelButton: View {
                 KeptChannelBadge(channelID: channel.id)
                     .padding(.trailing, 3)
                     .padding(.bottom, 2)
+            }
+            // Program-only search match (Android GuideGrid match line): one
+            // ellipsized accent line, also read by VoiceOver.
+            .overlay(alignment: .bottom) {
+                if let line = searchMatchLines[channel.id] {
+                    Text(line)
+                        .scaledFont(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.contrastText(.accentPrimary))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.horizontal, 3)
+                        .frame(maxWidth: .infinity)
+                        .background(Color.cardBackground.opacity(0.92))
+                        .accessibilityLabel("matched: \(line)")
+                }
             }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channel) }

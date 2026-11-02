@@ -82,6 +82,10 @@ struct ChannelListView: View {
     @Query private var servers: [ServerConnection]
 
     @State private var filteredChannels: [ChannelDisplayItem] = []
+    /// iPhone and iPad Live TV search (Android parity, Logan 2026-11-01):
+    /// the "why it matched" line per program-only match, by channel id.
+    @State private var searchMatchLines: [String: String] = [:]
+    @State private var liveSearchTask: Task<Void, Never>?
     @State private var searchText: String = ""
     @State private var selectedGroup: String = "All"
     @State private var prefetchTask: Task<Void, Never>? = nil
@@ -750,6 +754,17 @@ struct ChannelListView: View {
                     if !searchText.isEmpty { searchText = "" }
                 }
                 .onChange(of: searchText)       { _, _ in filterChannels() }
+                #if os(iOS)
+                // A guide write invalidates the search index; an active
+                // search re-runs against the new programs.
+                .onReceive(GuideStore.shared.$programs.dropFirst()) { _ in
+                    LiveSearchIndexCache.invalidate()
+                    if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        DispatchQueue.main.async { filterChannels() }
+                    }
+                }
+                .environment(\.liveSearchMatchLines, searchMatchLines)
+                #endif
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
                 // #45: re-filter when a collection's membership changes so a
@@ -1427,10 +1442,10 @@ struct ChannelListView: View {
     private var emptyGroupNotice: some View {
         EmptyStateView(
             icon: searchText.isEmpty ? "rectangle.on.rectangle.slash" : "magnifyingglass",
-            title: searchText.isEmpty ? "No Channels in This Group" : "No Matching Channels",
+            title: searchText.isEmpty ? "No Channels in This Group" : "No Matches",
             message: searchText.isEmpty
                 ? "This group has no channels yet. It fills in as soon as the provider assigns some."
-                : "No channels in this group match that search.",
+                : "No channels or programs match that search.",
             action: {
                 searchText = ""
                 selectedGroup = fallbackGroup
@@ -2510,7 +2525,7 @@ struct ChannelListView: View {
                     )
 
                     if iPadSearchPresented {
-                        TextField("Search channels", text: $searchText)
+                        TextField("Search channels and programs", text: $searchText)
                             .textFieldStyle(.plain)
                             .scaledFont(.labelMedium)
                             .foregroundColor(.textPrimary)
@@ -3037,9 +3052,12 @@ struct ChannelListView: View {
                 result = result.filter { $0.group == selectedGroup }
             }
         }
+        #if os(tvOS)
+        // tvOS keeps name-only filtering; it has the global Search tab.
         if !searchText.isEmpty {
             result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
+        #endif
         // Apply sort
         switch preservesOrder ? "recency" : sortModeRaw {
         case "name":
@@ -3091,9 +3109,66 @@ struct ChannelListView: View {
             }.map { $0.element }
         }
         debugLog("[GROUP] filter group=\(Self.groupTitle(selectedGroup)) raw=\(channelStore.channels.count) rows=\(result.count) first=\(result.first?.name ?? "none")")
+        #if os(iOS)
+        // Search runs on the group's sorted rows, so name and number matches
+        // keep the chosen order and program-only matches follow them.
+        liveSearchTask?.cancel()
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            runLiveSearch(base: result)
+            return
+        }
+        if !searchMatchLines.isEmpty { searchMatchLines = [:] }
+        #endif
         filteredChannels = result
         prefetchEPGForVisibleChannels(result)
     }
+
+    #if os(iOS)
+    /// Android computeLiveSearch: channel name, channel number, and the title
+    /// or sub-title of a program airing now or later in the loaded guide
+    /// window (never descriptions, never ended programs). 120 ms debounce,
+    /// matching off the main actor over an index built from the in-memory
+    /// guide map; no network.
+    private func runLiveSearch(base: [ChannelDisplayItem]) {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let channels = base.map { LiveSearchChannel(id: $0.id, name: $0.name, number: $0.number) }
+        let cached = LiveSearchIndexCache.index
+        let programs: [String: [LiveSearchProgram]]? = cached == nil
+            ? GuideStore.shared.programs.mapValues { list in
+                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end) }
+              }
+            : nil
+        let generation = LiveSearchIndexCache.generation
+        liveSearchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(LiveSearchMatcher.debounceMilliseconds))
+            guard !Task.isCancelled else { return }
+            let t0 = Date()
+            let (index, result) = await Task.detached(priority: .userInitiated) {
+                let index = cached ?? LiveProgramIndex(programs: programs ?? [:])
+                return (index, LiveSearchMatcher.search(channels, query: query, index: index, now: Date()))
+            }.value
+            guard !Task.isCancelled,
+                  searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            if cached == nil, generation == LiveSearchIndexCache.generation {
+                LiveSearchIndexCache.index = index
+            }
+            let byID = Dictionary(base.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let rows = result.orderedIDs.compactMap { byID[$0] }
+            let now = Date()
+            let fmt = ClockFormat.short()
+            searchMatchLines = result.programMatches.mapValues {
+                LiveSearchMatcher.matchLine($0, now: now, time: { fmt.string(from: $0) })
+            }
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            // Query length only, never the text.
+            DebugLogger.shared.log(
+                "[SEARCH] live filter q=\(query.count) channels=\(result.channelCount) programs=\(result.programMatches.count) ms=\(ms)",
+                category: "Search", level: .info)
+            filteredChannels = rows
+            prefetchEPGForVisibleChannels(rows)
+        }
+    }
+    #endif
 
     /// Pre-warm the EPG cache for the first 20 visible channels so cards open instantly.
     /// Skipped entirely when playback is active, network requests compete with the
@@ -3587,6 +3662,7 @@ struct ChannelRow: View {
     var fetchUpcoming: (() async -> [EPGEntry])? = nil
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.liveSearchMatchLines) private var searchMatchLines
     @State private var isExpanded = false
     /// Observe `GuideStore.programs` so the expanded-schedule
     /// panel can read category-enriched programmes DIRECTLY
@@ -4309,6 +4385,16 @@ struct ChannelRow: View {
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     KeptChannelBadge(channelID: item.id, compact: !isWide)
+                }
+
+                // Program-only search match: why this row is here.
+                if let line = searchMatchLines[item.id] {
+                    Text(line)
+                        .scaledFont(.system(size: (isWide ? 14 : 12) * s, weight: .medium))
+                        .foregroundColor(.contrastText(.accentPrimary))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityLabel("matched: \(line)")
                 }
 
                 if let prog = liveProgram {
@@ -6600,7 +6686,7 @@ private struct PerIdiomSearchableModifier: ViewModifier {
                 text: $text,
                 isPresented: presented,
                 placement: .navigationBarDrawer(displayMode: iPhoneDisplayMode),
-                prompt: "Search channels"
+                prompt: "Search channels and programs"
             )
         }
     }
@@ -7165,3 +7251,28 @@ private struct DrawerSlideOffset: ViewModifier, @preconcurrency Animatable {
     }
 }
 #endif
+
+/// Program-only Live TV search matches ("why it matched" line by channel
+/// id), read by the list rows and the guide's channel column.
+private struct LiveSearchMatchLinesKey: EnvironmentKey {
+    static let defaultValue: [String: String] = [:]
+}
+
+extension EnvironmentValues {
+    var liveSearchMatchLines: [String: String] {
+        get { self[LiveSearchMatchLinesKey.self] }
+        set { self[LiveSearchMatchLinesKey.self] = newValue }
+    }
+}
+
+/// The Live TV search index, reused while the guide map is unchanged
+/// (Android LiveProgramIndex.of, memoized by map identity).
+@MainActor
+enum LiveSearchIndexCache {
+    static var index: LiveProgramIndex?
+    static var generation = 0
+    static func invalidate() {
+        index = nil
+        generation &+= 1
+    }
+}
