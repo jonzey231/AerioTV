@@ -1446,6 +1446,8 @@ struct RootView: View {
 
     var body: some View {
         MainTabView()
+            // Profiles: switch scrim, launch PIN gate, Apple TV launch picker.
+            .modifier(ProfileRootChrome())
             .preferredColorScheme(theme.resolvedColorScheme)
             .fullScreenCover(isPresented: $showOnboarding) {
                 NavigationStack {

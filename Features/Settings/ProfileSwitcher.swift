@@ -1,0 +1,346 @@
+//  ProfileSwitcher.swift
+//  Aerio
+//
+//  Profiles part 3: the switcher in the app chrome and the launch surfaces
+//  (Android ProfilesUi.kt ProfileSwitcherButton / ProfileSwitcherHost,
+//  ProfileRoleUi.kt TvLaunchProfilePicker and WhoIsWatchingTile,
+//  ProfilePinUi.kt ProfileLaunchGate, and the MainActivity switch scrim).
+
+import SwiftUI
+
+/// The active Dispatcharr playlist id, when it has profiles.
+@MainActor
+private func activeProfilesPlaylist() -> String? {
+    DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString
+}
+
+/// Opens Settings > Playlists > (active playlist), where PROFILES lives.
+@MainActor
+func openManageProfiles() {
+    debugLog("[PROFILE] manage profiles from the switcher")
+    if let url = URL(string: "aerio://settings/\(SettingsDeepLinkPage.playlistDetail.rawValue)") {
+        SettingsDeepLink.handle(url)
+    }
+}
+
+#if os(iOS)
+/// Phone and tablet Live TV header: the active profile's avatar, only with
+/// 2+ profiles and never for a Child. Tap opens "Switch Profile".
+struct ProfileSwitcherButton: View {
+    var size: CGFloat = 38
+    @ObservedObject private var manager = ProfileManager.shared
+    @State private var open = false
+
+    var body: some View {
+        if let pid = activeProfilesPlaylist(),
+           let profiles = manager.profilesByPlaylist[pid], profiles.count >= 2,
+           RoleRules.canSeeSwitcher(manager.activeRoleNow) {
+            let activeId = manager.activeProfileIds[pid]
+            let active = profiles.first { $0.id == activeId } ?? profiles[0]
+            Button { open = true } label: { ProfileAvatarView(active, size: size) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Switch Profile")
+                .sheet(isPresented: $open) {
+                    SwitchProfileSheet(playlistId: pid) { open = false }
+                        .presentationDetents(profiles.count > 4 ? [.medium, .large] : [.medium])
+                        .presentationBackground(Color.appBackground)
+                }
+        }
+    }
+}
+
+/// "Switch Profile": every profile, the active one checked, then Manage Profiles.
+private struct SwitchProfileSheet: View {
+    let playlistId: String
+    let onClose: () -> Void
+    @ObservedObject private var manager = ProfileManager.shared
+    @State private var target: DispatcharrProfile?
+    @State private var error: String?
+
+    var body: some View {
+        if let target {
+            ProfileDialogHost {
+                ProfileSwitchFlow(playlistId: playlistId, profile: target) { err in
+                    self.target = nil
+                    error = err
+                    if err == nil && manager.activeProfileIds[playlistId] == target.id { onClose() }
+                }
+            }
+        } else {
+            let profiles = manager.profilesByPlaylist[playlistId] ?? []
+            let activeId = manager.activeProfileIds[playlistId]
+            ScrollView {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Switch Profile")
+                        .scaledFont(ProfileUI.title)
+                        .foregroundColor(.textPrimary)
+                        .padding(.horizontal, 20).padding(.vertical, 8)
+                    ForEach(profiles) { p in
+                        Button {
+                            guard p.id != activeId, !manager.switching else { return }
+                            error = nil
+                            target = p
+                        } label: {
+                            ProfileRowContent(profile: p, isActive: p.id == activeId, locked: manager.hasPin(p.id))
+                        }
+                        .buttonStyle(ProfileRowButtonStyle())
+                        .padding(.horizontal, 8)
+                    }
+                    if manager.switching { ProgressView().tint(.accentPrimary).padding(20) }
+                    if let error {
+                        Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor).padding(.horizontal, 20)
+                    }
+                    Button {
+                        onClose()
+                        openManageProfiles()
+                    } label: {
+                        Label("Manage Profiles", systemImage: "person.2.badge.gearshape").foregroundColor(.accentPrimary)
+                    }
+                    .buttonStyle(ProfileRowButtonStyle())
+                    .padding(.horizontal, 8).padding(.top, 6)
+                }
+                .padding(.vertical, 12)
+            }
+            .onAppear { manager.notePickerOpened(playlistId, "switch") }
+        }
+    }
+}
+#endif
+
+/// One "Who is watching?" tile: avatar with the round accent ring on focus,
+/// dimmed at rest, lock badge, name; [current] adds a "Current" caption.
+struct WhoIsWatchingTile: View {
+    let profile: DispatcharrProfile
+    let locked: Bool
+    var current = false
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            WhoIsWatchingTileLabel(icon: nil, profile: profile, label: profile.displayName, locked: locked, current: current)
+        }
+        .buttonStyle(WhoIsWatchingTileStyle())
+    }
+}
+
+/// A picker tile that is an action (Add Profile, Manage Profiles).
+struct PickerActionTile: View {
+    let icon: String
+    let label: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            WhoIsWatchingTileLabel(icon: icon, profile: nil, label: label, locked: false, current: false)
+        }
+        .buttonStyle(WhoIsWatchingTileStyle())
+    }
+}
+
+private struct WhoIsWatchingTileStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.scaleEffect(configuration.isPressed ? 0.96 : 1)
+    }
+}
+
+private struct WhoIsWatchingTileLabel: View {
+    let icon: String?
+    let profile: DispatcharrProfile?
+    let label: String
+    let locked: Bool
+    let current: Bool
+    @Environment(\.isFocused) private var focused
+    private var lit: Bool { focused || !ProfileUI.isTv }
+
+    var body: some View {
+        let d = ProfileUI.s(88, 150)
+        VStack(spacing: ProfileUI.s(10, 16)) {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let profile {
+                        ProfileAvatarView(profile, size: d)
+                    } else {
+                        Circle().fill(Color.textPrimary.opacity(0.12)).frame(width: d, height: d)
+                            .overlay(Image(systemName: icon ?? "plus").font(.system(size: d * 0.42)).foregroundColor(.textPrimary))
+                    }
+                }
+                .padding(5)
+                .overlay(Circle().stroke(focused ? Color.accentPrimary : .clear, lineWidth: ProfileUI.s(3, 5)))
+                .opacity(lit ? 1 : 0.6)
+                if locked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: ProfileUI.s(13, 22)))
+                        .foregroundColor(.accentPrimary)
+                        .padding(ProfileUI.s(5, 8))
+                        .background(Circle().fill(Color.cardBackground))
+                        .accessibilityLabel("PIN")
+                }
+            }
+            .scaleEffect(focused ? 1.08 : 1)
+            Text(label)
+                .scaledFont(.system(size: ProfileUI.s(17, 28), weight: focused ? .semibold : .regular))
+                .foregroundColor(lit ? .textPrimary : Color.textSecondary.opacity(0.7))
+                .lineLimit(1)
+            if current {
+                Text("Current").scaledFont(ProfileUI.label).foregroundColor(.accentPrimary)
+            }
+        }
+        .frame(width: ProfileUI.s(120, 210))
+        .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+
+/// "Who is watching?" full screen. Launch: the TV launch picker (no Back,
+/// pickAtLaunch). Switch: the current profile captioned, Back closes, and
+/// Manage Profiles opens the playlist page.
+struct WhoIsWatchingView: View {
+    enum Mode { case launch, switcher }
+    let playlistId: String
+    let mode: Mode
+    var lastProfileId: String? = nil
+    let onClose: () -> Void
+
+    @ObservedObject private var manager = ProfileManager.shared
+    @State private var busy = false
+    @State private var error: String?
+    @State private var flow: Flow?
+    @FocusState private var focus: String?
+
+    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add }
+
+    private func choose(_ p: DispatcharrProfile) {
+        busy = true; error = nil
+        Task {
+            do {
+                if mode == .launch {
+                    try await manager.pickAtLaunch(p.id)
+                } else {
+                    try await manager.switchTo(playlistId, p.id)
+                    onClose()
+                }
+            } catch { self.error = error.localizedDescription.isEmpty ? "Switch failed" : error.localizedDescription }
+            busy = false
+        }
+    }
+
+    private func picked(_ p: DispatcharrProfile, current: Bool) {
+        guard !busy else { return }
+        if mode == .switcher && current { onClose(); return }
+        if manager.hasPin(p.id) && !manager.hasSwitchTicket(p.id) { flow = .pin(p); return }
+        if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p); return }
+        choose(p)
+    }
+
+    private func startAdd() {
+        guard !busy else { return }
+        debugLog("[PROFILE] add profile from picker")
+        if manager.adminHasPin(playlistId) { flow = .adminPin } else { manager.pickerAddUnlocked = playlistId; flow = .add }
+    }
+
+    var body: some View {
+        let profiles = manager.profilesByPlaylist[playlistId] ?? []
+        let currentId = mode == .launch
+            ? (lastProfileId ?? profiles.first(where: \.isDefault)?.id)
+            : (manager.activeProfileIds[playlistId] ?? profiles.first(where: \.isDefault)?.id)
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            switch flow {
+            case .pin(let p):
+                SwitchPinFlow(profile: p, onDismiss: { flow = nil }) {
+                    flow = nil
+                    if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p) } else { choose(p) }
+                }
+            case .confirm(let p):
+                StopPlaybackConfirm(name: p.displayName, onCancel: { flow = nil }) { flow = nil; choose(p) }
+            case .adminPin:
+                AdminPinFlow(playlistId: playlistId, onDismiss: { flow = nil }) {
+                    manager.pickerAddUnlocked = playlistId
+                    flow = .add
+                }
+            case .add:
+                AddProfileFlow(playlistId: playlistId) { flow = nil; manager.pickerAddUnlocked = nil }
+            case nil:
+                VStack(spacing: ProfileUI.s(28, 48)) {
+                    Text("Who is watching?")
+                        .scaledFont(.system(size: ProfileUI.s(28, 52), weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: ProfileUI.s(28, 48)) {
+                            ForEach(profiles) { p in
+                                let isCurrent = p.id == currentId
+                                WhoIsWatchingTile(profile: p, locked: manager.hasPin(p.id), current: mode == .switcher && isCurrent) {
+                                    picked(p, current: isCurrent)
+                                }
+                                .focused($focus, equals: p.id)
+                            }
+                            if RoleRules.canSeeSwitcher(manager.activeRoleNow) {
+                                PickerActionTile(icon: "plus", label: "Add Profile", action: startAdd)
+                                if mode == .switcher {
+                                    PickerActionTile(icon: "person.2.badge.gearshape", label: "Manage Profiles") {
+                                        onClose()
+                                        openManageProfiles()
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, ProfileUI.s(24, 80))
+                        .padding(.vertical, ProfileUI.s(12, 40))
+                    }
+                    .frame(maxWidth: .infinity)
+                    if busy || manager.switching { ProgressView().tint(.accentPrimary) }
+                    if let error { Text(error).scaledFont(ProfileUI.body).foregroundColor(ProfileUI.errorColor) }
+                }
+                .onAppear {
+                    focus = currentId
+                    manager.notePickerOpened(playlistId, mode == .launch ? "launch" : "switch")
+                }
+                #if os(tvOS)
+                .onExitCommand(perform: mode == .switcher ? onClose : nil)
+                #endif
+            }
+        }
+    }
+}
+
+/// Root chrome for profiles: the switch scrim, the launch PIN gate, and the
+/// TV launch picker. Applied once on the main tab view.
+struct ProfileRootChrome: ViewModifier {
+    @ObservedObject private var manager = ProfileManager.shared
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if manager.switching {
+                    ZStack {
+                        Color.black.opacity(0.55).ignoresSafeArea()
+                        ProgressView().tint(.accentPrimary).scaleEffect(ProfileUI.s(1.4, 2))
+                    }
+                    .transition(.opacity)
+                }
+            }
+            // A locked restored profile covers everything until its PIN is entered.
+            .fullScreenCover(isPresented: Binding(get: { manager.launchGate != nil }, set: { _ in })) {
+                if let p = manager.launchGate {
+                    ZStack {
+                        Color.black.opacity(0.92).ignoresSafeArea()
+                        ProfilePinEntry(
+                            title: "Enter PIN for \(p.displayName)", type: manager.pinType(p.id) ?? .numbers,
+                            pinLength: manager.pinLength(p.id), lockSeconds: { manager.pinLockSeconds(p.id) },
+                            onDismiss: nil,
+                            onEntered: { ProfileCopy.pinCheckMessage(manager.unlockLaunchGate($0)) }
+                        )
+                    }
+                    .interactiveDismissDisabled()
+                }
+            }
+            #if os(tvOS)
+            // Apple TV "Who is watching?" at launch (showLaunchPicker).
+            .fullScreenCover(isPresented: Binding(get: { manager.launchPicker != nil }, set: { _ in })) {
+                if let pk = manager.launchPicker {
+                    WhoIsWatchingView(playlistId: pk.playlistId, mode: .launch, lastProfileId: pk.lastProfileId) {}
+                }
+            }
+            #endif
+            .onAppear {
+                manager.isPlaying = { PlayerSession.shared.mode != .idle }
+            }
+    }
+}

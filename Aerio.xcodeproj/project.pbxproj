@@ -64,6 +64,7 @@
 		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
+		9F0F11E60000000000000051 /* ProfileSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000050 /* ProfileSwitcher.swift */; };
 		9F0F11E60000000000000041 /* ProfilesSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000040 /* ProfilesSettingsSection.swift */; };
 		9F0F11E60000000000000031 /* ProfileFlows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000030 /* ProfileFlows.swift */; };
 		9F0F11E60000000000000021 /* ProfileUIKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000020 /* ProfileUIKit.swift */; };
@@ -80,6 +81,7 @@
 		36B1927A52630A63A061D530 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
+		9F0F11E60000000000000052 /* ProfileSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000050 /* ProfileSwitcher.swift */; };
 		9F0F11E60000000000000042 /* ProfilesSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000040 /* ProfilesSettingsSection.swift */; };
 		9F0F11E60000000000000032 /* ProfileFlows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000030 /* ProfileFlows.swift */; };
 		9F0F11E60000000000000022 /* ProfileUIKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000020 /* ProfileUIKit.swift */; };
@@ -447,6 +449,7 @@
 		0D4994E16D37F74AE4F116EC /* RemoteControlMap.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteControlMap.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DVRSettingsView.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SyncCategoriesSettingsView.swift; sourceTree = "<group>"; };
+		9F0F11E60000000000000050 /* ProfileSwitcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProfileSwitcher.swift; sourceTree = "<group>"; };
 		9F0F11E60000000000000040 /* ProfilesSettingsSection.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProfilesSettingsSection.swift; sourceTree = "<group>"; };
 		9F0F11E60000000000000030 /* ProfileFlows.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProfileFlows.swift; sourceTree = "<group>"; };
 		9F0F11E60000000000000020 /* ProfileUIKit.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProfileUIKit.swift; sourceTree = "<group>"; };
@@ -1052,6 +1055,7 @@
 				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
 				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
 				0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */,
+				9F0F11E60000000000000050 /* ProfileSwitcher.swift */,
 				9F0F11E60000000000000040 /* ProfilesSettingsSection.swift */,
 				9F0F11E60000000000000030 /* ProfileFlows.swift */,
 				9F0F11E60000000000000020 /* ProfileUIKit.swift */,
@@ -1656,6 +1660,7 @@
 				B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */,
 				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
 				2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */,
+				9F0F11E60000000000000051 /* ProfileSwitcher.swift in Sources */,
 				9F0F11E60000000000000041 /* ProfilesSettingsSection.swift in Sources */,
 				9F0F11E60000000000000031 /* ProfileFlows.swift in Sources */,
 				9F0F11E60000000000000021 /* ProfileUIKit.swift in Sources */,
@@ -1843,6 +1848,7 @@
 				B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */,
 				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
 				38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */,
+				9F0F11E60000000000000052 /* ProfileSwitcher.swift in Sources */,
 				9F0F11E60000000000000042 /* ProfilesSettingsSection.swift in Sources */,
 				9F0F11E60000000000000032 /* ProfileFlows.swift in Sources */,
 				9F0F11E60000000000000022 /* ProfileUIKit.swift in Sources */,

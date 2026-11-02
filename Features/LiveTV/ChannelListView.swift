@@ -680,6 +680,12 @@ struct ChannelListView: View {
                             PhoneHeaderSyncSpinner(size: 14)
                         }
                     }
+                    // Profiles: avatar switcher on the iPad bar (the phone header row carries its own).
+                    if !isPhoneIdiom {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            ProfileSwitcherButton(size: 30)
+                        }
+                    }
                     // Guide view toggle: shown on all iOS width classes now
                     // that iPhone (and the folded foldable) can open the Guide.
                     // Session-only: toggling never writes defaultLiveTVView.
@@ -1197,6 +1203,10 @@ struct ChannelListView: View {
                 PhoneHeaderSyncSpinner()
             }
             phoneHeaderActions
+            #if os(iOS)
+            // Profiles: avatar switcher, drawn only with 2+ profiles (Android LiveTvTopBar).
+            ProfileSwitcherButton(size: 38)
+            #endif
         }
         .padding(.horizontal, 16)
         #if os(iOS)
