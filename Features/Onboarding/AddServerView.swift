@@ -617,6 +617,7 @@ struct AddServerView: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
@@ -1231,6 +1232,7 @@ struct AddServerView: View {
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
     #endif
