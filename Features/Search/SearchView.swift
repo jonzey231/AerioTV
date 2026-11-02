@@ -91,6 +91,13 @@ struct SearchView: View {
     // Debounce
     @State private var searchTask: Task<Void, Never>?
 
+    /// Row last opened from the results (Android GH #162): Back from the
+    /// player lands on it again with the query and results intact.
+    @State private var lastOpenedID: String?
+    #if os(tvOS)
+    @FocusState private var focusedRowID: String?
+    #endif
+
     /// Guide-channel lookup for EPG result rows (channel name + logo, Android
     /// parity: "LIVE . Channel . start-end" with the channel's logo as the
     /// thumbnail). Rebuilt per search from the active playlist's channels.
@@ -265,23 +272,57 @@ struct SearchView: View {
             }
             .padding(.horizontal, 16)
         }
+        #if os(tvOS)
+        // Own focus region so Up from the first result lands on a chip even
+        // when no chip sits straight above the focused row.
+        .focusSection()
+        #endif
     }
 
     // MARK: - Results List
     private var resultsList: some View {
-        List(results) { result in
-            resultRow(result)
-                .listRowBackground(Color.cardBackground)
-                .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                #if os(iOS)
-                .listRowSeparator(.hidden)
-                #endif
+        ScrollViewReader { proxy in
+            List(results) { result in
+                resultRow(result)
+                    .id(result.id)
+                    #if os(tvOS)
+                    .focused($focusedRowID, equals: result.id)
+                    #endif
+                    .listRowBackground(Color.cardBackground)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    #if os(iOS)
+                    .listRowSeparator(.hidden)
+                    #endif
+            }
+            .listStyle(.plain)
+            .background(Color.appBackground)
+            #if os(iOS)
+            .scrollContentBackground(.hidden)
+            #endif
+            #if os(tvOS)
+            // Back from a player opened out of the results (HomeView posts
+            // this instead of the guide refocus while Search is up).
+            .onReceive(NotificationCenter.default.publisher(for: .aerioSearchRestoreFocus)) { _ in
+                guard let id = lastOpenedID,
+                      let index = results.firstIndex(where: { $0.id == id }) else {
+                    debugLog("[SEARCH] restore skipped: opened row not in results=\(results.count)")
+                    return
+                }
+                debugLog("[SEARCH] restore results=\(results.count) index=\(index)")
+                proxy.scrollTo(id, anchor: .center)
+                Task { @MainActor in
+                    // One frame so the row is laid out before focusing it.
+                    try? await Task.sleep(for: .milliseconds(50))
+                    focusedRowID = id
+                }
+            }
+            .onChange(of: focusedRowID) { _, id in
+                if let id, let i = results.firstIndex(where: { $0.id == id }) {
+                    debugLog("[FOCUS] search:row\(i)")
+                }
+            }
+            #endif
         }
-        .listStyle(.plain)
-        .background(Color.appBackground)
-        #if os(iOS)
-        .scrollContentBackground(.hidden)
-        #endif
     }
 
     /// SSRF gate for the search-result thumbnail. VOD posters are already
@@ -323,37 +364,70 @@ struct SearchView: View {
         }
     }
 
-    /// EPG rows thumbnail with the CHANNEL's logo (already SSRF-validated at
-    /// channel build time); programme art is the fallback.
-    private func rowThumbnailURL(_ result: SearchResult) -> URL? {
-        if case .epg(let prog) = result,
-           let logo = channelsByID[prog.channelID]?.logoURL {
-            return logo
+    /// Program art the app already holds, no extra fetch (Android
+    /// 999e4c82): the art the guide banner resolved this session (what
+    /// Program Info opens with), then the program's own poster through the
+    /// SSRF gate. Nil falls back to the channel logo in the row.
+    private func programArtURL(_ prog: EPGProgram) -> URL? {
+        #if os(tvOS)
+        // The guide banner (and its art cache) is tvOS-only.
+        if let held = GuidePreviewArtCache.shared.cachedArt(title: prog.title, programID: prog.programID) {
+            return held
         }
-        return validatedPosterURL(result)
+        #endif
+        return validatedPosterURL(.epg(prog))
+    }
+
+    /// A live airing plays its channel through the Live TV tap path
+    /// (play-where prompt, Radio Mode, Mini Player setting) and Search stays
+    /// up underneath, so Back from the player returns here (Android GH #162).
+    /// A future airing, or one whose channel is not in the loaded list,
+    /// jumps to the guide.
+    private func openProgram(_ prog: EPGProgram) {
+        #if os(tvOS)
+        if embedsInTabChrome, prog.isLive,
+           let ch = channelsByID[prog.channelID], !ch.streamURLs.isEmpty {
+            debugLog("[SEARCH] live result: open channel")
+            NotificationCenter.default.post(name: .aerioOpenChannel, object: nil,
+                                            userInfo: ["channelID": ch.id])
+            return
+        }
+        if embedsInTabChrome, prog.isLive {
+            debugLog("[SEARCH] live result: channel not in the loaded list")
+        }
+        #endif
+        jumpToGuide(prog)
     }
 
     private func resultRow(_ result: SearchResult) -> some View {
         Button {
+            lastOpenedID = result.id
             switch result {
             case .vod(let item): selectedVODItem = item
-            case .epg(let prog): jumpToGuide(prog)
+            case .epg(let prog): openProgram(prog)
             }
         } label: {
             HStack(spacing: 12) {
-                // Thumbnail
-                AsyncImage(url: rowThumbnailURL(result)) { phase in
-                    if case .success(let img) = phase {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                            .frame(width: 50, height: 70)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    } else {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                            .frame(width: 50, height: 70)
-                            .overlay(Image(systemName: result.iconName)
-                                        .foregroundColor(.textTertiary))
+                // Thumbnail: fixed 50x70 box so nothing shifts when art lands.
+                switch result {
+                case .vod:
+                    AsyncImage(url: validatedPosterURL(result)) { phase in
+                        if case .success(let img) = phase {
+                            img.resizable().aspectRatio(contentMode: .fill)
+                                .frame(width: 50, height: 70)
+                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        } else {
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(Color.elevatedBackground)
+                                .frame(width: 50, height: 70)
+                                .overlay(Image(systemName: result.iconName)
+                                            .foregroundColor(.textTertiary))
+                        }
                     }
+                case .epg(let prog):
+                    SearchProgramThumb(art: programArtURL(prog),
+                                       logo: channelsByID[prog.channelID]?.logoURL,
+                                       icon: prog.isLive ? "tv" : "calendar")
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
@@ -545,5 +619,49 @@ struct SearchView: View {
         defaults.set(prog.startTime.timeIntervalSince1970, forKey: "guideJumpStart")
         if let onClose { onClose() } else { dismiss() }
         NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
+    }
+}
+
+extension Notification.Name {
+    /// Posted by HomeView when a player opened from Search closes while the
+    /// tvOS in-place Search is still up: Search refocuses the opened row.
+    static let aerioSearchRestoreFocus = Notification.Name("aerioSearchRestoreFocus")
+}
+
+/// EPG result thumbnail (Android SearchScreen ResultRow): program art when
+/// held, else the channel logo (also when the art fails to load), both
+/// fitted inside the fixed 50x70 box; the logo keeps 5 pt of breathing room.
+private struct SearchProgramThumb: View {
+    let art: URL?
+    let logo: URL?
+    let icon: String
+    @State private var artFailed = false
+
+    var body: some View {
+        let showArt = art != nil && !artFailed
+        let url = showArt ? art : logo
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color.elevatedBackground)
+            .frame(width: 50, height: 70)
+            .overlay {
+                if let url {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let img):
+                            img.resizable().aspectRatio(contentMode: .fit)
+                                .padding(showArt ? 0 : 5)
+                        case .failure:
+                            Image(systemName: icon).foregroundColor(.textTertiary)
+                                .onAppear { if showArt { artFailed = true } }
+                        default:
+                            Color.clear
+                        }
+                    }
+                    .id(url)
+                } else {
+                    Image(systemName: icon).foregroundColor(.textTertiary)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }

@@ -7946,6 +7946,14 @@ struct MainTabView: View {
                 nowPlaying.endGuideRefocusHold()
                 return
             }
+            // A player opened from the in-place Search returns to Search
+            // (Android GH #162): its opened row takes focus, not the guide.
+            if showSearch {
+                nowPlaying.endGuideRefocusHold()
+                debugLog("[FOCUS] player closed over Search -> restore opened row")
+                NotificationCenter.default.post(name: .aerioSearchRestoreFocus, object: nil)
+                return
+            }
             // Same turn as the teardown: a delayed post let tvOS pick its
             // own default (the Refresh circle) before the guide asked.
             NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
@@ -8915,7 +8923,9 @@ struct MainTabView: View {
         }
         // In-place search is the topmost surface when up; Menu leaves it and
         // returns to the tab content, like Android's Back from Search.
-        if showSearch {
+        // A fullscreen player opened from Search sits above it: Back belongs
+        // to the player first.
+        if showSearch && !(nowPlaying.isActive && !nowPlaying.isMinimized) {
             debugLog("\u{1F3AE} [HMP]   \u{2192} branch: in-place search up \u{2192} closing it")
             withAnimation(.easeOut(duration: 0.2)) { showSearch = false }
             return

@@ -411,6 +411,17 @@ final class GuidePreviewArtCache: ObservableObject {
         return .pending
     }
 
+    /// Art this session already resolved for a program, with no lookup
+    /// started: the Dispatcharr detail icon, then a cached TMDB poster.
+    /// Search rows use it (Android cachedPreviewArt, 999e4c82) so typing
+    /// never fans out network requests.
+    func cachedArt(title: String, programID: Int?) -> URL? {
+        if let pid = programID, case .some(.some(let u)) = detailEntries[pid] { return u }
+        let key = LibraryMatcher.cleanTitle(title)
+        if !key.isEmpty, case .some(.some(let u)) = entries[key] { return u }
+        return nil
+    }
+
     private var detailEntries: [Int: URL?] = [:]
     private var detailInFlight: Set<Int> = []
     /// Detail lookups that failed or 404ed without a match: not a cached
