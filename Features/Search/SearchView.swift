@@ -444,6 +444,7 @@ struct SearchView: View {
         // like every other media surface.
         let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString
         var found: [SearchResult] = []
+        var programCount = 0, movieCount = 0, seriesCount = 0
 
         // EPG search. This used to be an in-memory filter over a @Query of
         // the ENTIRE EPG cache -- materializing ~258k SwiftData models and
@@ -457,23 +458,28 @@ struct SearchView: View {
                 uniquingKeysWith: { a, _ in a }
             )
             let sid = activeServerID ?? ""
+            let now = Date()
+            // Android SearchViewModel / EpgProgrammeDao.searchInWindow
+            // parity: title OR description, now-forward only (endTime > now)
+            // so ended airings never take a slot, start order. The fetch
+            // bound only protects SQLite; the 30-row cap is applied AFTER
+            // the live-first sort and the per-airing de-duplication below.
             var descriptor = FetchDescriptor<EPGProgram>(
                 predicate: #Predicate<EPGProgram> { p in
                     p.serverID == sid
+                    && p.endTime > now
                     && (p.title.localizedStandardContains(lowered)
                         || p.programDescription.localizedStandardContains(lowered))
                 },
                 sortBy: [SortDescriptor(\.startTime)]
             )
-            descriptor.fetchLimit = 60
+            descriptor.fetchLimit = 200
             let epgMatches = (try? modelContext.fetch(descriptor)) ?? []
-            let epgResults = epgMatches
-                .sorted { a, b in
-                    // Live programs first, then upcoming, then past
-                    if a.isLive != b.isLive { return a.isLive }
-                    return a.startTime < b.startTime
-                }
-                .prefix(30)
+            let epgResults = GlobalSearchRanking.rankPrograms(
+                epgMatches, now: now,
+                start: { $0.startTime }, end: { $0.endTime },
+                channelKey: { $0.channelID })
+            programCount = epgResults.count
             found += epgResults.map { .epg($0) }
         }
 
@@ -496,18 +502,32 @@ struct SearchView: View {
             // The catalog answers this with an indexed query off the main
             // actor; there is no resident library array to walk any more.
             let hidden = HiddenVODStore.shared.snapshot(serverID: searchActiveServer?.id.uuidString)
+            // Android caps: 25 movies plus 25 series (was 50 combined, so a
+            // long movie list could starve the series half).
             var vodResults: [VODDisplayItem] = []
             if allowMovies, scope != .tv {
-                vodResults += await VODStore.shared.searchCatalog(kind: .movie, query: lowered,
-                                                                  hiddenTitleKeys: hidden)
+                let movies = await VODStore.shared.searchCatalog(kind: .movie, query: lowered,
+                                                                 hiddenTitleKeys: hidden)
+                    .prefix(GlobalSearchRanking.movieCap)
+                movieCount = movies.count
+                vodResults += movies
             }
             if allowSeries, scope != .movies {
-                vodResults += await VODStore.shared.searchCatalog(kind: .series, query: lowered,
-                                                                  hiddenTitleKeys: hidden)
+                let series = await VODStore.shared.searchCatalog(kind: .series, query: lowered,
+                                                                 hiddenTitleKeys: hidden)
+                    .prefix(GlobalSearchRanking.seriesCap)
+                seriesCount = series.count
+                vodResults += series
             }
-            found += vodResults.prefix(50).map { .vod($0) }
+            found += vodResults.map { .vod($0) }
         }
 
+        // Drop a stale pass if the user kept typing past this query.
+        guard query.trimmingCharacters(in: .whitespaces) == q.trimmingCharacters(in: .whitespaces) else { return }
+        // Counts only, never the query text.
+        DebugLogger.shared.log(
+            "[SEARCH] query q=\(q.count) scope=\(scope.rawValue) programs=\(programCount) movies=\(movieCount) series=\(seriesCount)",
+            category: "Search", level: .info)
         results = found
         isSearching = false
     }

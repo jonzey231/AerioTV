@@ -84,6 +84,7 @@
 		0F4B69220FA8BC283C66A689 /* WelcomeSyncChain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 726BF4C46D7BD370C1BC6735 /* WelcomeSyncChain.swift */; };
 		5A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
 		5B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */; };
+		E5A3C0DE0000000000000101 /* LiveSearchMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A3C0DE0000000000000001 /* LiveSearchMatcher.swift */; };
 		5B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */; };
 		5C8D82B12B1996C98C0B301B /* RemoteControlHints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7548A26AF128BE1520EA3FFA /* RemoteControlHints.swift */; };
 		5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
@@ -131,6 +132,7 @@
 		6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
 		6B91E10A20F4B86799998C43 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */; };
 		6B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */; };
+		E5A3C0DE0000000000000201 /* LiveSearchMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A3C0DE0000000000000001 /* LiveSearchMatcher.swift */; };
 		6B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */; };
 		6BA60E4727C61B8943535F4E /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11C8C5B56FBF497EF66CA96 /* Typography.swift */; };
 		7134A5E98E9415DF4789626B /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
@@ -445,6 +447,7 @@
 		46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "Pods-Aerio_iOS-dummy.m"; sourceTree = "<group>"; };
 		4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncManager.swift; sourceTree = "<group>"; };
+		E5A3C0DE0000000000000001 /* LiveSearchMatcher.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveSearchMatcher.swift; sourceTree = "<group>"; };
 		4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncFlags.swift; sourceTree = "<group>"; };
 		4C548BC428D32F3966A46C27 /* VODService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODService.swift; sourceTree = "<group>"; };
 		4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
@@ -1125,6 +1128,7 @@
 				4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */,
 				265A7DFCEC12544455827DB3 /* ReminderManager.swift */,
 				4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */,
+				E5A3C0DE0000000000000001 /* LiveSearchMatcher.swift */,
 				AA10CA7A0001000000000011 /* VODCatalogStore.swift */,
 				AA10CA7A0001000000000021 /* VODSweepActivity.swift */,
 				4B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift */,
@@ -1490,6 +1494,7 @@
 				5A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */,
 				565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */,
 				5B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
+				E5A3C0DE0000000000000101 /* LiveSearchMatcher.swift in Sources */,
 				5B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */,
 				5E7AD5452EC3506ECA3B504C /* TVSettingsSplitView.swift in Sources */,
@@ -1664,6 +1669,7 @@
 				6A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */,
 				665A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */,
 				6B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
+				E5A3C0DE0000000000000201 /* LiveSearchMatcher.swift in Sources */,
 				6B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */,
 				5E7AAC31F09DF14FF7413C87 /* TVSettingsSplitView.swift in Sources */,
