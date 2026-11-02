@@ -599,15 +599,18 @@ struct AddServerView: View {
     /// user has already paid for a window they may not have wanted. Same
     /// options and default as the Edit Server picker so the screens agree.
     private var guideHistoryRow: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Picker("Guide Days", selection: $viewModel.epgRetentionDays) {
-                Text("1 day").tag(1)
-                Text("3 days").tag(3)
-                Text("7 days (default)").tag(7)
-                Text("14 days").tag(14)
-                Text("All Available").tag(0)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Guide Days")
+                .scaledFont(.bodyLarge)
+                .fontWeight(.medium)
+                .foregroundColor(.textPrimary)
+            // Android GuideHistoryRow: pills for 1, 3, 7, 14, and All
+            // (0 = All Available; legacy 30 reads as All).
+            HStack(spacing: 8) {
+                ForEach([1, 3, 7, 14, 0], id: \.self) { days in
+                    guideDaysPill(days)
+                }
             }
-            .tint(.accentPrimary)
             Text("How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
                 .scaledFont(.labelSmall.subtext())
                 .foregroundColor(Color.contrastText(.textTertiary))
@@ -615,6 +618,33 @@ struct AddServerView: View {
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func guideDaysPill(_ days: Int) -> some View {
+        let current = viewModel.epgRetentionDays
+        let normalized = (current <= 0 || current >= 30) ? 0 : min(max(current, 1), 14)
+        let selected = days == normalized
+        let label = days == 0 ? "All" : (days == 1 ? "1 Day" : "\(days) Days")
+        return Button {
+            viewModel.epgRetentionDays = days
+        } label: {
+            Text(label)
+                .scaledFont(.bodyMedium)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .foregroundColor(selected ? .white : .textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(selected ? Color.accentPrimary : Color.textPrimary.opacity(0.1)))
+                .contentShape(Capsule())
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: selected, scalesOnFocus: selected))
+        .tvFocusRingShape(.capsule)
+        #else
+        .buttonStyle(.plain)
+        #endif
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// On Demand opt-in. Same wording and behavior as the Edit Server
