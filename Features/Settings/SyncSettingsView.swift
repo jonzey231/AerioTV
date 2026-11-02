@@ -36,6 +36,10 @@ struct SyncSettingsView: View {
     @AppStorage(DispatcharrSyncManager.enabledKey) private var dsyncOn = false
 
     @State private var showClearICloudConfirm = false
+    /// Android credsSyncDisclosed: the one-time credentials notice the first
+    /// time sync is turned on here.
+    @AppStorage("credentialsSyncDisclosed") private var credsSyncDisclosed = false
+    @State private var credsSyncDisclosureOpen = false
     @State private var showPullConfirm = false
     @State private var showPushConfirm = false
     @State private var clearICloudConfirmationVisible = false
@@ -147,6 +151,9 @@ struct SyncSettingsView: View {
     private var cloudBinding: Binding<Bool> {
         Binding(get: { iCloudSyncEnabled }, set: { on in
             if on && dsyncOn { enableSecond(enablingCloud: true) { setCloud(true) } } else { setCloud(on) }
+            // First time sync is turned on, disclose that server credentials
+            // sync too (Android "Credentials sync to your Drive").
+            if on && !credsSyncDisclosed { credsSyncDisclosureOpen = true }
         })
     }
 
@@ -296,6 +303,14 @@ struct SyncSettingsView: View {
             )
             .interactiveDismissDisabled(true)
             .presentationDetents([.medium, .large])
+        }
+        .alert("Credentials sync to iCloud", isPresented: $credsSyncDisclosureOpen) {
+            Button("Got it") { credsSyncDisclosed = true }
+        } message: {
+            Text("So your servers restore automatically on another device, AerioTV includes each server's sign-in details (username, password, and API key) in iCloud Keychain. They are end-to-end encrypted and reachable only by AerioTV on devices signed into your Apple Account. On this device the same credentials are encrypted at rest.\n\nYou can turn this off any time with the Credentials toggle in Sync Categories.")
+        }
+        .onChange(of: credsSyncDisclosureOpen) { _, open in
+            if !open { credsSyncDisclosed = true }
         }
         .alert("Clear iCloud Data?", isPresented: $showClearICloudConfirm) {
             Button("Clear", role: .destructive) {
