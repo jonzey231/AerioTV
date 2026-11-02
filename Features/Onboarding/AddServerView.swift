@@ -23,6 +23,10 @@ struct AddServerView: View {
 
     /// Server that was just saved, triggers the sync loading screen.
     @State private var savedServer: ServerConnection?
+    /// Settings > Add Playlist of a Dispatcharr playlist: the Add Profiles
+    /// step follows the sync screen (Android AddPlaylistWizardStep.AddProfiles).
+    @State private var pendingProfilesPid: String?
+    @State private var addProfilesFor: String?
 
     // DVR onboarding (Dispatcharr only)
     @State private var deviceNickname: String = DeviceInfo.modelName
@@ -55,6 +59,12 @@ struct AddServerView: View {
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
+            if let pid = addProfilesFor {
+                AddProfilesStepView(playlistId: pid, onboarding: false) {
+                    debugLog("[PROFILE] settings add playlist: add profiles done")
+                    dismiss()
+                }
+            } else {
             ScrollView {
                 VStack(spacing: 24) {
                     if !typeChosen {
@@ -81,6 +91,7 @@ struct AddServerView: View {
                 }
                 .padding(20)
             }
+            }
         }
         .onAppear {
             guard !appliedInitialType else { return }
@@ -90,14 +101,14 @@ struct AddServerView: View {
                 typeChosen = true
             }
         }
-        .navigationTitle(typeChosen ? "Configure" : (isOnboarding ? "" : "Add Playlist"))
-        .navigationBarBackButtonHidden(typeChosen)
+        .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? "Configure" : (isOnboarding ? "" : "Add Playlist")))
+        .navigationBarBackButtonHidden(typeChosen || addProfilesFor != nil)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .toolbar {
-            if typeChosen {
+            if typeChosen && addProfilesFor == nil {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -125,8 +136,14 @@ struct AddServerView: View {
                 .modifier(QrRestoreOfferModifier(signIn: qrRestoreSignIn))
                 #endif
                 .onDisappear {
-                    // When the sync screen is dismissed, also dismiss AddServerView.
-                    dismiss()
+                    // When the sync screen is dismissed, also dismiss AddServerView,
+                    // unless a Dispatcharr playlist continues to Add Profiles.
+                    if let pid = pendingProfilesPid {
+                        pendingProfilesPid = nil
+                        addProfilesFor = pid
+                    } else {
+                        dismiss()
+                    }
                 }
         }
     }
@@ -1008,6 +1025,7 @@ struct AddServerView: View {
             #if os(iOS)
             qrRestoreSignIn = server.type == .dispatcharrAPI ? QrImportBus.takeSignIn(savedApiKey: server.baseApiKey) : nil
             #endif
+            if server.type == .dispatcharrAPI { pendingProfilesPid = server.id.uuidString }
             savedServer = server
         } else {
             dismiss()
