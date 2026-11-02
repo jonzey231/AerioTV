@@ -189,6 +189,7 @@ struct WelcomeView: View {
         case .roleStep(let pid, let auto):
             ProfileRoleStepView(playlistId: pid) { child in
                 childOnly = child
+                debugLog("[SYNC] chain: Dispatcharr Sync step (childOnly=\(child))")
                 stage = .dispatcharrSync(auto: auto)
             }
         case .addProfiles(let pid):
@@ -214,6 +215,7 @@ struct WelcomeView: View {
     /// step made this a kid-only device (Android afterDriveOffer).
     private func toAddProfiles(_ why: String) {
         if !childOnly, let d = DsyncLocal.activeDispatcharrPlaylist() {
+            debugLog("[SYNC] chain: Add Profiles (\(why))")
             stage = .addProfiles(d.id.uuidString)
             return
         }
@@ -491,7 +493,11 @@ struct WelcomeView: View {
 
     /// Back from Connect a Server: a Dispatcharr Direct Connect playlist goes to the sync step.
     private func afterConnect() async {
-        guard hold.holding, stage == .welcome else { return }
+        guard hold.holding, stage == .welcome else {
+            debugLog("[SYNC] after connect: skipped (holding=\(hold.holding))")
+            return
+        }
+        debugLog("[SYNC] after connect: playlists=\(servers.count)")
         if servers.isEmpty {
             enableAfterConnect = false
             hold.end("connect backed out")
@@ -501,6 +507,7 @@ struct WelcomeView: View {
             // Signed in from a Dispatcharr user QR (iPhone and iPad): the step checks for a restore.
             qrSignIn = QrImportBus.takeSignIn(savedApiKey: d.baseApiKey)
             childOnly = false
+            debugLog("[SYNC] chain: role step (auto=\(enableAfterConnect))")
             stage = .roleStep(d.id.uuidString, auto: enableAfterConnect)
             enableAfterConnect = false
             return
@@ -529,6 +536,7 @@ struct WelcomeView: View {
     }
 
     private func finish(_ why: String) {
+        debugLog("[SYNC] chain: finish onboarding (\(why))")
         hold.end(why)
         hasCompletedOnboarding = true
     }

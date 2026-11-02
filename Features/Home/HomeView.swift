@@ -3,6 +3,7 @@ import SwiftData
 import Foundation
 import Security
 import Network
+import Combine
 
 // MARK: - VOD Store
 // Shared ObservableObject owned by MainTabView.
@@ -5353,6 +5354,15 @@ struct MainTabView: View {
         guard !showInitialEPGLoading else { return }
         guard !allServers.isEmpty else { return }
         guard channelStore.channels.isEmpty else { return }
+        // The onboarding cover is presented from RootView. A second
+        // fullScreenCover from here while the Welcome chain holds it tore the
+        // onboarding cover down and rebuilt WelcomeView fresh, so the chain
+        // (sync step, profile steps) never ran (iPad log 2026-11-02). Retried
+        // when the hold ends.
+        if OnboardingHold.shared.holding {
+            debugLog("[SYNC] initial loading cover deferred: onboarding chain in progress")
+            return
+        }
         // v1.6.23: don't re-present after the user explicitly Skipped.
         // Without this gate, dismissing via the Skip button is visually
         // a no-op when a downstream onChange (e.g. allServers.count
@@ -7850,6 +7860,9 @@ struct MainTabView: View {
         // on-screen state honest. The key is a Hashable digest of
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
+        .onReceive(OnboardingHold.shared.$holding.removeDuplicates()) { holding in
+            if !holding { tryShowInitialLoading() }
+        }
         // v1.6.13 (GH #8): auto-resume the last-played channel into
         // the corner mini-player as soon as the channel list is
         // resolvable. Fires on the first non-empty `channels`
