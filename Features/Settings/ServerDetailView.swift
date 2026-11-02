@@ -181,6 +181,10 @@ struct ServerDetailView: View {
     /// button is off the D-pad path). Delete lives in Danger Zone.
     @State private var editingServer: ServerConnection? = nil
     @State private var showDeleteConfirm = false
+    #if os(iOS)
+    /// Set up a TV with this playlist (docs/DeviceSetupHandoff.md).
+    @State private var showSetUpTv = false
+    #endif
     @State private var isRefreshingPlaylist = false
     /// "Refresh Permissions" row: an unthrottled capability probe.
     @State private var isRefreshingPermissions = false
@@ -262,6 +266,9 @@ struct ServerDetailView: View {
             }
         }
         .sheet(item: $editingServer) { EditServerSheet(server: $0) }
+        .sheet(isPresented: $showSetUpTv) {
+            SetUpTvView(server: server) { showSetUpTv = false }
+        }
         #endif
         // Opening the ACTIVE playlist re-reads its permissions, throttled
         // to once a minute like a return to foreground, so the User
@@ -520,6 +527,16 @@ struct ServerDetailView: View {
                 } header: {
                     Text("Actions").sectionHeaderStyle()
                 }
+
+                #if os(iOS)
+                // Set up a TV: iPhone and iPad, Admin or default profile.
+                if SetupGate.canSetUpTv(server) {
+                    Section {
+                        SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.detailSubtitle) { showSetUpTv = true }
+                            .listRowBackground(Color.cardBackground)
+                    }
+                }
+                #endif
 
                 // MARK: EPG Cache (per-playlist)
                 //

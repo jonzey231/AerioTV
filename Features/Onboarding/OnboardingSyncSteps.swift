@@ -16,6 +16,8 @@ import SwiftUI
 struct DispatcharrSyncStepView: View {
     /// Came from the Welcome "Sync with Dispatcharr" card: turn on without asking.
     let autoEnable: Bool
+    /// Set when the playlist was just signed in from a Dispatcharr user QR.
+    var qrSignIn: QrImportBus.SignIn? = nil
     let onDone: () -> Void
     /// Cancel on the "Which setup" prompt.
     let onCancel: () -> Void
@@ -25,6 +27,8 @@ struct DispatcharrSyncStepView: View {
     @State private var busy = false
     @State private var ask: SetupSourceCoordinator.Probe?
     @State private var started = false
+    /// The server already holds this user's AerioTV data: lead with the restore copy.
+    @State private var restore = false
     #if os(tvOS)
     @FocusState private var turnOnFocused: Bool
     #endif
@@ -53,6 +57,7 @@ struct DispatcharrSyncStepView: View {
             } else if autoEnable {
                 await runTurnOn(fromCard: true)
             } else {
+                if let qrSignIn { restore = await QrImportBus.serverHasData(qrSignIn) }
                 ready = true
             }
         }
@@ -100,6 +105,13 @@ struct DispatcharrSyncStepView: View {
                     .foregroundColor(.textPrimary)
                     .multilineTextAlignment(.center)
                     .accessibilityAddTraits(.isHeader)
+                if restore {
+                    Text("Restore your favorites, progress, and settings from your server.")
+                        .scaledFont(tv ? .system(size: 26) : .bodyLarge)
+                        .foregroundColor(.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text("Your favorites, watch progress, reminders, and preferences are stored on your Dispatcharr server under each profile and follow you to every device. Admins on the server can view this data.")
                     .scaledFont(tv ? .system(size: 24).subtext() : .bodyMedium.subtext())
                     .foregroundColor(Color.contrastText(.textSecondary))

@@ -319,6 +319,8 @@ See the linked GitHub.
   AerioTV's DVR tab within ~2 minutes. XC / M3U don't have a
   server-side scheduler to discover from.
 
+On an iPhone or iPad you can sign in by scanning the API key QR code that Dispatcharr shows for a user on its Users page (Scan QR code), by picking a saved image of that code (Choose from Photos), or by opening the code saved as a file (Import file).
+
 </details>
 
 <details>
@@ -414,6 +416,11 @@ own authentication instead. Each bypassed path is still guarded by the
 server: the Dispatcharr API by an API key or token, the Xtream Codes paths
 by the account's username and password, and the stream proxy by the stream
 UUID in the URL.
+
+Set up a TV from your phone uses no server path, so the tables below are
+unchanged: while the TV's setup screen is open it listens on a random LAN
+port and advertises `_aeriotv-setup._tcp`, and the phone sends the
+encrypted playlist straight to it (see docs/DeviceSetupHandoff.md).
 
 <details>
 <summary><strong>Pangolin access rules for Dispatcharr</strong> (click to expand)</summary>

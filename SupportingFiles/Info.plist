@@ -34,6 +34,18 @@
 				<string>aerio</string>
 			</array>
 		</dict>
+		<dict>
+			<!-- aeriotv://setup?... from a TV's setup QR code (docs/DeviceSetupHandoff.md):
+			     the system camera opens Set up a TV with the TV and code filled in. -->
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>app.molinete.aerio.setup</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>aeriotv</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
@@ -62,9 +74,14 @@
 		<string>_116851A3._googlecast._tcp</string>
 		<string>_aeriotv._tcp</string>
 		<string>_airplay._tcp</string>
+		<string>_aeriotv-setup._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>AerioTV uses the camera only to read QR codes.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>AerioTV needs local network access to connect to your media server on your home network, and to find and stream to your AirPlay and Google Cast TVs.</string>
+	<string>AerioTV needs local network access to connect to your media server on your home network, to find and stream to your AirPlay and Google Cast TVs, and to set up AerioTV on a TV.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>AerioTV asks for access only when you choose to delete a QR code image you imported.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

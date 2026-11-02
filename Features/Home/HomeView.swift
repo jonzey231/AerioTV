@@ -4847,6 +4847,9 @@ struct MainTabView: View {
     @ObservedObject private var mvBackground = MultiviewBackgroundSession.shared
     /// GH #33 companion remote: same card for a paired AerioTV TV.
     @ObservedObject private var companionClient = CompanionClient.shared
+    /// Set up a TV dock card (docs/DeviceSetupHandoff.md): the one shared
+    /// discovery, gating, and dismissal with the Settings banner.
+    @ObservedObject private var setupCenter = SetupTvOfferCenter.shared
     /// AirPlay rides the same card (rule 2): the monitor reports when the
     /// AVPlayer engine's output actually moved to an AirPlay receiver.
     @ObservedObject private var airPlay = AirPlayMonitor.shared
@@ -4858,6 +4861,7 @@ struct MainTabView: View {
     /// Measured height of the iPhone Kept Live dock card; the Control-a-TV
     /// circle beside it takes this diameter.
     @State private var keptCardHeight: CGFloat = 0
+    @State private var setupCardHeight: CGFloat = 0
     @State private var radioCardHeight: CGFloat = 0
     #if os(iOS)
     @State private var multiviewCardHeight: CGFloat = 0
@@ -6336,7 +6340,9 @@ struct MainTabView: View {
                // Multiview card (Logan 2026-10-06).
                !keptLiveCardVisible, !multiviewCardVisible, !mvBackgroundCardVisible,
                // Radio Mode card row carries the button (Logan 2026-10-15).
-               !radioCardCarriesControlATV {
+               !radioCardCarriesControlATV,
+               // The Set up a TV card row carries it too.
+               !setupCardVisible {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6406,6 +6412,11 @@ struct MainTabView: View {
                         remoteSessionCard
                             .frame(width: padRemoteCardWidth)
                             .frame(maxWidth: .infinity)
+                        // Set up a TV: the lowest card, directly above the pill
+                        // (the Control-a-TV circle lives on the pill row).
+                        setupDockCard
+                            .frame(width: padRemoteCardWidth)
+                            .frame(maxWidth: .infinity)
                     } else {
                         // iPhone (Logan 2026-10-04): the remote-session card
                         // stays full width on top; below it ONE row with the
@@ -6441,7 +6452,7 @@ struct MainTabView: View {
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                                         if abs(h - multiviewCardHeight) > 0.5 { multiviewCardHeight = h }
                                     }
-                                if showsControlATVButton && !keptLiveCardVisible && !multiviewCardVisible {
+                                if showsControlATVButton && !keptLiveCardVisible && !multiviewCardVisible && !setupCardVisible {
                                     CompanionControlFAB(action: { showCompanionPickerGlobal = true },
                                                         size: multiviewCardHeight > 0 ? multiviewCardHeight : 48)
                                 }
@@ -6455,7 +6466,7 @@ struct MainTabView: View {
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                                         if abs(h - multiviewCardHeight) > 0.5 { multiviewCardHeight = h }
                                     }
-                                if showsControlATVButton && !keptLiveCardVisible {
+                                if showsControlATVButton && !keptLiveCardVisible && !setupCardVisible {
                                     CompanionControlFAB(action: { showCompanionPickerGlobal = true },
                                                         size: multiviewCardHeight > 0 ? multiviewCardHeight : 48)
                                 }
@@ -6475,9 +6486,25 @@ struct MainTabView: View {
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                                         if abs(h - keptCardHeight) > 0.5 { keptCardHeight = h }
                                     }
-                                if showsControlATVButton {
+                                if showsControlATVButton && !setupCardVisible {
                                     CompanionControlFAB(action: { showCompanionPickerGlobal = true },
                                                         size: keptCardHeight > 0 ? keptCardHeight : 48)
+                                }
+                            }
+                            .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
+                            .padding(.trailing, cardMetrics.barTrailingInset > 0 ? cardMetrics.barTrailingInset : 20)
+                        }
+                        if setupCardVisible {
+                            // Set up a TV: the lowest row, directly above the
+                            // tab bar; the Control-a-TV circle shares it.
+                            HStack(spacing: RemoteSessionCardMetrics.gap) {
+                                setupDockCard
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                        if abs(h - setupCardHeight) > 0.5 { setupCardHeight = h }
+                                    }
+                                if showsControlATVButton {
+                                    CompanionControlFAB(action: { showCompanionPickerGlobal = true },
+                                                        size: setupCardHeight > 0 ? setupCardHeight : 48)
                                 }
                             }
                             .padding(.leading, cardMetrics.barLeadingInset > 0 ? cardMetrics.barLeadingInset : 20)
@@ -6709,6 +6736,22 @@ struct MainTabView: View {
     /// fullscreen (the player's Options carry the same rows then).
     private var keptLiveCardVisible: Bool {
         !keptChannels.isEmpty && !playerFullscreen
+    }
+
+    /// Set up a TV dock card: a TV is advertising and the player is not
+    /// fullscreen. It takes the lowest row (directly above the tab bar), so
+    /// the Control-a-TV circle rides its row.
+    private var setupCardVisible: Bool {
+        setupCenter.offer != nil && !playerFullscreen
+    }
+
+    @ViewBuilder
+    private var setupDockCard: some View {
+        if !playerFullscreen, let t = setupCenter.offer {
+            SetupTvDockCard(target: t,
+                            onSetUp: { setupCenter.setUp(t) },
+                            onDismiss: { setupCenter.dismiss(t) })
+        }
     }
 
     /// A fullscreen player (live, catch-up, VOD in the container player) is
@@ -7517,6 +7560,7 @@ struct MainTabView: View {
             && multiviewStore.audioProgressStore != nil
             && !playerFullscreen && showsControlATVButton
             && !keptLiveCardVisible && !multiviewCardVisible && !mvBackgroundCardVisible
+            && !setupCardVisible
     }
 
     /// Same gates as the phone's floating Control-a-TV button.

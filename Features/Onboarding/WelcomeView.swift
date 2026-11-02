@@ -43,6 +43,8 @@ struct WelcomeView: View {
     @State private var connectType: ServerType?
     /// Dispatcharr Sync on after the connect (the "Sync with Dispatcharr" card).
     @State private var enableAfterConnect = false
+    /// The last Dispatcharr sign-in made from a user QR, for the restore offer.
+    @State private var qrSignIn: QrImportBus.SignIn?
     @State private var backupBusy = false
     @State private var cloudOfferBusy = false
 
@@ -158,6 +160,7 @@ struct WelcomeView: View {
         case .dispatcharrSync(let auto):
             DispatcharrSyncStepView(
                 autoEnable: auto,
+                qrSignIn: qrSignIn,
                 onDone: { afterDispatcharrStep() },
                 onCancel: {
                     // Rule 4 prompt Cancel: back to Welcome, selections kept.
@@ -434,7 +437,9 @@ struct WelcomeView: View {
             hold.end("connect backed out")
             return
         }
-        if await waitForActivePlaylist(seconds: 10), DsyncLocal.activeDispatcharrPlaylist() != nil {
+        if await waitForActivePlaylist(seconds: 10), let d = DsyncLocal.activeDispatcharrPlaylist() {
+            // Signed in from a Dispatcharr user QR (iPhone and iPad): the step checks for a restore.
+            qrSignIn = QrImportBus.takeSignIn(savedApiKey: d.effectiveApiKey)
             stage = .dispatcharrSync(auto: enableAfterConnect)
             enableAfterConnect = false
             return

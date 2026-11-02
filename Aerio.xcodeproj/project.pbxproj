@@ -7,6 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		840687943FCCCE62BDED11A2 /* SetUpTvView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */; };
+		61AC54DD611AB8A912D13900 /* SetUpTvView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */; };
+		E3A2ED87A113140BDF2CF848 /* QrScanViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CC018C28968E4CD360302C /* QrScanViews.swift */; };
+		169119F5C074E675E5D95C35 /* QrScanViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CC018C28968E4CD360302C /* QrScanViews.swift */; };
+		7F69C24644D6250EDA4FE939 /* SetupSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B56507D6BBD6E556B2B44EF /* SetupSender.swift */; };
+		87EF48431B1FC52F768BA18A /* SetupSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B56507D6BBD6E556B2B44EF /* SetupSender.swift */; };
+		89D0668D36AB27D423AA395F /* SetupProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB8724FB2417E85C6830222 /* SetupProtocol.swift */; };
+		A033846791D84DCD15BE0E86 /* SetupProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB8724FB2417E85C6830222 /* SetupProtocol.swift */; };
 		A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */; };
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */; };
@@ -403,6 +411,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetUpTvView.swift; sourceTree = "<group>"; };
+		40CC018C28968E4CD360302C /* QrScanViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QrScanViews.swift; sourceTree = "<group>"; };
+		8B56507D6BBD6E556B2B44EF /* SetupSender.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupSender.swift; sourceTree = "<group>"; };
+		DCB8724FB2417E85C6830222 /* SetupProtocol.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupProtocol.swift; sourceTree = "<group>"; };
 		A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionNowPlaying.swift; sourceTree = "<group>"; };
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOnlySampleClock.swift; sourceTree = "<group>"; };
@@ -665,6 +677,24 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		E7700D4D9FAEA8BD7C6C5F41 /* DeviceSetup */ = {
+			isa = PBXGroup;
+			children = (
+				40CC018C28968E4CD360302C /* QrScanViews.swift */,
+				6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */,
+			);
+			path = DeviceSetup;
+			sourceTree = "<group>";
+		};
+		C0468D189001A88A939DDF96 /* Setup */ = {
+			isa = PBXGroup;
+			children = (
+				DCB8724FB2417E85C6830222 /* SetupProtocol.swift */,
+				8B56507D6BBD6E556B2B44EF /* SetupSender.swift */,
+			);
+			path = Setup;
+			sourceTree = "<group>";
+		};
 		11EC69739059FC54CFF03581 /* iOS */ = {
 			isa = PBXGroup;
 			children = (
@@ -727,6 +757,7 @@
 		4432D1DEAD99D32286CFADCA /* Features */ = {
 			isa = PBXGroup;
 			children = (
+				E7700D4D9FAEA8BD7C6C5F41 /* DeviceSetup */,
 				1D44B2A9B6CE86B60388ED7C /* DVR */,
 				D790E242FC19FAB9A2C4F61C /* Home */,
 				2E9487FE5F10365DAD5FCB23 /* LiveTV */,
@@ -1123,6 +1154,7 @@
 		FF2BFAF9459BFB3B8F20DCC8 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				C0468D189001A88A939DDF96 /* Setup */,
 				68C828711A3654526E9E9D04 /* ViewModels */,
 				A144EEEE5555EEEE5555EEEE /* AerioObjC */,
 				4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */,
@@ -1445,6 +1477,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				61AC54DD611AB8A912D13900 /* SetUpTvView.swift in Sources */,
+				169119F5C074E675E5D95C35 /* QrScanViews.swift in Sources */,
+				87EF48431B1FC52F768BA18A /* SetupSender.swift in Sources */,
+				A033846791D84DCD15BE0E86 /* SetupProtocol.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DB60 /* AudioOnlySampleClock.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */,
 				5B11801E8D7B1330A0EA0F6E /* MultiviewCompositor.swift in Sources */,
@@ -1615,6 +1651,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				840687943FCCCE62BDED11A2 /* SetUpTvView.swift in Sources */,
+				E3A2ED87A113140BDF2CF848 /* QrScanViews.swift in Sources */,
+				7F69C24644D6250EDA4FE939 /* SetupSender.swift in Sources */,
+				89D0668D36AB27D423AA395F /* SetupProtocol.swift in Sources */,
 				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */,

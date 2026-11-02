@@ -602,6 +602,12 @@ struct AerioApp: App {
                 // the DVR paths that have no view of their own; before
                 // this, a denied delete or schedule was a silent no-op.
                 .modifier(DispatcharrPermissionNoticeAlert())
+                #if os(iOS)
+                // Set up a TV (docs/DeviceSetupHandoff.md): one discovery for
+                // the dock card and the Settings banner, and the aeriotv://setup
+                // link from the system camera.
+                .modifier(SetupHandoffRoot())
+                #endif
                 .aerioTextScaleRoot(textScale)
                 .aerioSecondaryTextRoot(subtextScale: subtextScale, contrast: textContrast)
                 .aerioLogoCornersRoot(list: roundedLogoCorners, guide: roundedGuideCorners)

@@ -34,6 +34,17 @@ struct AddServerView: View {
     @State private var xmltvAdvancedExpanded: Bool = false
     @State private var xmltvTestState: XMLTVTestState = .idle
 
+    #if os(iOS)
+    // Dispatcharr user QR (scanned, picked from Photos, or imported from a
+    // file): fills the server URL and API key, switches to API Key, then runs
+    // the same Test Connection as a typed key. The username is advisory.
+    @State private var scannedUser: String?
+    /// A setup link read here opens Set up a TV.
+    @State private var scannedSetupLink: SetupTvOfferCenter.LinkBox?
+    /// Settings > Add Playlist from a user QR: the restore offer over the sync screen.
+    @State private var qrRestoreSignIn: QrImportBus.SignIn?
+    #endif
+
     enum XMLTVTestState: Equatable {
         case idle
         case testing
@@ -110,6 +121,9 @@ struct AddServerView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: viewModel.verificationSuccess)
         .fullScreenCover(item: $savedServer) { server in
             ServerSyncView(mode: .onboarding(server: server))
+                #if os(iOS)
+                .modifier(QrRestoreOfferModifier(signIn: qrRestoreSignIn))
+                #endif
                 .onDisappear {
                     // When the sync screen is dismissed, also dismiss AddServerView.
                     dismiss()
@@ -396,6 +410,26 @@ struct AddServerView: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.vertical, 4)
+
+                #if os(iOS)
+                // iPhone and iPad, in both sign-in modes: the Dispatcharr user
+                // QR fills the server and key in one step.
+                QrScanActions(enabled: !viewModel.isVerifying) { r in
+                    switch r {
+                    case .userKey(let k): applyUserKey(k)
+                    case .setupLink(let l): scannedSetupLink = .init(link: l)
+                    case .invalid: break
+                    }
+                }
+                .sheet(item: $scannedSetupLink) { box in
+                    SetUpTvView(link: box.link) { scannedSetupLink = nil }
+                }
+                if let scannedUser {
+                    Text("Signed in as \(scannedUser)")
+                        .scaledFont(.bodySmall)
+                        .foregroundColor(.accentPrimary)
+                }
+                #endif
 
                 switch viewModel.dispatcharrCredentialType {
                 case .usernamePassword:
@@ -927,6 +961,22 @@ struct AddServerView: View {
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
+    #if os(iOS)
+    private func applyUserKey(_ k: ScannedCode.UserKey) {
+        viewModel.dispatcharrCredentialType = .apiKey
+        if let base = k.baseUrl { viewModel.baseURL = base }
+        viewModel.apiKey = k.apiKey
+        scannedUser = k.username
+        QrImportBus.noteSignIn(.init(apiKey: k.apiKey, baseUrl: k.baseUrl ?? viewModel.baseURL, username: k.username))
+        if viewModel.name.trimmingCharacters(in: .whitespaces).isEmpty {
+            viewModel.name = URL(string: viewModel.baseURL)?.host ?? "Dispatcharr"
+        }
+        debugLog("[SETUP-QR] user code applied to the connect form")
+        // Signs in the same way as a typed key.
+        Task { await viewModel.verifyConnection() }
+    }
+    #endif
+
     private func saveServer() {
         // Deactivate all existing servers so only the newly added one is active.
         let existing = (try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
@@ -955,6 +1005,9 @@ struct AddServerView: View {
         // During onboarding, skip the sync view, the app root auto-detects the new server
         // and transitions to MainTabView, which handles initial data loading itself.
         if onSave != nil {
+            #if os(iOS)
+            qrRestoreSignIn = server.type == .dispatcharrAPI ? QrImportBus.takeSignIn(savedApiKey: server.effectiveApiKey) : nil
+            #endif
             savedServer = server
         } else {
             dismiss()

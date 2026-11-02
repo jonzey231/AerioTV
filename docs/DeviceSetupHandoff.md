@@ -276,4 +276,4 @@ Non-interactive, with a progress line on screen:
 | Android TV | Done | n/a |
 | Android phone and tablet | n/a | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link) |
 | Apple TV | Planned, same wire format | n/a |
-| iPhone and iPad | n/a | Planned, same wire format |
+| iPhone and iPad | n/a | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link) |

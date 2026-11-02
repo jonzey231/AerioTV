@@ -66,6 +66,11 @@ struct SettingsView: View {
     }
     @Environment(\.modelContext) private var modelContext
     @State private var showAddServer = false
+    #if os(iOS)
+    /// Set up a TV (docs/DeviceSetupHandoff.md) for the active playlist.
+    @State private var showSetUpTv = false
+    @ObservedObject private var setupCenter = SetupTvOfferCenter.shared
+    #endif
     @State private var serverToDelete: ServerConnection? = nil
     @State private var serverToEdit: ServerConnection? = nil
     @State private var showDeleteAlert = false
@@ -364,8 +369,23 @@ struct SettingsView: View {
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                         .id("settings.top")
+                    // MARK: - Set up a TV banner
+                    // The TV the dock card offers (one shared discovery and
+                    // gating), at the top of the Settings root.
+                    if let t = setupCenter.offer {
+                        SetupTvSettingsBanner(target: t,
+                                              onSetUp: { setupCenter.setUp(t) },
+                                              onDismiss: { setupCenter.dismiss(t) })
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
                     // MARK: - Playlists Section
                     Section {
+                        if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
+                            SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
+                                .listRowBackground(Color.cardBackground)
+                        }
                         if servers.isEmpty {
                             HStack {
                                 Spacer()
@@ -666,6 +686,11 @@ struct SettingsView: View {
             .settingsPushLog("route \(route)")
             }
             #endif
+            #if os(iOS)
+            .sheet(isPresented: $showSetUpTv) {
+                SetUpTvView { showSetUpTv = false }
+            }
+            #endif
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
                     .settingsSheetLog("Add Playlist")
@@ -783,6 +808,9 @@ struct SettingsView: View {
         .sheet(isPresented: $showAddServer) {
             NavigationStack { AddServerView(onSave: { _ in }) }
         }
+        .sheet(isPresented: $showSetUpTv) {
+            SetUpTvView { showSetUpTv = false }
+        }
         .sheet(item: $serverToEdit) { server in
             EditServerSheet(server: server)
         }
@@ -837,6 +865,13 @@ struct SettingsView: View {
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 14)
                     .padding(.bottom, 14)
+
+                if let t = setupCenter.offer {
+                    SetupTvSettingsBanner(target: t,
+                                          onSetUp: { setupCenter.setUp(t) },
+                                          onDismiss: { setupCenter.dismiss(t) })
+                        .padding(.bottom, 10)
+                }
 
                 padSidebarRow(.playlists, icon: "rectangle.stack.fill", iconColor: .accentPrimary,
                               title: "Playlists",
@@ -929,6 +964,10 @@ struct SettingsView: View {
     private var padPlaylistsPane: some View {
         List {
             Section {
+                if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
+                    SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
+                        .listRowBackground(Color.cardBackground)
+                }
                 if servers.isEmpty {
                     HStack {
                         Spacer()
