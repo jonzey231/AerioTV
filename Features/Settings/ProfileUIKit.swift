@@ -197,11 +197,19 @@ struct ProfilePillStyle: ButtonStyle {
     var selected = false
     @Environment(\.isFocused) private var focused
     @Environment(\.isEnabled) private var enabled
+    @Environment(\.colorScheme) private var scheme
+    /// Text on a filled pill: Android onPrimary (app background in dark, white in
+    /// light), onError (text primary) for destructive. contrastText(tint) returned
+    /// the tint itself at zero text contrast, so the label vanished on its fill.
+    private var onFill: Color {
+        if destructive { return .white }
+        return scheme == .dark ? Color.appBackground : .white
+    }
     func makeBody(configuration: Configuration) -> some View {
         let tint = destructive ? ProfileUI.errorColor : Color.accentPrimary
         return configuration.label
             .scaledFont(ProfileUI.label)
-            .foregroundColor(filled ? Color.contrastText(tint) : tint)
+            .foregroundColor(filled ? onFill : tint)
             .padding(.horizontal, ProfileUI.s(16, 28))
             .padding(.vertical, ProfileUI.s(7, 12))
             .background(Capsule().fill(filled ? tint : tint.opacity(0.14)))
