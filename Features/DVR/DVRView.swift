@@ -81,8 +81,16 @@ struct DVRView: View {
     private let gridColumns = 5
     private let gridSpacing: CGFloat = 24
     #else
-    private var gridColumns: Int { isPhone ? 3 : 2 }
+    /// Phone: three posters. iPad: Android tablet MediaPageScaffold
+    /// (GridCells.Adaptive(minSize = 120.dp)): as many 2:3 posters as fit at
+    /// 120 pt or wider, so landscape is not two stretched 16:9 cards.
+    private var gridColumns: Int {
+        if isPhone { return 3 }
+        guard gridWidth > 0 else { return 2 }
+        return max(2, Int((gridWidth + gridSpacing) / (120 + gridSpacing)))
+    }
     private var gridSpacing: CGFloat { isPhone ? 8 : 12 }
+    @State private var gridWidth: CGFloat = 0
     private let railWidth: CGFloat = 14   // matches Movies (Logan 2026-09-09)
     #endif
     /// Scroll-time numbers read only by the rail jump math, kept OUT of
@@ -1253,6 +1261,11 @@ struct DVRView: View {
             Color.clear.preference(key: GridTopKey.self,
                                    value: g.frame(in: .named("dvrScroll")).minY.rounded())
         })
+        #if os(iOS)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width.rounded() } action: { w in
+            if !isPhone && w != gridWidth { gridWidth = w }
+        }
+        #endif
         // Phone: 2 pt extra each side (column gap 8) so the alphabet rail
         // at the edge clears the posters (Logan 2026-09-09).
         .padding(.horizontal, isPhone ? 2 : 0)
@@ -1281,7 +1294,8 @@ struct DVRView: View {
             select(rec)
         } label: {
             #if os(iOS)
-            if isPhone {
+            if isPhone || inGrid {
+                // iPad grid: the same 2:3 poster as the phone and Android tablet.
                 DVRPosterCard(recording: rec, headers: headers, progress: progressFraction(rec))
             } else {
                 DVRRecordingCard(recording: rec, headers: headers, progress: progressFraction(rec))
