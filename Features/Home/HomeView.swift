@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 import Foundation
 import Security
+import Network
 
 // MARK: - VOD Store
 // Shared ObservableObject owned by MainTabView.
@@ -1667,6 +1668,34 @@ final class ChannelStore: ObservableObject {
         if cancelled.isEmpty { debugLog("[PLAYLIST] delete: no running channel tasks for \(name)") }
     }
 
+    // MARK: Resume refresh (jonzey231/AerioTV-Android#147)
+
+    private static func channelRefreshKey(_ serverID: UUID) -> String {
+        "lastChannelRefreshAt.\(serverID.uuidString)"
+    }
+
+    /// When this playlist's channels were last fetched successfully.
+    static func lastChannelRefresh(serverID: UUID) -> Date? {
+        let t = UserDefaults.standard.double(forKey: channelRefreshKey(serverID))
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+
+    static func noteChannelRefresh(serverID: UUID) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: channelRefreshKey(serverID))
+    }
+
+    /// Silent channel re-pull for a resume: the list on screen stays up
+    /// (load only shows the spinner when there is nothing cached) and the
+    /// fetch replaces it when it lands.
+    func refreshChannelsQuietly(servers: [ServerConnection]) async {
+        guard let server = servers.first(where: { $0.isActive }) ?? servers.first,
+              server.id == currentChannelServerID, !channels.isEmpty else { return }
+        loadTask?.cancel()
+        let task = Task { await load(server: server) }
+        loadTask = task
+        await task.value
+    }
+
     /// Called by MainTabView whenever the server list changes.
     func refresh(servers: [ServerConnection]) {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
@@ -2109,6 +2138,7 @@ final class ChannelStore: ObservableObject {
                 orderedGroups = groups
                 error = nil
                 debugLog("🔷 ChannelStore.load: published \(items.count) channels")
+                Self.noteChannelRefresh(serverID: serverID)
                 // Every channel load / playlist refresh re-reads the
                 // Dispatcharr user level and permission flags, so a change
                 // made on the server gates the UI without re-adding the
@@ -5524,6 +5554,90 @@ struct MainTabView: View {
         }
     }
 
+    /// Last resume-triggered playlist refresh, process-wide (at most one
+    /// per resume).
+    private static var lastResumeRefreshAt: Date?
+    /// Set when the scene reaches .background; the next activation is a resume.
+    private static var reachedBackground = false
+
+    /// jonzey231/AerioTV-Android#147: a device that sleeps overnight keeps
+    /// AerioTV alive, so the morning open is a resume, not the cold launch
+    /// that refreshes the playlist. When the last channel refresh is older
+    /// than the Background Refresh interval (a daily schedule counts as 24
+    /// hours), re-pull the channels, then run the guide freshness check.
+    /// Same conditions as Android's background job: a network that is not
+    /// expensive or constrained, and a battery that is not low. Returns true
+    /// when it took over the foreground guide check.
+    private func refreshPlaylistIfDueOnResume() -> Bool {
+        guard !channelStore.channels.isEmpty, !channelStore.isLoading, !channelStore.isEPGLoading,
+              let server = allServers.first(where: { $0.isActive }) ?? allServers.first,
+              let last = ChannelStore.lastChannelRefresh(serverID: server.id) else { return false }
+        let age = Date().timeIntervalSince(last)
+        let type = UserDefaults.standard.string(forKey: "bgRefreshType") ?? "interval"
+        let stored = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
+        let intervalMins = type == "time" ? 24 * 60 : (stored > 0 ? stored : 24 * 60)
+        guard age > Double(intervalMins) * 60 else { return false }
+        if let prev = Self.lastResumeRefreshAt, Date().timeIntervalSince(prev) < 60 { return false }
+        Self.lastResumeRefreshAt = Date()
+        let ageText: String = {
+            let m = Int(age / 60)
+            return m >= 60 ? "\(m / 60)h\(m % 60)m" : "\(m)m"
+        }()
+        let servers = allServers
+        Task { @MainActor in
+            guard await Self.resumeRefreshConditionsMet() else {
+                debugLog("[REFRESH] resume: last refresh \(ageText) > interval \(intervalMins); waiting for an unmetered network and battery")
+                Self.lastResumeRefreshAt = nil
+                refreshGuideIfStale(reason: "foreground")
+                return
+            }
+            debugLog("[REFRESH] resume: last refresh \(ageText) > interval \(intervalMins); refreshing")
+            await channelStore.refreshChannelsQuietly(servers: servers)
+            // The guide keeps its own freshness rule.
+            refreshGuideIfStale(reason: "resume")
+        }
+        return true
+    }
+
+    /// Unmetered network (not expensive, not constrained) and a battery
+    /// that is not low (charging, unknown, no battery, or above 15 percent).
+    private static func resumeRefreshConditionsMet() async -> Bool {
+        let path: NWPath = await withCheckedContinuation { cont in
+            let monitor = NWPathMonitor()
+            let once = OnceFlag()
+            monitor.pathUpdateHandler = { p in
+                guard once.claim() else { return }
+                monitor.cancel()
+                cont.resume(returning: p)
+            }
+            monitor.start(queue: DispatchQueue(label: "aerio.resume-refresh.path"))
+        }
+        guard path.status == .satisfied, !path.isExpensive, !path.isConstrained else { return false }
+        #if os(iOS)
+        let device = UIDevice.current
+        let wasMonitoring = device.isBatteryMonitoringEnabled
+        device.isBatteryMonitoringEnabled = true
+        let state = device.batteryState
+        let level = device.batteryLevel
+        if !wasMonitoring { device.isBatteryMonitoringEnabled = false }
+        if state == .charging || state == .full || state == .unknown || level < 0 { return true }
+        return level > 0.15
+        #else
+        return true
+        #endif
+    }
+
+    private final class OnceFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var done = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if done { return false }
+            done = true
+            return true
+        }
+    }
+
     /// When the app last left the foreground, for the permission re-probe.
     private static var backgroundedAt: Date?
     /// Away this long and the next foreground re-reads permissions.
@@ -5531,7 +5645,12 @@ struct MainTabView: View {
 
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         if newPhase != .active { Self.backgroundedAt = Date() }
+        if newPhase == .background { Self.reachedBackground = true }
         guard oldPhase != .active, newPhase == .active else { return }
+        // Only a return from the background is a resume; the cold launch's
+        // first activation and a Control Center pull are not.
+        let isResume = Self.reachedBackground
+        Self.reachedBackground = false
         // Away longer than a minute: re-read permissions for real rather than
         // letting the staleness gate hold an answer from hours ago. Matches
         // Android's foreground re-probe window.
@@ -5539,8 +5658,12 @@ struct MainTabView: View {
             Date().timeIntervalSince($0) >= Self.foregroundReprobeSeconds
         } ?? false
         // Independent of the guide staleness gate below: one cheap request,
-        // throttled to 15 minutes per server.
-        refreshGuideIfStale(reason: "foreground")
+        // throttled to 15 minutes per server. A resume past the Background
+        // Refresh interval re-pulls the channels first and runs this same
+        // guide check after them.
+        if !(isResume && refreshPlaylistIfDueOnResume()) {
+            refreshGuideIfStale(reason: "foreground")
+        }
         checkEPGSourcesForChanges(reason: "foreground")
         // Foreground after a while: re-read the per-user capability
         // snapshot so a permission the admin changed while the app was
