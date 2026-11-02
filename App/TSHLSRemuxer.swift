@@ -421,11 +421,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         case unsupportedCodec(String)
         case ingestFailed(String)
         case serverFailed
+        /// jonzey231/AerioTV-Android#159: the live URL was redirected
+        /// (Redirect stream profile) and the target answered an HLS
+        /// playlist, not MPEG-TS. The host re-tunes `upstreamHLSRedirect`
+        /// through direct HLS. The description never carries the URL.
+        case upstreamHLS
 
         var description: String {
             switch self {
             case .unsupportedCodec(let codec): return "unsupported codec: \(codec)"
             case .ingestFailed(let reason):    return "ingest failed: \(reason)"
+            case .upstreamHLS:                 return "live redirect answered HLS"
             case .serverFailed:                return "local HLS server failed"
             }
         }
@@ -848,6 +854,49 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var flipGeneration = 0
     private let queue = DispatchQueue(label: "com.aerio.tsremux")
     private var urlSession: URLSession?
+
+    // MARK: Redirect stream profile (jonzey231/AerioTV-Android#159)
+
+    /// Dispatcharr's Redirect stream profile answers the live URL with a
+    /// 302 straight to the provider (live_proxy/views.py
+    /// _handle_redirect_stream), and the provider serves whatever it
+    /// serves: MPEG-TS, an HLS playlist, or another redirect. Set on the
+    /// URLSession delegate queue when a redirect hop happens; the first
+    /// bytes after it are sniffed before the demux sees them.
+    private var redirectSniffPending = false
+    private var redirectSniffBuffer = Data()
+    private var redirectCrossHost = false
+    private var redirectLandedURL: URL?
+    /// Set when a redirected live open answered an HLS playlist: the
+    /// landed URL and whether it is on another host (the host then plays
+    /// it without Dispatcharr's auth headers). Read on main after onError.
+    private(set) var upstreamHLSRedirect: (url: URL, crossHost: Bool)?
+    /// Headers that authenticate to Dispatcharr and never follow a
+    /// redirect to another host.
+    static let serverAuthHeaders = ["X-API-Key", "Authorization", "Cookie"]
+
+    static func withoutServerAuth(_ headers: [String: String]) -> [String: String] {
+        headers.filter { key, _ in
+            !serverAuthHeaders.contains { $0.caseInsensitiveCompare(key) == .orderedSame }
+        }
+    }
+
+    enum SniffedContent: String { case ts, hls, unknown }
+
+    /// Classifies the first bytes of a body: 0x47 TS sync, `#EXTM3U`, or neither.
+    static func sniffContent(_ data: Data) -> SniffedContent {
+        let b = [UInt8](data.prefix(1024))
+        var i = 0
+        if b.count >= 3, b[0] == 0xEF, b[1] == 0xBB, b[2] == 0xBF { i = 3 }
+        while i < b.count, [0x20, 0x0D, 0x0A, 0x09].contains(b[i]) { i += 1 }
+        let tag = Array("#EXTM3U".utf8)
+        if b.count - i >= tag.count, Array(b[i..<(i + tag.count)]) == tag { return .hls }
+        if let first = b.first, first == 0x47 {
+            if b.count > 188 { return b[188] == 0x47 ? .ts : .unknown }
+            return .ts
+        }
+        return .unknown
+    }
     private var ingestTask: URLSessionDataTask?
     /// LiveConnectionRegistry id of the open ingest (single-connection
     /// invariant). Lock-free reads are fine: written on `queue` in
@@ -1257,6 +1306,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         firstByteLock.lock(); activeSession = session; firstByteLock.unlock()
         var request = URLRequest(url: sourceURL)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        redirectSniffPending = false
+        redirectSniffBuffer.removeAll()
+        redirectCrossHost = false
+        redirectLandedURL = nil
+        upstreamHLSRedirect = nil
         let task = session.dataTask(with: request)
         ingestTask = task
         releaseConnection()
@@ -4138,6 +4192,30 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             + "local=\(t.localAddress ?? "?") reused=\(t.isReusedConnection)")
     }
 
+    /// Redirect stream profile (jonzey231/AerioTV-Android#159): follow the
+    /// hop, but never carry Dispatcharr's auth headers to another host.
+    /// URLSession re-sends the original request's custom headers on a
+    /// redirect, so a cross-host hop gets X-API-Key, Authorization, and
+    /// Cookie removed here.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        guard isCurrentIngest(session) else { completionHandler(nil); return }
+        var next = request
+        let originalHost = sourceURL.host?.lowercased()
+        let nextHost = request.url?.host?.lowercased()
+        let crossHost = originalHost == nil || originalHost != nextHost
+        if crossHost {
+            for key in Self.serverAuthHeaders { next.setValue(nil, forHTTPHeaderField: key) }
+            redirectCrossHost = true
+        }
+        redirectSniffPending = true
+        redirectSniffBuffer.removeAll()
+        redirectLandedURL = request.url
+        completionHandler(next)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -4191,6 +4269,23 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
                 failWithIngestError()
             }
             return
+        }
+        var data = data
+        if redirectSniffPending {
+            // Two TS packets is enough to tell TS from a playlist.
+            redirectSniffBuffer.append(data)
+            guard redirectSniffBuffer.count >= 376 else { return }
+            redirectSniffPending = false
+            data = redirectSniffBuffer
+            redirectSniffBuffer.removeAll()
+            let content = Self.sniffContent(data)
+            debugLog("[LIVE] redirect -> \(redirectCrossHost ? "cross-host" : "same-host") content=\(content.rawValue)")
+            if content == .hls, let landed = redirectLandedURL {
+                upstreamHLSRedirect = (landed, redirectCrossHost)
+                dataTask.cancel()
+                queue.async { [weak self] in self?.fail(.upstreamHLS) }
+                return
+            }
         }
         // "First byte" marker (review 2026-09-11, marker inventory): the
         // log had NOTHING between `ingest started` and the PAT parse, so
@@ -4246,6 +4341,19 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         if errorStatusCode != nil {
             failWithIngestError()
             return
+        }
+        // A redirected answer shorter than the sniff window (a small HLS
+        // playlist): classify what arrived before treating it as EOF.
+        if redirectSniffPending, error == nil, !redirectSniffBuffer.isEmpty {
+            redirectSniffPending = false
+            let content = Self.sniffContent(redirectSniffBuffer)
+            debugLog("[LIVE] redirect -> \(redirectCrossHost ? "cross-host" : "same-host") content=\(content.rawValue)")
+            redirectSniffBuffer.removeAll()
+            if content == .hls, let landed = redirectLandedURL {
+                upstreamHLSRedirect = (landed, redirectCrossHost)
+                queue.async { [weak self] in self?.fail(.upstreamHLS) }
+                return
+            }
         }
         guard let error, (error as NSError).code != NSURLErrorCancelled else {
             // Clean EOF. For event (catch-up / local-file) playlists this
@@ -5447,6 +5555,11 @@ struct AVPlayerMultiviewTile: View {
     /// TS, AVPlayer -11850): the same channel re-tuned once through the
     /// on-device TS remux, on the URL without the HLS upgrade.
     @State private var directHLSFallbackURL: URL?
+    /// jonzey231/AerioTV-Android#159: a Redirect-profile live URL whose
+    /// target answered an HLS playlist. start() plays it through direct
+    /// HLS (without Dispatcharr's auth headers when it is on another host)
+    /// instead of the TS remux. Cleared on a channel flip.
+    @State private var redirectHLSTarget: (url: URL, crossHost: Bool)?
     /// Developer Force HLS: when the forced direct-HLS tile started, for
     /// the [FORCE-HLS] first-frame time. Nil on every other path.
     @State private var forceHLSStartedAt: Date?
@@ -5980,6 +6093,7 @@ struct AVPlayerMultiviewTile: View {
             // not follow the flip: liveSourceURL prefers it over streamURL,
             // so the flip would re-open the OLD channel.
             directHLSFallbackURL = nil
+            redirectHLSTarget = nil
             forceHLSStartedAt = nil
             mismatchAutoRetries = 0
             serverBusyRetries = 0
@@ -6820,6 +6934,23 @@ struct AVPlayerMultiviewTile: View {
         // suspended-adjacent (state .background with PiP inactive) - the
         // resume handler owns recovery, not the card.
         if backgroundSuspended { return }
+        #endif
+        // Redirect stream profile answered HLS: re-tune the redirect
+        // target through direct HLS once, ahead of every other recovery.
+        if !isVOD, !isDVR, catchup == nil, redirectHLSTarget == nil,
+           let target = remuxer?.upstreamHLSRedirect {
+            debugLog("[LIVE] redirect answered HLS; re-tuning the redirect target through HLS channel=\(channelName)")
+            redirectHLSTarget = target
+            stop()
+            statusText = "Retrying..."
+            let token = teardownToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard token == teardownToken else { return }
+                start()
+            }
+            return
+        }
+        #if os(iOS)
         // An AirPlay receiver is served from this tile's remuxer (device
         // log 2026-10-04 16:09:45): a dead ingest is retried IN PLACE, in
         // the background as in the foreground, so the LAN listener and the
@@ -7558,6 +7689,13 @@ struct AVPlayerMultiviewTile: View {
         }
         if isVOD {
             startVOD()
+            return
+        }
+        if let target = redirectHLSTarget {
+            let hopHeaders = target.crossHost ? TSHLSRemuxer.withoutServerAuth(headers) : headers
+            LivePrewarm.shared.cancel(reason: "redirect target playing direct HLS")
+            startPlayer(url: target.url, requestHeaders: hopHeaders)
+            debugLog("[AVP-MV] tile playing redirect target as direct HLS crossHost=\(target.crossHost) channel=\(channelName)")
             return
         }
         var sourceURL = liveSourceURL
