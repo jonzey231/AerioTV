@@ -148,6 +148,7 @@ struct ProfileRoleStepView: View {
                     .padding(.horizontal, stepIsTV ? 80 : 20)
                     .padding(.vertical, stepIsTV ? 60 : 24)
                 }
+                .onboardingPadCentered()
             }
         }
         .navigationBarHidden(true)
@@ -584,7 +585,7 @@ struct AddProfilesStepView: View {
                 }
                 pickControls(users).padding(.bottom, 16)
             }
-            .frame(maxWidth: 640)
+            .onboardingPadWidth(560, other: 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 20)
         }
@@ -721,10 +722,11 @@ struct AddProfilesStepView: View {
                 countLine
                 setUpTvLink
             }
-            .frame(maxWidth: stepIsTV ? 1000 : 640)
+            .onboardingPadWidth(560, other: stepIsTV ? 1000 : 640)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, stepIsTV ? 80 : 20)
             .padding(.vertical, stepIsTV ? 48 : 24)
         }
+        .onboardingPadCentered()
     }
 }

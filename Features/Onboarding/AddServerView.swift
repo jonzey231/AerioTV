@@ -4,6 +4,9 @@ import SwiftData
 struct AddServerView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
 
     @State private var viewModel = ServerConnectionViewModel()
     /// false = type picker shown first; true = form fields revealed
@@ -89,8 +92,11 @@ struct AddServerView: View {
                     }
                     Spacer(minLength: 40)
                 }
-                .padding(20)
+                .onboardingPadWidth(560)
+                .padding(.horizontal, isPad ? 40 : 20)
+                .padding(.vertical, 20)
             }
+            .onboardingPadCentered()
             }
         }
         .onAppear {
@@ -194,7 +200,7 @@ struct AddServerView: View {
                 tvFooter
             }
         }
-        .frame(maxWidth: isTV ? 1200 : 640)
+        .onboardingPadWidth(560, other: isTV ? 1200 : 640)
         .frame(maxWidth: .infinity)
     }
 
@@ -219,10 +225,10 @@ struct AddServerView: View {
             }
 
             LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(), spacing: isTV ? 14 : 8, alignment: .top),
+                columns: Array(repeating: GridItem(.flexible(), spacing: isTV ? 14 : (isPad ? 6 : 8), alignment: .top),
                                count: isTV ? 3 : 2),
                 alignment: .leading,
-                spacing: isTV ? 14 : 8
+                spacing: isTV ? 14 : (isPad ? 6 : 8)
             ) {
                 ForEach(Self.dispatcharrFeatures, id: \.title) { feature in
                     HStack(alignment: .top, spacing: isTV ? 12 : 8) {
@@ -236,8 +242,9 @@ struct AddServerView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
                     }
-                    .padding(isTV ? 14 : 10)
-                    .frame(maxWidth: .infinity, minHeight: isTV ? 72 : 52, alignment: .topLeading)
+                    .padding(.horizontal, isTV ? 14 : 10)
+                    .padding(.vertical, isTV ? 14 : (isPad ? 8 : 10))
+                    .frame(maxWidth: .infinity, minHeight: isTV ? 72 : (isPad ? nil : 52), alignment: .topLeading)
                     .background(
                         RoundedRectangle(cornerRadius: isTV ? 12 : 10, style: .continuous)
                             .fill(Color.elevatedBackground)
@@ -1030,5 +1037,60 @@ struct AddServerView: View {
         } else {
             dismiss()
         }
+    }
+}
+
+// MARK: - iPad onboarding layout
+
+/// iPad onboarding layout (Android tablet rules, ui/adaptive Adaptive.kt:
+/// onboardingMaxWidth 560 dp past compact width, content centered). Only the
+/// regular-width iOS path changes; iPhone (compact) and tvOS get `other` and
+/// the default scroll alignment, exactly as before.
+struct OnboardingPadWidth: ViewModifier {
+    let pad: CGFloat
+    let other: CGFloat?
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if horizontalSizeClass == .regular {
+            content.frame(maxWidth: pad).frame(maxWidth: .infinity)
+        } else if let other {
+            content.frame(maxWidth: other)
+        } else {
+            content
+        }
+        #else
+        if let other { content.frame(maxWidth: other) } else { content }
+        #endif
+    }
+}
+
+/// iPad: a scroll view's content sits vertically centered while it fits and
+/// scrolls from the top when it does not. iPhone and tvOS are unchanged.
+struct OnboardingPadCentered: ViewModifier {
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        content.defaultScrollAnchor(horizontalSizeClass == .regular ? .center : nil, for: .alignment)
+        #else
+        content
+        #endif
+    }
+}
+
+extension View {
+    /// Caps width at `pad` on iPad; `other` (nil = no cap) elsewhere.
+    func onboardingPadWidth(_ pad: CGFloat = 560, other: CGFloat? = nil) -> some View {
+        modifier(OnboardingPadWidth(pad: pad, other: other))
+    }
+
+    func onboardingPadCentered() -> some View {
+        modifier(OnboardingPadCentered())
     }
 }

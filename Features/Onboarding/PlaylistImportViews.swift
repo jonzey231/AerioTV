@@ -57,8 +57,10 @@ struct M3UImportView: View {
 
                         Spacer(minLength: 40)
                     }
+                    .onboardingPadWidth(560)
                     .padding(20)
                 }
+                .onboardingPadCentered()
             }
             .navigationTitle("Import M3U Playlist")
             #if os(iOS)
@@ -436,8 +438,10 @@ struct EPGImportView: View {
 
                         Spacer(minLength: 40)
                     }
+                    .onboardingPadWidth(560)
                     .padding(20)
                 }
+                .onboardingPadCentered()
             }
             .navigationTitle("Import EPG Guide")
             #if os(iOS)

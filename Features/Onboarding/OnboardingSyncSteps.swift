@@ -139,7 +139,7 @@ struct DispatcharrSyncStepView: View {
                     .foregroundColor(Color.contrastText(.textTertiary))
                     .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: tv ? 900 : 520)
+            .onboardingPadWidth(560, other: tv ? 900 : 520)
         }
         #if os(tvOS)
         .onAppear { turnOnFocused = true }
@@ -212,7 +212,7 @@ struct CloudBackupOfferStepView: View {
                     .padding(.top, 8)
                 SyncStepSecondaryButton(title: "Not now") { if !busy { onNotNow() } }
             }
-            .frame(maxWidth: tv ? 900 : 520)
+            .onboardingPadWidth(560, other: tv ? 900 : 520)
         }
         .navigationBarHidden(true)
     }

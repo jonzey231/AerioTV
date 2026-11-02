@@ -223,6 +223,8 @@ struct ServerSyncView: View {
 
                 Spacer().frame(height: 20)
             }
+            // iPad: Android SettingUpScreen's 520 dp column.
+            .onboardingPadWidth(520)
         }
         .interactiveDismissDisabled(interactiveDismissDisabled)
         // While saving, Menu / Back must not tear the cover down and drop
