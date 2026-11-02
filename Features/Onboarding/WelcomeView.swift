@@ -91,20 +91,15 @@ struct WelcomeView: View {
     // MARK: Copy
 
     private var headline: String {
-        if isTV { return "Welcome. Let's get your TV connected." }
-        return isRegularWidth ? "Welcome. Let's get connected." : "Welcome. Let's connect your content."
-    }
-
-    private var bodyCopy: String {
-        isTV
-            ? "Live TV with a full guide, movies, series, and DVR from your own server. Nothing is bundled, so the first step is telling AerioTV where your content lives."
-            : "Live TV with a guide, movies, series, and DVR from your own server. First, tell AerioTV where it lives."
+        // Android WelcomeScreen.kt: two-line headline, no body paragraph.
+        if isTV { return "Welcome.\nLet's get your TV connected." }
+        return isRegularWidth ? "Welcome.\nLet's get connected." : "Welcome.\nLet's set up your content."
     }
 
     private var connectDetail: String {
         isTV
-            ? "Enter the details yourself. Dispatcharr, Xtream Codes, or an M3U playlist with an EPG."
-            : "Dispatcharr, Xtream Codes, or an M3U playlist with an EPG."
+            ? "Enter the details yourself. Dispatcharr, Xtream Codes, or an M3U playlist with an optional EPG."
+            : "Dispatcharr, Xtream Codes, or an M3U playlist with an optional EPG."
     }
 
     private var cloudSyncDetail: String {
@@ -281,16 +276,22 @@ struct WelcomeView: View {
 
     private var brandColumn: some View {
         VStack(alignment: .leading, spacing: isTV ? 20 : 12) {
-            Text("AerioTV")
-                .scaledFont(.system(size: isTV ? 34 : 20, weight: .bold))
-                .foregroundColor(.accentPrimary)
+            // The logo with the name, centered (Android WelcomeLogo).
+            HStack(spacing: isTV ? 16 : 10) {
+                Image("AerioLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(height: isTV ? 64 : 44)
+                Text("AerioTV")
+                    .scaledFont(.system(size: isTV ? 44 : 28, weight: .bold))
+                    .foregroundColor(.textPrimary)
+            }
+            .accessibilityElement(children: .combine)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, isTV ? 12 : 12)
             Text(headline)
                 .scaledFont(.system(size: isTV ? 56 : (isRegularWidth ? 40 : 30), weight: .bold))
                 .foregroundColor(.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(bodyCopy)
-                .scaledFont(isTV ? .system(size: 26).subtext() : .bodyLarge.subtext())
-                .foregroundColor(Color.contrastText(.textSecondary))
                 .fixedSize(horizontal: false, vertical: true)
             if isTV {
                 HStack(spacing: 10) {
@@ -367,7 +368,9 @@ struct WelcomeView: View {
                 #endif
                 .padding(.top, isTV ? 16 : 10)
             } else {
-                VStack(alignment: .leading, spacing: 8) {
+                // Phone and tablet center Skip and its line; TV keeps them
+                // leading (Android SkipPill centered = !isTv).
+                VStack(alignment: isTV ? .leading : .center, spacing: 8) {
                     OnboardingPillButton(title: "Skip for now", filled: false) {
                         Task { @MainActor in await SetupSourceCoordinator.shared.releaseHeld() }
                         hold.end("skip")
@@ -379,8 +382,10 @@ struct WelcomeView: View {
                     Text(skipFootnote)
                         .scaledFont(isTV ? .system(size: 20).subtext() : .bodySmall.subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
+                        .multilineTextAlignment(isTV ? .leading : .center)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: .infinity, alignment: isTV ? .leading : .center)
                 .padding(.top, isTV ? 16 : 10)
             }
         }
