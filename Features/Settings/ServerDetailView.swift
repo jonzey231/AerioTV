@@ -185,6 +185,8 @@ struct ServerDetailView: View {
     /// Set up a TV with this playlist (docs/DeviceSetupHandoff.md).
     @State private var showSetUpTv = false
     #endif
+    /// Profiles section (Dispatcharr playlists): one presentation for every profile prompt.
+    @StateObject private var profilesFlow = ProfilesFlowModel()
     @State private var isRefreshingPlaylist = false
     /// "Refresh Permissions" row: an unthrottled capability probe.
     @State private var isRefreshingPermissions = false
@@ -266,6 +268,7 @@ struct ServerDetailView: View {
             }
         }
         .sheet(item: $editingServer) { EditServerSheet(server: $0) }
+        .profilesFlowPresentation(server.type == .dispatcharrAPI ? server.id.uuidString : nil, model: profilesFlow)
         .sheet(isPresented: $showSetUpTv) {
             SetUpTvView(server: server) { showSetUpTv = false }
         }
@@ -535,6 +538,12 @@ struct ServerDetailView: View {
                         SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.detailSubtitle) { showSetUpTv = true }
                             .listRowBackground(Color.cardBackground)
                     }
+                }
+                #endif
+
+                #if os(iOS)
+                if server.type == .dispatcharrAPI {
+                    ProfilesSettingsSection(playlistId: server.id.uuidString, model: profilesFlow)
                 }
                 #endif
 
