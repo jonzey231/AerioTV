@@ -1476,6 +1476,8 @@ struct RootView: View {
                 WatchlistManager.modelContext = modelContext
                 // Dispatcharr Sync: idle unless Settings > Sync turns it on.
                 DispatcharrSyncManager.shared.start()
+                // Rule 4 coordinator: registers the Rule 5 "choice pending" gate with the manager.
+                _ = SetupSourceCoordinator.shared
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }
