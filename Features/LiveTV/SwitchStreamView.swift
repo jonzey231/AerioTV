@@ -255,6 +255,15 @@ struct SwitchStreamView: View {
     /// a cover, so the focus engine won't auto-land somewhere for us).
     /// "done" until streams load, then the first stream row.
     @FocusState private var focusedRow: String?
+    /// Hold-to-reorder (Android 714152b8 parity): the stream lifted by a
+    /// long press on its focused row, nil at rest. Up / Down move it on a
+    /// local copy, Select places it with one save, Menu restores.
+    @State private var liftedStreamID: Int?
+    /// The order when the row was lifted, restored by Menu.
+    @State private var orderBeforeLift: [DispatcharrStream]?
+    /// The long press lifts while Select is still held; the Button action
+    /// that the release produces must not place the row (or switch).
+    @State private var swallowNextSelect = false
     #endif
 
     private var activeServer: ServerConnection? {
@@ -294,14 +303,29 @@ struct SwitchStreamView: View {
     // MARK: - Load
 
     private func load() async {
-        // Re-read the user level before listing: an admin can demote (or
-        // promote) the account at any time, and the picker must follow the
-        // live answer, not the one cached at launch.
-        guard await SwitchStreamFlow.recheckAdmin(server: activeServer, trigger: "Switch Stream open") else {
+        // Re-read the user level on open: an admin can demote (or promote)
+        // the account at any time, and the picker follows the live answer,
+        // not the one cached at launch. The re-read runs ALONGSIDE the list
+        // loads instead of before them (Android 6485bee7: the serial probe
+        // held the sheet for seconds); a denied answer replaces the list with
+        // the denial, and the server refuses a switch from a non-admin
+        // regardless.
+        let openedAt = Date()
+        let allowedTask = Task { @MainActor in
+            await SwitchStreamFlow.recheckAdmin(server: activeServer, trigger: "Switch Stream open")
+        }
+        await loadLists()
+        let allowed = await allowedTask.value
+        guard allowed else {
+            streams = []
             loadError = SwitchStreamFlow.switchDeniedMessage
             isLoading = false
             return
         }
+        debugLog("[SwitchStream] sheet open +\(Int(Date().timeIntervalSince(openedAt) * 1000))ms")
+    }
+
+    private func loadLists() async {
         guard let api = makeAPI() else {
             loadError = "Switch Stream is only available on a Dispatcharr Direct Connect playlist."
             isLoading = false
@@ -448,21 +472,67 @@ struct SwitchStreamView: View {
     }
     #endif
 
-    /// tvOS Move Up / Move Down: shifts one row by `offset` (-1 or +1).
-    private func moveStream(_ stream: DispatcharrStream, by offset: Int) {
-        guard canReorder, !isSavingOrder,
-              let index = streams.firstIndex(where: { $0.id == stream.id }) else { return }
-        let target = index + offset
-        guard streams.indices.contains(target) else { return }
-        let previous = streams
-        streams.swapAt(index, target)
-        saveOrder(previous: previous)
-        #if os(tvOS)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            focusedRow = "stream-\(stream.id)"
-        }
-        #endif
+    #if os(tvOS)
+    // MARK: tvOS hold-to-reorder (Android 714152b8, f58e3c22)
+
+    /// Long press on the focused row: lift it.
+    private func liftFocusedRow() {
+        guard canReorder, !isSavingOrder, !isSwitching, liftedStreamID == nil,
+              let row = focusedRow, row.hasPrefix("stream-"),
+              let id = Int(row.dropFirst("stream-".count)),
+              let at = streams.firstIndex(where: { $0.id == id }) else { return }
+        orderBeforeLift = streams
+        swallowNextSelect = true
+        withAnimation(.easeInOut(duration: 0.15)) { liftedStreamID = id }
+        debugLog("[SwitchStream] pick-up start id=\(id) at=\(at)")
     }
+
+    /// Up / Down while lifted: move the lifted row by `delta` on the local copy.
+    private func moveLifted(by delta: Int) {
+        guard let id = liftedStreamID,
+              let index = streams.firstIndex(where: { $0.id == id }) else { return }
+        let target = index + delta
+        guard streams.indices.contains(target) else { return }
+        withAnimation(.easeInOut(duration: 0.12)) {
+            streams.move(fromOffsets: IndexSet(integer: index), toOffset: delta > 0 ? target + 1 : target)
+        }
+        focusedRow = "stream-\(id)"
+    }
+
+    /// Select while lifted: place the row and save the full order ONCE
+    /// through saveOrder (skipped when the row did not move).
+    private func placeLifted() {
+        guard let id = liftedStreamID, let previous = orderBeforeLift else { return }
+        let from = previous.firstIndex(where: { $0.id == id }) ?? -1
+        let to = streams.firstIndex(where: { $0.id == id }) ?? -1
+        withAnimation(.easeInOut(duration: 0.15)) { liftedStreamID = nil }
+        orderBeforeLift = nil
+        debugLog("[SwitchStream] pick-up drop id=\(id) from=\(from) to=\(to) save=\(from != to)")
+        if from != to { saveOrder(previous: previous) }
+        focusedRow = "stream-\(id)"
+    }
+
+    /// Menu while lifted: restore the order and keep the sheet open.
+    private func cancelLifted() {
+        guard let id = liftedStreamID else { return }
+        let from = orderBeforeLift?.firstIndex(where: { $0.id == id }) ?? -1
+        if let previous = orderBeforeLift {
+            withAnimation(.easeInOut(duration: 0.15)) { streams = previous }
+        }
+        withAnimation(.easeInOut(duration: 0.15)) { liftedStreamID = nil }
+        orderBeforeLift = nil
+        debugLog("[SwitchStream] pick-up cancel id=\(id) from=\(from)")
+        focusedRow = "stream-\(id)"
+    }
+
+    /// The row Button's action: places a lifted row, otherwise switches.
+    private func rowPressed(_ stream: DispatcharrStream) {
+        if swallowNextSelect { swallowNextSelect = false; return }
+        if liftedStreamID != nil { placeLifted(); return }
+        if isSavingOrder { return }
+        select(stream)
+    }
+    #endif
 
     /// PATCHes the full member-stream order (Dispatcharr deletes links
     /// missing from the list, so every id goes). On failure the list is
@@ -583,6 +653,11 @@ struct SwitchStreamView: View {
     // MARK: - iOS
 
     #if os(iOS)
+    private var iOSSubtitle: String? {
+        guard canReorder else { return nil }
+        return editMode.isEditing ? "Drag the handle to reorder" : "Tap Reorder to change the stream order"
+    }
+
     private var iOSBody: some View {
         List {
             if isLoading {
@@ -634,15 +709,28 @@ struct SwitchStreamView: View {
                         }
                     }
                 } footer: {
-                    Text(canReorder
-                         ? "Switches the active upstream for this channel. The picture follows in a few seconds. Tap Reorder to change the stream priority."
-                         : "Switches the active upstream for this channel. The picture follows in a few seconds.")
+                    // The reorder hint lives in the subtitle now; no repeat here.
+                    Text("Switches the active upstream for this channel. The picture follows in a few seconds.")
                 }
             }
         }
         .navigationTitle("Switch Stream")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Pinned, centered header; the subtitle is the reorder hint for
+            // admins (the handles appear only after Reorder is tapped).
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text("Switch Stream")
+                        .font(.headline)
+                    if let subtitle = iOSSubtitle {
+                        Text(subtitle)
+                            .scaledFont(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
             ToolbarItem(placement: .cancellationAction) {
                 Button("Done") { close() }
             }
@@ -666,18 +754,29 @@ struct SwitchStreamView: View {
     // MARK: - tvOS
 
     #if os(tvOS)
+    private var tvOSSubtitle: String? {
+        guard canReorder else { return nil }
+        return liftedStreamID != nil
+            ? "Up / Down to move, OK to place, Menu to cancel"
+            : "Long press to select and reorder"
+    }
+
     private var tvOSBody: some View {
         VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Switch Stream")
-                        .scaledFont(.system(size: 42, weight: .bold))
-                    Text(channelName)
+            // Pinned above the scrolling rows, centered; the subtitle is the
+            // reorder hint for admins. Not focusable.
+            VStack(spacing: 6) {
+                Text("Switch Stream")
+                    .scaledFont(.system(size: 42, weight: .bold))
+                if let subtitle = tvOSSubtitle {
+                    Text(subtitle)
                         .scaledFont(.system(size: 24).subtext())
                         .foregroundColor(Color.contrastText(.textSecondary))
+                        .lineLimit(1)
                 }
-                Spacer()
             }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 80)
             .padding(.top, 60)
             .padding(.bottom, 28)
@@ -696,6 +795,7 @@ struct SwitchStreamView: View {
                     messageCard("No alternate streams for this channel.", systemImage: "rectangle.on.rectangle.slash", tint: .textSecondary)
                     Spacer()
                 } else {
+                    ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
                             if let switchError {
@@ -713,50 +813,47 @@ struct SwitchStreamView: View {
                                 }
                                 .padding(.horizontal, 80)
                             }
-                            ForEach(Array(streams.enumerated()), id: \.element.id) { index, stream in
-                                HStack(spacing: 16) {
-                                    SwitchStreamRow(
-                                        title: titleLine(for: stream),
-                                        meta: metaLine(for: stream),
-                                        isSelected: selectedStreamID == stream.id,
-                                        action: { select(stream) }
-                                    )
-                                    .focused($focusedRow, equals: "stream-\(stream.id)")
-                                    .disabled(isSwitching || isSavingOrder)
-                                    // Admin reorder: trailing "more" button with a
-                                    // Move Up / Move Down menu (Android parity).
-                                    // Right from the row focuses it, Left returns.
-                                    if canReorder && streams.count > 1 {
-                                        Menu {
-                                            // Disabled header so the entry reads
-                                            // "Reorder" like the phone and tablet
-                                            // button (Android TV parity).
-                                            Section("Reorder") {
-                                                if index > 0 {
-                                                    Button { moveStream(stream, by: -1) } label: {
-                                                        Label("Move Up", systemImage: "arrow.up")
-                                                    }
-                                                }
-                                                if index < streams.count - 1 {
-                                                    Button { moveStream(stream, by: 1) } label: {
-                                                        Label("Move Down", systemImage: "arrow.down")
-                                                    }
-                                                }
-                                            }
-                                        } label: {
-                                            SwitchStreamMoreLabel()
-                                        }
-                                        .buttonStyle(SwitchStreamRowStyle())
-                                        .focusEffectDisabled()
-                                        .focused($focusedRow, equals: "more-\(stream.id)")
-                                        .disabled(isSwitching || isSavingOrder)
-                                    }
-                                }
-                                .fixedSize(horizontal: false, vertical: true)
+                            ForEach(streams) { stream in
+                                let lifted = liftedStreamID == stream.id
+                                let dimmed = liftedStreamID != nil && !lifted
+                                // Short Select switches; a long press lifts the
+                                // row (admins); Select while lifted places it.
+                                SwitchStreamRow(
+                                    title: titleLine(for: stream),
+                                    meta: metaLine(for: stream),
+                                    isSelected: selectedStreamID == stream.id,
+                                    isLifted: lifted,
+                                    action: { rowPressed(stream) }
+                                )
+                                .focused($focusedRow, equals: "stream-\(stream.id)")
+                                // Only the lifted row stays focusable while a
+                                // row is lifted, so Up / Down cannot move focus.
+                                // The lifted row itself is never disabled.
+                                // Not disabled while the order saves: the placed
+                                // row keeps focus (a disabled focused TV button
+                                // drops focus); rowPressed ignores presses then.
+                                .disabled(isSwitching || dimmed)
+                                .opacity(dimmed ? 0.45 : 1)
+                                .id(stream.id)
                             }
                         }
                         .padding(.horizontal, 80)
                         .padding(.bottom, 40)
+                    }
+                    .onMoveCommand { direction in
+                        guard liftedStreamID != nil else { return }
+                        switch direction {
+                        case .up: moveLifted(by: -1)
+                        case .down: moveLifted(by: 1)
+                        default: break
+                        }
+                    }
+                    // Keep the lifted row in view after every move.
+                    .onChange(of: streams.map(\.id)) { _, _ in
+                        if let id = liftedStreamID {
+                            withAnimation(.easeInOut(duration: 0.12)) { proxy.scrollTo(id, anchor: .center) }
+                        }
+                    }
                     }
                     .focusSection()
                 }
@@ -782,6 +879,7 @@ struct SwitchStreamView: View {
                 }
                 .buttonStyle(SwitchStreamActionStyle())
                 .focused($focusedRow, equals: "done")
+                .disabled(liftedStreamID != nil)
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 28)
@@ -789,7 +887,23 @@ struct SwitchStreamView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground.ignoresSafeArea())
-        .onExitCommand { close() }
+        // Menu while a row is lifted restores the order and keeps the
+        // sheet open; at rest it closes.
+        .onExitCommand { if liftedStreamID != nil { cancelLifted() } else { close() } }
+        .background(
+            SwitchStreamSelectHoldDetector(
+                minimumPressDuration: 0.5,
+                isEnabled: canReorder && liftedStreamID == nil,
+                onBegan: { liftFocusedRow() },
+                onEnded: {
+                    // The release's Button action normally clears the
+                    // swallow flag; clear it anyway if UIKit cancelled that
+                    // press instead.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { swallowNextSelect = false }
+                }
+            )
+            .allowsHitTesting(false)
+        )
         .onAppear {
             // Seed focus immediately so the overlay is never focus-less
             // while streams load; the streams.onChange moves it to the
@@ -824,11 +938,12 @@ private struct SwitchStreamRow: View {
     let title: String
     let meta: String
     let isSelected: Bool
+    var isLifted: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            SwitchStreamRowLabel(title: title, meta: meta, isSelected: isSelected)
+            SwitchStreamRowLabel(title: title, meta: meta, isSelected: isSelected, isLifted: isLifted)
         }
         .buttonStyle(SwitchStreamRowStyle())
         .focusEffectDisabled()
@@ -839,7 +954,11 @@ private struct SwitchStreamRowLabel: View {
     let title: String
     let meta: String
     let isSelected: Bool
-    @Environment(\.isFocused) private var isFocused
+    var isLifted: Bool = false
+    @Environment(\.isFocused) private var isFocusedEnv
+    /// A lifted row reads as picked up (elevated fill, accent stroke), not
+    /// as the accent-filled focus state.
+    private var isFocused: Bool { isFocusedEnv && !isLifted }
 
     var body: some View {
         HStack(spacing: 16) {
@@ -854,6 +973,13 @@ private struct SwitchStreamRowLabel: View {
                 }
             }
             Spacer(minLength: 8)
+            if isLifted {
+                Text("Moving")
+                    .scaledFont(.system(size: 20, weight: .semibold))
+                    .foregroundColor(.accentPrimary)
+                    // Gap so the label never touches the stream name.
+                    .padding(.leading, 24)
+            }
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
                     .scaledFont(.system(size: 28))
@@ -869,31 +995,97 @@ private struct SwitchStreamRowLabel: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(isSelected && !isFocused ? Color.accentPrimary : Color.clear, lineWidth: 2)
+                .stroke(isLifted || (isSelected && !isFocused) ? Color.accentPrimary : Color.clear,
+                        lineWidth: isLifted ? 3 : 2)
         )
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .scaleEffect(isLifted ? 1.03 : (isFocused ? 1.02 : 1.0))
         .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .animation(.easeInOut(duration: 0.15), value: isLifted)
     }
 }
 
-/// Trailing "more" button for a stream row. Same height as the row
-/// (the HStack is vertically fixed and this fills it).
-private struct SwitchStreamMoreLabel: View {
-    @Environment(\.isFocused) private var isFocused
+/// Window-level Select-hold recognizer for the Switch Stream sheet. A
+/// SwiftUI long press on tvOS fires on release; this fires at the threshold
+/// while Select is still held, and never takes focus or cancels the press
+/// (the row Button still gets its release, which the sheet swallows).
+/// Attached only while the sheet is mounted and `isEnabled` is true.
+private struct SwitchStreamSelectHoldDetector: UIViewRepresentable {
+    var minimumPressDuration: TimeInterval
+    var isEnabled: Bool
+    let onBegan: () -> Void
+    let onEnded: () -> Void
 
-    var body: some View {
-        Image(systemName: "ellipsis")
-            .scaledFont(.system(size: 28, weight: .semibold))
-            .foregroundColor(isFocused ? .white : .textSecondary)
-            .frame(width: 96)
-            .frame(maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isFocused ? Color.accentPrimary : Color.elevatedBackground)
-            )
-            .scaleEffect(isFocused ? 1.04 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    func makeUIView(context: Context) -> SelectHoldHostView {
+        let v = SelectHoldHostView()
+        v.isUserInteractionEnabled = false
+        update(v)
+        return v
     }
+
+    func updateUIView(_ uiView: SelectHoldHostView, context: Context) { update(uiView) }
+
+    private func update(_ v: SelectHoldHostView) {
+        v.minimumPressDuration = minimumPressDuration
+        v.onBegan = onBegan
+        v.onEnded = onEnded
+        v.isEnabled = isEnabled
+        v.sync()
+    }
+
+    static func dismantleUIView(_ uiView: SelectHoldHostView, coordinator: ()) { uiView.detach() }
+}
+
+private final class SelectHoldHostView: UIView, UIGestureRecognizerDelegate {
+    var onBegan: (() -> Void)?
+    var onEnded: (() -> Void)?
+    var minimumPressDuration: TimeInterval = 0.5
+    var isEnabled = true
+    private weak var attachedWindow: UIWindow?
+    private var recognizer: UILongPressGestureRecognizer?
+
+    override var canBecomeFocused: Bool { false }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        sync()
+    }
+
+    func sync() {
+        guard isEnabled, let window else { detach(); return }
+        if let recognizer, attachedWindow === window {
+            recognizer.minimumPressDuration = minimumPressDuration
+            return
+        }
+        detach()
+        let r = UILongPressGestureRecognizer(target: self, action: #selector(handle(_:)))
+        r.allowedPressTypes = [NSNumber(value: UIPress.PressType.select.rawValue)]
+        r.allowedTouchTypes = []
+        r.minimumPressDuration = minimumPressDuration
+        r.cancelsTouchesInView = false
+        r.delaysTouchesBegan = false
+        r.delaysTouchesEnded = false
+        r.delegate = self
+        window.addGestureRecognizer(r)
+        recognizer = r
+        attachedWindow = window
+    }
+
+    func detach() {
+        if let recognizer { attachedWindow?.removeGestureRecognizer(recognizer) }
+        recognizer = nil
+        attachedWindow = nil
+    }
+
+    @objc private func handle(_ r: UILongPressGestureRecognizer) {
+        switch r.state {
+        case .began: onBegan?()
+        case .ended, .cancelled, .failed: onEnded?()
+        default: break
+        }
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 
 private struct SwitchStreamRowStyle: ButtonStyle {
