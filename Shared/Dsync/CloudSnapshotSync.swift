@@ -611,6 +611,311 @@ final class CloudSnapshotSync: ObservableObject {
         }
     }
 
+    // MARK: - Rule 4 setup state (Android setupState)
+
+    private static let HOLD_TTL_MS: Int64 = 30 * 60 * 1000
+
+    /// Onboarding with both providers: hold the shared categories (pull and push) until the choice.
+    func holdShared() {
+        state.set("cloud.holdShared", Self.nowMs())
+        debugLog("[CLOUD] shared categories held until the setup choice")
+    }
+
+    func sharedHeld() -> Bool {
+        let at = state.long("cloud.holdShared")
+        return at > 0 && Self.nowMs() - at < Self.HOLD_TTL_MS
+    }
+
+    func releaseHold() {
+        guard state.contains("cloud.holdShared") else { return }
+        state.remove("cloud.holdShared")
+        debugLog("[CLOUD] setup hold released")
+    }
+
+    func markCloudUnknown() {
+        if cloudUnknown() { return }
+        state.set("cloud.unknown", true)
+        debugLog("[CLOUD] iCloud state unknown: shared files wait for a working setup probe")
+    }
+
+    func cloudUnknown() -> Bool { state.bool("cloud.unknown") }
+
+    func clearCloudUnknown() {
+        guard cloudUnknown() else { return }
+        state.remove("cloud.unknown")
+        debugLog("[CLOUD] iCloud state known again")
+    }
+
+    func markReplaceDeferred() { state.set("cloud.replaceDeferred", true) }
+    func clearReplaceDeferred() { state.remove("cloud.replaceDeferred") }
+    func replaceDeferred() -> Bool { state.bool("cloud.replaceDeferred") }
+
+    private func waitKey(_ c: DsyncCategory) -> String { "cloud.replaceWait|\(c.rawValue)" }
+    func replaceWaiting(_ c: DsyncCategory) -> Bool { state.bool(waitKey(c)) }
+    func clearReplaceWait(_ c: DsyncCategory) { state.remove(waitKey(c)) }
+
+    /// The user chose Dispatcharr: every shared iCloud file waits for its Dispatcharr pull before its first push.
+    func armReplaceWait() { for c in CloudCanon.SHARED_FILES { state.set(waitKey(c), true) } }
+
+    /// The user chose iCloud: nothing waits on Dispatcharr.
+    func clearReplaceWaits() { for c in CloudCanon.SHARED_FILES { clearReplaceWait(c) } }
+
+    /// iCloud is usable on this device: Sync with iCloud on and an iCloud account signed in.
+    var available: Bool { cloudOn && FileManager.default.ubiquityIdentityToken != nil }
+
+    // MARK: - Probe (read only)
+
+    /// The iCloud copy's shared categories, summarized with the Dispatcharr probe's fingerprints
+    /// and filters (canonical-id rows only, Off categories left out). Nil when iCloud could not be
+    /// read: unknown, never empty. Nothing is applied.
+    func readSharedSummary() -> SetupSourceChoice.Summary? {
+        guard FileManager.default.ubiquityIdentityToken != nil else {
+            debugLog(CloudCanon.probeFailedLine("NoAccount"))
+            return nil
+        }
+        let now = Self.nowMs()
+        let scopes = DsyncLocal.scopes()
+        let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString
+        var out: [String: SetupSourceChoice.Category] = [:]
+        var carriedP: CloudProgress?
+        var carriedW: CloudWatchlist?
+        var ids = lookup().ids
+        func fail(_ c: DsyncCategory) -> SetupSourceChoice.Summary? {
+            debugLog(CloudCanon.probeFailedLine("Decode\(CloudCanon.fileName(c))"))
+            return nil
+        }
+        if let b = backupBody(.favorites) {
+            guard let f = CloudFavorites.decode(text: b) else { return fail(.favorites) }
+            out["favorites"] = CloudCanon.favorites(f, ids)
+        }
+        if let b = backupBody(.watchProgress) {
+            guard let w0 = CloudProgress.decode(text: b) else { return fail(.watchProgress) }
+            let w = CloudCanon.progressInScope(w0, host: pid)
+            // Snapshots older than the update resolve their local ids here.
+            let c = CloudCanon.progressCandidates(w).filter { !DsyncHeld.isPlaceholder($0.videoId) }
+            let l = lookup(movieIds: c.filter { $0.vodType == "movie" }.map(\.videoId), episodeIds: c.filter { $0.vodType == "episode" }.map(\.videoId))
+            ids.movies.merge(l.ids.movies) { a, _ in a }
+            ids.episodes = l.ids.episodes
+            out["progress"] = CloudCanon.progress(w, ids, nowMs: now)
+            carriedP = w
+        }
+        if let b = backupBody(.reminders) {
+            guard let r = CloudReminders.decode(text: b) else { return fail(.reminders) }
+            out["reminders"] = CloudCanon.reminders(r, nowMs: now)
+        }
+        if let b = backupBody(.watchlist) {
+            guard let w = CloudWatchlist.decode(text: b) else { return fail(.watchlist) }
+            let movies = (w.entries.filter { $0.vodType != "series" && ($0.serverId == nil || $0.serverId == pid) }.map(\.vodId) +
+                w.hidden.filter { $0.vodType != "series" && ($0.serverId == nil || $0.serverId == pid) }.map(\.vodId))
+            ids.movies.merge(lookup(movieIds: movies).ids.movies) { a, _ in a }
+            out["watchlist"] = CloudCanon.watchlist(w, ids, host: pid)
+            out["hiddenTitles"] = CloudCanon.hiddenTitles(w, ids, host: pid)
+            carriedW = w
+        }
+        var carried = CloudCanon.carriedItems(carriedP, carriedW, ids)
+        if let b = backupBody(.preferences) {
+            guard let p = CloudPreferences.decode(text: b) else { return fail(.preferences) }
+            out["recents"] = CloudCanon.recentsCategory(p, ids)
+            carried.formUnion(CloudCanon.recentChannelItems(p, ids))
+            out["collections"] = CloudCanon.collectionsCategory(p, ids)
+            out["hiddenGroups"] = CloudCanon.hiddenGroupsCategory(p)
+            out["groupOrder"] = CloudCanon.groupOrderCategory(p)
+            out["settings"] = CloudCanon.settingsOf(p) { SetupSourceChoice.nameOff(scopes, $0) }
+        }
+        // Section 10a: rows the iCloud copy carries with a canonical id are representable here.
+        if let pid { dsync.noteCloudItems(pid, carried) }
+        let kept = SetupSourceChoice.forDevice(SetupSourceChoice.Summary(categories: out)) { SetupSourceChoice.itemOff(scopes, $0) }.categories
+        let line = kept.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.rows)" }.joined(separator: ", ")
+        debugLog("[CLOUD] setup probe \(line.isEmpty ? "empty" : line)")
+        return SetupSourceChoice.Summary(categories: kept, lastWrite: kept.values.map(\.updatedAt).max())
+    }
+
+    // MARK: - Rule 4 replace (the user chose the iCloud backup)
+
+    /// The settings lanes the last replace applied (Rule 4 mirror for the forced Dispatcharr push).
+    private var mirrorLanes: (String, [String: [String: DsyncJSON]])?
+
+    /// Applies every shared iCloud category as a true replace. Per category: true when the backup
+    /// applied or had no file (a missing file replaces nothing), false when it failed or did not run.
+    func applySharedForReplace(_ ignoreOwnership: Bool) async -> [DsyncCategory: Bool] {
+        let wanted = CloudCanon.SHARED_FILES.filter(fileEnabled)
+        debugLog("[CLOUD] applying backup (user chose iCloud) categories=\(wanted.map { CloudCanon.fileName($0) })")
+        guard let server = DsyncLocal.activeDispatcharrPlaylist() else { return [:] }
+        var out: [DsyncCategory: Bool] = [:]
+        for c in wanted {
+            guard let body = backupBody(c) else { out[c] = true; continue }
+            out[c] = await replace(c, body, server)
+        }
+        return out
+    }
+
+    private func replace(_ c: DsyncCategory, _ body: String, _ server: ServerConnection) async -> Bool {
+        let pid = server.id.uuidString
+        let now = Self.nowMs()
+        switch c {
+        case .favorites:
+            guard let s = CloudFavorites.decode(text: body) else { return false }
+            let local = DsyncLocal.favorites()
+            let m = DsyncLocal.channelMap(pid)
+            let order = s.entries.sorted { $0.displayOrder < $1.displayOrder }
+                .map { e in e.dispatcharrChannelId.flatMap { m.toLocal[$0] } ?? e.channelId }.distinctOrdered()
+            let gone = CloudCanon.favoriteReplaceDeletes(local, s)
+            DsyncLocal.setFavorites(order)
+            debugLog(CloudCanon.replaceLine("favorites", local: local.count, backup: s.entries.count, removed: gone.count))
+            return true
+        case .watchProgress:
+            guard let s0 = CloudProgress.decode(text: body) else { return false }
+            let s = CloudCanon.progressInScope(s0, host: pid)
+            let held = s.entries.compactMap(CloudCanon.heldRow)
+            let rows = s.entries.compactMap { e -> ProgressRow? in
+                guard !DsyncHeld.isPlaceholder(e.videoId), let id = e.dispatcharrVodId ?? Int(e.videoId),
+                      e.vodType == "movie" || e.vodType == "episode" else { return nil }
+                return ProgressRow(vodId: id, type: e.vodType == "episode" ? "e" : "m", position: e.positionMs / 1000,
+                                   duration: e.durationMs / 1000, updatedAt: e.updatedAt / 1000, finished: e.isFinished,
+                                   seriesId: e.vodType == "episode" ? e.seriesId.flatMap { Int($0) } : nil,
+                                   season: e.seasonNumber, episode: e.episodeNumber, title: e.title)
+            }
+            var written = 0
+            let left = await DsyncLocal.applyProgress(server, rows, written: &written)
+            dsync.holdFromCloud(pid, DsyncHeld.merge(held, left), replace: true)
+            debugLog("[CLOUD] held progress rows=\(held.count + left.count) (replace)")
+            let localRows = DsyncLocal.progressRows(pid)
+            let local = localRows.map(progressEntry)
+            let gone = Set(CloudCanon.progressReplaceDeletes(local, s, nowMs: now))
+            if let ctx = WatchProgressManager.modelContext, !gone.isEmpty {
+                for r in localRows where gone.contains(r.vodID) { ctx.delete(r) }
+                do { try ctx.save() } catch { debugLog("[CLOUD] progress replace save failed: \(type(of: error))") }
+                NotificationCenter.default.post(name: .syncManagerDidUpdateWatchProgress, object: nil)
+            }
+            debugLog(CloudCanon.replaceLine("progress", local: CloudCanon.progressCounted(local, nowMs: now).count,
+                                            backup: CloudCanon.progress(s, .init(), nowMs: now).rows, removed: gone.count))
+            return true
+        case .reminders:
+            guard let s = CloudReminders.decode(text: body) else { return false }
+            let cur = ReminderManager.shared.syncableReminders
+            let local = cur.map { k, r in
+                CloudReminderEntry(reminderKey: k, channelName: r.channelName, programTitle: r.programTitle,
+                                   startMillis: Int64(r.startTime.timeIntervalSince1970 * 1000), endMillis: Int64(r.startTime.timeIntervalSince1970 * 1000))
+            }
+            let gone = Set(CloudCanon.reminderReplaceDeletes(local, s, nowMs: now))
+            // mergeRemote cancels the alarm of every key the map lacks and schedules the new ones.
+            var next: [String: SyncableReminder] = cur.filter { !gone.contains($0.key) }
+            let have = Set(next.values.map { CloudCanon.reminderItem($0.channelName, Int64($0.startTime.timeIntervalSince1970)) })
+            for e in s.entries where next[e.reminderKey] == nil && !have.contains(CloudCanon.reminderItem(e.channelName, e.startMillis / 1000)) {
+                next[e.reminderKey] = SyncableReminder(programTitle: e.programTitle, channelName: e.channelName,
+                                                       startTime: Date(timeIntervalSince1970: TimeInterval(e.startMillis) / 1000),
+                                                       updatedAt: Date(timeIntervalSince1970: 0))
+            }
+            ReminderManager.shared.mergeRemote(next)
+            debugLog(CloudCanon.replaceLine("reminders", local: local.filter { $0.endMillis >= now }.count,
+                                            backup: CloudCanon.reminders(s, nowMs: now).rows, removed: gone.count))
+            return true
+        case .watchlist:
+            guard let s = CloudWatchlist.decode(text: body) else { return false }
+            replaceWatchlist(s, pid)
+            if SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID) { replaceHidden(s, pid) }
+            return true
+        case .preferences:
+            guard let s = CloudPreferences.decode(text: body) else { return false }
+            replacePreferences(s, pid)
+            return true
+        case .playlists, .credentials:
+            return false
+        }
+    }
+
+    private func replaceWatchlist(_ s: CloudWatchlist, _ pid: String) {
+        guard let ctx = WatchlistManager.modelContext else { return }
+        let rows = (try? ctx.fetch(FetchDescriptor<WatchlistEntry>())) ?? []
+        let now = Self.nowMs()
+        let local = rows.map {
+            CloudWatchlistEntry(vodId: $0.vodID, vodType: $0.vodType == "series" ? "series" : "movie", title: $0.title,
+                                posterUrl: $0.posterURL, releaseYear: $0.releaseYear, rating: $0.rating, serverId: $0.serverID,
+                                addedAt: Int64($0.addedAt.timeIntervalSince1970 * 1000))
+        }
+        func id(_ e: CloudWatchlistEntry) -> String { "\(e.vodType)|\(e.vodId)|\(e.serverId ?? "")" }
+        let inScope = { (e: CloudWatchlistEntry) in e.serverId == nil || e.serverId == pid }
+        let localLive = CloudCanon.liveInScope(local, live: { $0.isLive }, inScope: inScope)
+        let result = CloudCanon.replaceMarks(local, s.entries, identity: id, live: { $0.isLive }, inScope: inScope,
+                                             tombstone: { var e = $0; e.removedAt = now; return e })
+        let haveLocal = Set(local.map(id))
+        let wantLive = Dictionary(result.filter(\.isLive).map { (id($0), $0) }, uniquingKeysWith: { a, _ in a })
+        var removed = 0
+        for r in rows {
+            let k = "\(r.vodType == "series" ? "series" : "movie")|\(r.vodID)|\(r.serverID ?? "")"
+            if wantLive[k] == nil { ctx.delete(r); removed += 1 }
+        }
+        for (k, e) in wantLive where !haveLocal.contains(k) {
+            ctx.insert(WatchlistEntry(vodID: e.vodId, title: e.title, posterURL: e.posterUrl, vodType: e.vodType, serverID: e.serverId,
+                                      releaseYear: e.releaseYear, rating: e.rating,
+                                      addedAt: Date(timeIntervalSince1970: TimeInterval(e.addedAt) / 1000)))
+        }
+        do { try ctx.save() } catch { debugLog("[CLOUD] watchlist replace save failed: \(type(of: error))") }
+        debugLog(CloudCanon.replaceLine("watchlist", local: localLive, backup: CloudCanon.watchlist(s, .init(), host: pid).rows, removed: removed))
+    }
+
+    private func replaceHidden(_ s: CloudWatchlist, _ pid: String) {
+        let now = Self.nowMs()
+        let local = hiddenEntries(HiddenVODStore.shared.entries.mapValues { $0.mapValues { ($0.hidden, $0.updatedAt) } })
+        func id(_ e: CloudHiddenEntry) -> String { "\(e.vodType)|\(e.vodId)|\(e.serverId ?? "")" }
+        let inScope = { (e: CloudHiddenEntry) in e.serverId == nil || e.serverId == pid }
+        let localLive = CloudCanon.liveInScope(local, live: { $0.isLive }, inScope: inScope)
+        let result = CloudCanon.replaceMarks(local, s.hidden, identity: id, live: { $0.isLive }, inScope: inScope,
+                                             tombstone: { var e = $0; e.unhiddenAt = now; return e })
+        let before = Dictionary(local.map { (id($0), $0.isLive) }, uniquingKeysWith: { a, _ in a })
+        var removed = 0
+        for e in result where before[id(e)] != e.isLive && (before[id(e)] != nil || e.isLive) {
+            if before[id(e)] == true && !e.isLive { removed += 1 }
+            // Unscoped rows have no playlist bucket on Apple: they apply to the active playlist.
+            HiddenVODStore.shared.setHidden(e.isLive, type: e.vodType, id: e.vodId, serverID: e.serverId ?? pid)
+        }
+        debugLog(CloudCanon.replaceLine("hiddenTitles", local: localLive, backup: CloudCanon.hiddenTitles(s, .init(), host: pid).rows, removed: removed))
+    }
+
+    /// Typed wire value of a snapshot string for one schema name.
+    private static func typed(_ name: String, _ v: String) -> DsyncJSON {
+        switch DsyncSettingsMap.entry(name)?.kind {
+        case .bool: return .bool(v.lowercased() == "true")
+        case .int, .double: return .number(v)
+        default: return .string(v)
+        }
+    }
+
+    private func replacePreferences(_ s: CloudPreferences, _ pid: String) {
+        let localSettings = DsyncLocal.settingsValues().count
+        let m = DsyncLocal.channelMap(pid)
+        func local(_ id: String) -> String { s.dispatcharrChannelIds?[id].flatMap { m.toLocal[$0] } ?? id }
+        DsyncLocal.setRecents(pid, CloudCanon.recents(s).map(local))
+        DsyncLocal.setCollections(CloudCanon.collections(s).map {
+            ChannelCollection(id: $0.id, name: $0.name, memberIDs: $0.memberIds.map(local),
+                              placement: CollectionPlacement(rawValue: $0.placement) ?? .end)
+        })
+        DsyncLocal.setHiddenGroups(DsyncPayloads.HiddenGroups(live: CloudCanon.lines(s.keys[CloudCanon.K_HIDDEN_LIVE]),
+                                                              movies: CloudCanon.lines(s.keys[CloudCanon.K_HIDDEN_MOVIES]),
+                                                              series: CloudCanon.lines(s.keys[CloudCanon.K_HIDDEN_SERIES])))
+        DsyncLocal.setGroupOrder(DsyncPayloads.GroupOrder(mode: CloudCanon.groupMode(s.keys[CloudCanon.K_SORT_MODE]),
+                                                          order: CloudCanon.lines(s.keys[CloudCanon.K_ORDER])))
+        // Settings replace: each name read from the lane its scope picks here; a mapped name the
+        // backup lacks returns to its default.
+        let scopes = DsyncLocal.scopes()
+        var lanes: [String: [String: DsyncJSON]] = [:]
+        for (lane, vals) in s.settingsLanes { lanes[lane] = vals.reduce(into: [:]) { $0[$1.key] = Self.typed($1.key, $1.value) } }
+        let picked = pickFromLanes(lanes, names: [], scopeOf: { DsyncLocal.scopeForName(scopes, $0) }, isTv: DsyncLocal.isTv)
+        let r = DsyncSettingsValidator.filter(picked.filter { DsyncSettingsValidator.isOwned($0.key) })
+        for e in DsyncSettingsMap.ENTRIES where r.accepted[e.name] == nil && DsyncLocal.scopeForName(scopes, e.name) != .off {
+            UserDefaults.standard.removeObject(forKey: e.appleKey)
+        }
+        DsyncLocal.applySettings(r.accepted)
+        mirrorLanes = (pid, CloudCanon.lanesOn(lanes) { SetupSourceChoice.nameOff(scopes, $0) })
+        debugLog(CloudCanon.replaceLine("preferences", local: localSettings, backup: s.keys.count + s.tv.count + s.mobile.count, removed: 0))
+    }
+
+    /// No choice was needed: apply whatever iCloud held (a merge, as before).
+    func applySharedNow(_ ignoreOwnership: Bool) {
+        debugLog("[CLOUD] applying backup (held shared categories released)")
+        SyncManager.shared.pullFromCloud(force: true)
+    }
+
     // MARK: - Lifecycle
 
     /// Registers the iCloud side with Dispatcharr Sync and the coordinator, then the launch retry.
@@ -618,8 +923,34 @@ final class CloudSnapshotSync: ObservableObject {
         guard !started else { return }
         started = true
         dsync.cloudCatalogPage = { [weak self] in self?.noteCatalogPage() }
+        dsync.cloudMirrorLanes = { [weak self] pid in
+            guard let m = self?.mirrorLanes, m.0 == pid else { return [:] }
+            return m.1
+        }
+        registerHooks()
         retryIdUpdate("launch")
         refreshUpdateOffer()
+    }
+
+    /// The coordinator's iCloud hooks (Android DriveSyncManager calls).
+    private func registerHooks() {
+        var h = DsyncCloudHooks()
+        h.available = { CloudSnapshotSync.shared.available }
+        h.readSharedSummary = { CloudSnapshotSync.shared.readSharedSummary() }
+        h.markUnknown = { CloudSnapshotSync.shared.markCloudUnknown() }
+        h.clearUnknown = { CloudSnapshotSync.shared.clearCloudUnknown() }
+        h.isUnknown = { CloudSnapshotSync.shared.cloudUnknown() }
+        h.releaseHold = { CloudSnapshotSync.shared.releaseHold() }
+        h.holdShared = { CloudSnapshotSync.shared.holdShared() }
+        h.sharedHeld = { CloudSnapshotSync.shared.sharedHeld() }
+        h.applySharedForReplace = { await CloudSnapshotSync.shared.applySharedForReplace($0) }
+        h.applySharedNow = { CloudSnapshotSync.shared.applySharedNow($0) }
+        h.clearReplaceWaits = { CloudSnapshotSync.shared.clearReplaceWaits() }
+        h.armReplaceWait = { CloudSnapshotSync.shared.armReplaceWait() }
+        h.markReplaceDeferred = { CloudSnapshotSync.shared.markReplaceDeferred() }
+        h.clearReplaceDeferred = { CloudSnapshotSync.shared.clearReplaceDeferred() }
+        h.replaceDeferred = { CloudSnapshotSync.shared.replaceDeferred() }
+        SetupSourceCoordinator.shared.cloud = h
     }
 
     static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }

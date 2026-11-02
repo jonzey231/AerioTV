@@ -688,6 +688,75 @@ extension CloudCanon {
     static let SHARED_FILES: [DsyncCategory] = [.favorites, .watchProgress, .reminders, .watchlist, .preferences]
 }
 
+// MARK: - Rule 4 replace (the user chose the iCloud backup)
+//
+// The device starts from the iCloud copy: a local row the backup does not
+// carry is removed. Only rows inside the comparison the setup probe makes
+// are candidates (the filters of progress, reminders, watchlist, and
+// hiddenTitles above); a row those filters exclude is counted by neither
+// side and is kept (section 10a). A missing cloud file replaces nothing.
+
+extension CloudCanon {
+    /// Progress video ids to delete: counted locally and absent from the backup.
+    static func progressReplaceDeletes(_ local: [CloudProgressEntry], _ backup: CloudProgress, nowMs: Int64) -> [String] {
+        let keep = Set(backup.entries.map(\.videoId))
+        return progressCounted(local, nowMs: nowMs).map(\.videoId).filter { !keep.contains($0) }.distinctOrdered()
+    }
+
+    /// Future reminders only (ended ones are not compared). Matched by key, or by channel name and start second.
+    static func reminderReplaceDeletes(_ local: [CloudReminderEntry], _ backup: CloudReminders, nowMs: Int64) -> [String] {
+        let keys = Set(backup.entries.map(\.reminderKey))
+        let ids = Set(backup.entries.map { reminderItem($0.channelName, $0.startMillis / 1000) })
+        return local.filter { $0.endMillis >= nowMs }
+            .filter { !keys.contains($0.reminderKey) && !ids.contains(reminderItem($0.channelName, $0.startMillis / 1000)) }
+            .map(\.reminderKey)
+    }
+
+    /// Favorites carry no scope: every local favorite the backup lacks goes.
+    static func favoriteReplaceDeletes(_ local: [String], _ backup: CloudFavorites) -> [String] {
+        let keep = Set(backup.entries.map(\.channelId))
+        return local.filter { !keep.contains($0) }.distinctOrdered()
+    }
+
+    /// Watchlist and hidden titles (tombstoned): a row whose identity the backup carries becomes the
+    /// backup row (tombstone included); a live local row in scope the backup lacks is tombstoned;
+    /// every other row is kept; backup rows new here are added.
+    static func replaceMarks<E, I: Hashable>(_ local: [E], _ remote: [E], identity: (E) -> I, live: (E) -> Bool,
+                                             inScope: (E) -> Bool, tombstone: (E) -> E) -> [E] {
+        var byId: [I: E] = [:]
+        for r in remote where byId[identity(r)] == nil { byId[identity(r)] = r }
+        var seen = Set<I>()
+        var out: [E] = local.map { l in
+            let id = identity(l)
+            if let r = byId[id] { seen.insert(id); return r }
+            return live(l) && inScope(l) ? tombstone(l) : l
+        }
+        for r in remote where !seen.contains(identity(r)) {
+            seen.insert(identity(r))
+            out.append(r)
+        }
+        return out
+    }
+
+    /// Live rows in [inScope], for the counts line.
+    static func liveInScope<E>(_ rows: [E], live: (E) -> Bool, inScope: (E) -> Bool) -> Int { rows.filter { live($0) && inScope($0) }.count }
+
+    /// The counts-only replace line.
+    static func replaceLine(_ category: String, local: Int, backup: Int, removed: Int) -> String {
+        "[CLOUD] replace \(category) local=\(local) backup=\(backup) removed=\(removed)"
+    }
+
+    /// The probe failure line: a failed read is unknown, never empty.
+    static func probeFailedLine(_ reason: String) -> String { "[CLOUD] setup probe failed: \(reason) (treated as unknown, not empty)" }
+
+    /// Progress rows of one playlist's scope (its id, or unscoped), placeholders included.
+    static func progressInScope(_ s: CloudProgress, host: String?) -> CloudProgress {
+        var out = s
+        out.entries = s.entries.filter { $0.serverId == nil || $0.serverId == host || DsyncHeld.isPlaceholder($0.videoId) }
+        return out
+    }
+}
+
 // MARK: - Sync providers record (section 10b; Android SyncProviders.kt)
 
 struct SyncProvidersRecord: Equatable, Sendable {

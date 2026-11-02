@@ -664,6 +664,51 @@ do {
     eq(CloudCanon.migrationLine("progress", rows: 4), "[CLOUD] id migration: progress 4 rows enriched", "migration line")
 }
 
+// MARK: - Cloud replace plan (DriveSnapshotRulesTest replace parts)
+
+do {
+    let now: Int64 = 100 * 86_400_000
+    let env = CloudEnvelope(lastModified: 1, device: "d", format: 2)
+    func pe(_ id: String, _ at: Int64, fin: Bool = false, type: String = "movie") -> CloudProgressEntry {
+        CloudProgressEntry(videoId: id, title: id, positionMs: 1, durationMs: 2, updatedAt: at, vodType: type, isFinished: fin)
+    }
+    let local = [pe("1", now), pe("2", now - 1), pe("old", now - 40 * 86_400_000, fin: true), pe("dvr", now, type: "recording"),
+                 pe("http://x", now)]
+    let backup = CloudProgress(envelope: env, entries: [pe("1", now)])
+    eq(CloudCanon.progressReplaceDeletes(local, backup, nowMs: now), ["2"],
+       "only counted rows go: finished older than 30 days, non-VOD, and URL rows kept")
+    let many = (0..<310).map { pe("m\($0)", now - Int64($0)) }
+    eq(CloudCanon.progressReplaceDeletes(many, CloudProgress(envelope: env, entries: []), nowMs: now).count, 300, "beyond the 300 newest kept")
+
+    let r = [CloudReminderEntry(reminderKey: "a", channelName: "One", programTitle: "A", startMillis: now + 1_000, endMillis: now + 1_000),
+             CloudReminderEntry(reminderKey: "b", channelName: "Two", programTitle: "B", startMillis: now + 5_000, endMillis: now + 5_000),
+             CloudReminderEntry(reminderKey: "ended", channelName: "Three", programTitle: "C", startMillis: 1, endMillis: 2)]
+    let rb = CloudReminders(envelope: env, entries: [CloudReminderEntry(reminderKey: "other", channelName: "Two", programTitle: "B",
+                                                                         startMillis: now + 5_000, endMillis: now + 5_000)])
+    eq(CloudCanon.reminderReplaceDeletes(r, rb, nowMs: now), ["a"], "matched by channel and start; ended reminders kept")
+
+    let fb = CloudFavorites(envelope: env, entries: [CloudFavoriteEntry(channelId: "2", channelName: "", displayOrder: 0, addedAt: 0)])
+    eq(CloudCanon.favoriteReplaceDeletes(["1", "2", "1"], fb), ["1"], "favorites the backup lacks")
+
+    let lw = [CloudWatchlistEntry(vodId: "1", title: "Keep", serverId: "p", addedAt: 1),
+              CloudWatchlistEntry(vodId: "2", title: "Gone", serverId: "p", addedAt: 1),
+              CloudWatchlistEntry(vodId: "3", title: "Other server", serverId: "q", addedAt: 1)]
+    let rw = [CloudWatchlistEntry(vodId: "1", title: "Keep", serverId: "p", addedAt: 5),
+              CloudWatchlistEntry(vodId: "9", title: "New", serverId: "p", addedAt: 5)]
+    let out = CloudCanon.replaceMarks(lw, rw, identity: { "\($0.vodType)|\($0.vodId)|\($0.serverId ?? "")" }, live: { $0.isLive },
+                                      inScope: { $0.serverId == nil || $0.serverId == "p" }, tombstone: { var e = $0; e.removedAt = 7; return e })
+    eq(out.map(\.vodId), ["1", "2", "3", "9"], "backup rows win, new rows added")
+    eq(out.map(\.removedAt), [nil, 7, nil, nil], "the live in-scope row the backup lacks is tombstoned; another server's kept")
+    eq(CloudCanon.liveInScope(lw, live: { $0.isLive }, inScope: { $0.serverId == "p" }), 2, "counts line")
+    eq(CloudCanon.replaceLine("favorites", local: 3, backup: 1, removed: 2), "[CLOUD] replace favorites local=3 backup=1 removed=2", "replace line")
+    eq(CloudCanon.probeFailedLine("NoAccount"), "[CLOUD] setup probe failed: NoAccount (treated as unknown, not empty)", "probe line")
+    let scoped = CloudCanon.progressInScope(CloudProgress(envelope: env, entries: [
+        CloudProgressEntry(videoId: "1", title: "", positionMs: 0, durationMs: 0, updatedAt: 0, serverId: "p"),
+        CloudProgressEntry(videoId: "2", title: "", positionMs: 0, durationMs: 0, updatedAt: 0, serverId: "q"),
+        CloudProgressEntry(videoId: "dsync:m:3", title: "", positionMs: 0, durationMs: 0, updatedAt: 0)]), host: "p")
+    eq(scoped.entries.map(\.videoId), ["1", "dsync:m:3"], "progress from another playlist is out of scope")
+}
+
 // MARK: - SyncProvidersTest (Apple writes icloud, preserves googleDrive)
 
 do {
