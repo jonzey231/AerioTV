@@ -237,6 +237,10 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
     /// Logan's standing rule forbids the white / oversized ring inside
     /// Settings, so every Settings call site sets this.
     var settingsStyle: Bool = false
+    /// Android dpadFocusRing(onFilled): an accent-filled control (primary
+    /// button, selected pill or card) also grows 1.04 on focus, so focus
+    /// still reads when the white ring sits on a bright fill.
+    var scalesOnFocus: Bool = false
 
     private var ringColor: Color {
         (isSelected && !settingsStyle) ? .white : .accentPrimary
@@ -267,6 +271,8 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
                 .opacity(visible ? 1 : 0)
                 .animation(.easeInOut(duration: 0.15), value: isFocused)
             }
+            .scaleEffect(scalesOnFocus && drawsFocusRing && isFocused ? 1.04 : 1)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
             .opacity(configuration.isPressed ? 0.7 : 1.0)
     }
 }

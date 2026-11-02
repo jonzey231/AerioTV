@@ -636,7 +636,8 @@ struct OnboardingNavCard<Destination: View>: View {
             #endif
         }
         #if os(tvOS)
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // A highlighted card already wears an accent border: ring it white.
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: highlighted))
         .focused($isFocused)
         .tvFocusRingShape(.rounded(18))
         #else
@@ -687,7 +688,9 @@ struct OnboardingActionCard: View {
             #endif
         }
         #if os(tvOS)
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // A selected (on) card already wears an accent border: ring it white
+        // so focus shows on it (Android 9095b1b4).
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: highlighted || isOn == true))
         .focused($isFocused)
         .tvFocusRingShape(.rounded(18))
         #else
@@ -723,7 +726,9 @@ struct OnboardingPillButton: View {
                 .contentShape(Capsule())
         }
         #if os(tvOS)
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // Android 9095b1b4: an accent ring vanishes on the accent fill, so a
+        // filled pill rings in white and grows 1.04.
+        .buttonStyle(TVNoHighlightButtonStyle(isSelected: filled, scalesOnFocus: filled))
         .tvFocusRingShape(.capsule)
         #else
         .buttonStyle(.plain)

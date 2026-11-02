@@ -557,8 +557,16 @@ struct AddProfilesStepView: View {
             VStack(spacing: 24) {
                 header.frame(maxWidth: 1100)
                 HStack(alignment: .top, spacing: 48) {
-                    ScrollView { userList(users).padding(.vertical, 8) }
+                    // Bottom fade: the list scrolls (Android d57ef3d0).
+                    ScrollView { userList(users).padding(.vertical, 8).padding(.bottom, 40) }
                         .frame(maxWidth: .infinity)
+                        .mask {
+                            VStack(spacing: 0) {
+                                Color.black
+                                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                                    .frame(height: 60)
+                            }
+                        }
                     ScrollView { pickControls(users) }
                         .frame(width: 560)
                 }

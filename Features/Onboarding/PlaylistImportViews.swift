@@ -107,7 +107,8 @@ struct M3UImportView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
+                .buttonStyle(TVNoHighlightButtonStyle(isSelected: sourceMode == mode, scalesOnFocus: sourceMode == mode))
+                .tvFocusRingShape(.rounded(10))
                 #else
                 .buttonStyle(.plain)
                 #endif
@@ -493,7 +494,8 @@ struct EPGImportView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
+                .buttonStyle(TVNoHighlightButtonStyle(isSelected: sourceMode == mode, scalesOnFocus: sourceMode == mode))
+                .tvFocusRingShape(.rounded(10))
                 #else
                 .buttonStyle(.plain)
                 #endif
