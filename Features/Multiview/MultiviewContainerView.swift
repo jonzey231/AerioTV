@@ -1183,6 +1183,20 @@ struct MultiviewContainerView: View {
             if !presenting { chromeState.reportInteraction() }
         }
         .task(watchThermalState)
+        // jonzey231/AerioTV-Android#148: a paused solo player showed a frozen
+        // frame with no controls, and the auto-hide ran regardless. Any pause
+        // (chrome button, Play/Pause, Select, a media key, the lock screen)
+        // flips the tile's isPaused, so read it from the progress store:
+        // pause shows the chrome and holds it, resume restarts the countdown.
+        .task(id: store.audioProgressStoreRevision) {
+            guard let ps = store.audioProgressStore else {
+                chromeState.setPausedHold(false)
+                return
+            }
+            for await paused in ps.$isPaused.removeDuplicates().values {
+                chromeState.setPausedHold(paused && store.tiles.count == 1)
+            }
+        }
         .onReceive(
             NotificationCenter.default.publisher(for: .multiviewRequestOpenAddSheet)
         ) { _ in
@@ -2828,6 +2842,28 @@ final class MultiviewChromeState: ObservableObject {
     enum PinReason { case options, connectionIssue }
     private var pinReasons: Set<PinReason> = []
 
+    /// True while the solo player is paused (jonzey231/AerioTV-Android#148).
+    /// Suppresses the auto-hide like a pin, but an explicit dismiss
+    /// (hideNow) still works, so Back keeps its normal ladder.
+    private(set) var pausedHold = false
+
+    func setPausedHold(_ paused: Bool) {
+        guard pausedHold != paused else { return }
+        pausedHold = paused
+        if paused {
+            hideTask?.cancel()
+            hideTask = nil
+            if !isVisible {
+                lastReason = "paused"
+                withAnimation(.easeInOut(duration: 0.25)) { isVisible = true }
+            }
+            debugLog("[MV-Chrome] visible=true reason=paused (held until resume)")
+        } else {
+            debugLog("[MV-Chrome] resume: auto-hide restarted isVisible=\(isVisible)")
+            if isVisible { scheduleHide() }
+        }
+    }
+
     /// Cancellable auto-hide task for the full chrome.
     private var hideTask: Task<Void, Never>?
 
@@ -2951,6 +2987,10 @@ final class MultiviewChromeState: ObservableObject {
             debugLog("[MV-Chrome] scheduleHide SKIPPED (pinned) isVisible=\(isVisible)")
             return
         }
+        guard !pausedHold else {
+            debugLog("[MV-Chrome] scheduleHide SKIPPED (paused) isVisible=\(isVisible)")
+            return
+        }
         debugLog("[MV-Chrome] scheduleHide armed (\(Int(delaySeconds))s) isVisible=\(isVisible)")
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
@@ -2963,6 +3003,7 @@ final class MultiviewChromeState: ObservableObject {
                 debugLog("[MV-Chrome] hideTask fire SKIPPED (pinned at fire)")
                 return
             }
+            guard !self.pausedHold else { return }
             debugLog("[MV-Chrome] hideTask FIRED -> isVisible=false")
             self.lastReason = "timer"
             withAnimation(.easeInOut(duration: 0.4)) {
