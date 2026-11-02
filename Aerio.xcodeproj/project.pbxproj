@@ -343,6 +343,14 @@
 		D5C0DA7A0000000000000207 /* DsyncHeld.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000007 /* DsyncHeld.swift */; };
 		D5C0DA7A0000000000000108 /* SetupSourceChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */; };
 		D5C0DA7A0000000000000208 /* SetupSourceChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */; };
+		D5C0DA7A000000000000010D /* DsyncLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000D /* DsyncLocal.swift */; };
+		D5C0DA7A000000000000020D /* DsyncLocal.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000D /* DsyncLocal.swift */; };
+		D5C0DA7A000000000000010C /* DsyncStores.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000C /* DsyncStores.swift */; };
+		D5C0DA7A000000000000020C /* DsyncStores.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000C /* DsyncStores.swift */; };
+		D5C0DA7A000000000000010B /* DsyncSettingsMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000B /* DsyncSettingsMap.swift */; };
+		D5C0DA7A000000000000020B /* DsyncSettingsMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000B /* DsyncSettingsMap.swift */; };
+		D5C0DA7A000000000000010A /* DsyncManagerRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000A /* DsyncManagerRules.swift */; };
+		D5C0DA7A000000000000020A /* DsyncManagerRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A000000000000000A /* DsyncManagerRules.swift */; };
 		D5C0DA7A0000000000000109 /* DispatcharrAppDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */; };
 		D5C0DA7A0000000000000209 /* DispatcharrAppDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */; };
 /* End PBXBuildFile section */
@@ -586,6 +594,10 @@
 		D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSettingsValidator.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000007 /* DsyncHeld.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncHeld.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupSourceChoice.swift; sourceTree = "<group>"; };
+		D5C0DA7A000000000000000D /* DsyncLocal.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncLocal.swift; sourceTree = "<group>"; };
+		D5C0DA7A000000000000000C /* DsyncStores.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncStores.swift; sourceTree = "<group>"; };
+		D5C0DA7A000000000000000B /* DsyncSettingsMap.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSettingsMap.swift; sourceTree = "<group>"; };
+		D5C0DA7A000000000000000A /* DsyncManagerRules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncManagerRules.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DispatcharrAppDataClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -1134,6 +1146,10 @@
 				D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */,
 				D5C0DA7A0000000000000007 /* DsyncHeld.swift */,
 				D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */,
+				D5C0DA7A000000000000000D /* DsyncLocal.swift */,
+				D5C0DA7A000000000000000C /* DsyncStores.swift */,
+				D5C0DA7A000000000000000B /* DsyncSettingsMap.swift */,
+				D5C0DA7A000000000000000A /* DsyncManagerRules.swift */,
 			);
 			path = Dsync;
 			sourceTree = "<group>";
@@ -1499,6 +1515,10 @@
 				D5C0DA7A0000000000000106 /* DsyncSettingsValidator.swift in Sources */,
 				D5C0DA7A0000000000000107 /* DsyncHeld.swift in Sources */,
 				D5C0DA7A0000000000000108 /* SetupSourceChoice.swift in Sources */,
+				D5C0DA7A000000000000010D /* DsyncLocal.swift in Sources */,
+				D5C0DA7A000000000000010C /* DsyncStores.swift in Sources */,
+				D5C0DA7A000000000000010B /* DsyncSettingsMap.swift in Sources */,
+				D5C0DA7A000000000000010A /* DsyncManagerRules.swift in Sources */,
 				D5C0DA7A0000000000000109 /* DispatcharrAppDataClient.swift in Sources */,
 				A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */,
 				A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */,
@@ -1662,6 +1682,10 @@
 				D5C0DA7A0000000000000206 /* DsyncSettingsValidator.swift in Sources */,
 				D5C0DA7A0000000000000207 /* DsyncHeld.swift in Sources */,
 				D5C0DA7A0000000000000208 /* SetupSourceChoice.swift in Sources */,
+				D5C0DA7A000000000000020D /* DsyncLocal.swift in Sources */,
+				D5C0DA7A000000000000020C /* DsyncStores.swift in Sources */,
+				D5C0DA7A000000000000020B /* DsyncSettingsMap.swift in Sources */,
+				D5C0DA7A000000000000020A /* DsyncManagerRules.swift in Sources */,
 				D5C0DA7A0000000000000209 /* DispatcharrAppDataClient.swift in Sources */,
 				A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */,
 				A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */,

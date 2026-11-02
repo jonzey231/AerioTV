@@ -75,6 +75,16 @@ final class FavoritesStore: ObservableObject {
         SyncManager.shared.pushPreferencesImmediate()
     }
 
+    /// Dispatcharr Sync apply: [order] becomes the favorite set and its manual
+    /// order, then the loaded channel list re-hydrates. No iCloud push here:
+    /// what was just applied is the synced state, not a local change.
+    func applySynced(order: [String], items: [ChannelDisplayItem]) {
+        favoriteIDs = Set(order)
+        UserDefaults.standard.set(order, forKey: "favoriteChannelIDs")
+        UserDefaults.standard.set(order, forKey: Self.orderKey)
+        register(items: items)
+    }
+
     /// Called when channels load. Hydrates in-memory favorites from fresh item data.
     func register(items: [ChannelDisplayItem]) {
         let filtered = items.filter { favoriteIDs.contains($0.id) }

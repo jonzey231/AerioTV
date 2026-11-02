@@ -481,5 +481,125 @@ do {
     check(res.rows.isEmpty && res.dropped.count == 1, "tombstone removes an older row")
 }
 
+
+// MARK: - Manager rules (DispatcharrSyncManager processCategory, writeLocked, onLocalChange)
+
+do {
+    let empty = obj(#"{"ids":[]}"#)
+    let full = obj(#"{"ids":[1,2]}"#)
+    func d(_ key: DsyncKey = .favorites, forced: Bool = false, consumed: Bool = true, data: DsyncObject? = nil,
+           localAt: Int64 = 100, remoteAt: Int64 = 200, dirty: Bool = false, dirtyAt: Int64 = 0, forceApply: Bool = false) -> DsyncPullAction {
+        DsyncPullRules.decide(key, forced: forced, consumedBefore: consumed, data: data ?? full,
+                              localAt: localAt, localDevice: "A", remoteAt: remoteAt, remoteDevice: "B",
+                              dirty: dirty, dirtyAt: dirtyAt, forceApply: forceApply)
+    }
+    eq(d(forced: true), .forcedSkip, "forced key is consumed, not applied")
+    eq(d(consumed: false, data: empty), .seedFromLocal, "empty server on first read seeds from local")
+    eq(d(consumed: true, data: empty), .apply, "empty server after a consumed read applies (newer)")
+    eq(d(), .apply, "newer server copy applies")
+    eq(d(dirty: true), .merge, "row key with an unsent change merges")
+    eq(d(.hiddenGroups, data: obj(#"{"live":["a"]}"#), dirty: true, dirtyAt: 300), .keepLocal, "newer local whole value kept")
+    eq(d(.hiddenGroups, data: obj(#"{"live":["a"]}"#), dirty: true, dirtyAt: 150), .apply, "older local whole value replaced")
+    eq(d(localAt: 300, remoteAt: 200), .notNewer, "consumed stamp is not newer")
+    eq(d(localAt: 300, remoteAt: 200, forceApply: true), .choiceApply, "setup choice applies a not-newer key")
+    eq(d(localAt: 300, remoteAt: 200, dirty: true, forceApply: true), .notNewer, "setup choice keeps an unsent change")
+    eq(d(.profiles, localAt: 300, remoteAt: 200), .merge, "profiles merge per row on every pull")
+
+    check(DsyncPullRules.shouldSkipBucketGet(lastPullAt: 1_000, now: 30_000, fetchedBytes: 50, listedBytes: 50), "same size within a minute skips")
+    check(!DsyncPullRules.shouldSkipBucketGet(lastPullAt: 1_000, now: 70_000, fetchedBytes: 50, listedBytes: 50), "a minute later fetches")
+    check(!DsyncPullRules.shouldSkipBucketGet(lastPullAt: 1_000, now: 30_000, fetchedBytes: 50, listedBytes: 51), "size change fetches")
+    check(!DsyncPullRules.shouldSkipBucketGet(lastPullAt: 0, now: 30_000, fetchedBytes: 50, listedBytes: 50), "first pull fetches")
+    check(DsyncPullRules.resendReason("launch") && DsyncPullRules.resendReason("reconnect") && !DsyncPullRules.resendReason("periodic"), "resend reasons")
+    check(DsyncPullRules.sameAsConsumed(remoteAt: 5, remoteDevice: "A", remoteData: full, localAt: 5, localDevice: "A", localData: full), "consumed copy")
+    check(!DsyncPullRules.sameAsConsumed(remoteAt: 5, remoteDevice: "A", remoteData: full, localAt: 5, localDevice: "A", localData: empty), "changed data")
+
+    // "status=unchanged": compare with the server copy just fetched, not the saved one.
+    check(DsyncPushRules.unchanged(built: full, serverData: full, lastData: empty, present: true), "server copy equal")
+    check(!DsyncPushRules.unchanged(built: full, serverData: obj(#"{"ids":[1,2,3]}"#), lastData: full, present: true), "fresh server copy wins over a stale saved one")
+    check(DsyncPushRules.unchanged(built: full, serverData: nil, lastData: full, present: true), "saved copy when the fetch had none")
+    check(!DsyncPushRules.unchanged(built: full, serverData: full, lastData: nil, present: false), "absent category always puts")
+    check(!DsyncPushRules.unchanged(built: obj(#"{"ids":[2,1]}"#), serverData: full, lastData: nil, present: true), "order matters (text compare)")
+    check(DsyncPushRules.logsUnchanged(force: true, dirty: false, key: .remoteMap), "forced logs")
+    check(DsyncPushRules.logsUnchanged(force: false, dirty: true, key: .favorites), "dirty shared logs")
+    check(!DsyncPushRules.logsUnchanged(force: false, dirty: true, key: .remoteMap), "dirty non-shared quiet")
+
+    // Debounce and the local-change gate.
+    eq(DsyncPushRules.debounceMs(.favorites), 5_000, "5 s debounce")
+    eq(DsyncPushRules.debounceMs(.profiles), 1_000, "profiles 1 s")
+    check(DsyncPushRules.acceptLocalChange(sessionLive: true, suppressUntilMs: nil, nowMs: 10), "live change accepted")
+    check(!DsyncPushRules.acceptLocalChange(sessionLive: true, suppressUntilMs: 20, nowMs: 10), "apply echo suppressed")
+    check(DsyncPushRules.acceptLocalChange(sessionLive: true, suppressUntilMs: 10, nowMs: 10), "window over")
+    check(!DsyncPushRules.acceptLocalChange(sessionLive: false, suppressUntilMs: nil, nowMs: 10), "no session")
+    eq(DsyncTiming.backoff(0), 30_000, "backoff 1")
+    eq(DsyncTiming.backoff(2), 600_000, "backoff 3")
+    eq(DsyncTiming.backoff(3), nil, "backoff spent")
+    eq(DsyncTiming.reconnect(0), 2_000, "reconnect 1")
+    eq(DsyncTiming.reconnect(9), 60_000, "reconnect then every 60 s")
+
+    // Converge gating and skip reasons.
+    eq(DsyncPushRules.convergeSkip(forced: true, awaiting: true, pending: true, read: false, dirty: true, partial: false), "armed", "armed first")
+    eq(DsyncPushRules.convergeSkip(forced: false, awaiting: true, pending: true, read: true, dirty: true, partial: false), "deferred", "deferred")
+    eq(DsyncPushRules.convergeSkip(forced: false, awaiting: false, pending: true, read: true, dirty: false, partial: false), "dirty", "queued write")
+    eq(DsyncPushRules.convergeSkip(forced: false, awaiting: false, pending: false, read: false, dirty: false, partial: false), "unread", "unread")
+    eq(DsyncPushRules.convergeSkip(forced: false, awaiting: false, pending: false, read: true, dirty: true, partial: true), nil, "partial is compared")
+    check(DsyncPushRules.convergeAllowed(isBase: true, choiceHeld: false, running: false, anyForced: false, choicePending: false), "converge allowed")
+    check(!DsyncPushRules.convergeAllowed(isBase: true, choiceHeld: true, running: false, anyForced: false, choicePending: false), "no converge in a hold")
+    check(!DsyncPushRules.convergeAllowed(isBase: true, choiceHeld: false, running: false, anyForced: true, choicePending: false), "no converge while armed")
+    check(!DsyncPushRules.convergeAllowed(isBase: true, choiceHeld: false, running: false, anyForced: false, choicePending: true), "no converge with a prompt pending")
+
+    // Favorites apply plan.
+    let plan = DsyncFavoritesRules.plan(ids: [3, 1, 9, 3], toLocal: [1: "1", 2: "2", 3: "3"], toInt: ["1": 1, "2": 2, "3": 3],
+                                        local: ["2", "x", "1"])
+    eq(plan.wanted, ["3", "1"], "mapped in server order, distinct")
+    eq(plan.deletes, ["2"], "mapped local dropped by the server")
+    eq(plan.order, ["3", "1", "x"], "unmapped local kept after")
+    eq(DsyncFavoritesRules.logLine("in", ids: 4, mapped: 2, written: 2, scope: "", playlistId: "ABCDEFGHIJ"),
+       "[DSYNC] favorites in: 4 ids, 2 mapped, 2 written, scope=default, playlist=ABCDEFGH", "favorites log line")
+
+    // Recents stamps and apply.
+    let st = DsyncRecentsRules.stamp(ids: ["b", "a"], previousHead: "a", stamps: ["a": 50, "z": 1], now: 100)
+    eq(st.stamps, ["b": 100, "a": 50], "new head stamped now, stale ids dropped")
+    eq(st.head, "b", "head recorded")
+    let lr = DsyncRecentsRules.localRows(ids: ["b", "q", "a"], toInt: ["a": 1, "b": 2], stamps: ["b": 100], now: 100)
+    eq(lr, [RecentRow(channelId: 2, watchedAt: 100), RecentRow(channelId: 1, watchedAt: 98)], "local rows with fallback stamps")
+    let ap = DsyncRecentsRules.applied(local: lr, remote: [RecentRow(channelId: 3, watchedAt: 200), RecentRow(channelId: 1, watchedAt: 99)],
+                                       ids: ["b", "q", "a"], toInt: ["a": 1, "b": 2, "c": 3], toLocal: [1: "a", 2: "b", 3: "c"])
+    eq(ap.ids, ["c", "b", "a", "q"], "merged newest first, unmapped local after")
+
+    // Reminders apply plan.
+    let rp = DsyncRemindersRules.plan(
+        rows: [ReminderRow(channelId: 1, start: 1_000, end: 2_000, title: "A", channelName: "One"),
+               ReminderRow(channelId: 2, start: 10, end: 20, title: "Old", channelName: "Two"),
+               ReminderRow(channelId: 3, start: 1_000, end: 2_000, title: "C", channelName: "Three")],
+        nowMs: 500_000,
+        local: [.init(key: "k1", channelName: "One", startS: 1_000), .init(key: "k2", channelName: "Two", startS: 5),
+                .init(key: "k3", channelName: "Gone", startS: 1)],
+        intByName: ["One": 1, "Two": 2], toLocal: [1: "1", 2: "2"])
+    eq(rp.removeKeys, ["k2"], "a mapped local row the server dropped is removed; unmapped kept")
+    eq(rp.add.map(\.title), [], "already present, expired, and unmappable rows not added")
+}
+
+// MARK: - Settings name map (DsyncItemCatalog names to Apple UserDefaults keys)
+
+do {
+    let theme = DsyncSettingsMap.entry("selectedTheme")!
+    eq(DsyncSettingsMap.toApple(theme, .string("Midnight")) as? String, "midnight", "theme to Apple")
+    eq(DsyncSettingsMap.fromApple(theme, "midnight"), .string("Midnight"), "theme from Apple")
+    let tab = DsyncSettingsMap.entry("defaultTab")!
+    eq(DsyncSettingsMap.toApple(tab, .string("TVShows")) as? String, "tvshows", "tab to Apple")
+    eq(DsyncSettingsMap.fromApple(tab, "favorites"), nil, "an Apple-only tab has no schema spelling")
+    let hex = DsyncSettingsMap.entry("categoryColor.sports")!
+    eq(hex.appleKey, "categoryColor.sports", "prefix family keeps its name")
+    eq(DsyncSettingsMap.toApple(hex, .string("#ff0000")) as? String, "FF0000", "hex stored without # uppercased")
+    eq(DsyncSettingsMap.toApple(DsyncSettingsMap.entry("customAccentHex")!, .string("")) as? String, nil, "empty accent leaves local")
+    eq(DsyncSettingsMap.entry("skipBack")!.appleKey, "skipBackSeconds", "skip back key")
+    eq(DsyncSettingsMap.fromApple(DsyncSettingsMap.entry("textScale")!, 1.0), .double(1.0), "double spelling")
+    eq(DsyncSettingsMap.fromApple(DsyncSettingsMap.entry("trueBlack")!, NSNumber(value: true)), .bool(true), "NSNumber bool")
+    check(DsyncSettingsMap.entry("guideGroupSelector") == nil, "unverified names are not mapped")
+    for e in DsyncSettingsMap.ENTRIES { check(DsyncSettingsValidator.isOwned(e.name), "mapped name \(e.name) is a schema name") }
+    check(Set(DsyncSettingsMap.ENTRIES.map(\.name)).count == DsyncSettingsMap.ENTRIES.count, "names unique")
+    check(Set(DsyncSettingsMap.ENTRIES.map(\.appleKey)).count == DsyncSettingsMap.ENTRIES.count, "Apple keys unique")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
