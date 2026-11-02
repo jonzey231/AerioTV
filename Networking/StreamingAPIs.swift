@@ -7335,3 +7335,14 @@ enum DispatcharrProgramDetailResolver {
         }
     }
 }
+
+// MARK: - Dispatcharr Sync App Data access
+
+extension DispatcharrAPI {
+    /// The auth and content headers every Dispatcharr API call sends, for
+    /// DispatcharrAppDataClient (Networking/DispatcharrAppDataClient.swift).
+    var appDataHeaders: [String: String] { headers }
+
+    /// `buildURL(path:)` for DispatcharrAppDataClient.
+    func appDataURL(path: String) throws -> URL { try buildURL(path: path) }
+}

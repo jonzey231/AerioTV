@@ -327,6 +327,24 @@
 		TSR0000000000000000000003 /* TSHLSRemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TSR0000000000000000000001 /* TSHLSRemuxer.swift */; };
 		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
 		WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
+		D5C0DA7A0000000000000101 /* DsyncJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000001 /* DsyncJSON.swift */; };
+		D5C0DA7A0000000000000201 /* DsyncJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000001 /* DsyncJSON.swift */; };
+		D5C0DA7A0000000000000102 /* DsyncSyncItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */; };
+		D5C0DA7A0000000000000202 /* DsyncSyncItems.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */; };
+		D5C0DA7A0000000000000103 /* DsyncSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000003 /* DsyncSchema.swift */; };
+		D5C0DA7A0000000000000203 /* DsyncSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000003 /* DsyncSchema.swift */; };
+		D5C0DA7A0000000000000104 /* DsyncV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000004 /* DsyncV2.swift */; };
+		D5C0DA7A0000000000000204 /* DsyncV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000004 /* DsyncV2.swift */; };
+		D5C0DA7A0000000000000105 /* DsyncReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000005 /* DsyncReadiness.swift */; };
+		D5C0DA7A0000000000000205 /* DsyncReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000005 /* DsyncReadiness.swift */; };
+		D5C0DA7A0000000000000106 /* DsyncSettingsValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */; };
+		D5C0DA7A0000000000000206 /* DsyncSettingsValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */; };
+		D5C0DA7A0000000000000107 /* DsyncHeld.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000007 /* DsyncHeld.swift */; };
+		D5C0DA7A0000000000000207 /* DsyncHeld.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000007 /* DsyncHeld.swift */; };
+		D5C0DA7A0000000000000108 /* SetupSourceChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */; };
+		D5C0DA7A0000000000000208 /* SetupSourceChoice.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */; };
+		D5C0DA7A0000000000000109 /* DispatcharrAppDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */; };
+		D5C0DA7A0000000000000209 /* DispatcharrAppDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -560,6 +578,15 @@
 		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		TSR0000000000000000000001 /* TSHLSRemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSRemuxer.swift; sourceTree = "<group>"; };
 		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000001 /* DsyncJSON.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncJSON.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSyncItems.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000003 /* DsyncSchema.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSchema.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000004 /* DsyncV2.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncV2.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000005 /* DsyncReadiness.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncReadiness.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSettingsValidator.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000007 /* DsyncHeld.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncHeld.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupSourceChoice.swift; sourceTree = "<group>"; };
+		D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DispatcharrAppDataClient.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -643,6 +670,7 @@
 				57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */,
 				4C548BC428D32F3966A46C27 /* VODService.swift */,
 				693A71F4A4429F56337992E6 /* StreamingAPIs.swift */,
+				D5C0DA7A0000000000000009 /* DispatcharrAppDataClient.swift */,
 				6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */,
 				1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */,
 				1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */,
@@ -1075,6 +1103,7 @@
 				A1B2C3D4E5F67890D1C00003 /* PlayerInfoCardSettings.swift */,
 				A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */,
 				A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */,
+				D5C0DA7A0000000000000F00 /* Dsync */,
 				A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */,
 				A1B2C3D4E5F67890E9600030 /* EPGText.swift */,
 				B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */,
@@ -1092,6 +1121,21 @@
 				F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */,
 			);
 			path = Shared;
+			sourceTree = "<group>";
+		};
+		D5C0DA7A0000000000000F00 /* Dsync */ = {
+			isa = PBXGroup;
+			children = (
+				D5C0DA7A0000000000000001 /* DsyncJSON.swift */,
+				D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */,
+				D5C0DA7A0000000000000003 /* DsyncSchema.swift */,
+				D5C0DA7A0000000000000004 /* DsyncV2.swift */,
+				D5C0DA7A0000000000000005 /* DsyncReadiness.swift */,
+				D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */,
+				D5C0DA7A0000000000000007 /* DsyncHeld.swift */,
+				D5C0DA7A0000000000000008 /* SetupSourceChoice.swift */,
+			);
+			path = Dsync;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1447,6 +1491,15 @@
 				A1B2C3D4E5F67890D1C00001 /* PlayerInfoCardSettings.swift in Sources */,
 				A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */,
 				A1B2C3D4E5F67890C0A90001 /* CompanionNowPlaying.swift in Sources */,
+				D5C0DA7A0000000000000101 /* DsyncJSON.swift in Sources */,
+				D5C0DA7A0000000000000102 /* DsyncSyncItems.swift in Sources */,
+				D5C0DA7A0000000000000103 /* DsyncSchema.swift in Sources */,
+				D5C0DA7A0000000000000104 /* DsyncV2.swift in Sources */,
+				D5C0DA7A0000000000000105 /* DsyncReadiness.swift in Sources */,
+				D5C0DA7A0000000000000106 /* DsyncSettingsValidator.swift in Sources */,
+				D5C0DA7A0000000000000107 /* DsyncHeld.swift in Sources */,
+				D5C0DA7A0000000000000108 /* SetupSourceChoice.swift in Sources */,
+				D5C0DA7A0000000000000109 /* DispatcharrAppDataClient.swift in Sources */,
 				A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */,
 				A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */,
@@ -1601,6 +1654,15 @@
 				A1B2C3D4E5F67890D1C00002 /* PlayerInfoCardSettings.swift in Sources */,
 				A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */,
 				A1B2C3D4E5F67890C0A90002 /* CompanionNowPlaying.swift in Sources */,
+				D5C0DA7A0000000000000201 /* DsyncJSON.swift in Sources */,
+				D5C0DA7A0000000000000202 /* DsyncSyncItems.swift in Sources */,
+				D5C0DA7A0000000000000203 /* DsyncSchema.swift in Sources */,
+				D5C0DA7A0000000000000204 /* DsyncV2.swift in Sources */,
+				D5C0DA7A0000000000000205 /* DsyncReadiness.swift in Sources */,
+				D5C0DA7A0000000000000206 /* DsyncSettingsValidator.swift in Sources */,
+				D5C0DA7A0000000000000207 /* DsyncHeld.swift in Sources */,
+				D5C0DA7A0000000000000208 /* SetupSourceChoice.swift in Sources */,
+				D5C0DA7A0000000000000209 /* DispatcharrAppDataClient.swift in Sources */,
 				A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */,
 				A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */,
