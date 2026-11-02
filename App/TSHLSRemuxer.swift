@@ -8195,6 +8195,35 @@ struct AVPlayerMultiviewTile: View {
     /// `adoptedPlayer`: a direct-HLS AVPlayer handed back by Kept Live.
     /// Its item is already playing, so no new asset and no join offset
     /// (writing one on a playing live item seeks it backward).
+    /// VOD played direct (MP4/M4V/MOV) on a bare AVPlayerLayer gets no
+    /// automatic display-mode match, so the film rate (23.976 / 24) and
+    /// 25 / 50 Hz titles played on the home-screen 60 Hz mode. Android
+    /// VodFrameRateMatch requests the content rate for VOD (filmRate = true);
+    /// this reads the track's nominal rate and goes through the same
+    /// applyDisplayCriteria path the remuxed tiles use. tvOS only; the
+    /// system Match Content settings still decide whether the panel switches.
+    private func requestDirectVODFrameRate(_ asset: AVURLAsset) {
+        #if os(tvOS)
+        Task { @MainActor in
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let fps = try? await track.load(.nominalFrameRate), fps > 10 else {
+                debugLog("[AVP-DISPLAY] direct VOD: no nominal frame rate, no criteria")
+                return
+            }
+            let size = (try? await track.load(.naturalSize)) ?? .zero
+            var hdr = false
+            if let fd = (try? await track.load(.formatDescriptions))?.first {
+                let tf = CMFormatDescriptionGetExtension(fd, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String
+                hdr = tf == (kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+                    || tf == (kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String)
+            }
+            debugLog("[AVP-DISPLAY] direct VOD frame rate request fps=\(String(format: "%.3f", fps)) hdr=\(hdr)")
+            applyDisplayCriteria(width: Int(abs(size.width)), height: Int(abs(size.height)),
+                                 fps: Double(fps), is10Bit: hdr)
+        }
+        #endif
+    }
+
     private func startPlayer(url: URL, requestHeaders: [String: String], adoptedPlayer: AVPlayer? = nil) {
         // Segments exist by now, so the remuxer has already decided
         // whether this program is audio-only (GH #90).
@@ -8247,6 +8276,9 @@ struct AVPlayerMultiviewTile: View {
                                              queue: HLSResourceLoaderRegistry.shared.queue)
         }
         let playerItem = adoptedPlayer?.currentItem ?? AVPlayerItem(asset: asset)
+        if adoptedPlayer == nil, ["mp4", "m4v", "mov"].contains(url.pathExtension.lowercased()) {
+            requestDirectVODFrameRate(asset)
+        }
         // Live-edge point: trust the server, do not force an offset. The
         // Dispatcharr HLS output now pins the join point itself, correctly for
         // each mode: #EXT-X-START ~3 target durations back on the standard
