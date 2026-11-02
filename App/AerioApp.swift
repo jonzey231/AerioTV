@@ -750,6 +750,8 @@ struct AerioApp: App {
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
+                // Dispatcharr Sync: foreground pull (5 minutes since the last one).
+                DispatcharrSyncManager.shared.onForeground()
                 // Re-probe LAN on every foreground transition, covers
                 // the "user took the Apple TV / iPad / Mac to a
                 // different network and came back" case that the
@@ -783,6 +785,8 @@ struct AerioApp: App {
                 // on the main queue waiting out its asyncAfter debounce. See
                 // GitHub issue #2.
                 SyncManager.shared.pushPreferencesImmediate()
+                // Dispatcharr Sync: send queued writes now (Android onStop flush).
+                DispatcharrSyncManager.shared.onBackground()
                 #if os(tvOS)
                 // Stop playback so audio doesn't continue in the background.
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
@@ -1470,6 +1474,8 @@ struct RootView: View {
                 // Share model context with WatchProgressManager for VOD resume tracking
                 WatchProgressManager.modelContext = modelContext
                 WatchlistManager.modelContext = modelContext
+                // Dispatcharr Sync: idle unless Settings > Sync turns it on.
+                DispatcharrSyncManager.shared.start()
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }

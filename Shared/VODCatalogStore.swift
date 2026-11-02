@@ -293,6 +293,8 @@ final class VODCatalogStore: @unchecked Sendable {
     func writePage(_ items: [VODDisplayItem], playlistKey: String,
                    kind: VODItemType, generation: Int64) async -> Int {
         guard !items.isEmpty else { return 0 }
+        // Dispatcharr Sync: deferred VOD keys re-check on each page write.
+        defer { Task { @MainActor in DispatcharrSyncManager.shared.noteCatalogPageWritten() } }
         return await offMain { [weak self] in
             guard let self, self.ensureOpen() != nil else { return 0 }
             let columns = "playlistKey, kind, itemKey, title, sortKey, bucket, year, ratingValue, "
