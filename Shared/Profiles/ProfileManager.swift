@@ -218,6 +218,24 @@ final class ProfileManager: ObservableObject {
         return store.apiKey(p.id)
     }
 
+    /// The session's user id when not read yet (a default profile never switched to): ask /me/ once.
+    func ensureUserId(_ playlistId: String) async -> Int {
+        guard let p = activeProfile(playlistId) else { return 0 }
+        if p.userId > 0 { return p.userId }
+        guard let server = DsyncLocal.server(playlistId), let key = activeApiKey(playlistId),
+              let me = await fetchMe(server, key), me.username.caseInsensitiveCompare(p.username) == .orderedSame else { return 0 }
+        store.update(p.id) { var c = $0; c.userId = me.id; return c }
+        return me.id
+    }
+
+    /// The server users for the `profiles` key: the admin list, or the local profiles' own ids.
+    func syncUsers(_ playlistId: String) async -> [DispatcharrUserSummary] {
+        if activeIsAdmin(playlistId) && baseIsServerAdmin(playlistId), let server = DsyncLocal.server(playlistId),
+           let list = try? await baseApi(server).listUsers(), !list.isEmpty { return list }
+        // No users list without a server admin key (403): the local profiles' own user ids stand in.
+        return store.forPlaylist(playlistId).filter { $0.userId > 0 }.map { DispatcharrUserSummary(id: $0.userId, username: $0.username) }
+    }
+
     private func refreshActiveRole() {
         let role = store.lastActivePlaylistId.flatMap { activeRole($0) }
         if activeRoleNow != role {

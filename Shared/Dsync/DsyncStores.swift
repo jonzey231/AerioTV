@@ -41,6 +41,11 @@ final class DsyncStateStore {
     func set(_ k: String, _ v: Int64) { ud.set(Int(v), forKey: prefix + k) }
     func set(_ k: String, _ v: String) { ud.set(v, forKey: prefix + k) }
     func remove(_ k: String) { ud.removeObject(forKey: prefix + k) }
+    /// Every scalar key starting with [p] (the store prefix stripped), for the per-row profile stamps.
+    func keys(withPrefix p: String) -> [String] {
+        let full = prefix + p
+        return ud.dictionaryRepresentation().keys.filter { $0.hasPrefix(full) }.map { String($0.dropFirst(prefix.count)) }
+    }
 
     // ---- JSON blobs (files) ----
 

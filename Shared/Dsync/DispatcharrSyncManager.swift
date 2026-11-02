@@ -8,10 +8,15 @@
 //  core/sync/dsync/DispatcharrSyncManager.kt; the pure decisions are in
 //  DsyncManagerRules.swift, the Apple stores in DsyncLocal.swift.
 //
-//  One session per (active Dispatcharr Direct Connect playlist, profile).
-//  Apple has no profiles yet, so every session is the base user (token "",
-//  profile key "default") and the `profiles` key is read and kept (stamps and
-//  roster rows) but never applied or written. A session pulls first; a key
+//  One session per (active Dispatcharr Direct Connect playlist, active
+//  profile). The default profile is the base user (token "", profile key
+//  "default", the playlist's own credential); any other profile is its own
+//  Dispatcharr user (token and profile key = its profile id, its own API
+//  key). Until per-profile local data lands, a non-default session syncs
+//  only the keys whose local copy is per profile (profiles, settings,
+//  radioDefault, groupOrder). The `profiles` key merges per row with
+//  stamps and tombstones and is never applied as device profiles
+//  automatically (the roster is opt-in). A session pulls first; a key
 //  is never written before it was read in that session. Cadence and error
 //  handling follow section 7: launch, foreground (5 minutes since the last
 //  pull), every 15 minutes while foregrounded, 5 s after a local change,
@@ -81,6 +86,8 @@ final class DsyncSession {
     var ended = false
     /// The one re-pull after the channel list loaded (Apple only).
     var channelsRepulled = false
+    /// The server users for the `profiles` key, once read.
+    var users: [DispatcharrUserSummary]?
 
     init(playlistId: String, profileKey: String, token: String) {
         self.playlistId = playlistId
@@ -184,6 +191,20 @@ final class DispatcharrSyncManager: ObservableObject {
         }
         monitor.start(queue: DispatchQueue(label: "aerio.dsync.path"))
         pathMonitor = monitor
+        let pm = ProfileManager.shared
+        pm.onProfilesMutated = { [weak self] pid, user, what, at in self?.onProfilesMutated(pid, user, what, at) }
+        pm.onPickerOpened = { [weak self] pid, reason in self?.onPickerOpened(pid, reason) }
+        // A switch sends what the outgoing profile queued while it is still the live one.
+        pm.beforeSwitch = { [weak self] pid in
+            guard let self, let s = self.session, s.playlistId == pid else { return }
+            debugLog("[DSYNC] session end user=\(s.profileKey.prefix(8)) (switch)")
+            await self.flush(s)
+        }
+        pm.onSwitched = { [weak self] _, _, _ in self?.evaluateTarget() }
+        pm.$switching.removeDuplicates()
+            .sink { [weak self] _ in Task { @MainActor in self?.evaluateTarget() } }
+            .store(in: &cancellables)
+        pm.start()
         evaluateTarget()
     }
 
@@ -191,6 +212,7 @@ final class DispatcharrSyncManager: ObservableObject {
         foreground = true
         evaluateTarget()
         guard let s = session else { return }
+        onPickerOpened(s.playlistId, "foreground")
         if Self.nowMs() - s.lastPullAt >= DsyncTiming.FOREGROUND_PULL_MS {
             Task { await self.pullAll(s, "foreground") }
         }
@@ -241,16 +263,29 @@ final class DispatcharrSyncManager: ObservableObject {
 
     // MARK: - Session
 
-    private func targetPlaylist() -> String? {
-        guard isEnabled, let s = DsyncLocal.activeDispatcharrPlaylist() else { return nil }
-        return s.id.uuidString
+    private struct Target: Equatable { let playlistId: String; let token: String }
+
+    /// The profile token of [playlistId]'s active profile: "" for the default profile.
+    private func currentToken(_ playlistId: String) -> String {
+        guard let p = ProfileManager.shared.activeProfile(playlistId), !p.isDefault else { return "" }
+        return p.id
     }
 
-    /// Starts, ends, or switches the session when the enable flag or the active playlist changed.
+    private func target() -> Target? {
+        guard isEnabled, let s = DsyncLocal.activeDispatcharrPlaylist() else { return nil }
+        let pid = s.id.uuidString
+        return Target(playlistId: pid, token: currentToken(pid))
+    }
+
+    /// Starts, ends, or switches the session when the enable flag, the active playlist, or the profile changed.
+    /// A profile switch in flight holds: no session until its sign-in and settings are in place.
     private func evaluateTarget() {
         guard started, !targetChanging else { return }
-        let t = targetPlaylist()
-        if t == session?.playlistId { return }
+        let holding = ProfileManager.shared.switching
+        let t = holding ? nil : target()
+        if holding && session == nil { return }
+        if let cur = session, t == Target(playlistId: cur.playlistId, token: cur.token) { return }
+        if t == nil && session == nil { return }
         targetChanging = true
         Task {
             defer { self.targetChanging = false }
@@ -262,12 +297,15 @@ final class DispatcharrSyncManager: ObservableObject {
                 self.endSession(old)
             }
             guard let t else {
-                self.ui = Ui()
+                if !holding { self.ui = Ui() }
                 return
             }
-            await self.runSession(t, trigger: "launch")
+            let why = self.lastTarget.map { $0.playlistId == t.playlistId && $0.token != t.token } == true ? "profile" : "launch"
+            self.lastTarget = t
+            await self.runSession(t.playlistId, token: t.token, trigger: why)
             // A change while this one started is picked up now.
-            if self.targetPlaylist() != self.session?.playlistId { self.targetChanging = false; self.evaluateTarget() }
+            let now = self.target()
+            if now?.playlistId != self.session?.playlistId || now?.token != self.session?.token { self.targetChanging = false; self.evaluateTarget() }
         }
     }
 
@@ -281,13 +319,35 @@ final class DispatcharrSyncManager: ObservableObject {
         for key in DsyncKey.allCases { s.signatures[key] = DsyncLocal.signature(key, s.playlistId) }
     }
 
-    private func runSession(_ playlistId: String, trigger: String) async {
-        let s = DsyncSession(playlistId: playlistId, profileKey: "default", token: "")
+    private var lastTarget: Target?
+
+    /// The persisted-state profile key: "default" for the base user (what every
+    /// session used before profiles, so its stamps carry over), else the profile id.
+    private static func profileKey(_ token: String) -> String { token.isEmpty ? "default" : token }
+
+    private func makeSession(_ playlistId: String, token: String) -> DsyncSession {
+        let s = DsyncSession(playlistId: playlistId, profileKey: Self.profileKey(token), token: token)
+        if let server = DsyncLocal.server(playlistId) {
+            s.client = token.isEmpty ? DsyncLocal.client(server)
+                : DsyncLocal.client(server, profileKey: ProfileManager.shared.store.apiKey(token) ?? "")
+        }
+        return s
+    }
+
+    private func runSession(_ playlistId: String, token: String, trigger: String) async {
+        let s = makeSession(playlistId, token: token)
         session = s
-        let server = DsyncLocal.server(playlistId)
-        s.client = server.flatMap(DsyncLocal.client)
         ui = Ui(active: true, lastSyncAt: state.long(k("last", s)))
-        debugLog("[DSYNC] session start playlist=\(playlistId.prefix(8)) user=\(server?.username.isEmpty == false ? server!.username : "?") userId=?")
+        if state.bool(profilesPendingKey(playlistId)) {
+            debugLog("[DSYNC] profiles: pending local change from between sessions, re-sending")
+            setDirty(s, .profiles, true)
+        } else if newestRowStamp(playlistId) > state.long(profilesPushedKey(playlistId)) {
+            debugLog("[DSYNC] profiles: local roster newer than last push, re-sending")
+            setDirty(s, .profiles, true)
+        }
+        let userId = await ProfileManager.shared.ensureUserId(playlistId)
+        guard session === s else { return }
+        debugLog("[DSYNC] session start playlist=\(playlistId.prefix(8)) user=\(s.profileKey.prefix(8)) userId=\(userId > 0 ? String(userId) : "?")")
         // Change detection starts from the state at session start (Android drop(1)).
         for key in DsyncKey.allCases { s.signatures[key] = DsyncLocal.signature(key, playlistId) }
         stampRecents(s)
@@ -659,22 +719,33 @@ final class DispatcharrSyncManager: ObservableObject {
     func ownsCategory(_ category: DsyncCategory) -> Bool {
         guard DsyncCoexistence.SHARED_CATEGORIES.contains(category) else { return false }
         let active = DsyncLocal.activeDispatcharrPlaylist()
-        let done = isEnabled && active != nil ? state.bool("fpdone|\(active!.id.uuidString)|default") : false
+        let done = isEnabled && active != nil
+            ? state.bool("fpdone|\(active!.id.uuidString)|\(Self.profileKey(currentToken(active!.id.uuidString)))") : false
         return DsyncCoexistence.owns(category, activeIsDispatcharr: active != nil, dispatcharrSyncOn: isEnabled, firstPullDoneForUser: done)
     }
 
     // MARK: - Per-key enablement
 
+    /// The keys whose local copy is per profile on Apple today (settings and the
+    /// group order and radio default swap on a switch). A non-default profile's
+    /// session syncs only these until favorites, recents, and the rest are per profile.
+    static let PROFILE_LOCAL_KEYS: Set<DsyncKey> = [.profiles, .settings, .radioDefault, .groupOrder]
+
     /// Per-item choices: data keys follow their item's on/off; settings is gated per name.
-    /// Profiles: no Profiles feature on Apple yet, so this device never writes the key.
+    /// Profiles: written and applied by the local Admin or Standard profile only.
     private func enabled(_ key: DsyncKey, _ s: DsyncSession) -> Bool {
+        if !isBase(s) && !Self.PROFILE_LOCAL_KEYS.contains(key) { return false }
         if key == .settings { return true }
-        if key == .profiles { return false }
-        guard let item = DsyncItemCatalog.itemForDsync(key.suffix) else { return true }
-        return DsyncLocal.scopes()[item.id] != .off
+        if let item = DsyncItemCatalog.itemForDsync(key.suffix), DsyncLocal.scopes()[item.id] == .off { return false }
+        return key == .profiles ? isAdmin(s) : true
     }
 
-    /// Pull side: profiles is read (stamps and roster kept) though never written.
+    /// Writes and applies the `profiles` key: the local Admin or Standard profile, server admin or not.
+    private func isAdmin(_ s: DsyncSession) -> Bool {
+        RoleRules.canWriteProfilesKey(ProfileManager.shared.activeRole(s.playlistId))
+    }
+
+    /// Pull side: profiles is read (stamps and roster kept) even when this profile cannot write it.
     private func pulled(_ key: DsyncKey, _ s: DsyncSession) -> Bool { key == .profiles || enabled(key, s) }
 
     // MARK: - Persisted per (playlist, profile, key) state
@@ -742,10 +813,304 @@ final class DispatcharrSyncManager: ObservableObject {
         return out
     }
 
-    /// The `profiles` roster rows as last read (kept for the Profiles feature, a later batch).
+    /// The `profiles` roster rows as last read.
     func profileRoster() -> [ProfileRow] {
         guard let s = session else { return [] }
         return rawOf(s, .profiles)?["data"]?.asObject.flatMap { DsyncPayloads.decodeProfiles($0) } ?? []
+    }
+
+    // MARK: - Profiles key (schema 4.12 and 5)
+
+    private func profilesPendingKey(_ playlistId: String) -> String { "pdirty|\(playlistId)" }
+    private func profilesPushedKey(_ playlistId: String) -> String { "ppushed|\(playlistId)" }
+    private func rowKey(_ playlistId: String, _ username: String) -> String { "prow|\(playlistId)|\(username.lowercased())" }
+    private func removedKey(_ playlistId: String, _ username: String) -> String { "pgone|\(playlistId)|\(username.lowercased())" }
+    /// Set by a local rename or avatar change: this device claims name and avatar.
+    private func customKey(_ playlistId: String, _ username: String) -> String { "pcust|\(playlistId)|\(username.lowercased())" }
+
+    private func newestRowStamp(_ playlistId: String) -> Int64 {
+        state.keys(withPrefix: "prow|\(playlistId)|").map { state.long($0) }.max() ?? 0
+    }
+
+    /// Roster adds by row key, wall-clock ms: the push guard's 60 s window.
+    private var rosterAdds: [String: Int64] = [:]
+
+    /// ProfileManager mutation hook: stamp the row and re-send `profiles` from an Admin session.
+    private func onProfilesMutated(_ playlistId: String, _ username: String, _ what: String, _ stampAt: Int64) {
+        if what == "undo-add" {
+            // Roster undo: local only. No tombstone, no pending mark, no push.
+            rosterAdds.removeValue(forKey: rowKey(playlistId, username))
+            state.remove(rowKey(playlistId, username))
+            state.remove(customKey(playlistId, username))
+            debugLog("[DSYNC] profiles: undo add; server row left as is")
+            return
+        }
+        // A roster add keeps the row's own stamp (stampAt); every real edit stamps now.
+        let now = stampAt > 0 ? stampAt : Self.nowS()
+        if what == "roster-add" { rosterAdds[rowKey(playlistId, username)] = Self.nowMs() }
+        state.set(rowKey(playlistId, username), now)
+        if what == "remove" { state.set(removedKey(playlistId, username), now) } else { state.remove(removedKey(playlistId, username)) }
+        // Only an explicit rename or avatar change claims name and avatar.
+        if what == "rename" || what == "avatar" { state.set(customKey(playlistId, username), true) }
+        if what == "remove" { state.remove(customKey(playlistId, username)) }
+        // Playlist-level pending mark: survives no session, a non-admin session, and a relaunch;
+        // cleared only by a successful PUT.
+        state.set(profilesPendingKey(playlistId), true)
+        let s = session.flatMap { $0.playlistId == playlistId ? $0 : nil }
+        debugLog("[DSYNC] profiles dirty (\(what))\(s == nil ? "; no session" : "")")
+        guard let s else {
+            debugLog("[DSYNC] profiles: no-session push left to the session (\(what))")
+            return
+        }
+        guard isAdmin(s) else { return }
+        setDirty(s, .profiles, true)
+        schedule(s, .profiles, Self.PEEK_PUSH_DEBOUNCE_MS)
+    }
+
+    static let PICKER_PULL_MIN_MS: Int64 = 30_000
+    static let PICKER_REPULL_MS: Int64 = 2_000
+    static let PEEK_PUSH_DEBOUNCE_MS: Int64 = 1_000
+    private var pickerPullAt: [String: Int64] = [:]
+    private let profilesPeekMutex = DsyncMutex()
+
+    /// A profile picker surface opened (launch, switch, addProfile, foreground): pull the
+    /// `profiles` key only, then send a pending local profile change. At most one per 30 s.
+    private func onPickerOpened(_ playlistId: String, _ reason: String) {
+        guard isEnabled else { return }
+        let now = Self.nowMs()
+        if let last = pickerPullAt[playlistId], now - last < Self.PICKER_PULL_MIN_MS {
+            debugLog("[DSYNC] profiles: picker-open pull skipped (reason=\(reason), last under \(Self.PICKER_PULL_MIN_MS / 1000)s ago)")
+            return
+        }
+        pickerPullAt[playlistId] = now
+        debugLog("[DSYNC] profiles: picker-open pull (reason=\(reason))")
+        Task { await self.pickerPull(playlistId, reason) }
+    }
+
+    private func pickerPull(_ playlistId: String, _ reason: String) async {
+        if let live = session, live.playlistId == playlistId, live.token == currentToken(playlistId) {
+            await live.mutex.lock()
+            if session === live { _ = await pullProfilesOnly(live, reason, "live") }
+            live.mutex.unlock()
+            Task { [weak self] in
+                // A write from another device a moment before can still read back old: read once more.
+                await Self.sleep(Self.PICKER_REPULL_MS)
+                guard let self, self.session === live else { return }
+                await live.mutex.lock()
+                if self.session === live { _ = await self.pullProfilesOnly(live, "\(reason)-repull", "live") }
+                live.mutex.unlock()
+            }
+            if isDirty(live, .profiles) || state.bool(profilesPendingKey(playlistId)), isAdmin(live) {
+                setDirty(live, .profiles, true)
+                debugLog("[DSYNC] profiles: picker-open push of pending local change (reason=\(reason))")
+                schedule(live, .profiles, 0)
+            }
+            return
+        }
+        // No session (a switch hold): a read-only peek under this playlist and profile's own keys.
+        // Writes stay with the next session (its start re-sends the pending mark).
+        await profilesPeekMutex.lock()
+        _ = await pullProfilesOnly(makeSession(playlistId, token: currentToken(playlistId)), reason, "none")
+        profilesPeekMutex.unlock()
+        if state.bool(profilesPendingKey(playlistId)) {
+            debugLog("[DSYNC] profiles: pending local change kept for the next session (reason=\(reason))")
+        }
+    }
+
+    /// One GET of the main key, then the `profiles` category only, through the normal merge.
+    private func pullProfilesOnly(_ s: DsyncSession, _ reason: String, _ kind: String) async -> Bool {
+        guard let c = s.client else { return false }
+        guard enabled(.profiles, s) else {
+            debugLog("[DSYNC] profiles: picker-open pull not applied (reason=\(reason), profile cannot write profiles)")
+            return false
+        }
+        var ok = false
+        switch await c.fetchBucket(DsyncBucket.of(.profiles)) {
+        case .got(let bucket, let bytes):
+            switch DsyncV2.category(bucket, .profiles) {
+            case nil:
+                s.read.insert(.profiles)
+                ok = true
+            case .some(let d):
+                if let env = d.envelope {
+                    debugLog("[DSYNC] profiles: server copy (reason=\(reason)) bytes=\(bytes) updatedAt=\(env.updatedAt) device=\(env.deviceId.prefix(8)) rows=\(DsyncPayloads.decodeProfiles(env.data)?.count ?? -1) removed=\(DsyncPayloads.decodeProfileTombstones(env.data).count)")
+                    s.present.insert(.profiles)
+                    await processCategory(s, .profiles, env, bytes)
+                    ok = true
+                } else {
+                    debugLog("[DSYNC] malformed profiles category")
+                }
+            }
+        case .absent:
+            s.read.insert(.profiles)
+            ok = true
+        default: break
+        }
+        debugLog("[DSYNC] profiles: picker-open pull done (reason=\(reason), session=\(kind))")
+        return ok
+    }
+
+    /// The local removed stamps (`pgone|`), a cache of this device's removals until the payload carries them.
+    private func localTombstones(_ playlistId: String) -> [ProfileTombstone] {
+        let prefix = "pgone|\(playlistId)|"
+        return state.keys(withPrefix: prefix).compactMap { k in
+            let at = state.long(k)
+            return at > 0 ? ProfileTombstone(username: String(k.dropFirst(prefix.count)), removedAt: at) : nil
+        }
+    }
+
+    /// Server `removed` plus local stamps, newest per username, minus expired ones.
+    private func tombstonesFor(_ playlistId: String, _ data: DsyncObject?) -> [ProfileTombstone] {
+        ProfileTombstones.expire(ProfileTombstones.union(DsyncPayloads.decodeProfileTombstones(data), localTombstones(playlistId)), now: Self.nowS())
+    }
+
+    /// Local profiles a tombstone beats (removedAt >= the local row stamp).
+    private func tombstonedLocal(_ playlistId: String, _ tombs: [ProfileTombstone]) -> [String] {
+        ProfileManager.shared.profiles(playlistId).filter { !$0.isDefault }
+            .filter { ProfileTombstones.kills(tombs, $0.username, state.long(rowKey(playlistId, $0.username))) }
+            .map(\.username)
+    }
+
+    /// Delete [users] locally (same cleanup as a user remove, no new tombstone). Off the sync mutex:
+    /// a removal of the active profile switches profiles.
+    private func removeSynced(_ playlistId: String, _ users: [String], _ tombs: [ProfileTombstone]) {
+        guard !users.isEmpty else { return }
+        Task {
+            for u in users {
+                let at = ProfileTombstones.find(tombs, u)?.removedAt ?? 0
+                if await ProfileManager.shared.removeFromSync(playlistId, u) {
+                    self.state.remove(self.rowKey(playlistId, u))
+                    self.state.remove(self.customKey(playlistId, u))
+                    debugLog("[DSYNC] profiles: removed a local profile (tombstone removedAt=\(at))")
+                }
+            }
+        }
+    }
+
+    /// After a 200 (or an identical server copy): a local removed stamp clears once the payload's
+    /// `removed` list carries it, a row edited after it revived the profile, or it expired.
+    private func clearAckedRemovals(_ playlistId: String, _ data: DsyncObject) {
+        let sent = DsyncPayloads.decodeProfileTombstones(data)
+        let rows = DsyncPayloads.decodeProfiles(data) ?? []
+        let now = Self.nowS()
+        for t in localTombstones(playlistId) {
+            let why: String
+            if (ProfileTombstones.find(sent, t.username)?.removedAt ?? 0) >= t.removedAt { why = "written to the server payload" }
+            else if rows.contains(where: { $0.username.lowercased() == t.username.lowercased() && $0.updatedAt > t.removedAt }) { why = "superseded by a newer row" }
+            else if now - t.removedAt > ProfileTombstones.WINDOW_S { why = "expired" }
+            else { continue }
+            state.remove("pgone|\(playlistId)|\(t.username)")
+            debugLog("[DSYNC] profiles: a removal \(why); local stamp cleared")
+        }
+    }
+
+    /// A PUT of `profiles` landed (or the server already held it).
+    private func profilesAcked(_ s: DsyncSession, _ data: DsyncObject) {
+        state.remove(profilesPendingKey(s.playlistId))
+        state.set(profilesPushedKey(s.playlistId), newestRowStamp(s.playlistId))
+        clearAckedRemovals(s.playlistId, data)
+    }
+
+    /// Name/avatar claim. Profiles from before the flag existed count as customized only while an
+    /// unsent local change is pending and they carry a name or avatar of their own.
+    private func nameCustomized(_ playlistId: String, _ username: String, _ displayName: String, _ avatar: AvatarSpec?) -> Bool {
+        state.bool(customKey(playlistId, username))
+            || (state.bool(profilesPendingKey(playlistId)) && !ProfileRoster.isStripped(displayName, username, avatar))
+    }
+
+    private func adminUsers(_ s: DsyncSession) async -> [DispatcharrUserSummary] {
+        if let u = s.users { return u }
+        let list = await ProfileManager.shared.syncUsers(s.playlistId)
+        if !list.isEmpty { s.users = list }
+        return list
+    }
+
+    private func buildProfiles(_ s: DsyncSession, _ base: DsyncObject?) async -> DsyncObject? {
+        guard isAdmin(s) else { return nil }
+        let users = await adminUsers(s)
+        guard !users.isEmpty else { return nil }
+        let pm = ProfileManager.shared
+        let remote = base.flatMap { DsyncPayloads.decodeProfiles($0) } ?? []
+        let tombs = tombstonesFor(s.playlistId, base)
+        // Tombstoned local profiles are deleted, never re-sent (schema 4.12).
+        let gone = Set(tombstonedLocal(s.playlistId, tombs).map { $0.lowercased() })
+        removeSynced(s.playlistId, Array(gone), tombs)
+        let nowMs = Self.nowMs()
+        var rows: [ProfileRow] = []
+        for (index, p) in pm.profiles(s.playlistId).filter({ !gone.contains($0.username.lowercased()) }).enumerated() {
+            guard let user = users.first(where: { $0.username.caseInsensitiveCompare(p.username) == .orderedSame }) else { continue }
+            let prev = remote.first { $0.userId == user.id }
+            let type: String, hash: String, salt: String
+            if let rec = pm.pinStore.syncRecord(p.id) {
+                (type, hash, salt) = (PinRules.wireType(rec.type), rec.hash, rec.salt ?? "")
+            } else if pm.pinStore.isLegacy(p.id), let prev {
+                // A v1 PIN cannot sync until its next correct entry: keep what the server has.
+                (type, hash, salt) = (prev.pinType, prev.pinHash, prev.pinSalt)
+            } else {
+                (type, hash, salt) = ("none", "", "")
+            }
+            var at = state.long(rowKey(s.playlistId, p.username))
+            if at <= 0 {
+                at = (prev?.updatedAt ?? 0) > 0 ? prev!.updatedAt : Self.nowS()
+                state.set(rowKey(s.playlistId, p.username), at)
+            }
+            let out = ProfileRow(userId: user.id, username: user.username, displayName: p.displayName, pinType: type, pinHash: hash,
+                                 pinSalt: salt, role: p.effectiveRole.wire, updatedAt: at, avatar: p.avatar ?? AvatarSpec(),
+                                 order: index, tail: prev?.tail ?? Tail())
+            let fresh = (rosterAdds[rowKey(s.playlistId, p.username)] ?? 0) > nowMs - 60_000
+            if let g = ProfileRoster.guardFreshRosterAdd(out, prev: prev, freshRosterAdd: fresh) {
+                debugLog("[DSYNC] profiles: row kept server name/avatar (fresh roster add)")
+                rows.append(g)
+            } else if let g = ProfileRoster.guardUncustomized(out, prev: prev, customized: nameCustomized(s.playlistId, p.username, p.displayName, p.avatar)) {
+                debugLog("[DSYNC] profiles: row kept server name/avatar (not customized here)")
+                rows.append(g)
+            } else {
+                rows.append(out)
+            }
+        }
+        // Stale-device guard: a local row the server list lacks, with no unsent local change,
+        // older than the server roster is not re-sent.
+        let serverAt = state.long(k("at", s, .profiles))
+        let pushedAt = state.long(profilesPushedKey(s.playlistId))
+        let localNewest = rows.map(\.updatedAt).max() ?? 0
+        let sent = rows.filter { r in
+            let stale = ProfileTombstones.staleLocal(r, serverRows: remote, serverUpdatedAt: serverAt, localNewest: localNewest, lastPushedAt: pushedAt)
+            if stale { debugLog("[DSYNC] profiles: local row older than server roster, not re-sent") }
+            return !stale
+        }
+        // Rows for users this device has no profile for stay, unless a tombstone covers them.
+        let mine = Set(rows.map(\.userId))
+        let kept = remote.filter { !mine.contains($0.userId) }
+        let resolved = ProfileTombstones.resolve(sent + kept, tombs)
+        for d in resolved.dropped { debugLog("[DSYNC] profiles: row updatedAt=\(d.updatedAt) tombstoned; left out") }
+        return DsyncPayloads.encodeProfiles(base, resolved.rows, removed: resolved.removed)
+    }
+
+    private func applyProfiles(_ s: DsyncSession, _ d: DsyncObject) async -> ApplyResult {
+        guard let rows = DsyncPayloads.decodeProfiles(d) else { return .malformed }
+        guard isAdmin(s) else { return .applied }
+        let pid = s.playlistId
+        let tombs = tombstonesFor(pid, d)
+        removeSynced(pid, tombstonedLocal(pid, tombs), tombs)
+        let resolved = ProfileTombstones.resolve(rows, tombs)
+        for r in resolved.dropped { debugLog("[DSYNC] profiles: server row updatedAt=\(r.updatedAt) tombstoned; dropped") }
+        // A local removal the server payload does not carry yet: send it.
+        let onServer = DsyncPayloads.decodeProfileTombstones(d)
+        let unsent = localTombstones(pid).filter { l in
+            ProfileTombstones.find(resolved.removed, l.username) != nil && (ProfileTombstones.find(onServer, l.username)?.removedAt ?? 0) < l.removedAt
+        }
+        if !unsent.isEmpty && !isDirty(s, .profiles) && session === s {
+            debugLog("[DSYNC] profiles: \(unsent.count) tombstones not on the server yet; re-sending")
+            setDirty(s, .profiles, true)
+            schedule(s, .profiles, Self.PEEK_PUSH_DEBOUNCE_MS)
+        }
+        ProfileManager.shared.mergeSyncedProfiles(
+            pid, resolved.rows,
+            localUpdatedAt: { self.state.long(self.rowKey(pid, $0)) },
+            adopted: { u, at in if at > 0 { self.state.set(self.rowKey(pid, u), at) } },
+            removedAt: { self.state.long(self.removedKey(pid, $0)) },
+            customized: { u, name, avatar in self.nameCustomized(pid, u, name, avatar) })
+        return .applied
     }
 
     // MARK: - Pull (section 7.1, 7.2)
@@ -791,7 +1156,7 @@ final class DispatcharrSyncManager: ObservableObject {
         stampLast(s)
         debugLog("[DSYNC] pull done (\(reason)) read=\(s.read.count) server=\(s.serverBytes.count)")
         // A category absent on the server, or changed here before this session could write it, goes up now.
-        for key in s.read where key != .profiles {
+        for key in s.read where enabled(key, s) {
             let dirty = isDirty(s, key)
             if dirty && DsyncPullRules.resendReason(reason) { s.resend.insert(key) }
             if isForced(s, key) && s.awaitingCache[key] != nil { retryForced(s, key, "cycle") }
@@ -903,9 +1268,11 @@ final class DispatcharrSyncManager: ObservableObject {
     private func processCategory(_ s: DsyncSession, _ key: DsyncKey, _ env: DsyncEnvelope, _ bytes: Int) async {
         let raw = env.raw
         if key == .profiles {
-            // No Profiles feature on Apple yet: keep the stamps and the roster rows, apply nothing.
+            // Merged per row on every pull (the rows carry their own updatedAt); never added automatically.
+            let r = await apply(s, key, env)
+            if r == .malformed { debugLog(DsyncLogLines.malformedCategory(key)) }
             saveAfter(s, key, raw: raw, at: env.updatedAt, dev: env.deviceId, data: env.data)
-            debugLog("[DSYNC] pull profiles bytes=\(bytes) rows=\(DsyncPayloads.decodeProfiles(env.data)?.count ?? -1) kept (not applied on this device)")
+            debugLog(DsyncLogLines.pullMergedRow(key, bytes: bytes))
             s.read.insert(key)
             return
         }
@@ -1083,7 +1450,11 @@ final class DispatcharrSyncManager: ObservableObject {
             setDirty(s, key, true)
             return
         }
-        guard DsyncGate.mayWrite(sessionToken: s.token, currentToken: "", firstPullDone: s.firstPullDone, keyRead: s.read.contains(key)) else { return }
+        guard DsyncGate.mayWrite(sessionToken: s.token, currentToken: currentToken(s.playlistId), firstPullDone: s.firstPullDone, keyRead: s.read.contains(key)) else {
+            // The switch rule: the dirty flag stays set for this profile's next session.
+            if currentToken(s.playlistId) != s.token { debugLog("[DSYNC] drop \(key.suffix): profile changed before send") }
+            return
+        }
         guard !s.blocked.contains(key), enabled(key, s), let c = s.client else { return }
         let b = DsyncBucket.of(key)
         if s.resend.contains(key) { debugLog("[DSYNC] retry \(key.suffix) after offline") }
@@ -1118,6 +1489,7 @@ final class DispatcharrSyncManager: ObservableObject {
             if force { clearForced(s, key) }
             markSent(s, key)
             clearAwaiting(s, key)
+            if key == .profiles { profilesAcked(s, data) }
             return
         }
         if s.serverFull && s.serverBytes[b.wire] == nil {
@@ -1143,6 +1515,7 @@ final class DispatcharrSyncManager: ObservableObject {
                 if force { clearForced(s, key) }
                 markSent(s, key)
                 clearAwaiting(s, key)
+                if key == .profiles { profilesAcked(s, data) }
                 s.retries.removeValue(forKey: key)
                 s.tooLarge.remove(key)
             case .tooLarge:
@@ -1186,6 +1559,13 @@ final class DispatcharrSyncManager: ObservableObject {
         let dev = state.string(k("dev", s, key)) ?? ""
         if DsyncPullRules.sameAsConsumed(remoteAt: env.updatedAt, remoteDevice: env.deviceId, remoteData: env.data,
                                          localAt: at, localDevice: dev, localData: rawOf(s, key)?["data"]?.asObject) { return .ok }
+        if key == .profiles {
+            // profiles merges per row on every pull; the rows carry their own updatedAt.
+            _ = await apply(s, key, env)
+            saveAfter(s, key, raw: env.raw, at: env.updatedAt, dev: env.deviceId, data: env.data)
+            debugLog("[DSYNC] pull \(key.suffix) bytes=\(got.1) merged per row (before put)")
+            return .ok
+        }
         if DsyncGate.ROW_MERGE_KEYS.contains(key) {
             guard let merged = mergedEnvelope(s, key, env) else { return .unreachable }
             let applied = await apply(s, key, merged)
@@ -1411,7 +1791,7 @@ final class DispatcharrSyncManager: ObservableObject {
             }
             return DsyncPayloads.encodeCollections(base, rows)
         case .profiles:
-            return nil
+            return await buildProfiles(s, base)
         }
     }
 
@@ -1573,7 +1953,7 @@ final class DispatcharrSyncManager: ObservableObject {
                                   placement: $0.placement == "b" ? .beginning : .end)
             })
         case .profiles:
-            return DsyncPayloads.decodeProfiles(d) == nil ? .malformed : .applied
+            return await applyProfiles(s, d)
         }
         return .applied
     }

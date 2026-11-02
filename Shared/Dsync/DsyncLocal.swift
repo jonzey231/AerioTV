@@ -24,7 +24,7 @@
 //    radioDefault  radioModeByDefault
 //    remoteMap     remoteControlMap.tv (tvOS writes and applies; phones round-trip)
 //    settings      DsyncSettingsMap names to their Apple keys
-//    profiles      nothing yet (the Profiles feature is a later batch)
+//    profiles      ProfileManager (Shared/Profiles), merged per row
 
 import Foundation
 import SwiftData
@@ -55,7 +55,16 @@ enum DsyncLocal {
     }
 
     /// The App Data client for a playlist, with the same auth the rest of Direct Connect uses.
-    static func client(_ server: ServerConnection) -> DispatcharrAppDataClient? {
+    /// [profileKey] is a non-default profile's own API key: that user's App Data, with no
+    /// silent re-bootstrap (which would swap in the playlist's own credential).
+    static func client(_ server: ServerConnection, profileKey: String? = nil) -> DispatcharrAppDataClient? {
+        if let profileKey {
+            let k = profileKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !k.isEmpty else { return nil }
+            return DispatcharrAppDataClient(api: DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(k),
+                                                                userAgent: server.effectiveUserAgent,
+                                                                authMode: server.dispatcharrHeaderMode))
+        }
         let key = server.effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let jwt = server.dispatcharrCredentialType == .usernamePassword
         guard jwt || !key.isEmpty else { return nil }
