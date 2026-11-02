@@ -45,6 +45,8 @@ struct DispatcharrSyncStepView: View {
         .task {
             guard !started else { return }
             started = true
+            // The onboarding step asked about Dispatcharr Sync: the providers offer leaves it out.
+            WelcomeSyncChain.markAnswered(SyncProvidersRules.DISPATCHARR)
             if DispatcharrSyncManager.shared.isEnabled {
                 // Already on (for example a second Dispatcharr playlist): nothing to ask.
                 onDone()
@@ -252,5 +254,69 @@ enum SyncProvidersOfferStore {
         var s = UserDefaults.standard.stringArray(forKey: shownKey) ?? []
         if !s.contains(playlistId) { s.append(playlistId) }
         UserDefaults.standard.set(s, forKey: shownKey)
+    }
+}
+
+// MARK: - "Keep your devices in sync" one-time offer (Android SyncProvidersOffer.kt)
+
+/// Schema section 10b: after onboarding's first iCloud restore or first Dispatcharr Sync
+/// pull, offer ONCE per playlist the providers the owner's other devices use.
+/// Evaluated when onboarding closes; Google Drive is never offered on Apple.
+struct SyncProvidersOfferHost: ViewModifier {
+    /// The onboarding cover's visibility: the offer is evaluated once it is down.
+    let onboardingVisible: Bool
+    @State private var offer: [String]?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: onboardingVisible) { _, visible in
+                if !visible { evaluateSoon() }
+            }
+            .onAppear { if !onboardingVisible { evaluateSoon() } }
+            .alert("Keep your devices in sync",
+                   isPresented: Binding(get: { offer != nil }, set: { if !$0 { offer = nil } }),
+                   presenting: offer) { providers in
+                Button("Turn on") {
+                    offer = nil
+                    if providers.contains(SyncProvidersRules.DISPATCHARR) {
+                        DispatcharrSyncManager.shared.setEnabled(true)
+                        debugLog("[DSYNC] enabled from sync providers offer")
+                    }
+                    if providers.contains(SyncProvidersRules.ICLOUD) {
+                        UserDefaults.standard.set(true, forKey: "iCloudSyncEnabled")
+                        SyncManager.shared.syncSettingChanged(enabled: true)
+                        debugLog("[CLOUD] enabled from sync providers offer")
+                    }
+                }
+                Button("Not now", role: .cancel) { offer = nil }
+            } message: { providers in
+                Text(SyncProvidersRules.offerText(providers))
+            }
+    }
+
+    private func evaluateSoon() {
+        guard SyncProvidersOfferStore.armed else { return }
+        Task { @MainActor in
+            // Let the cover finish closing so the alert has a window to present on.
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            offer = evaluate()
+        }
+    }
+
+    /// Nil: nothing to offer (disarms). Base user only (Apple has no profiles).
+    @MainActor private func evaluate() -> [String]? {
+        guard SyncProvidersOfferStore.armed else { return nil }
+        SyncProvidersOfferStore.disarm()
+        guard let pid = ChannelStore.shared.activeServer?.id.uuidString else { return nil }
+        let raw = SyncProvidersOfferStore.offerShown(pid) ? [] : CloudSnapshotSync.shared.providerOffers()
+        // Providers the user already selected or answered in onboarding are never re-offered.
+        let offers = WelcomeSyncChain.filterOffers(raw)
+        if offers.isEmpty {
+            debugLog("[SYNC] offer providers=none")
+            return nil
+        }
+        SyncProvidersOfferStore.markOfferShown(pid)
+        debugLog("[SYNC] offer providers=\(offers)")
+        return offers
     }
 }

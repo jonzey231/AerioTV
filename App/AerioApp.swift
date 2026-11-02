@@ -1446,6 +1446,8 @@ struct RootView: View {
                 .preferredColorScheme(theme.resolvedColorScheme)
             }
             .whatsNewSheet(isPresented: $showWhatsNew)
+            // One-time "Keep your devices in sync" offer after onboarding's first restore or pull.
+            .modifier(SyncProvidersOfferHost(onboardingVisible: showOnboarding))
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 
