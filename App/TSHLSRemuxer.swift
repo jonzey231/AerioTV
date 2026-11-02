@@ -7268,7 +7268,7 @@ struct AVPlayerMultiviewTile: View {
             HLSCapabilityStore.shared.markNotCapable(streamURL)
             let plain = removingHLSOutputFormat(streamURL)
             if PlaybackFeatureFlags.forceHLS {
-                debugLog("[FORCE-HLS] direct HLS FAILED channel=\(channelName) reason=\(reason); falling back to TS remux on \(plain.absoluteString)")
+                debugLog("[FORCE-HLS] direct HLS FAILED channel=\(channelName) reason=\(reason); falling back to TS remux on host=\(Self.logHostClass(plain)) path=\(Self.logPathKind(plain))")
                 debugLog("[FORCE-HLS] entry is not HLS (AVPlayer: \(reason)); falling back to TS for this tune")
                 ForceHLSNotHLSMemory.remember(streamURL, channelID: channelID)
             }
@@ -9742,5 +9742,30 @@ final class AudioOnlySegmentDumper {
                 try? bytes.write(to: url)
             }
         }
+    }
+}
+
+// MARK: - Log-safe URL shape
+
+extension AVPlayerMultiviewTile {
+    /// "loopback", "lan", or "remote": never the host itself.
+    nonisolated static func logHostClass(_ u: URL) -> String {
+        let h = (u.host ?? "").lowercased()
+        if h == "localhost" || h.hasPrefix("127.") || h == "::1" { return "loopback" }
+        if h.hasSuffix(".local") || h.hasPrefix("10.") || h.hasPrefix("192.168.") || h.hasPrefix("169.254.") { return "lan" }
+        if h.hasPrefix("172."), let second = Int(h.split(separator: ".").dropFirst().first ?? ""), (16...31).contains(second) { return "lan" }
+        return "remote"
+    }
+
+    /// The leading non-identifier path segments (for example "proxy/ts"):
+    /// never ids, tokens, or the query.
+    nonisolated static func logPathKind(_ u: URL) -> String {
+        let parts = u.pathComponents.filter { $0 != "/" }
+        var kind: [String] = []
+        for p in parts.prefix(2) {
+            if p.count > 24 || p.contains(where: \.isNumber) { break }
+            kind.append(p)
+        }
+        return kind.isEmpty ? "other" : kind.joined(separator: "/")
     }
 }
