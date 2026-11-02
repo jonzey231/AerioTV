@@ -127,7 +127,14 @@ final class DebugLogger: @unchecked Sendable {
 
     /// Whether debug logging is currently active.
     var isEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "debugLoggingEnabled") }
+        get {
+            #if DEBUG
+            // Debug builds log by default until the owner turns it off;
+            // Release stays off until the user enables it in Settings.
+            if UserDefaults.standard.object(forKey: "debugLoggingEnabled") == nil { return true }
+            #endif
+            return UserDefaults.standard.bool(forKey: "debugLoggingEnabled")
+        }
     }
 
     /// The URL of the active log file.

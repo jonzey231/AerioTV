@@ -172,13 +172,19 @@ final class DispatcharrSyncManager: ObservableObject {
         guard !started else { return }
         started = true
         let nc = NotificationCenter.default
+        // These notifications arrive on whatever thread posted them (the
+        // guide cache saves from a background task); the sink closures run
+        // on this actor, so hop to the main run loop first.
         nc.publisher(for: UserDefaults.didChangeNotification)
+            .receive(on: RunLoop.main)
             .sink { [weak self] _ in Task { @MainActor in self?.scheduleScan(swiftData: false) } }
             .store(in: &cancellables)
         nc.publisher(for: ModelContext.didSave)
+            .receive(on: RunLoop.main)
             .sink { [weak self] _ in Task { @MainActor in self?.scheduleScan(swiftData: true) } }
             .store(in: &cancellables)
         nc.publisher(for: .remindersDidChange)
+            .receive(on: RunLoop.main)
             .sink { [weak self] _ in Task { @MainActor in self?.scheduleScan(swiftData: false) } }
             .store(in: &cancellables)
         ChannelStore.shared.$channels
