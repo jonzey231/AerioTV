@@ -432,6 +432,7 @@ private struct DockCardSurface: ViewModifier {
 /// the banner, and aeriotv://setup links. Mounted once at the app root.
 struct SetupHandoffRoot: ViewModifier {
     @ObservedObject private var center = SetupTvOfferCenter.shared
+    @ObservedObject private var profiles = ProfileManager.shared
     @Environment(\.scenePhase) private var scenePhase
     @Query private var servers: [ServerConnection]
 
@@ -439,6 +440,13 @@ struct SetupHandoffRoot: ViewModifier {
         content
             .onChange(of: scenePhase, initial: true) { _, phase in center.setForeground(phase == .active) }
             .onChange(of: servers.first(where: \.isActive)?.id, initial: true) { _, _ in
+                center.canOffer = SetupGate.canSetUpTv(servers.first(where: \.isActive))
+            }
+            // Admin or default profile only: a switch to a Child profile hides the offer.
+            .onChange(of: profiles.activeRoleNow) { _, _ in
+                center.canOffer = SetupGate.canSetUpTv(servers.first(where: \.isActive))
+            }
+            .onChange(of: profiles.activeProfileIds) { _, _ in
                 center.canOffer = SetupGate.canSetUpTv(servers.first(where: \.isActive))
             }
             .onOpenURL { url in

@@ -315,9 +315,11 @@ struct SyncProvidersOfferHost: ViewModifier {
         }
     }
 
-    /// Nil: nothing to offer (disarms). Base user only (Apple has no profiles).
+    /// Nil: nothing to offer (disarms). The owner's records only: never while
+    /// a non-default profile is active (Android evaluate, ProfileScope token).
     @MainActor private func evaluate() -> [String]? {
         guard SyncProvidersOfferStore.armed else { return nil }
+        if ProfileManager.shared.nonDefaultActive() { return nil }
         SyncProvidersOfferStore.disarm()
         guard let pid = ChannelStore.shared.activeServer?.id.uuidString else { return nil }
         let raw = SyncProvidersOfferStore.offerShown(pid) ? [] : CloudSnapshotSync.shared.providerOffers()

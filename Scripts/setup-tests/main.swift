@@ -227,5 +227,51 @@ do {
     check(!DsyncRestoreProbe.listsMainKey(nil), "nil body")
 }
 
+// MARK: Sender profile rules (Dispatcharr payload with profiles; synthetic data only)
+do {
+    typealias R = SetupProfileRules
+    let salt = String(repeating: "a", count: 32), hash = String(repeating: "b", count: 64)
+    let sources: [R.Source] = [
+        .init(id: "d", username: "owner", displayName: "Owner", role: "admin", isDefault: true,
+              apiKey: "base-key-not-sent", pinType: "numbers", pinHash: hash, pinSalt: salt),
+        .init(id: "k", username: "kid", displayName: "Kid", role: "child",
+              avatar: .init(icon: "rocket", color: "teal"), apiKey: "kid-key"),
+        .init(id: "g", username: "guest", displayName: "Guest", role: "user", password: "pw",
+              pinType: "directions", pinHash: hash, pinSalt: ""),
+        .init(id: "n", username: "nokey", displayName: "No Key", role: "user"),
+    ]
+    let all = R.parts(sources, selected: ["k", "g", "n"])
+    eq(all.map(\.username), ["owner", "kid", "guest"], "default always, no-credential row dropped")
+    eq(all.map(\.order), [0, 1, 2], "order is the list position")
+    check(all[0].isDefault && all[0].credential == nil, "default carries no credential")
+    eq(all[0].pinType, "numbers", "default v2 PIN sent")
+    eq(all[0].pinHash, hash, "default PIN hash")
+    eq(all[1].credential, SetupProtocol.Credential(apiKey: "kid-key"), "api key only")
+    eq(all[1].role, "child", "role wire")
+    eq(all[1].avatar, SetupProtocol.Avatar(icon: "rocket", color: "teal"), "avatar")
+    eq(all[1].pinType, "none", "no PIN")
+    eq(all[2].credential, SetupProtocol.Credential(password: "pw"), "password only")
+    eq(all[2].pinType, "none", "legacy PIN (no salt) sent as none")
+    eq(all[2].pinHash, "", "legacy PIN hash empty")
+    eq(R.parts(sources, selected: []).map(\.username), ["owner"], "nothing selected: default only")
+    eq(R.parts(sources, selected: ["g"]).map(\.order), [0, 2], "order kept when a row is skipped")
+    eq(R.credentialLabel(apiKey: " k ", password: "p"), "API key saved", "key label first")
+    eq(R.credentialLabel(apiKey: "", password: "p"), "Password saved", "password label")
+    eq(R.credentialLabel(apiKey: nil, password: "  "), nil, "no label")
+    check(R.canSetUpTv(activeRole: "admin", activeIsDefault: false), "admin may send")
+    check(R.canSetUpTv(activeRole: "user", activeIsDefault: false), "standard may send")
+    check(!R.canSetUpTv(activeRole: "child", activeIsDefault: false), "child profile may not send")
+    check(R.canSetUpTv(activeRole: "child", activeIsDefault: true), "default profile may send")
+    check(R.canSetUpTv(activeRole: nil, activeIsDefault: nil), "no profiles yet: the default")
+    // Full Dispatcharr payload round trip with profiles.
+    let payload = SetupProtocol.Payload(
+        playlist: .init(type: "dispatcharr", name: "Home", url: "http://192.0.2.10:9191",
+                        channelProfileIds: [2], credential: .init(apiKey: "base-key")),
+        profiles: all, sync: SetupProtocol.SyncPart())
+    let back = SetupProtocol.decodePayload(SetupProtocol.encodePayload(payload))
+    eq(back, payload, "payload with profiles round trips")
+    eq(back?.profiles.count, 3, "three profiles decoded")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

@@ -224,12 +224,19 @@ final class SetupTvOfferCenter: ObservableObject {
     }
 }
 
-/// Who may send a TV this device's playlist: Admin or the default profile
-/// (Android ProfileManager.canSetUpTv). AerioTV on Apple has no local
-/// profiles yet, so the device user is the default profile; the hook stays
-/// so the profile port only changes this function.
+/// Who may send a TV this device's playlist: an Admin or Standard profile,
+/// or the default profile (Android ProfileManager.canSetUpTv). Non-Dispatcharr
+/// playlists have no profiles, so the device user is the default.
 enum SetupGate {
-    static func canSetUpTv(_ server: ServerConnection?) -> Bool { server != nil }
+    @MainActor
+    static func canSetUpTv(_ server: ServerConnection?) -> Bool {
+        guard let server else { return false }
+        guard server.type == .dispatcharrAPI else { return true }
+        let pid = server.id.uuidString
+        let pm = ProfileManager.shared
+        let active = pm.activeProfile(pid)
+        return SetupProfileRules.canSetUpTv(activeRole: active?.effectiveRole.wire, activeIsDefault: active?.isDefault)
+    }
 }
 
 // MARK: - Payload and send
@@ -269,12 +276,16 @@ enum SetupSender {
         let isD = server.type == .dispatcharrAPI
         var choices: [ProfileChoice] = []
         if isD {
-            // No local profiles on Apple yet: the default profile only (it
-            // signs in with the playlist login and is always sent).
-            let label: String? = nonEmpty(server.baseApiKey) != nil ? "API key saved"
-                : (nonEmpty(server.effectivePassword) != nil ? "Password saved" : nil)
-            choices = [ProfileChoice(id: "default", displayName: defaultDisplayName(server), isDefault: true,
-                                     isCurrent: true, credentialLabel: label)]
+            let sources = profileSources(server)
+            let currentId = ProfileManager.shared.activeProfile(server.id.uuidString)?.id
+            choices = sources.map { s in
+                // The default profile signs in with the playlist login and is always sent.
+                let label = s.isDefault
+                    ? SetupProfileRules.credentialLabel(apiKey: server.baseApiKey, password: server.effectivePassword)
+                    : SetupProfileRules.credentialLabel(apiKey: s.apiKey, password: s.password)
+                return ProfileChoice(id: s.id, displayName: s.displayName, isDefault: s.isDefault,
+                                     isCurrent: s.id == currentId || (currentId == nil && s.isDefault), credentialLabel: label)
+            }
         }
         return Source(playlistName: server.name, isDispatcharr: isD, choices: choices,
                       syncOnHere: isD && DispatcharrSyncManager.shared.isEnabled)
@@ -282,6 +293,33 @@ enum SetupSender {
 
     private static func defaultDisplayName(_ s: ServerConnection) -> String {
         nonEmpty(s.username) ?? s.name
+    }
+
+    /// The playlist's local profiles in list order, with what this device
+    /// stores for each (Android ProfileManager.setupSources). No profiles yet
+    /// (the manager has not created the default): the default from the row.
+    @MainActor
+    private static func profileSources(_ server: ServerConnection) -> [SetupProfileRules.Source] {
+        let pm = ProfileManager.shared
+        let list = pm.profiles(server.id.uuidString)
+        guard !list.isEmpty else {
+            return [.init(id: "default", username: nonEmpty(server.username) ?? "", displayName: defaultDisplayName(server),
+                          role: "", isDefault: true)]
+        }
+        return list.map { p in
+            let pin = pm.pinStore.syncRecord(p.id)
+            return SetupProfileRules.Source(
+                id: p.id, username: p.username,
+                displayName: p.displayName.isEmpty ? (p.isDefault ? defaultDisplayName(server) : p.username) : p.displayName,
+                role: p.effectiveRole.wire,
+                avatar: p.avatar.map { SetupProtocol.Avatar(icon: $0.icon, color: $0.color) },
+                isDefault: p.isDefault,
+                apiKey: p.isDefault ? nil : pm.store.apiKey(p.id),
+                password: p.isDefault ? nil : pm.store.password(p.id),
+                pinType: pin.map { PinRules.wireType($0.type) },
+                pinHash: pin?.hash ?? "",
+                pinSalt: pin?.salt ?? "")
+        }
     }
 
     @MainActor
@@ -312,17 +350,11 @@ enum SetupSender {
             credential: cred.isEmpty ? nil : cred)
         // Xtream Codes and M3U send the playlist only.
         guard server.type == .dispatcharrAPI else { return SetupProtocol.Payload(playlist: playlist) }
-        // The default profile is always sent, without a credential of its own.
-        let def = SetupProtocol.ProfilePart(
-            username: nonEmpty(server.username) ?? "",
-            displayName: defaultDisplayName(server),
-            role: "",
-            avatar: SetupProtocol.Avatar(),
-            order: 0,
-            isDefault: true,
-            credential: nil,
-            pinType: "none")
-        return SetupProtocol.Payload(playlist: playlist, profiles: [def],
+        // The default profile always, then the chosen profiles that carry a sign-in
+        // (docs/DeviceSetupHandoff.md; Android SetupSender.buildPayload).
+        let parts = SetupProfileRules.parts(profileSources(server), selected: profileIds)
+        debugLog("[SETUP] payload profiles=\(parts.count) sync=\(turnOnSync)")
+        return SetupProtocol.Payload(playlist: playlist, profiles: parts,
                                      sync: turnOnSync ? SetupProtocol.SyncPart() : nil)
     }
 

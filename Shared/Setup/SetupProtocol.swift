@@ -355,6 +355,78 @@ enum SetupProtocol {
     }
 }
 
+// MARK: - Sender profile rules
+
+/// The contract's profile rules for the sender (docs/DeviceSetupHandoff.md,
+/// Android SetupSender.buildPayload and ProfileManager.canSetUpTv). Pure so
+/// Scripts/setup-tests can check them without the app.
+enum SetupProfileRules {
+    /// One local profile of the playlist, in list order, with what this device stores for it.
+    struct Source: Equatable, Sendable {
+        var id: String
+        var username: String
+        var displayName: String
+        /// "admin", "user", or "child" (the effective role).
+        var role: String
+        /// nil = never chosen (the receiver keeps its default avatar).
+        var avatar: SetupProtocol.Avatar? = nil
+        var isDefault = false
+        /// The profile's own sign-in (ignored for the default profile).
+        var apiKey: String? = nil
+        var password: String? = nil
+        /// The v2 synced PIN record; nil or a legacy (unsalted) PIN goes out as "none".
+        var pinType: String? = nil
+        var pinHash = ""
+        var pinSalt = ""
+    }
+
+    private static func nonEmpty(_ s: String?) -> String? {
+        guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// Who may send a TV this device's playlist: an Admin or Standard
+    /// profile, or the default profile (no profiles yet counts as default).
+    static func canSetUpTv(activeRole: String?, activeIsDefault: Bool?) -> Bool {
+        (activeRole != nil && activeRole != "child") || activeIsDefault != false
+    }
+
+    /// "API key saved", "Password saved", or nil when nothing is stored here.
+    static func credentialLabel(apiKey: String?, password: String?) -> String? {
+        if nonEmpty(apiKey) != nil { return "API key saved" }
+        if nonEmpty(password) != nil { return "Password saved" }
+        return nil
+    }
+
+    /// The payload profiles: the default profile always (no credential of its
+    /// own), plus the selected profiles that carry a sign-in. `order` is the
+    /// list position among every local profile; a PIN goes out only as its
+    /// v2 hash and salt.
+    static func parts(_ sources: [Source], selected: Set<String>) -> [SetupProtocol.ProfilePart] {
+        sources.enumerated().compactMap { index, s in
+            guard s.isDefault || selected.contains(s.id) else { return nil }
+            var cred: SetupProtocol.Credential? = nil
+            if !s.isDefault {
+                let c = SetupProtocol.Credential(apiKey: nonEmpty(s.apiKey), password: nonEmpty(s.password))
+                guard !c.isEmpty else { return nil }
+                cred = c
+            }
+            let pinOk = (s.pinType == "numbers" || s.pinType == "directions") && s.pinHash.count == 64 && s.pinSalt.count == 32
+            return SetupProtocol.ProfilePart(
+                username: s.username,
+                displayName: s.displayName,
+                role: s.role,
+                avatar: s.avatar,
+                order: index,
+                isDefault: s.isDefault,
+                credential: cred,
+                pinType: pinOk ? s.pinType! : "none",
+                pinHash: pinOk ? s.pinHash : "",
+                pinSalt: pinOk ? s.pinSalt : "")
+        }
+    }
+}
+
 // MARK: - Scanned or imported codes
 
 /// What a scanned, picked, or imported code means to AerioTV: the Dispatcharr

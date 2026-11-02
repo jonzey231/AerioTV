@@ -131,7 +131,8 @@ final class CloudSnapshotSync: ObservableObject {
     }
 
     /// The providers record every file of a push carries (section 10b): this device sets
-    /// icloud and dispatcharr, googleDrive is preserved. Apple has no profiles: always the base user.
+    /// icloud and dispatcharr, googleDrive is preserved. The owner's record: iCloud pushes
+    /// run for the default profile only (shared writes stop while a sub-profile is active).
     func providersForPush() -> SyncProvidersRecord? {
         SyncProvidersStore.forPush(SyncProvidersStore.ICLOUD, dispatcharrOn: dsync.isEnabled && DsyncLocal.activeDispatcharrPlaylist() != nil,
                                    icloudOn: cloudOn, deviceId: dsync.deviceId)
