@@ -497,6 +497,20 @@ final class ServerConnection {
     /// still reports `hasSnapshot == false` and every capability reads
     /// `.unknown` -> affordance enabled -> the server decides.
     var dispatcharrCapabilities: DispatcharrCapabilitySet {
+        // A non-default profile is active: gate on its own /me/ snapshot
+        // (Profiles: DVR, catch-up, VOD, and series follow the active profile).
+        if type == .dispatcharrAPI, let o = ProfileCapsOverlay.values(id.uuidString) {
+            return DispatcharrCapabilitySet(
+                isDispatcharr: true,
+                rawUserLevel: o.userLevel,
+                isStaff: o.isStaff,
+                isSuperuser: o.isSuperuser,
+                props: DispatcharrCustomProperties(json: o.customProperties),
+                systemCatchupEnabled: dispatcharrSystemCatchupEnabled,
+                fetchedAt: o.fetchedAt,
+                schema: o.fetchedAt == nil ? 0 : DispatcharrCapabilitySet.currentSchema
+            )
+        }
         let props: DispatcharrCustomProperties
         let stored = DispatcharrCustomProperties(json: dispatcharrCustomPropertiesJSON)
         if stored.isPresent {
@@ -1641,6 +1655,11 @@ enum DispatcharrCapabilityProbe {
             return server.dispatcharrCapabilities.hasSnapshot
         }
         if minInterval > 0, secondsSinceLastProbe(server) < minInterval { return true }
+        // A non-default profile is active: the same probe, as that profile.
+        if ProfileOverlay.values(id.uuidString) != nil {
+            lastProbeAt[id] = Date()
+            return await ProfileManager.shared.refreshActiveCapabilities(id.uuidString, reason: reason)
+        }
         inFlight.insert(server.id)
         lastProbeAt[server.id] = Date()
         defer { inFlight.remove(server.id) }

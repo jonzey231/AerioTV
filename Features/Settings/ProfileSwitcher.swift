@@ -204,7 +204,21 @@ struct WhoIsWatchingView: View {
     @State private var flow: Flow?
     @FocusState private var focus: String?
 
-    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add }
+    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add, move(DispatcharrProfile) }
+
+    /// The hold that opened Move also ends in a Select release; that one is swallowed.
+    @State private var swallowNextSelect = false
+
+    /// Long press on a tile (Admin or Standard): Move Left, Move Right, Move to Front (Android ProfileMoveSheet).
+    private var noFlow: Bool { if case .none = flow { return true }; return false }
+
+    private var canReorder: Bool { RoleRules.isFullAccess(manager.activeRole(playlistId)) }
+
+    private func openMove(_ p: DispatcharrProfile) {
+        guard canReorder, !busy else { return }
+        debugLog("[PROFILE] picker move opened")
+        flow = .move(p)
+    }
 
     private func choose(_ p: DispatcharrProfile) {
         busy = true; error = nil
@@ -222,11 +236,18 @@ struct WhoIsWatchingView: View {
     }
 
     private func picked(_ p: DispatcharrProfile, current: Bool) {
+        if swallowNextSelect { swallowNextSelect = false; return }
         guard !busy else { return }
         if mode == .switcher && current { onClose(); return }
         if manager.hasPin(p.id) && !manager.hasSwitchTicket(p.id) { flow = .pin(p); return }
         if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p); return }
         choose(p)
+    }
+
+    private func move(_ p: DispatcharrProfile, _ how: ProfileOrder.Move) {
+        flow = nil
+        do { _ = try manager.move(playlistId, p.id, how) } catch { self.error = error.localizedDescription }
+        focus = p.id
     }
 
     private func startAdd() {
@@ -257,6 +278,13 @@ struct WhoIsWatchingView: View {
                 }
             case .add:
                 AddProfileFlow(playlistId: playlistId) { flow = nil; manager.pickerAddUnlocked = nil }
+            case .move(let p):
+                let at = profiles.firstIndex { $0.id == p.id } ?? -1
+                ProfileDialog(title: p.displayName, onCancel: { flow = nil; focus = p.id }) {
+                    if at > 0 { ProfileChoiceRow(label: "Move Left") { move(p, .earlier) } }
+                    if at >= 0 && at < profiles.count - 1 { ProfileChoiceRow(label: "Move Right") { move(p, .later) } }
+                    if at > 0 { ProfileChoiceRow(label: "Move to Front") { move(p, .first) } }
+                }
             case nil:
                 VStack(spacing: ProfileUI.s(28, 48)) {
                     Text("Who is watching?")
@@ -270,6 +298,9 @@ struct WhoIsWatchingView: View {
                                     picked(p, current: isCurrent)
                                 }
                                 .focused($focus, equals: p.id)
+                                #if os(iOS)
+                                .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in openMove(p) })
+                                #endif
                             }
                             if RoleRules.canSeeSwitcher(manager.activeRoleNow) {
                                 PickerActionTile(icon: "plus", label: "Add Profile", action: startAdd)
@@ -285,6 +316,21 @@ struct WhoIsWatchingView: View {
                         .padding(.vertical, ProfileUI.s(12, 40))
                     }
                     .frame(maxWidth: .infinity)
+                    #if os(tvOS)
+                    .background(
+                        SwitchStreamSelectHoldDetector(
+                            minimumPressDuration: 0.5,
+                            isEnabled: canReorder && noFlow,
+                            onBegan: {
+                                guard let id = focus, let p = profiles.first(where: { $0.id == id }) else { return }
+                                swallowNextSelect = true
+                                openMove(p)
+                            },
+                            onEnded: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { swallowNextSelect = false } }
+                        )
+                        .allowsHitTesting(false)
+                    )
+                    #endif
                     if busy || manager.switching { ProgressView().tint(.accentPrimary) }
                     if let error { Text(error).scaledFont(ProfileUI.body).foregroundColor(ProfileUI.errorColor) }
                 }
@@ -344,3 +390,42 @@ struct ProfileRootChrome: ViewModifier {
             }
     }
 }
+
+#if os(tvOS)
+/// Apple TV top bar: the active profile's avatar right after Settings
+/// (Android TvProfileSwitcherButton). Same diameter as the Refresh and
+/// Search circles; the avatar disc is the button and focus rings its edge.
+/// Only with 2+ profiles and never for a Child. Opens "Who is watching?".
+struct TVProfileSwitcherCircle: View {
+    @ObservedObject private var manager = ProfileManager.shared
+    @State private var open = false
+
+    var body: some View {
+        if let pid = activeProfilesPlaylist(),
+           let profiles = manager.profilesByPlaylist[pid], profiles.count >= 2,
+           RoleRules.canSeeSwitcher(manager.activeRoleNow) {
+            let activeId = manager.activeProfileIds[pid]
+            let active = profiles.first { $0.id == activeId } ?? profiles[0]
+            Button {
+                debugLog("[PROFILE] picker opened (tv top bar)")
+                open = true
+            } label: { ProfileAvatarView(active, size: 60) }
+                .buttonStyle(TVProfileCircleStyle())
+                .accessibilityLabel("Switch Profile")
+                .fullScreenCover(isPresented: $open) {
+                    WhoIsWatchingView(playlistId: pid, mode: .switcher) { open = false }
+                }
+        }
+    }
+}
+
+private struct TVProfileCircleStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .overlay(Circle().stroke(isFocused ? Color.white : .clear, lineWidth: 4))
+            .scaleEffect(isFocused ? 1.08 : 1)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif

@@ -1565,6 +1565,16 @@ extension DispatcharrAPI {
         return key
     }
 
+    /// Profiles > Channel Profiles (admin only): PATCH /api/accounts/users/<id>/
+    /// with {"channel_profiles": [ids]} (empty = All channels).
+    func patchUserChannelProfiles(userId: Int, ids: [Int]) async throws {
+        let (data, response) = try await dataWithJWTRetry(for: profilesRequest("PATCH", "/api/accounts/users/\(userId)/", body: ["channel_profiles": ids]))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200...299).contains(status) else {
+            throw DispatcharrDirectConnectError.transport("Channel Profiles: HTTP \(status)" + (Self.reason(data).map { " (\($0))" } ?? ""))
+        }
+    }
+
     /// Profiles > Enable API access off (admin only): POST /api/accounts/api-keys/revoke/
     /// with {"user_id": id} clears that user's key (Dispatcharr answers {"success": true}).
     func revokeUserApiKey(userId: Int) async throws {

@@ -59,6 +59,40 @@ final class ProfileOverlay: @unchecked Sendable {
     }
 }
 
+/// The active non-default profile's own permissions (Android: DVR, catch-up,
+/// VOD, and series follow the active profile's /api/accounts/users/me/), read
+/// by ServerConnection.dispatcharrCapabilities. nil = the default profile,
+/// whose snapshot lives on the playlist row. Thread safe, like ProfileOverlay.
+final class ProfileCapsOverlay: @unchecked Sendable {
+    struct Values: Equatable, Sendable {
+        let userLevel: Int
+        let isStaff: Bool
+        let isSuperuser: Bool
+        /// The profile's custom_properties JSON from its own /me/.
+        let customProperties: String
+        /// nil = never read: every capability stays unknown (the server decides).
+        let fetchedAt: Date?
+    }
+
+    private static let shared = ProfileCapsOverlay()
+    private let lock = NSLock()
+    private var map: [String: Values] = [:]
+
+    static func values(_ playlistId: String) -> Values? {
+        shared.lock.lock(); defer { shared.lock.unlock() }
+        return shared.map[playlistId]
+    }
+
+    /// Replace every overlay. True when something changed.
+    @discardableResult
+    static func set(_ next: [String: Values]) -> Bool {
+        shared.lock.lock(); defer { shared.lock.unlock() }
+        if shared.map == next { return false }
+        shared.map = next
+        return true
+    }
+}
+
 @MainActor
 final class ProfileDataStore {
 

@@ -135,6 +135,44 @@ final class ProfileManager: ObservableObject {
             next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
         }
         if ProfileOverlay.set(next) { debugLog("[PROFILE] request overlay: \(next.count) playlist(s) on a non-default profile") }
+        var caps: [String: ProfileCapsOverlay.Values] = [:]
+        for (pid, id) in act {
+            guard let p = store.byId(id), !p.isDefault else { continue }
+            caps[pid] = ProfileCapsOverlay.Values(
+                userLevel: p.userLevel, isStaff: p.isStaff, isSuperuser: p.isSuperuser,
+                customProperties: p.customProperties,
+                fetchedAt: p.capabilitiesFetchedAt > 0 ? Date(timeIntervalSince1970: Double(p.capabilitiesFetchedAt) / 1000) : nil)
+        }
+        if ProfileCapsOverlay.set(caps) {
+            debugLog("[PERMS] profile overlay: \(caps.count) playlist(s) gate on the active profile's own permissions")
+            NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil)
+        }
+    }
+
+    /// The capability probe for a playlist whose active profile is not the
+    /// default: the same /me/ read, with that profile's own key, stored on
+    /// the profile (Android refreshes the active profile's permissions the
+    /// same way). Returns whether the server was reached.
+    func refreshActiveCapabilities(_ playlistId: String, reason: String) async -> Bool {
+        guard let p = activeProfile(playlistId), !p.isDefault, let server = DsyncLocal.server(playlistId),
+              let key = store.apiKey(p.id) else { return false }
+        guard let me = await fetchMe(server, key),
+              me.username.caseInsensitiveCompare(p.username) == .orderedSame,
+              let live = store.byId(p.id) else {
+            debugLog("[PERMS] profile probe FAILED \(Self.tag(p.id)) reason=\(reason); keeping the last snapshot")
+            return false
+        }
+        let next = applyMe(live, me)
+        let changed = next.userLevel != live.userLevel || next.dvrAccess != live.dvrAccess
+            || next.catchupEnabled != live.catchupEnabled || next.vodMoviesEnabled != live.vodMoviesEnabled
+            || next.vodSeriesEnabled != live.vodSeriesEnabled || next.customProperties != live.customProperties
+            || next.isStaff != live.isStaff || next.isSuperuser != live.isSuperuser
+        store.upsert(next)
+        followServerRole(p.id, me.effectiveUserLevel)
+        publish()
+        debugLog("[PERMS] profile probe OK \(Self.tag(p.id)) level=\(next.userLevel) dvr=\(next.dvrAccess.isEmpty ? "default" : next.dvrAccess) catchup=\(next.catchupEnabled) vod=\(next.vodMoviesEnabled) series=\(next.vodSeriesEnabled) changed=\(changed) reason=\(reason)")
+        if changed { NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil) }
+        return true
     }
 
     /// True while [playlistId] (default: the active Dispatcharr playlist) runs a non-default profile.
@@ -870,6 +908,52 @@ final class ProfileManager: ObservableObject {
         undoableRosterAdds.remove(profileId)
         refreshActiveRole()
         debugLog("[PROFILES] undo add \(Self.tag(profileId))")
+    }
+
+    // MARK: Channel Profiles per user (Admin only)
+
+    struct ChannelProfileChoice: Equatable, Sendable { let id: Int; let name: String }
+    struct ChannelProfileAssignment: Equatable, Sendable { let userId: Int; let choices: [ChannelProfileChoice]; let assigned: Set<Int> }
+
+    /// Channel Profiles are assigned on the server: base and active must be server admins.
+    func canAssignChannelProfiles(_ playlistId: String) -> Bool {
+        RoleRules.canAssignChannelProfiles(baseIsServerAdmin: baseIsServerAdmin(playlistId),
+                                           activeIsServerAdmin: activeIsAdmin(playlistId), active: activeRole(playlistId))
+    }
+
+    /// The server's channel profiles and [profileId]'s user's current list (Android channelProfileAssignment).
+    func channelProfileAssignment(_ playlistId: String, _ profileId: String) async throws -> ChannelProfileAssignment {
+        guard activeIsAdmin(playlistId) else { throw fail("Only a Dispatcharr admin can assign channel profiles.") }
+        guard let p = store.byId(profileId) else { throw fail("Profile not found") }
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        let api = baseApi(server)
+        guard let user = try await api.listUsers().first(where: { $0.username.caseInsensitiveCompare(p.username) == .orderedSame }) else {
+            throw fail("\(p.username) was not found on the server.")
+        }
+        let choices = try await api.listChannelProfiles().map { ChannelProfileChoice(id: $0.id, name: $0.name) }
+            .sorted { $0.name.lowercased() < $1.name.lowercased() }
+        return ChannelProfileAssignment(userId: user.id, choices: choices, assigned: Set(user.channelProfiles))
+    }
+
+    /// PATCH the user's channel_profiles (empty = All). Channels reload when
+    /// [profileId] is the active profile (Android saveChannelProfiles).
+    func saveChannelProfiles(_ playlistId: String, _ profileId: String, userId: Int, ids: [Int]) async throws {
+        guard activeIsAdmin(playlistId) else { throw fail("Only a Dispatcharr admin can assign channel profiles.") }
+        guard let p = store.byId(profileId) else { throw fail("Profile not found") }
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        try await baseApi(server).patchUserChannelProfiles(userId: userId, ids: ids)
+        let joined = ids.sorted().map(String.init).joined(separator: ",")
+        if p.isDefault {
+            server.dispatcharrChannelProfileIDs = joined
+            try? server.modelContext?.save()
+        } else {
+            store.update(profileId) { var c = $0; c.accountProfileIds = joined; return c }
+            publish()
+        }
+        debugLog("[PROFILE] channel profiles for \(Self.tag(profileId)) set to \(ids.isEmpty ? "All" : "\(ids.count) profile(s)")")
+        if activeProfileIdNow(playlistId) == profileId {
+            await ChannelStore.shared.reloadChannelsAndWait(servers: [server])
+        }
     }
 
     // MARK: Edit

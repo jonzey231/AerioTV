@@ -22,6 +22,7 @@ enum ProfileRoute: Equatable {
     case removePin(DispatcharrProfile)
     case resetPin(DispatcharrProfile)
     case role(DispatcharrProfile)
+    case channelProfiles(DispatcharrProfile)
     case switchTo(DispatcharrProfile)
     case add
     case deviceSet
@@ -91,6 +92,7 @@ struct ProfileFlowHost: View {
             case .removePin(let p): RemovePinFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .resetPin(let p): ResetPinFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .role(let p): RoleFlow(playlistId: playlistId, profile: p) { model.close($0) }
+            case .channelProfiles(let p): ChannelProfilesFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .switchTo(let p): ProfileSwitchFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .add: AddProfileFlow(playlistId: playlistId) { model.close() }
             case .deviceSet: DeviceAdminPinSetFlow(playlistId: playlistId) { model.close($0) }
@@ -156,6 +158,9 @@ struct ProfileActionsSheet: View {
                 if hasPin && g.isRoleAdmin && !isActive {
                     ProfileChoiceRow(label: "Reset PIN") { model.route = .resetPin(p) }
                 }
+            }
+            if manager.canAssignChannelProfiles(playlistId) {
+                ProfileChoiceRow(label: "Channel Profiles") { model.route = .channelProfiles(p) }
             }
             if g.isAdmin && !p.isDefault {
                 ProfileChoiceRow(label: "Remove", destructive: true) { model.route = .remove(p) }
@@ -446,6 +451,50 @@ extension View {
     func profilesFlowPresentation(_ playlistId: String?, model: ProfilesFlowModel) -> some View {
         sheet(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close(model.status) } })) {
             if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
+        }
+    }
+}
+
+/// Admin only: assign the user's Dispatcharr Channel Profiles (Android ChannelProfilesDialog).
+struct ChannelProfilesFlow: View {
+    let playlistId: String
+    let profile: DispatcharrProfile
+    let onClose: (String?) -> Void
+    @State private var data: ProfileManager.ChannelProfileAssignment?
+    @State private var picked: Set<Int> = []
+    @State private var error: String?
+    @State private var busy = false
+
+    var body: some View {
+        ProfileDialog(title: "Channel Profiles", confirm: data == nil ? nil : ("Save", !busy, false, {
+            guard let d = data, !busy else { return }
+            busy = true; error = nil
+            Task {
+                do { try await ProfileManager.shared.saveChannelProfiles(playlistId, profile.id, userId: d.userId, ids: Array(picked)); onClose(nil) }
+                catch { busy = false; self.error = error.localizedDescription.isEmpty ? "Could not save" : error.localizedDescription }
+            }
+        }), onCancel: { onClose(nil) }) {
+            if let d = data {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ProfileChoiceRow(label: "All", checked: picked.isEmpty) { picked.removeAll() }
+                        ForEach(d.choices, id: \.id) { c in
+                            ProfileChoiceRow(label: c.name, checked: picked.contains(c.id)) {
+                                if picked.contains(c.id) { picked.remove(c.id) } else { picked.insert(c.id) }
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: ProfileUI.s(360, 560))
+            } else if error == nil {
+                ProgressView().tint(.accentPrimary)
+            }
+            if busy { ProgressView().tint(.accentPrimary) }
+            if let error { Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor) }
+        }
+        .task {
+            do { let d = try await ProfileManager.shared.channelProfileAssignment(playlistId, profile.id); data = d; picked = d.assigned }
+            catch { self.error = error.localizedDescription.isEmpty ? "Could not load channel profiles" : error.localizedDescription }
         }
     }
 }

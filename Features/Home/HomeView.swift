@@ -6038,6 +6038,25 @@ struct MainTabView: View {
                 }
                 .zIndex(2)
             }
+            // Profile switcher (Android 2c): right of the system tab bar, after
+            // Settings, in its own focus section so Right from the last pill
+            // reaches it and focus never selects a tab.
+            if tvTabBarSeen && !isVODDetailPushed && !tabBarScrollState.isHidden
+                && (!nowPlaying.isActive || nowPlaying.isMinimized) {
+                GeometryReader { geo in
+                    let visibleTabs = 2
+                        + (showRecordingsTab ? 1 : 0)
+                        + (showMoviesTab ? 1 : 0)
+                        + (showSeriesTab ? 1 : 0)
+                    let barTrailing = (geo.size.width + CGFloat(visibleTabs) * 230) / 2
+                    TVProfileSwitcherCircle()
+                        .focusSection()
+                        .padding(.leading, min(geo.size.width - 96, barTrailing + 16))
+                        .padding(.top, -10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .zIndex(2)
+            }
             #endif
 
             // In-place Search screen (tvOS): covers the tab content while the

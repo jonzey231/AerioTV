@@ -61,11 +61,37 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
     static let defaultsKey = "programReminders"
 
     /// Re-reads the stored reminders after a profile switch swapped them.
-    /// Scheduled notifications are left as they are (Android keeps each
-    /// profile's alarms too).
+    /// The outgoing profile's pending notifications are cancelled and the
+    /// incoming profile's future reminders are scheduled, so only the
+    /// profile on screen is reminded.
     func reloadFromDefaults() {
+        #if os(iOS)
+        let outgoing = activeReminders.values.map(\.notificationID)
+        if !outgoing.isEmpty {
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: outgoing)
+        }
+        #endif
         activeReminders = [:]
         loadReminders()
+        #if os(iOS)
+        let incoming = activeReminders.values.filter { $0.startTime.addingTimeInterval(-5 * 60) > Date() }
+        debugLog("🔔 ReminderManager: profile switch cancelled=\(outgoing.count) rescheduled=\(incoming.count)")
+        guard !incoming.isEmpty else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+            for info in incoming {
+                let content = UNMutableNotificationContent()
+                content.title = info.programTitle
+                content.body = "\(info.programTitle) starts in 5 minutes on \(info.channelName)"
+                content.sound = .default
+                let components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second], from: info.startTime.addingTimeInterval(-5 * 60))
+                let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                try? await center.add(UNNotificationRequest(identifier: info.notificationID, content: content, trigger: trigger))
+            }
+        }
+        #endif
     }
 
     private func loadReminders() {
