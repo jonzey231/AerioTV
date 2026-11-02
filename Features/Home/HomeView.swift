@@ -656,13 +656,19 @@ final class VODStore: ObservableObject {
         if !sweepMovies { VODSweepActivity.shared.markIdle(.movie) }
         if !sweepSeries { VODSweepActivity.shared.markIdle(.series) }
         guard gate != .skipped else { return }
-        if sweepMovies {
-            guard !Task.isCancelled else { return }
-            await loadMovies(servers: servers, background: true)
-        }
-        if sweepSeries {
-            guard !Task.isCancelled else { return }
-            await loadSeries(servers: servers, background: true)
+        guard !Task.isCancelled else { return }
+        // Both kinds sweep side by side (Android startMovieSweep and
+        // startSeriesSweep launch together). Run one after the other, TV
+        // Shows sat on "Loading TV shows..." for the whole movie sweep on a
+        // fresh install (71 movie lanes, several minutes).
+        let moviesTask = sweepMovies ? Task { @MainActor in await self.loadMovies(servers: servers, background: true) } : nil
+        let seriesTask = sweepSeries ? Task { @MainActor in await self.loadSeries(servers: servers, background: true) } : nil
+        await withTaskCancellationHandler {
+            await moviesTask?.value
+            await seriesTask?.value
+        } onCancel: {
+            moviesTask?.cancel()
+            seriesTask?.cancel()
         }
     }
 
