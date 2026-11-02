@@ -21,6 +21,10 @@ struct AddServerView: View {
     /// Onboarding shows the step indicator and the TV footer hints.
     var isOnboarding: Bool = false
     @State private var appliedInitialType = false
+    /// Connect a Server "Scan QR code": open the camera once the details form appears
+    /// (Android QrAutoScan.request()).
+    @State private var autoScanOnForm = false
+    @State private var formScanTrigger = 0
     /// "Other source types" expands in place on every platform.
     @State private var otherTypesExpanded = false
 
@@ -48,6 +52,11 @@ struct AddServerView: View {
     @State private var scannedUser: String?
     /// A setup link read here opens Set up a TV.
     @State private var scannedSetupLink: SetupTvOfferCenter.LinkBox?
+    /// After a user QR scan (camera, Photos, or file), show the compact
+    /// Playlist details step instead of auto-submitting; "Edit all details"
+    /// falls back to the full form with the scanned values filled (Android
+    /// ScannedPlaylistDetails). iPhone and iPad only.
+    @State private var showScanDetails = false
     /// Settings > Add Playlist from a user QR: the restore offer over the sync screen.
     @State private var qrRestoreSignIn: QrImportBus.SignIn?
     #endif
@@ -72,6 +81,16 @@ struct AddServerView: View {
                 VStack(spacing: 24) {
                     if !typeChosen {
                         typePickerSection
+                    } else if showScanDetailsOnThisPlatform {
+                        scannedPlaylistDetailsView
+                        // Kept in the hierarchy (invisible) so the scan
+                        // actions' delete-source prompt still presents.
+                        serverForm
+                            .frame(height: 0)
+                            .clipped()
+                            .opacity(0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     } else {
                         chosenTypeHeader
                         serverForm
@@ -107,7 +126,7 @@ struct AddServerView: View {
                 typeChosen = true
             }
         }
-        .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? "Configure" : (isOnboarding ? "" : "Add Playlist")))
+        .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? configureTitle : (isOnboarding ? "" : "Add Playlist")))
         .navigationBarBackButtonHidden(typeChosen || addProfilesFor != nil)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
@@ -119,9 +138,13 @@ struct AddServerView: View {
                     Button {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             typeChosen = false
+                            #if os(iOS)
+                            showScanDetails = false
+                            #endif
                             viewModel.reset()
                         }
                     } label: {
+                        #if os(tvOS)
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left")
                                 .scaledFont(.system(size: 13, weight: .semibold))
@@ -130,6 +153,15 @@ struct AddServerView: View {
                         .foregroundColor(.accentPrimary)
                         .frame(minHeight: 44)
                         .contentShape(Rectangle())
+                        #else
+                        // Android ConfigureSourceScreen: back arrow only, no title.
+                        Image(systemName: "chevron.left")
+                            .scaledFont(.system(size: 17, weight: .semibold))
+                            .foregroundColor(.accentPrimary)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                            .accessibilityLabel("Back")
+                        #endif
                     }
                 }
             }
@@ -165,6 +197,39 @@ struct AddServerView: View {
         return true
         #else
         return false
+        #endif
+    }
+
+    /// iPad (regular width, not TV): Android tablet spacing on the hero card.
+    private var isPad: Bool {
+        #if os(iOS)
+        return horizontalSizeClass == .regular
+        #else
+        return false
+        #endif
+    }
+
+    private var showScanDetailsOnThisPlatform: Bool {
+        #if os(iOS)
+        return showScanDetails
+        #else
+        return false
+        #endif
+    }
+
+    @ViewBuilder
+    private var scannedPlaylistDetailsView: some View {
+        #if os(iOS)
+        scannedPlaylistDetails
+        #endif
+    }
+
+    /// Android's Configure screen has no title on phones and tablets.
+    private var configureTitle: String {
+        #if os(tvOS)
+        return "Configure"
+        #else
+        return ""
         #endif
     }
 
@@ -260,9 +325,25 @@ struct AddServerView: View {
                 .foregroundColor(Color.contrastText(.textSecondary))
                 .fixedSize(horizontal: false, vertical: true)
 
-            OnboardingPillButton(title: isTV ? "Continue with Dispatcharr" : "Enter details",
-                                 filled: true, fullWidth: true) {
-                choose(.dispatcharrAPI)
+            if isTV {
+                OnboardingPillButton(title: "Continue with Dispatcharr",
+                                     filled: true, fullWidth: true) {
+                    choose(.dispatcharrAPI)
+                }
+            } else {
+                // Android ConnectServerParts: Scan QR code + Enter details.
+                HStack(spacing: 10) {
+                    OnboardingPillButton(title: "Scan QR code", filled: true, fullWidth: true,
+                                         systemImage: "qrcode.viewfinder", minHeight: 48) {
+                        autoScanOnForm = true
+                        choose(.dispatcharrAPI)
+                    }
+                    OnboardingPillButton(title: "Enter details", filled: false, fullWidth: true,
+                                         systemImage: "arrow.right.circle", minHeight: 48) {
+                        autoScanOnForm = false
+                        choose(.dispatcharrAPI)
+                    }
+                }
             }
         }
         .padding(isTV ? 32 : 18)
@@ -438,12 +519,19 @@ struct AddServerView: View {
                 #if os(iOS)
                 // iPhone and iPad, in both sign-in modes: the Dispatcharr user
                 // QR fills the server and key in one step.
-                QrScanActions(enabled: !viewModel.isVerifying) { r in
+                QrScanActions(enabled: !viewModel.isVerifying, scanTrigger: formScanTrigger) { r in
                     switch r {
                     case .userKey(let k): applyUserKey(k)
                     case .setupLink(let l): scannedSetupLink = .init(link: l)
                     case .invalid: break
                     }
+                }
+                .onAppear {
+                    // Bump after the form is on screen so QrScanActions sees a change;
+                    // cancelling the camera leaves the user on this form.
+                    guard autoScanOnForm else { return }
+                    autoScanOnForm = false
+                    DispatchQueue.main.async { formScanTrigger += 1 }
                 }
                 .sheet(item: $scannedSetupLink) { box in
                     SetUpTvView(link: box.link) { scannedSetupLink = nil }
@@ -996,10 +1084,119 @@ struct AddServerView: View {
             viewModel.name = URL(string: viewModel.baseURL)?.host ?? "Dispatcharr"
         }
         debugLog("[SETUP-QR] user code applied to the connect form")
-        // Signs in the same way as a typed key.
+        // Compact Playlist details step; Connect signs in the same way as a typed key.
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { showScanDetails = true }
+        // Probe now (the pre-port scan behavior) so the recording row knows
+        // the account's DVR access; Connect reuses this result.
+        dvrDestination = .dispatcharrServer
         Task { await viewModel.verifyConnection() }
     }
     #endif
+
+    #if os(iOS)
+    // MARK: - Scanned Playlist Details (compact step after a user QR scan)
+
+    private static func scannedHost(_ url: String) -> String? {
+        let u = url.trimmingCharacters(in: .whitespaces)
+        guard !u.isEmpty else { return nil }
+        let withScheme = u.contains("://") ? u : "http://\(u)"
+        guard let h = URL(string: withScheme)?.host, !h.isEmpty else { return nil }
+        return h
+    }
+
+    private var scannedPlaylistDetails: some View {
+        let who = scannedUser.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        let host = Self.scannedHost(viewModel.baseURL)
+        let line: String
+        switch (who, host) {
+        case let (w?, h?): line = "Scanned \(w) on \(h)"
+        case let (w?, nil): line = "Scanned \(w)"
+        case let (nil, h?): line = "Scanned a sign-in code for \(h)"
+        default: line = "Scanned a sign-in code"
+        }
+        return VStack(alignment: .leading, spacing: 14) {
+            Text("Playlist details")
+                .scaledFont(.headlineLarge)
+                .foregroundColor(.textPrimary)
+            Text(line)
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
+            AppTextField("Name", placeholder: "My IPTV Server",
+                         text: $viewModel.name, icon: "tag.fill")
+                .disabled(viewModel.isVerifying)
+            guideHistoryRow
+            scannedDvrRow
+            if let error = viewModel.verificationError {
+                Text(error)
+                    .scaledFont(.bodySmall)
+                    .foregroundColor(.statusLive)
+            }
+            PrimaryButton(
+                "Connect",
+                isLoading: viewModel.isVerifying,
+                isDisabled: viewModel.isVerifying
+            ) {
+                Task {
+                    // Reuse the background probe started by the scan.
+                    if !viewModel.verificationSuccess {
+                        await viewModel.verifyConnection()
+                    }
+                    if viewModel.verificationSuccess { saveServer() }
+                }
+            }
+            .padding(.top, 4)
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { showScanDetails = false }
+            } label: {
+                Text("Edit all details")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.accentPrimary)
+                    .frame(minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isVerifying)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private var scannedDvrRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Default Recording Destination")
+                .scaledFont(.bodyLarge)
+                .foregroundColor(.textPrimary)
+            if viewModel.isVerifying {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Checking access")
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+                .frame(minHeight: 32, alignment: .leading)
+            } else if viewModel.verificationSuccess
+                        && viewModel.discoveredCapabilities.canManageDvr == .denied {
+                // Denied: no choice; saveServer() stores This Device.
+                Text(Self.dvrDeniedLine)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            } else {
+                // Allowed, or Unknown (probe failed / capability unknown).
+                Picker("Default Recording Destination", selection: $dvrDestination) {
+                    Text("Server (Dispatcharr)").tag(RecordingDestination.dispatcharrServer)
+                    Text("This Device").tag(RecordingDestination.local)
+                }
+                .pickerStyle(.segmented)
+                Text("Where recordings are saved by default. Server recording needs DVR Manage access in Dispatcharr. You can change this later in Settings > DVR.")
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+    #endif
+
+    static let dvrDeniedLine = "Recordings save to this device. Server recording needs DVR Manage access in Dispatcharr."
 
     private func saveServer() {
         // Deactivate all existing servers so only the newly added one is active.

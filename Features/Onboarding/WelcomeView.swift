@@ -723,17 +723,29 @@ struct OnboardingPillButton: View {
     let title: String
     var filled: Bool = false
     var fullWidth: Bool = false
+    /// Optional leading SF Symbol (Android icon + 8 dp + label).
+    var systemImage: String? = nil
+    /// Overrides the default minimum height (44 pt, 60 on TV).
+    var minHeight: CGFloat? = nil
     let action: () -> Void
 
     var body: some View {
         let tv = onboardingIsTV
         Button(action: action) {
-            Text(title)
+            HStack(spacing: 8) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: tv ? 22 : 17, weight: .semibold))
+                }
+                Text(title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
                 .scaledFont(.system(size: tv ? 24 : 16, weight: .semibold))
                 .foregroundColor(filled ? .white : .textPrimary)
                 .padding(.horizontal, tv ? 36 : 22)
                 .frame(maxWidth: fullWidth ? .infinity : nil)
-                .frame(minHeight: tv ? 60 : 44)
+                .frame(minHeight: minHeight ?? (tv ? 60 : 44))
                 .background {
                     if filled {
                         Capsule(style: .continuous).fill(LinearGradient.accentGradient)
