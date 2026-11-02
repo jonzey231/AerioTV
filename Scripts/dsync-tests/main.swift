@@ -805,5 +805,109 @@ do {
     check(SetupSourceChoice.probeDecision(accountPresent: true, cloud: nil, dsync: dsyncCopy) == nil, "unreadable iCloud: unknown, no decision")
 }
 
+// MARK: - Profiles: RoleRulesTest, ProfilePinTest, ProfileOrderTest, ProfileRosterTest
+
+do {
+    let A = ProfileRole.admin, U = ProfileRole.user, C = ProfileRole.child
+    eq(ProfileRole.defaultFor(10), A, "level 10 Admin"); eq(ProfileRole.defaultFor(1), U, "level 1 Standard")
+    eq(ProfileRole.defaultFor(0), U, "level 0 Standard"); eq(ProfileRole.fromWire("child"), C, "wire child")
+    eq(ProfileRole.fromWire("boss"), nil, "unknown wire")
+    eq(DispatcharrProfile(id: "b", playlistId: "p", displayName: "Base", username: "base", isDefault: true, userLevel: 1).effectiveRole, U, "base standard")
+    eq(DispatcharrProfile(id: "o", playlistId: "p", displayName: "O", username: "o", userLevel: 1, role: A).effectiveRole, U, "admin label needs server admin")
+    eq(DispatcharrProfile(id: "o", playlistId: "p", displayName: "O", username: "o", userLevel: 1, role: C).effectiveRole, C, "child kept")
+    eq(DispatcharrProfile(id: "o", playlistId: "p", displayName: "O", username: "o", userLevel: 10, role: C).effectiveRole, A, "server admin never Child")
+    eq(ProfileRole.optionsFor(10), [A], "admin options"); eq(ProfileRole.optionsFor(1), [U, C], "standard options")
+    eq(ProfileRole.optionsFor(serverAdmin: nil), [U, C], "unknown level options")
+    eq(RoleRules.serverRoleChange(A, 1), U, "demoted"); eq(RoleRules.serverRoleChange(U, 10), A, "promoted")
+    eq(RoleRules.serverRoleChange(C, 10), A, "promoted child"); eq(RoleRules.serverRoleChange(C, 1), nil, "child stays")
+    eq(RoleRules.serverRoleChange(A, 10), nil, "admin stays"); eq(RoleRules.serverRoleChange(nil, 1), U, "unset resolves")
+    for actor in [A, U] {
+        eq(RoleRules.roleChange(actor: actor, from: U, to: A, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: false), .denied(RoleRules.ADMIN_IS_SERVER_SET), "admin is server set")
+        eq(RoleRules.roleChange(actor: actor, from: A, to: C, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: false, targetIsServerAdmin: true), .denied(RoleRules.SERVER_ADMIN_STAYS), "server admin stays")
+        eq(RoleRules.roleChange(actor: actor, from: U, to: C, missingPins: 1, anyPinExists: true, targetIsLastFullAccess: false), .needsPinsCreated, "missing pins")
+        eq(RoleRules.roleChange(actor: actor, from: U, to: C, missingPins: 0, anyPinExists: false, targetIsLastFullAccess: false), .needsPinsCreated, "no pin at all")
+        eq(RoleRules.roleChange(actor: actor, from: U, to: C, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: false), .allowed, "to child allowed")
+        eq(RoleRules.roleChange(actor: actor, from: C, to: U, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: false), .needsPinEntry, "leaving child needs a PIN")
+        check(RoleRules.roleChange(actor: actor, from: U, to: C, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: true) != .allowed, "last full access stays")
+        eq(RoleRules.resetGate(actor: actor, actorHasPin: true, childExists: true), .enterOwnPin, "reset own pin")
+        eq(RoleRules.resetGate(actor: actor, actorHasPin: false, childExists: false), .confirmOnly, "reset confirm")
+    }
+    check(RoleRules.roleChange(actor: C, from: U, to: C, missingPins: 0, anyPinExists: true, targetIsLastFullAccess: false) != .allowed, "child cannot change roles")
+    eq(RoleRules.addPath(baseIsServerAdmin: true, usersListForbidden: false), .serverList, "server list")
+    eq(RoleRules.addPath(baseIsServerAdmin: true, usersListForbidden: true), .manual, "403 manual")
+    check(RoleRules.canAssignChannelProfiles(baseIsServerAdmin: true, activeIsServerAdmin: true, active: U), "standard server admin assigns")
+    check(!RoleRules.canAssignChannelProfiles(baseIsServerAdmin: true, activeIsServerAdmin: true, active: C), "child never assigns")
+    check(!RoleRules.canWriteProfilesKey(C) && !RoleRules.canWriteProfilesKey(nil) && RoleRules.canWriteProfilesKey(U), "profiles key writers")
+    check(!RoleRules.canSeeSwitcher(C) && RoleRules.canSeeSwitcher(nil), "switcher")
+    for s in ["LiveTV", "Player", "Appearance", "About"] { check(RoleRules.sectionVisible(C, s), "child sees \(s)") }
+    for s in ["DvrSettings", "Sync", "Developer"] { check(!RoleRules.sectionVisible(C, s), "child hides \(s)") }
+    check(RoleRules.deepLinkAllowed(C, "LiveTV") && !RoleRules.deepLinkAllowed(C, "Sync"), "child deep links")
+    let holders = [RoleRules.PinHolder(id: "a", role: A, hasPin: true), RoleRules.PinHolder(id: "u1", role: U, hasPin: false),
+                   RoleRules.PinHolder(id: "me", role: A, hasPin: false, isActor: true), RoleRules.PinHolder(id: "c", role: C, hasPin: false),
+                   RoleRules.PinHolder(id: "u2", role: U, hasPin: false)]
+    eq(RoleRules.pinsMissingForChild(holders), ["me", "u1", "u2"], "missing pins, actor first")
+    eq(RoleRules.pinsMissingForChild(holders, becomingChild: "u1"), ["me", "u2"], "becoming child excluded")
+    check(!RoleRules.canRemovePin(A, childExists: true) && RoleRules.canRemovePin(C, childExists: true), "keep PIN while a Child exists")
+    check(!RoleRules.canRemoveDevicePin(childExists: true, otherPins: 0) && RoleRules.canRemoveDevicePin(childExists: true, otherPins: 1), "device PIN")
+    check(RoleRules.showLaunchPicker(isTv: true, isDispatcharr: true, toggleOn: true, profileCount: 2, lastRole: A), "launch picker")
+    check(!RoleRules.showLaunchPicker(isTv: true, isDispatcharr: true, toggleOn: true, profileCount: 2, lastRole: C), "child skips picker")
+    check(!RoleRules.canEditAvatar(actor: C, isOwn: false) && RoleRules.canEditAvatar(actor: C, isOwn: true), "avatar editing")
+
+    // PIN
+    eq(PinRules.normalize(.numbers, ["2", "5", "8", "0"]), "2580", "numbers")
+    eq(PinRules.normalize(.numbers, ["2", "5", "8"]), nil, "too short")
+    eq(PinRules.normalize(.numbers, Array(repeating: "1", count: 7)), nil, "too long")
+    eq(PinRules.normalize(.numbers, ["2", "5", "x", "0"]), nil, "non digit")
+    eq(PinRules.normalize(.directions, ["Up", "Up", "Down", "Left"]), "UUDL", "directions")
+    eq(PinRules.normalize(.directions, ["Up", "Up", "Down", "1"]), nil, "bad direction")
+    let salt = Data((0..<16).map { UInt8($0) })
+    let h = PinRules.hash(salt: salt, profileId: "p1", type: .numbers, normalized: "2580")
+    eq(h.count, 64, "v1 hash hex"); check(h != PinRules.hash(salt: salt, profileId: "p2", type: .numbers, normalized: "2580"), "bound to id")
+    check(PinRules.matches(h, PinRules.hash(salt: salt, profileId: "p1", type: .numbers, normalized: "2580")), "v1 stable")
+    let s0 = String(repeating: "0", count: 32)
+    let v2 = PinRules.hashV2(saltHex: s0, normalized: "1234")!
+    check(PinRules.matches(PinRules.hashV2(saltHex: s0, normalized: "1234")!, v2) && !PinRules.matches(v2, PinRules.hashV2(saltHex: s0, normalized: "1235")!), "v2 hash")
+    eq(PinRules.freshSaltHex().count, 32, "fresh salt is 16 bytes")
+    var b = PinBackoff(); let t: Int64 = 1_000_000
+    for _ in 0..<4 { b = b.onWrong(t) }; eq(b.remainingSeconds(t), 0, "four wrong")
+    b = b.onWrong(t); eq(b.remainingSeconds(t), 30, "fifth locks 30 s")
+    for _ in 0..<5 { b = b.onWrong(t + 30_000) }; eq(b.remainingSeconds(t + 30_000), 60, "doubles")
+    eq(PinBackoff.lockMs(50), 30_000 << 10, "cap"); eq(PinBackoff.decode(PinBackoff(fails: 3, round: 2, lockedUntil: 12345).encode()), PinBackoff(fails: 3, round: 2, lockedUntil: 12345), "round trip")
+    eq(PinBackoff.decode("garbage"), PinBackoff(), "garbage")
+    check(DevicePin.isDevice(DevicePin.id("abc")) && !DevicePin.isDevice("3f2c-uuid"), "device PIN id")
+
+    // Order
+    let start = ["a", "b", "c", "d", "e"]
+    var steps = start
+    for _ in 0..<4 { steps = ProfileOrder.step(steps, "e", .earlier) }
+    for _ in 0..<2 { steps = ProfileOrder.step(steps, "b", .later) }
+    eq(steps, ["e", "a", "c", "d", "b"], "single moves")
+    eq(ProfileOrder.resolve(start, steps), steps, "full order equals single moves")
+    eq(ProfileOrder.resolve(start, start), start, "unchanged")
+    eq(ProfileOrder.resolve(["a", "b", "c", "f"], ["c", "a", "x", "b"]), ["c", "a", "b", "f"], "roster change mid lift")
+    eq(ProfileOrder.step(start, "a", .earlier), start, "clamp top"); eq(ProfileOrder.step(start, "e", .later), start, "clamp bottom")
+
+    // Roster
+    func row(_ id: Int, _ u: String, role: String = "user", order: Int = -1, avatar: AvatarSpec? = nil, name: String? = nil, at: Int64 = 1_793_000_000) -> ProfileRow {
+        ProfileRow(userId: id, username: u, displayName: name ?? u, pinType: "none", pinHash: "", pinSalt: "", role: role, updatedAt: at, avatar: avatar, order: order)
+    }
+    let rows = [row(1, "admin"), row(2, "jonzey231"), row(3, "kid", role: "child")]
+    let plan = ProfileRoster.plan(rows, ["Admin"])
+    eq(plan.merge.map(\.username), ["admin"], "merge local only"); eq(plan.available.map(\.username), ["jonzey231", "kid"], "offered")
+    eq(ProfileRoster.suggestions([row(2, "b", order: 2), row(3, "c", order: 1), row(4, "a"), row(1, "me", order: 0)], ["ME"]).map(\.username), ["c", "b", "a"], "roster order")
+    let av = AvatarSpec(icon: AvatarCatalog.ICONS[0], color: AvatarCatalog.COLORS[0])
+    let applied = ProfileRoster.applyRow(DispatcharrProfile(id: "x", playlistId: "p", displayName: "jonzey231", username: "jonzey231"),
+                                         row(7, "jonzey231", role: "child", order: 3, avatar: av, name: "Logan"))
+    check(applied.role == C && applied.order == 3 && applied.avatar == av && applied.displayName == "Logan" && applied.userId == 7, "Add pill applies name, avatar, role, and order")
+    let kept = ProfileRoster.applyRow(DispatcharrProfile(id: "x", playlistId: "p", displayName: "Mine", username: "x", role: A, order: 5), row(1, "x", role: "", order: -1, name: ""))
+    check(kept.role == A && kept.order == 5 && kept.displayName == "Mine", "absent fields keep local")
+    let tr = ProfileTombstones.resolve([row(1, "admin"), row(8, "test2", at: 1_792_000_000)], [ProfileTombstone(username: "test2", removedAt: 1_793_500_000, userId: 8)])
+    eq(tr.dropped.map(\.username), ["test2"], "tombstone drops"); check(ProfileRoster.suggestions(tr.rows, ["admin"]).isEmpty, "tombstoned not suggested")
+    check(ProfileRoster.isStripped(row(1, "u")) && !ProfileRoster.isStripped(row(1, "u", name: "Named")), "stripped rows")
+    eq(AvatarCatalog.defaultColorIndex("ab"), (97 + 98) % 8, "default color index")
+    eq(SnapshotStaleness.normalize("3, 1,x,2"), "1,2,3", "assignment normalize")
+    eq(SnapshotStaleness.reason(SnapshotStamp(userId: 2, assignment: ""), currentUserId: 2, currentAssignment: ""), nil, "fresh stamp")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
