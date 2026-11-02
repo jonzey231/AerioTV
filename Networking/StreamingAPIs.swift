@@ -5334,38 +5334,57 @@ struct DispatcharrChannel: Decodable, Identifiable {
         case effectiveEpgDataID = "effective_epg_data_id"
         case isCatchup = "is_catchup"
         case catchupDays = "catchup_days"
+        // jonzey231/AerioTV#97: Dispatcharr's ChannelSerializer sends the
+        // raw provider columns next to effective_* fields that coalesce the
+        // user's ChannelOverride over them (its M3U and XC outputs render
+        // the effective values). Prefer effective_*, fall back to the raw
+        // column when absent or null.
+        case effectiveName = "effective_name"
+        case effectiveChannelNumber = "effective_channel_number"
+        case effectiveLogoID = "effective_logo_id"
+        case effectiveChannelGroupID = "effective_channel_group_id"
+        case effectiveTvgID = "effective_tvg_id"
         // channelGroupID handled in init(from:)
+    }
+
+    /// Accepts JSON Double, Int, or String for a channel number key.
+    /// See the `channelNumber` doc comment for the rationale.
+    private static func decodeChannelNumber(
+        _ container: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys
+    ) -> String? {
+        if let d = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return d.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(d)) : String(d)
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return String(i)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: key) {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+
+    private static func nonBlank(_ s: String?) -> String? {
+        guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        return s
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(Int.self, forKey: .id)
-        name = try container.decode(String.self, forKey: .name)
+        let rawName = try container.decode(String.self, forKey: .name)
+        name = Self.nonBlank(try? container.decodeIfPresent(String.self, forKey: .effectiveName)) ?? rawName
         // v1.7.x: accept Double, Int, or String for channel_number.
         // See the `channelNumber` doc comment for the rationale.
-        // Order matters: try numeric types first (Double covers the
-        // common "11444.0" float case AND any Int-valued numbers),
-        // then String (Django REST DecimalField default shape).
-        // Note: `try?` on a throwing `T?`-returning function flattens
-        // throw-into-nil so the result is a single `T?`, not `T??`.
-        if let d = try? container.decodeIfPresent(Double.self, forKey: .channelNumber) {
-            // Whole-number doubles flatten to "11" instead of "11.0"
-            // so integer-numbered lineups stay clean.
-            channelNumber = d.truncatingRemainder(dividingBy: 1) == 0
-                ? String(Int(d))
-                : String(d)
-        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .channelNumber) {
-            channelNumber = String(i)
-        } else if let s = try? container.decodeIfPresent(String.self, forKey: .channelNumber) {
-            let trimmed = s.trimmingCharacters(in: .whitespaces)
-            channelNumber = trimmed.isEmpty ? nil : trimmed
-        } else {
-            channelNumber = nil
-        }
+        channelNumber = Self.decodeChannelNumber(container, .effectiveChannelNumber)
+            ?? Self.decodeChannelNumber(container, .channelNumber)
         uuid = try container.decodeIfPresent(String.self, forKey: .uuid)
-        logoID = try container.decodeIfPresent(Int.self, forKey: .logoID)
+        // A channel with no effective logo keeps a nil logo id and the
+        // name-text tile.
+        logoID = try (try? container.decodeIfPresent(Int.self, forKey: .effectiveLogoID))
+            ?? (try container.decodeIfPresent(Int.self, forKey: .logoID))
         streams = try container.decodeIfPresent([Int].self, forKey: .streams)
-        tvgID = try container.decodeIfPresent(String.self, forKey: .tvgID)
+        tvgID = try Self.nonBlank(try? container.decodeIfPresent(String.self, forKey: .effectiveTvgID))
+            ?? (try container.decodeIfPresent(String.self, forKey: .tvgID))
         if let intVal = try? container.decodeIfPresent(Int.self, forKey: .epgDataID) {
             epgDataID = intVal
         } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .epgDataID) {
@@ -5401,8 +5420,9 @@ struct DispatcharrChannel: Decodable, Identifiable {
             case channelGroup   = "channel_group"
         }
         let extra = try decoder.container(keyedBy: ExtraKeys.self)
-        channelGroupID = try extra.decodeIfPresent(Int.self, forKey: .channelGroupID)
-            ?? extra.decodeIfPresent(Int.self, forKey: .channelGroup)
+        channelGroupID = try (try? container.decodeIfPresent(Int.self, forKey: .effectiveChannelGroupID))
+            ?? (try extra.decodeIfPresent(Int.self, forKey: .channelGroupID))
+            ?? (try extra.decodeIfPresent(Int.self, forKey: .channelGroup))
     }
 
 }
