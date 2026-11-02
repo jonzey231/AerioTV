@@ -5333,6 +5333,15 @@ final class AVPlayerProgressDriver {
     /// then sat at pos 0.0s for eleven seconds (session2.txt:280-347),
     /// which is what made the [TUNE] line print before playback existed.
     private var firstFrameRendered = false
+    /// `AVPlayerItemTrack.currentVideoFrameRate` is a dispatch_sync onto
+    /// AVFoundation's item queue and waits while the item is busy: read on
+    /// the main actor from the periodic observer it blocked the main thread
+    /// 14 to 15 s per call on a live channel (iPad simulator sample,
+    /// 2026-11-02). It is read here on this queue only, one read in flight
+    /// at a time, and the result hops back to the main actor.
+    private static let frameRateQueue = DispatchQueue(label: "aerio.avp.framerate", qos: .utility)
+    private var presentedFpsReadInFlight = false
+    private var presentedFpsLastRead: CFTimeInterval = 0
     private var firstFrameProbeClock: CMTime = .invalid
 
     private var streamSummaryLogged = false
@@ -5907,7 +5916,9 @@ final class AVPlayerProgressDriver {
         let hasBuffer = out.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil
         let pts = displayTime.isValid ? displayTime.seconds : probeLastFramePTS
         let videoTrack = item.tracks.first { $0.assetTrack?.mediaType == .video }
-        let fps = Double(videoTrack?.assetTrack?.nominalFrameRate ?? 0)
+        // Stream rate already loaded async (populateStreamInfo); the
+        // synchronous assetTrack.nominalFrameRate getter can block main.
+        let fps = store.streamInfo.fps
         var framesPerSec = 0
         if pts.isFinite, probeLastFramePTS.isFinite, fps > 0 {
             framesPerSec = Int(((pts - probeLastFramePTS) * fps).rounded())
@@ -6778,15 +6789,7 @@ final class AVPlayerProgressDriver {
         // AVPlayer managed to show, not what the stream declares, and it
         // reads low while buffering or dropping (Logan 2026-09-11: 32fps
         // on a 59.94 feed). It NEVER becomes streamInfo.fps.
-        if let item = player.currentItem {
-            for track in item.tracks where track.currentVideoFrameRate > 0 {
-                let presented = Double(track.currentVideoFrameRate)
-                if abs(presented - store.streamInfo.presentedFps) > 0.01 {
-                    store.streamInfo.presentedFps = presented
-                }
-                break
-            }
-        }
+        if let item = player.currentItem { requestPresentedFps(item: item) }
         // The remuxed path's stream rate: the SPS VUI declaration when the
         // stream carries one, else the long-window snapped median.
         let remux = RemuxMeasuredVideo.shared
@@ -6795,6 +6798,32 @@ final class AVPlayerProgressDriver {
         }
         guard store.streamInfo.fps == 0, remux.fps > 0 else { return }
         store.streamInfo.fps = remux.fps
+    }
+
+    /// Reads the presented rate off the main actor (see frameRateQueue).
+    /// At most one read in flight and one per 2 s, so a stalled item queue
+    /// can neither block the UI nor stack reads behind itself.
+    private func requestPresentedFps(item: AVPlayerItem, force: Bool = false) {
+        let now = CACurrentMediaTime()
+        guard !presentedFpsReadInFlight, force || now - presentedFpsLastRead >= 2 else { return }
+        presentedFpsReadInFlight = true
+        presentedFpsLastRead = now
+        nonisolated(unsafe) let tracks = item.tracks
+        Self.frameRateQueue.async { [weak self] in
+            var presented = 0.0
+            for track in tracks where track.currentVideoFrameRate > 0 {
+                presented = Double(track.currentVideoFrameRate)
+                break
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.presentedFpsReadInFlight = false
+                guard presented > 0, self.player.currentItem === item else { return }
+                if abs(presented - self.store.streamInfo.presentedFps) > 0.01 {
+                    self.store.streamInfo.presentedFps = presented
+                }
+            }
+        }
     }
 
     private func populateStreamInfo(item: AVPlayerItem) {
@@ -6815,9 +6844,7 @@ final class AVPlayerProgressDriver {
         // comes from the track's nominalFrameRate below, or (remux path,
         // where fMP4 declares none) from the SPS VUI timing the remuxer
         // parsed - see sampleFrameRateIfUnknown.
-        for track in item.tracks where track.currentVideoFrameRate > 0 {
-            store.streamInfo.presentedFps = Double(track.currentVideoFrameRate)
-        }
+        requestPresentedFps(item: item, force: true)
 
         // Buffered-ahead seconds (the AVPlayer analog of mpv's demuxer cache).
         if let range = item.loadedTimeRanges.last?.timeRangeValue {
