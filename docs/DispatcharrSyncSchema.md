@@ -13,6 +13,10 @@ so `schemaVersion` stays 3: older readers ignore it, and a row without it keeps 
 v3 note (2026-10-27): `settings` gains the full allowlist (section 4.9, every setting iCloud or Drive
 backs up), optional `tv` and `mobile` lanes beside `v`, and per-item scopes chosen in Sync
 Categories. All optional, so `schemaVersion` stays 3: older readers read `v` and round-trip the rest.
+v3 note (2026-10-29): new category `syncProviders` (section 10b): which sync providers the device
+owner runs. A new category inside the key is not breaking (writers re-emit unknown categories, section
+3), so `schemaVersion` stays 3; bumping it would make every older reader skip the whole key (reader
+rule 2).
 
 ## 1. What it is
 
@@ -43,7 +47,7 @@ see the same favorites, progress, and reminders.
 
 ONE App Data key, `app.molinete.aerio`, holds every category as a sub-object (section 3): settings,
 profiles, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder, collections, remoteMap,
-radioDefault, favorites, recents, and progress. It is written with the profile's own token to
+radioDefault, favorites, recents, progress, and syncProviders (section 10b). It is written with the profile's own token to
 `users/me/app-data/app.molinete.aerio/`.
 
 Categories (the "Key" column below is the v1 key name; in v2 the category name is the part after
@@ -74,7 +78,7 @@ Device-local, never synced here (nor through iCloud or Drive), and why:
 - Debug and developer options, update checks: per install.
 - Playlist URLs and credentials: Drive and iCloud Keychain only, never Dispatcharr (section 10).
 - TMDB API key: a secret; Drive stopped carrying it in cleartext on 2026-10-27 (section 10.2).
-- Sync provider, Sync Categories choices (`syncScope.<item>`, `syncItem.<item>`), and the active profile: per device by design.
+- The Drive Sync and Dispatcharr Sync switches, Sync Categories choices (`syncScope.<item>`, `syncItem.<item>`), and the active profile: per device by design.
 - Channel profile selection: server-side state (admin assigns it per user).
 - DVR recordings: server-side (Dispatcharr) or local files.
 - EPG, logos, VOD catalog caches: rebuilt from the server.
@@ -314,6 +318,7 @@ compatibility):
 | dvrDefaultDestination | string | defaultDestination | (Android only) | dvr_default_destination | |
 | dvrSortOrder | string | dvrSortOrder | dvrSortOrder | dvr_sort_order | |
 | showRemoteHints | bool | remoteHints | showRemoteHintsKey | show_remote_hints | |
+| exitDialogFocusExit | bool | exitFocus | (Android only) | exit_dialog_focus_exit | |
 | guideTuneInMini | bool | playChannelsIn | RemoteControlStore.tuneInMiniKey | guide_tune_in_mini | |
 | defaultGroup | string | groupOrder | defaultChannelGroup | default_group_token_<playlistId> | defaultGroup (JSON object, playlist id to token) |
 | lastGroup | string | groupOrder | (Android only) | live_group_token_<playlistId> | lastGroup (JSON object) |
@@ -455,6 +460,11 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   local displayName, role, avatar, order, pinType, pinHash, and pinSalt only when its `updatedAt` is newer than the
   local row's; otherwise the local row stays and goes back up on the next write. A writer keeps
   rows it does not have locally unless a tombstone covers them.
+- Name and avatar claim: only an explicit local rename or avatar change claims displayName and
+  avatar, so a profile created by onboarding, a QR login, or any other path that never customized
+  them takes the server row's displayName and avatar on the next pull whatever the stamps say (logs
+  `[DSYNC] profiles: adopted synced name/avatar for <user>`), and its writes keep the server's
+  values; with no server row it keeps its username as the display name.
 - Catalog semantics: the rows are the profiles AVAILABLE to devices, not a mandate. A pull never
   creates a local profile. Metadata (displayName, role, avatar, order, PIN) merges only into
   profiles already present on the device; rows for users with no local profile are offered as
@@ -462,7 +472,7 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   Sync step has pulled, and Settings > Playlists > (playlist) > Add Profile) and are added only by
   an explicit choice on that device. Adding one uses the normal credential path (admin-listed
   `api_key`, else a typed password or API key) and then applies the row's role, PIN, avatar,
-  displayName, and order. A Child row needs an Admin PIN on the device first. Tombstones apply on
+  displayName, and order. A Child row needs every Admin and Standard profile on the device to hold a PIN first. Tombstones apply on
   every device. Each pull logs `[DSYNC] profiles: N roster rows available, not added (opt-in)`.
 - Stale-device rule: a writer does not send a local row the server list lacks when that row has no
   unsent local change (its `updatedAt` is at or before this device's last acknowledged write) and
@@ -470,7 +480,8 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   row is older than the server's newest row by more than the 90-day tombstone window. The writer
   logs `[DSYNC] profiles: local row <user> older than server roster, not re-sent` and adopts the
   server list; the local profile stays on that device until a tombstone or the user removes it.
-- `role` is the app-local role set by an Admin on the device (default: `"admin"` when the Dispatcharr user level is Admin, else `"user"`). `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs an Admin PIN.
+- `role` is the app-local role and follows the user's Dispatcharr access (owner rule 2026-10-29): a Dispatcharr admin (superuser, staff, or user_level 10) is always `"admin"` and is never offered a role picker; any other user is `"user"` (shown as Standard) or `"child"`, chosen by an Admin or Standard profile, and is never offered Admin. When a refresh of `/api/accounts/users/me/` reports a changed level the role follows it (demotion: Admin to Standard; promotion: Standard or Child to Admin) and logs `[PROFILES] server role changed for <username>: <old> -> <new>`. Inside AerioTV `admin` and `user` (shown as Standard) are identical (owner rule 2026-10-29): the label only reflects the user's Dispatcharr access, and both can add, remove, and reorder profiles, change roles, reset other profiles' PINs, and write this key. Only actions that call Dispatcharr admin endpoints (Channel Profiles, Enable API access, the server users list) check the server admin flag. `child` hides the switcher, the Profiles section, and every other profile name; leaving a child profile needs a PIN from an Admin or Standard profile.
+- While any profile is a Child, every Admin and Standard profile holds a PIN (Numbers or Directions): setting a role to Child first walks the acting profile through each missing PIN (its own first, then a temporary PIN per other profile); an Admin or Standard profile added while a Child exists sets its PIN right after the add (cancel undoes the add); removing such a PIN is denied ("While a Child profile exists, Admin and Standard profiles keep a PIN."), and a reset sets a temporary PIN instead of clearing it.
 - `pinHash` = lowercase hex SHA-256 of `pinSalt bytes || UTF-8 PIN` where the PIN is digits for
   numbers and the letters `U D L R` for directions (example `"UULR"`). Empty when `pinType` is `"none"`.
 - `pinSalt` = 16 random bytes from the platform CSPRNG, lowercase hex, regenerated on every PIN set
@@ -478,13 +489,13 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
 - Non-admin devices never read this key (they cannot reach it through `me`). A profile signed in
   alone has no picker and no PIN prompt for itself on that device.
 - Device Admin PIN (device-local, never synced, not in this key): when onboarding signs in as a
-  Standard Dispatcharr user, "Who is this profile for?" offers User (default) or Child. Child sets a
+  Standard Dispatcharr user, "Who is this profile for?" offers Standard (default; wire value `user`) or Child. Child sets a
   Device Admin PIN (Numbers or Directions) tied to no profile, and the profile becomes a Child: a
-  kid-only device. Every "Enter an Admin PIN" gate (leaving a Child, Manage Profiles, Add Profile,
-  role changes, removing a Child) accepts the Device Admin PIN as well as any Admin profile's PIN,
+  kid-only device. Every "Enter a PIN from an Admin or Standard profile" gate (leaving a Child, Manage Profiles, Add Profile,
+  role changes, removing a Child) accepts the Device Admin PIN as well as any Admin or Standard profile's PIN,
   and it stays valid after an Admin profile is added. It is changed or removed in Settings >
-  Playlists > Profiles (Admin profiles) or Manage Profiles behind the PIN, both needing the current
-  Device Admin PIN; the last Admin PIN stays while any profile is a Child.
+  Playlists > Profiles (Admin and Standard profiles) or Manage Profiles behind the PIN, both needing the current
+  Device Admin PIN; it stays while any profile is a Child and no Admin or Standard profile has a PIN.
 
 ## 5. Profiles flow
 
@@ -630,6 +641,506 @@ never trimmed. After the last step still fails: "Sync data too large".
 | PreferencesSnapshot `tmdbApiKey` | not synced | No longer written (it was cleartext); still read for one version so an older snapshot restores it, then dropped |
 | ChannelCollection id, name, memberIds, placement (AppPreferences `channel_collections`, in Drive as `channelCollections.v1` since 2026-10-27) | collections row | Same conversion as Apple |
 | Playlists, Credentials | not synced here | Stay on Drive |
+
+## 10a. Coexistence with Drive and iCloud
+
+Google Drive sync (Android) and iCloud sync (Apple) can be on at the same time as Dispatcharr Sync. Apple applies the same rules with iCloud in place of Drive.
+
+Two independent switches (owner decision 2026-10-29), no single-choice "sync provider":
+1. Drive Sync (iCloud on Apple): one device-local switch, Settings > Sync > Google Drive.
+2. Dispatcharr Sync: one device-local switch per base user (profile-scoped), Settings > Sync > Dispatcharr Sync.
+3. Turning either one on or off never changes the other: not in Settings, the Welcome "Sync with Dispatcharr" path, the onboarding Dispatcharr Sync step, the Drive restore path, or the providers offer (section 10b).
+4. With both on, Settings shows under the Dispatcharr Sync section: "Dispatcharr Sync takes precedence for shared data on this server. Google Drive keeps a backup." Sync Categories is one shared list for both.
+5. Migration from the old single choice (Android key `sync_provider`): `dispatcharr` reads as Dispatcharr Sync on; `drive`, `off`, or unset read as off. Drive Sync keeps its own stored value in every case. The old key is dropped the first time the Dispatcharr switch is written.
+
+Rule 1, precedence. For a Dispatcharr playlist whose active user has Dispatcharr Sync on, Dispatcharr Sync takes precedence for every category both providers carry: favorites, recents, collections, watch progress, reminders, watchlist, hidden titles, hidden groups, group order, radio default, remote map, and settings. Drive (or iCloud) keeps owning playlists and credentials, and every category for non-Dispatcharr playlists. Drive keeps pushing its full snapshot as a backup; a Drive pull does not apply a Dispatcharr-owned category.
+
+Ownership predicate (Android `DispatcharrSyncManager.ownsCategory`, pure rule `DsyncCoexistence.owns`): true when all of these hold:
+
+1. the Drive category carries at least one key of this schema (Favorites, Watch Progress, Reminders, Watchlist, App Preferences; never Playlists or Credentials),
+2. the active playlist is Dispatcharr,
+3. Dispatcharr Sync is on for that playlist's active user, and
+4. this device has completed at least one Dispatcharr pull for that user (persisted per playlist and profile).
+
+Until condition 4 holds, a Drive pull still applies its categories, so restoring from Drive and then turning on Dispatcharr Sync leaves the Drive data on the device, and the first Dispatcharr push seeds it to the server. Each skipped category logs one line:
+
+```
+[DRIVE] pull <category> skipped: Dispatcharr Sync owns it
+```
+
+Per-item Sync Categories still apply: an item that is Off neither pushes nor applies on any provider.
+
+Rule 2, first-pull seeding. An empty or missing server copy never overwrites what a user already has when they turn on Dispatcharr Sync:
+
+1. Missing (bucket 404, absent from the list, or category absent inside the bucket): the key is marked read and not present, and the post-pull flush pushes local up. This was already the behavior.
+2. Present with empty data (no ids, rows, names, or lanes; `groupOrder` with mode `default` and no order) on the first read of that key for this user on this device (no server stamp ever consumed here): the envelope is recorded as consumed without applying it, the key is marked dirty, and local is pushed up. Log line: `[DSYNC] pull <key> bytes=<n> empty on server, first pull: seeding from local`. Primitive values (for example `radioDefault.on=false`) are real choices and apply as usual. An empty copy seen after the first read is a real change from another device and applies as usual. `profiles` merges per row and is exempt.
+
+Rule 3 (id cache readiness, 2026-10-30). Keys translated through the
+channel map (favorites, recents, reminders, collections) are not written
+until the session's channel snapshot has Dispatcharr channel ids. Keys
+translated through the VOD catalog (progress, watchlist, hiddenTitles) are
+not written while the movie catalog has not completed a sweep and a local
+row could not be translated. A deferred key stays dirty and is re-pushed
+when the cache is ready, so an empty list never goes up over local rows
+that exist but could not be translated. After the cache is built, a row
+that still cannot be translated is a real miss and stays on the device.
+Drive snapshots carry local ids and need no translation.
+
+Rule 4: choosing a source when both hold data (2026-10-30). When Google
+Drive and Dispatcharr Sync both hold data for the signed-in Dispatcharr user
+(the base profile; sub-profiles never take part) and they differ, the user
+picks which setup the device starts from, and the other side is replaced
+with it. It runs in onboarding (both providers selected, or Drive only when
+the restored playlist is Dispatcharr and the user then turns Dispatcharr
+Sync on) and in Settings > Sync when the second provider is turned on.
+
+Probe before apply: with both selected in onboarding, the Drive restore
+applies Playlists and Credentials only (Dispatcharr never holds them and the
+probe needs them); the shared categories are held, neither pulled nor
+pushed, until the choice (the hold expires after 30 minutes). Each held
+pull or push logs `[DRIVE] pull <category> held: waiting for the setup
+choice` (or `push`); that line is the fresh-setup state before the choice. The probe
+reads the Drive files and the user's App Data key (`GET` on the existing
+app-data path, no new server path) without applying either, and summarizes
+per shared category (favorites, recents, collections, progress, reminders,
+watchlist, hiddenTitles, hiddenGroups, groupOrder, settings): row count,
+`updatedAt`, and a content fingerprint over canonical row identities. The
+channel categories favorites and recents count canonical-id rows only
+(2026-11-01): distinct Dispatcharr channel ids, recents capped at 50 after
+the dedupe, exactly what the Dispatcharr build carries and
+`DsyncCoexistence.rowCount` counts; a local channel with no Dispatcharr id
+(another playlist, not in the channel list) is neither counted nor compared.
+One row definition per category serves the forced push row count, the
+probe summary, the Drive summary and push line, and the converge
+fingerprint (`ConvergeRoundTripTest.pushRowCountEqualsProbeCountForEveryCategory`).
+A failed channel lookup fails the probe (no choice) instead of undercounting.
+A collection whose members cannot all be resolved has no fingerprint and
+counts as different when non-empty on either side. The VOD categories
+(progress, watchlist, hidden titles) follow the canonical-id requirement
+below.
+
+Canonical-id requirement for VOD rows (2026-11-01). A progress, watchlist,
+or hidden title row counts only when it carries a canonical Dispatcharr VOD
+id: the snapshot's `dispatcharrVodId`, else the id resolved from the local
+catalog or episode map at probe time. Both summaries apply it (the Drive
+summary in `DriveCanon.progress`, `watchlist`, and `hiddenTitles`; the
+Dispatcharr rows always carry one, counted as distinct type plus id). A row
+with no canonical id (a title deleted from the server, a row from another
+server, a URL-keyed row) cannot live on Dispatcharr Sync: it stays in Drive
+and on the device, is never force pushed, never converged, and never
+counted, so the fingerprints agree on the rows both sides can hold. Field
+run 2026-11-01: Drive progress=8 against Dispatcharr progress=1 with seven
+untranslatable rows asked on every Drive off/on; both now read 1.
+
+Representable rows and held rows (2026-11-01, second field run). The
+decision compares only rows this device can represent on both providers.
+A Dispatcharr progress row the pull cannot map to a local uuid (movie
+catalog sweep not there yet, episode not in the saved episode map) is no
+longer dropped: it is held by its canonical id (`DsyncHeldStore`, base user,
+per playlist) and logged counts only as `[DSYNC] progress in held=<n>
+movies=<n> episodes=<n> catalogReady=<bool>`. The Drive WatchProgress
+snapshot carries each held row as a placeholder row (`videoId`
+`dsync:<m|e>:<id>` with `dispatcharrVodId`), so the Drive summary and push
+count it by that id even when the local catalog cannot resolve it. A Drive
+apply never writes a placeholder as a local row; it holds it (replacing the
+held set when the user chose Google Drive), and the forced Dispatcharr push
+includes held rows. Every later progress pull ("not newer" included)
+retries the held rows against the catalog and episode map and turns the
+ones that resolve into local rows. Symmetrically, the Dispatcharr summary
+on this device (setup probe, fresh-device order, converge) keeps a
+progress, watchlist, or hidden title row only when it resolves here, is
+held, or the Drive copy carries it with a canonical id; the others are
+excluded with `[SYNC] probe excludes <category> rows=<n> (no local match)`.
+Held rows that resolve log `[DSYNC] progress held rows resolved=<n>` and
+queue the Drive follow push. A converge mark (this Dispatcharr state was
+pushed once and Drive still differs) stands only while this device's push
+would still carry what Drive holds; when the local copy changed since, the
+mark is cleared (`[SYNC] converge mark cleared <category> (local copy
+changed)`) and converge pushes again. So `converge skip <category>
+reason=untranslatable` can only follow rows that cannot exist on this
+device, and those are in neither summary. Field
+run: `[DSYNC] setup probe progress=1` against `[DRIVE] setup probe
+progress=0` with `push WatchProgress rows=0` after a Dispatcharr choice,
+because the one server row was skipped by the pull
+(`HeldProgressTest`). The Apple copy of this section must mirror it.
+
+Translation order for a forced push (2026-11-01). Every Drive apply of
+watch progress and watchlist records the snapshot's canonical ids into the
+Dispatcharr Sync id map (`[DRIVE] canonical ids progress movies=<n>
+episodes=<n> without=<n>`), so a forced push translates those rows from
+the snapshot first and the local catalog or episode list second, without
+waiting for the movie sweep or for the user to open Movies or TV Shows.
+Episode ids need no series catalog sweep: they come from the snapshot, the
+saved episode map, or one episode-list load per series (retried on a later
+build when it failed). A forced key that ends without a PUT, because the
+server already holds the same copy, logs `[DSYNC] put <bucket> (<key>)
+status=unchanged rows=<n>`. Rows still untranslated log `[DSYNC] progress
+drops untranslated: movies=<n> episodes=<n> other=<n>` (counts only).
+
+Canonical ids and the Drive id migration (2026-10-30). The canonical
+identity of each shared category is the one Dispatcharr Sync puts on the
+wire: Dispatcharr channel ids for favorites, recents, and collection
+members; the type plus the Dispatcharr VOD id for progress, watchlist, and
+hidden titles; channel name and start second for reminders; group names for
+hidden groups and group order; and schema setting names with their values
+for settings (blank values left out on both sides). Drive snapshots keep
+their local ids and gain nullable fields beside them, filled on every Drive
+push when the active playlist is Dispatcharr and the id resolves (an
+unresolved id stays null and never holds a push): `dispatcharrChannelId` on
+favorites entries, `dispatcharrVodId` on watch progress, watchlist, and
+hidden title entries, and `dispatcharrChannelIds` (local channel id to
+Dispatcharr channel id) on the preferences snapshot for the channels that
+recents and collections reference. Older files decode unchanged and the
+envelope version stays 1; instead the envelope gains `format`, and every
+push from this build writes `format` 2. The probe falls back to resolving
+local ids for rows written before these fields existed. When a Drive
+restore (onboarding, or Settings > Sync with Drive on) finds any shared
+file whose envelope `format` is missing or below 2, AerioTV offers "Your
+backup needs an update" with "Update backup" and "Not now", for every
+playlist type. Nothing is rewritten without "Update backup", which rewrites
+each shared Drive file once at `format` 2, keeping its envelope time and
+every other field, gated per base user and category by a saved flag. With
+an active Dispatcharr playlist the Dispatcharr ids are filled where they
+resolve; the channel categories wait for the channel list and the VOD
+categories wait for the movie catalog, flag unset, and finish on a later
+sync. Any other playlist type rewrites at once with the ids left null.
+"Not now" keeps the old format and the prompt-when-unsure behavior;
+onboarding does not show the offer again that app session, and Settings
+offers it at most once per app session.
+
+Format rule (2026-11-01). Every Drive write of every shared file carries
+envelope `format` 2: each push builds its envelope in one place
+(`DriveCanon.writerEnvelope`), and the accepted update rewrites every
+shared file (favorites, progress, reminders, watchlist, preferences) whether
+or not its Sync Category is on and whatever its row count. When the id
+fill has to wait (channel list or movie catalog) or the file does not
+decode as a current snapshot, the update still stamps `format` 2 at once,
+keeping every other field as written, logged `[DRIVE] id migration:
+<category> format stamped ok=<bool> (<why>)`; its flag stays unset and the
+ids fill on a later sync. The update is not held by the setup-choice hold
+(it carries the Drive file's own rows, never this device's data), so
+"Update backup" on the welcome flow takes effect at once. The offer check
+logs which files are old format: `[DRIVE] backup update needed:
+categories=<names>`. A device on a build older than format 2 can still
+write an old file; the offer then returns, which is the intended signal.
+
+| Drive | Dispatcharr | Result |
+| --- | --- | --- |
+| empty | empty | Dispatcharr (nothing to replace) |
+| has data | empty | Google Drive, no prompt |
+| empty | has data | Dispatcharr, no prompt |
+| has data | has data, every category provably equal | Dispatcharr, no prompt |
+| has data | has data, any category differs or cannot be proven equal | Ask |
+
+The prompt: "Which setup should this device start from?", two cards
+("Dispatcharr" and "Google Drive", each "Updated <relative time>" and up to
+four non-zero counts, then "and more"), the line "The other will be
+replaced with the setup you choose.", and Continue or Cancel. Dispatcharr
+is always preselected when it opens, whichever side is newer (2026-11-01):
+the prompt only appears with Dispatcharr Sync on for the active playlist,
+so there is no newer-side rule. The Apple app mirrors this.
+Cancel in onboarding returns to Welcome with the selections kept; in
+Settings it leaves the switch off.
+
+Google Drive chosen: the Drive snapshot applies (ignoring Rule 1 ownership
+in Settings, where Dispatcharr already owns the data), then every shared key
+of the base user is pushed whole from this device. A persisted per-key force
+flag makes the pull record the server copy as consumed without applying it
+(no `remoteWins`, no consumed-stamp check, no self-heal) and makes the PUT
+skip the merge in the read-before-put; row categories build from local only
+(no server rows merged or kept). Rule 3 still applies: a key whose cache is
+not ready stays dirty and forced until it is sent. A key with no local
+rows is written empty, so the server mirrors Google Drive exactly and the
+two sides compare equal afterward (2026-10-30; before this the server copy
+was kept and the prompt came back). In the other direction, choosing
+Dispatcharr makes the next Drive push write every enabled file, empty ones
+included. While the Drive backup applies, Dispatcharr Sync neither pulls
+nor pushes the shared keys (a hold of at most 2 minutes), and the forced
+replace is armed per category only after that category's Drive backup
+applied (a missing Drive file counts as applied with no rows). When the
+apply fails, that category's keys are not armed (any earlier flag clears),
+the server copy stays, and the prompt shows again next time, logged as `[SYNC] forced
+replace cancelled: Drive backup did not apply (<category>)`. The flag
+clears per key on a successful PUT. Log lines:
+`[DSYNC] force push <key> rows=<n> (user chose Google Drive)` and, for an
+empty key, `[DSYNC] force push <key> rows=0 (empty, mirrors Google Drive)`.
+Profiles, remoteMap, and radioDefault are not forced.
+
+Mirror details (2026-11-01). Every shared Drive file applies with replace
+semantics for this choice. Preferences: a setting, recents list,
+collection, hidden group, or group order the Drive copy does not carry
+goes back to its default, so local holds the Drive key set. Row files:
+the backup rows apply, then a local row the backup does not carry is
+removed (favorites and progress rows deleted, reminders deleted with their
+alarm cancelled, watchlist and hidden title rows tombstoned so the removal
+travels; a watchlist or hidden title identity the backup carries takes the
+backup row, its tombstone included). Only rows inside the comparison the
+setup probe makes are candidates; rows its filters exclude are counted by
+neither side and are kept: progress rows that are URL keyed, not a movie
+or episode, finished more than 30 days ago, or beyond the 300 newest;
+reminders that already ended; watchlist and hidden title rows of another
+playlist scope (a host other than the active playlist's). Hidden titles
+follow only while their Sync Categories item is on. A missing Drive file
+replaces nothing (local rows stay; the next Drive push writes them). One
+counts-only line per category: `[DRIVE] replace <category> local=<n>
+backup=<m> removed=<k>` (local and backup counted with the probe filters;
+preferences counts keys across lanes with removed 0). The
+forced `settings` push sends exactly the Drive lanes just applied (`v`,
+`tv`, and `mobile`, the same names and non-blank count the setup probe
+reads from Drive); the server's previous lanes are not merged in. Log
+line: `[DSYNC] force push settings rows=<n> (mirrors Google Drive)`. A
+forced key that defers on its id cache (Rule 3, for example progress while
+the movie catalog sweep runs) stays armed and dirty until a PUT succeeds,
+and a pull keeps skipping it meanwhile. It is retried when the catalog is
+ready (the 5 s cache poll, and the catalog page signal after a quiet
+period of `PAGE_RECHECK_MS`, the hook the Drive id migration retry uses)
+and on every regular sync cycle, logged as `[DSYNC] force push <key> retry
+(catalog|cycle) rows=<n>`. The choice hold may expire first; the armed flag
+is what protects the key. Rows still untranslated once the catalog is built
+are left out of the push, logged once with counts only: `[DSYNC] force push
+<key> drops untranslated=<n> sent=<m> (not in this catalog)`. The Apple
+copy of this document and the Apple app must mirror these rules.
+
+Dispatcharr chosen: the held Drive categories are never applied; the normal
+first pull applies the server copy; then Drive's backup is replaced in the
+same app session, right after that first pull (or its 120 s limit), not at
+the next scheduled push (2026-11-01). Every enabled shared Drive file is
+pushed at once and logs its own line, counts only: `[DRIVE] next push
+replaces backup (user chose Dispatcharr)`, then `[DRIVE] push <Category>
+rows=<n> (replace)` per file (the Preferences line adds its per-category
+counts, for example `recents=9 groupOrder=4`). Rule 1 precedence holds
+afterward in both cases.
+
+Fresh-device order (2026-11-01, Dispatcharr chosen, prompt or automatic
+UseDispatcharr). The choice arms a persisted wait on every shared Drive
+file before any hold is released. The first Drive push of a file (replace,
+follow, worker, or converge) goes out only when, for every shared category
+it carries that this device syncs, the Dispatcharr pull of that key has
+completed on this device this session (applied, merged, kept local, not
+newer, seeded from local, or absent on the server). A completed pull
+releases the file whatever the row counts say: after it, local is the
+Dispatcharr copy (2026-11-01 revision; the earlier count check held a phone
+that was set up all along forever, because its local count left settings
+out). Otherwise the file is not pushed and logs `[DRIVE] push <Category>
+held: <category> not pulled yet|Dispatcharr pull not done (fresh-device
+order)`; the pull's Drive follow pushes it once the pull completes. So a
+fresh device never overwrites a populated backup before it has the
+Dispatcharr copy. The wait clears per file on its first push, on a Google
+Drive choice, or when Dispatcharr Sync is off. A converge push of a
+waiting file is not remembered as pushed, so the next converge retries it.
+
+Unknown Drive (2026-11-01). A Drive read that fails (HTTP 401, any other
+HTTP error, network, or Drive needing sign-in) is unknown, never empty:
+the listing throws instead of returning no files, and a failed file
+lookup never leads to a create. The setup probe logs `[DRIVE] setup probe
+failed: <reason class> (treated as unknown, not empty)` and the decide
+rules do not decide: no UseDispatcharr with replace, no forced replace,
+no converge push, and no "next push replaces backup". Log: `[SYNC] setup
+source drive=unknown dsync=<n> rows decision=none (retry when Drive
+works)`. The flow continues on Dispatcharr Sync alone; shared Drive files
+are neither pushed nor pulled (`[DRIVE] push <Category> held: Drive state
+unknown (setup probe failed)`), persisted across restarts. The probe runs
+again after each complete Dispatcharr pull (Rule 5 entry) and when the
+Sync screen sees Drive signed in; a readable Drive then decides as usual
+(Ask waits for the prompt on the Sync screen). Converge skips with
+`[SYNC] converge skipped: Drive unreadable (unknown, not empty)` when its
+own Drive read fails.
+
+Drive token (2026-11-01). Every Drive call that gets a 401 refreshes the
+access token once (clearing it from the platform token cache first, since
+the cached token would otherwise come back unchanged) and retries once.
+If the refresh fails or the retry gets a 401 too, Drive is marked as
+needing sign-in (persisted): no further Drive call goes out, the Sync
+screen shows "Sign in to Google Drive again" as one line under the Drive
+section with the sign-in and Sign Out controls, and signing in again
+clears it. The in-memory token honors the same expiry as the saved one.
+
+Rule 5: convergence (2026-11-01). With Google Drive and Dispatcharr Sync
+both on, the shared categories stay equal on both sides on every device,
+so a device signing in later decides "equal, use Dispatcharr" with no
+prompt from either source. It never replaces or answers a prompt: "Your
+backup needs an update", "Which setup should this device start from?",
+and "Turn on Dispatcharr Sync?" stay exactly as they are, and a mismatch
+found before the setup choice is settled is left to them.
+
+1. Drive follows Dispatcharr Sync in the same foreground session. A shared
+   key applied from a Dispatcharr pull (applied, merged, or self-healed),
+   or changed on this device, queues the one-shot Drive push (15 s
+   debounce, REPLACE), base user only, Drive Sync on, and the key's Sync
+   Categories item on. Log: `[SYNC] drive follow <key> (pull|local)`.
+   The follow is noted on the Drive FILE that carries the key
+   (`DsyncCoexistence.driveFileFor`): recents and collections ride in
+   Preferences although their Sync Categories toggle is Favorites; a key
+   with no Drive file fails a unit test instead of falling through.
+   A Drive pull of a Drive-owned category (Playlists, Credentials, any
+   category of a non-Dispatcharr playlist) has no Dispatcharr key, so
+   nothing goes to Dispatcharr Sync.
+2. Self-heal after every complete Dispatcharr pull, when all hold: base
+   user, Drive Sync on and signed in, a Drive pull completed on this
+   install, Rule 1 ownership (Dispatcharr Sync on, Dispatcharr playlist,
+   first pull done), no Rule 4 hold, no armed forced key, and no setup
+   prompt open or unanswered this app session. The Dispatcharr side is
+   the bucket this pull just read (no extra server read); the Drive side
+   is one read of the shared files. Both are summarized with the Rule 4
+   probe (same fingerprints). A category with an unsent local change is
+   not compared (the follow push carries it). Every differing category
+   pushes its Drive file from this device, which holds the Dispatcharr
+   copy: Dispatcharr is the source of truth, Drive is never pulled over
+   Dispatcharr-owned data. Log, counts only:
+   `[SYNC] converge <category> drive=<fp>/<rows> dsync=<fp>/<rows> -> push drive`,
+   or `[SYNC] converge equal categories=<n> skipped=<n>` (skipped counts only categories that logged a skip line; Off items are not compared or counted). Converge and the
+   Rule 4 probe use the same summaries (`DriveSyncManager.readSharedSummary`
+   and `DsyncCoexistence.summarize`), so "equal" is logged only when the
+   probe would not ask. Every differing category it does not push is named:
+   `[SYNC] converge skip <category> reason=<armed|deferred|dirty|unread|untranslatable> drive=<n> dsync=<n>`,
+   then `[SYNC] converge nothing pushed categories=<n> differing=<n>`. A key
+   dirty only because untranslatable rows stayed local is compared, not
+   skipped. The follow push logs each followed file:
+   `[DRIVE] push <Category> rows=<n> (follow <key> <reason>)`. Every
+   converge push logs `[DRIVE] push <Category> rows=<n> (converge)`, and the
+   next converge reads equal unless a row cannot be translated. A key
+   skipped as dirty with no write queued gets its write queued: the build is
+   compared with the server copy just fetched (never an older saved copy),
+   so a key the server already equals ends as `status=unchanged` and clears,
+   and converge runs again once those writes settle. A truly unsent local
+   change stays a valid skip until its write goes out.
+3. No ping-pong: a category pushed once for a given Dispatcharr state
+   (rows plus fingerprint, saved per playlist) is not pushed again until
+   the Dispatcharr copy changes, even when the next compare still differs
+   (a row this device could not translate).
+4. Same inputs on both sides, for the Rule 4 decision and Rule 5 alike:
+   a category whose Sync Categories item is Off on this device is left out
+   of both summaries, so it is never compared, converged, or replaced
+   here; settings drop the names whose item is Off. Drive settings are
+   typed into the wire form a push sends before they are fingerprinted,
+   and every setting value is compared in one spelling (booleans
+   lowercase, whole numbers without ".0", color hex uppercase without
+   "#"). The group sort mode reads as a known mode or "default" on both
+   sides.
+
+Single snapshot builder, pull before replace, and atomic category commit
+(2026-11-01, third field run on the phone):
+
+1. One builder. Exactly one function builds the Drive WatchProgress
+   snapshot (`DriveSyncManager.driveProgressSnapshot`, pure rule
+   `DsyncHeld.driveSnapshot`). Every caller uses it: replace, converge,
+   follow local, follow pull, the periodic and one-shot worker, Push to
+   Drive, and the converge mark check. It merges the local rows with the
+   held rows and the progress rows of the Dispatcharr copy this device
+   last read (the active base-user session; held rows only when the user
+   chose Google Drive or progress is off). A resolved local row wins over
+   the placeholder for the same item; a local row whose canonical lookup
+   returned nothing takes the id from the Dispatcharr row whose saved
+   reverse id is its uuid. So a lookup that fails in one run never drops a
+   row from Drive (field run: the movie row existed, the push counted 0).
+   Each push logs counts only: `[DRIVE] progress snapshot local=<n>
+   canonical=<n> dsync=<n> placeholders=<n> (<why>)`.
+   What emptied the snapshot on the phone: every Drive worker run pulls
+   Playlists after its push, and the playlist write used SQLite REPLACE,
+   which deletes the playlist row before inserting it, so ON DELETE CASCADE
+   removed every watch progress (and reminder and local recording) row of
+   that playlist (`progress snapshot local=2`, then `local=0` right after
+   the pull). Playlist writes are now an in-place upsert (Room `@Upsert`).
+   The Apple copy must check its own playlist writes for the same cascade.
+2. Progress heal. A progress pull that is "not newer" writes every server
+   row this device lacks (or holds older) when it resolves, and holds the
+   rest, unless a local change is unsent. The server copy is a per-row
+   union, so this never writes anything a later push would undo.
+3. Pull before replace. Choosing Dispatcharr runs a full Dispatcharr pull
+   first with the stamp check forced (a shared key that is "not newer" is
+   applied anyway unless it has an unsent local change;
+   `DsyncCoexistence.choiceApplies`), and only then replaces the Drive
+   backup. The pull logs `[DSYNC] setup choice pull ok=<bool>` and each
+   forced key `[DSYNC] pull <key> bytes=<n> applied (setup choice, stamp
+   not newer)`. Progress rows the pull held (movie catalog not built yet)
+   are written locally before the replace push (bounded wait, 45 s;
+   `[DSYNC] progress before replace resolved=<n> held=<n>`), so the first
+   `[DRIVE] progress snapshot` already counts them as local. If the list, the bucket, or a forced apply fails, Drive is
+   not replaced: `[DRIVE] replace deferred: Dispatcharr pull failed`, the
+   shared Drive pushes are held (`[DRIVE] push <Category> held: replace
+   deferred until the Dispatcharr pull applies`), and the next Dispatcharr
+   cycle (converge) retries pull then replace. Recents follow the same
+   representable rule as the VOD keys: the Dispatcharr summary on this
+   device keeps a recent channel only when this device's channel list maps
+   it or the Drive copy carries it (`[SYNC] probe excludes recents rows=<n>
+   (no local match)`); an unloaded channel list excludes nothing. Field run
+   after the first fix: server recents 14, one channel absent here, so the
+   apply could never write it and every probe read 14 against 13.
+4. Atomic category commit. Once a category's upload starts, the upload,
+   the follow bookkeeping, and its push line run under NonCancellable;
+   turning Drive off stops the push only between categories (`[DRIVE] push
+   stopped before <Category>: sync cancelled (Drive turned off)`). Tests:
+   `DriveSnapshotRulesTest`. The Apple copy must mirror all four rules
+   (iCloud in place of Drive).
+
+Apple mirrors Rule 5 with iCloud in place of Drive (pending in the Apple
+copy of this document). The Apple copy must also mirror the canonical-id
+requirement for VOD rows and the forced-push translation order above, and
+(2026-11-01) the canonical-id rule for favorites and recents, the immediate
+backup replace on a Dispatcharr choice, and the fresh-device order. The
+Apple copy must mirror the unknown-Drive rule (unknown iCloud: a failed
+read is never empty, nothing is decided) and the hold release rule (a
+completed pull releases the fresh-device hold regardless of counts).
+
+Manual push and pull (owner decision 2026-11-02). Settings > Sync, under
+the Dispatcharr Sync section and only while Dispatcharr Sync is on for the
+active Dispatcharr playlist, shows "Push to Dispatcharr" (with its "Last
+synced" line) and "Pull from Dispatcharr" after Sync Now, which is
+unchanged. With Google Drive also on (and signed in), "Push to both"
+follows. Each asks first (Push or Pull, and Cancel). The keys covered are
+the forced-replace keys (`DsyncCoexistence.FORCE_KEYS`) whose Sync
+Categories item is not Off (`DsyncManual.keys`); Profiles, remoteMap, and
+radioDefault are never forced, and an Off item neither pushes nor pulls.
+1. Push to Dispatcharr: the forced replace (Rule 4 semantics, empty keys
+   included, no server rows merged) for the base user, sent at once. Log
+   `[DSYNC] manual push <key> rows=<n>` then the put status line. A key
+   that cannot be sent stays armed and dirty for a later cycle; the row
+   reads "Could not reach your Dispatcharr server".
+2. Pull from Dispatcharr: the setup-choice pull (`pullForChoice` path,
+   stamp check forced) applies the server copy for every covered key, no
+   prompt; applied keys queue the Drive follow pushes (Rule 5). Log
+   `[DSYNC] manual pull <key> rows=<n>`.
+3. Push to both: step 1, then the Drive `replaceBackupNow`. Log
+   `[SYNC] manual push to both`.
+Results: "Pushed to Dispatcharr", "Pulled from Dispatcharr", "Pushed to
+both", or "Could not reach your Dispatcharr server" as the row's status
+line. Rows, order, and wording are identical on phone, tablet, and TV. The
+Apple app mirrors this with iCloud in place of Google Drive.
+
+## 10b. Sync providers record (`syncProviders`)
+
+Every backup carries which sync providers the device owner runs, so a new device can offer the same ones.
+
+```json
+{"dispatcharr":true,"googleDrive":true,"icloud":false,"updatedAt":1761700000000,"deviceId":"6F1C...5A11"}
+```
+
+`updatedAt` is Unix milliseconds (the one exception to the seconds rule inside `data`). Where it lives:
+
+1. Dispatcharr Sync: the `data` of category `syncProviders` in the single key (section 3), with the usual sub-object `updatedAt` (ISO, the record's time) and `deviceId`.
+2. Google Drive (Android): `envelope.syncProviders` in every snapshot file (`SyncEnvelope`), optional.
+3. iCloud (Apple): the same object in the iCloud payload; Apple writes `icloud`.
+
+Readers tolerate its absence; missing booleans read false, a record without `updatedAt` is ignored.
+
+Scope (owner rule, 2026-10-29): the record describes the user who set up the device, never another profile.
+1. Dispatcharr copy: written and read only by a session of the BASE (signed-in) profile, under that user's own key. A sub-profile session round-trips the category untouched and never folds it locally. Local copies are kept per playlist, never merged across profiles.
+2. Drive copy: belongs to the Google account that owns the backup; every flag is computed from the base profile's state only. `dispatcharr` there means the owner uses Dispatcharr Sync for their own user.
+
+Union rule (both providers, same pure rule, Android `SyncProvidersRules`):
+1. Pull: keep the newer record whole (`updatedAt`, ties: higher `deviceId`).
+2. Push: stored flags OR this device's own, each from its own switch (`dispatcharr` = Dispatcharr Sync on for the base user, `googleDrive` = Drive Sync on, `icloud` = iCloud on; Android never sets `icloud` but preserves it).
+3. A flag goes from true to false only when this device reported it true before and the provider is now off here: it writes `false` with a newer `updatedAt` once, then stops forcing it, so a device that still runs the provider sets it true again on its next push.
+4. `updatedAt` and `deviceId` change only when a flag changes.
+5. Best effort: a device pushing a stale Drive copy can re-raise a flag; the next union settles it.
+
+Prompt rule:
+1. Armed only by onboarding's first Drive restore or first Dispatcharr Sync pull, with the base profile active. Never when a sub-profile is added or switched to.
+2. Offers each provider the owner's records (Drive copy, and the base user's Dispatcharr copy for the active playlist) mark true that is off on this device. Dispatcharr is offered only when the active playlist is Dispatcharr Direct Connect. iCloud is never offered on Android; Apple offers iCloud and Dispatcharr the same way.
+3. One themed dialog, once per playlist (persisted): title "Keep your devices in sync", text "Your other devices also use <Google Drive / Dispatcharr Sync / Google Drive and Dispatcharr Sync>. Turn it on here too?", buttons "Turn on" (focused on TV) and "Not now".
+4. Turn on: Drive runs the Welcome card path (Google sign-in, Drive scope, master on); Dispatcharr turns Dispatcharr Sync on for the active user. Neither turns the other provider off.
+
+No new server paths: the record rides the existing App Data key and Drive files.
 
 ## 11. README rows (both repos, same commit as the code)
 
