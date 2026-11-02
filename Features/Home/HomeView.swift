@@ -3906,6 +3906,10 @@ final class NowPlayingManager: ObservableObject {
             // search (Logan 2026-09-16). See SearchDismissCenter.
             if playingItem != nil, oldValue == nil {
                 SearchDismissCenter.dismissAll(reason: "fullscreen player")
+            } else if let item = playingItem, item.id != oldValue?.id, !isMinimized {
+                // A retune while the fullscreen player is up (or about to
+                // be): no nil transition, so close search here too.
+                SearchDismissCenter.dismissAll(reason: "fullscreen retune")
             }
         }
     }
@@ -3917,7 +3921,19 @@ final class NowPlayingManager: ObservableObject {
     @Published private var _isMinimized: Bool = false
     var isMinimized: Bool {
         get { _isMinimized }
-        set { if newValue != _isMinimized { _isMinimized = newValue } }
+        set {
+            guard newValue != _isMinimized else { return }
+            _isMinimized = newValue
+            // Expanding the docked mini (a pick from a search while the
+            // mini is up retunes it and expands it) is also an entry into
+            // the fullscreen player: playingItem never passes through nil
+            // there, so the didSet above does not fire and the keyboard
+            // stayed over the player. Same rule as Android, which closes
+            // search on every entry into a player route.
+            if !newValue, playingItem != nil {
+                SearchDismissCenter.dismissAll(reason: "expand to fullscreen")
+            }
+        }
     }
     // #42 Part 3: debounce state distinguishing a SINGLE Back (restore the mini
     // to fullscreen) from a DOUBLE Back (jump to the top channel).

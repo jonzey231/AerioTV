@@ -1007,6 +1007,9 @@ final class PlayerSession: ObservableObject {
         store.setVODVersionContext(options: versionOptions,
                                    selectedID: selectedVersionID,
                                    selectionKey: versionSelectionKey)
+        // On Demand and DVR picks open the player here without touching
+        // playingItem, so the search keyboard would stay over the player.
+        SearchDismissCenter.dismissAll(reason: "on demand player")
         mode = .multiview
         return true
     }
