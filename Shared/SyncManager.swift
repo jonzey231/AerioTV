@@ -667,6 +667,8 @@ final class SyncManager: ObservableObject {
         }
 
         debugLog("🔵 SyncManager.pushPrefs: building snapshot")
+        // Rule 5 follow: the iCloud snapshots of the files the preferences payload carries.
+        for c in [DsyncCategory.favorites, .watchlist, .preferences] { CloudSnapshotSync.shared.follow(c, "\(c.rawValue) local") }
         var built = buildPreferencesDict()
         let modifiedAt = (prefsDirtySince ?? Date()).timeIntervalSince1970
         built[Self.prefsModifiedAtKey] = modifiedAt
@@ -1407,6 +1409,7 @@ final class SyncManager: ObservableObject {
         }
 
         let payload = entries.map { serializeWatchProgress($0) }
+        CloudSnapshotSync.shared.follow(.watchProgress, "progress local")
         nonisolated(unsafe) let capturedPayload = payload
 
         watchProgressPushDebounce?.cancel()
@@ -1558,6 +1561,7 @@ final class SyncManager: ObservableObject {
         }
 
         let reminders = ReminderManager.shared.syncableReminders
+        CloudSnapshotSync.shared.follow(.reminders, "reminders local")
         var payload: [[String: Any]] = []
         for (key, r) in reminders {
             payload.append([

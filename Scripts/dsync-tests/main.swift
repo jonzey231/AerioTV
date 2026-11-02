@@ -709,6 +709,51 @@ do {
     eq(scoped.entries.map(\.videoId), ["1", "dsync:m:3"], "progress from another playlist is out of scope")
 }
 
+// MARK: - Cloud follow, holds, and converge (ConvergeRoundTripTest, DriveSnapshotRulesTest)
+
+do {
+    var q = CloudFollowQueue()
+    q.note(.preferences, "recents pull"); q.note(.preferences, "recents pull"); q.note(.favorites, "favorites local")
+    eq(q.pending, [.favorites, .preferences], "pending files in order")
+    eq(q.take(.preferences), ["recents pull"], "follows deduplicated")
+    eq(q.take(.preferences), [], "taken once")
+    eq(CloudFollowQueue.DELAY_MS, 15_000, "follow pushes within 15 s")
+
+    eq(CloudPushRules.hold(shared: true, choiceHeld: true, unknown: true, deferred: true), "waiting for the setup choice", "choice hold first")
+    eq(CloudPushRules.hold(shared: true, choiceHeld: false, unknown: false, deferred: true),
+       "replace deferred until the Dispatcharr pull applies", "deferred replace holds")
+    eq(CloudPushRules.hold(shared: false, choiceHeld: true, unknown: true, deferred: true), nil, "non-shared files never held")
+    eq(CloudPushRules.heldLine("Favorites", "waiting for the setup choice"), "[CLOUD] push Favorites held: waiting for the setup choice", "held line")
+    eq(CloudPushRules.stopReason(cloudOn: false, superseded: true), "sync cancelled (iCloud turned off)", "turned off wins")
+    eq(CloudPushRules.stopReason(cloudOn: true, superseded: true), "superseded by a newer push", "superseded")
+    eq(CloudPushRules.stopReason(cloudOn: true, superseded: false), nil, "go on")
+
+    // Fresh-device hold: released once each category's Dispatcharr pull completed, whatever it counts.
+    eq(SetupSourceChoice.freshDeviceHold(["favorites"], read: nil), "Dispatcharr pull not done", "no pull yet")
+    eq(SetupSourceChoice.freshDeviceHold(["recents", "settings"], read: ["recents"]), "settings not pulled yet", "one name waits")
+    eq(SetupSourceChoice.freshDeviceHold(["favorites"], read: ["favorites"]), nil, "released after the pull")
+    eq(SetupSourceChoice.freshDeviceHold([], read: nil), nil, "nothing to wait for")
+
+    // Converge: Dispatcharr is the source of truth; a pushed state is not pushed again (no ping-pong).
+    let c = sum(("favorites", Cat(rows: 2, updatedAt: 1, fingerprint: "a")), ("progress", Cat(rows: 1, updatedAt: 1, fingerprint: "p")))
+    let d = sum(("favorites", Cat(rows: 3, updatedAt: 2, fingerprint: "b")), ("progress", Cat(rows: 1, updatedAt: 1, fingerprint: "p")))
+    let p1 = CloudConverge.plan(cloud: c, dsync: d, skipReasons: [:], marked: [:]) { _ in false }
+    eq(p1.push, ["favorites"], "differing category pushed")
+    let mark = SetupSourceChoice.convergeMark(d.categories["favorites"])
+    let p2 = CloudConverge.plan(cloud: c, dsync: d, skipReasons: [:], marked: ["favorites": mark]) { _ in false }
+    eq(p2.push, [], "same Dispatcharr state not pushed twice")
+    eq(p2.skipped.map(\.1), ["untranslatable"], "logged skip")
+    let p3 = CloudConverge.plan(cloud: c, dsync: d, skipReasons: [:], marked: ["favorites": mark]) { $0 == "favorites" }
+    eq(p3.push, ["favorites"], "a local change clears the mark")
+    eq(p3.cleared, ["favorites"], "cleared mark reported")
+    let p4 = CloudConverge.plan(cloud: c, dsync: d, skipReasons: ["favorites": "dirty"], marked: [:]) { _ in true }
+    eq(p4.push, [], "a category with a local change on its way is skipped")
+    eq(p4.skipped.map(\.1), ["dirty"], "skip reason")
+    eq(SetupSourceChoice.convergeEqualLine(categories: CloudConverge.known(c, c), skipped: []), "[SYNC] converge equal categories=2 skipped=0", "equal line")
+    eq(SetupSourceChoice.convergeLine("favorites", cloud: c.categories["favorites"], dsync: d.categories["favorites"]),
+       "[SYNC] converge favorites cloud=a/2 dsync=b/3 -> push cloud", "converge line")
+}
+
 // MARK: - SyncProvidersTest (Apple writes icloud, preserves googleDrive)
 
 do {

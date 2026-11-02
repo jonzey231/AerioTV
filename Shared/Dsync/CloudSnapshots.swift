@@ -757,6 +757,77 @@ extension CloudCanon {
     }
 }
 
+// MARK: - Rule 5 follow pushes and converge (Android DriveSyncWorker follows, DriveSyncManager.converge)
+
+/// Follow reasons per cloud file, remembered until that file's next push logs them.
+struct CloudFollowQueue: Sendable {
+    /// A follow push goes out this long after the last change (Android one-shot worker delay).
+    static let DELAY_MS: Int64 = 15_000
+
+    private var follows: [DsyncCategory: [String]] = [:]
+
+    mutating func note(_ c: DsyncCategory, _ why: String) {
+        var l = follows[c] ?? []
+        if !l.contains(why) { l.append(why) }
+        follows[c] = l
+    }
+
+    mutating func take(_ c: DsyncCategory) -> [String] { follows.removeValue(forKey: c) ?? [] }
+
+    /// Files with a follow waiting, in SHARED_FILES order.
+    var pending: [DsyncCategory] { CloudCanon.SHARED_FILES.filter { follows[$0] != nil } }
+}
+
+enum CloudPushRules {
+    /// Why a shared file push is held (nil: push). Order as Android: the setup choice, unknown iCloud, a deferred replace.
+    static func hold(shared: Bool, choiceHeld: Bool, unknown: Bool, deferred: Bool) -> String? {
+        guard shared else { return nil }
+        if choiceHeld { return "waiting for the setup choice" }
+        if unknown { return "iCloud state unknown (setup probe failed)" }
+        if deferred { return "replace deferred until the Dispatcharr pull applies" }
+        return nil
+    }
+
+    static func heldLine(_ file: String, _ why: String) -> String { "[CLOUD] push \(file) held: \(why)" }
+
+    /// Why a multi-file push stops before the next file (nil: go on). A file already writing commits whole.
+    static func stopReason(cloudOn: Bool, superseded: Bool) -> String? {
+        if !cloudOn { return "sync cancelled (iCloud turned off)" }
+        if superseded { return "superseded by a newer push" }
+        return nil
+    }
+
+    static func stoppedLine(_ file: String, _ why: String) -> String { "[CLOUD] push stopped before \(file): \(why)" }
+}
+
+enum CloudConverge {
+    struct Plan: Equatable {
+        var push: [String]
+        var skipped: [(String, String)]
+        var cleared: [String]
+        static func == (a: Plan, b: Plan) -> Bool {
+            a.push == b.push && a.cleared == b.cleared && a.skipped.map { "\($0.0)=\($0.1)" } == b.skipped.map { "\($0.0)=\($0.1)" }
+        }
+    }
+
+    /// Rule 5 plan: a mark ("this Dispatcharr state was pushed once and iCloud still differs")
+    /// stands only while this device's push would still carry what iCloud holds; a category whose
+    /// local copy changed since ([localDiffers]) has its mark cleared so it is pushed again.
+    static func plan(cloud: SetupSourceChoice.Summary, dsync: SetupSourceChoice.Summary, skipReasons: [String: String],
+                     marked: [String: String], localDiffers: (String) -> Bool) -> Plan {
+        let stale = SetupSourceChoice.convergeSkips(cloud, dsync, skip: skipReasons, lastPushed: marked)
+            .filter { $0.1 == "untranslatable" }.map(\.0).filter(localDiffers)
+        let last = marked.filter { !stale.contains($0.key) }
+        return Plan(push: SetupSourceChoice.convergePlan(cloud, dsync, skip: Set(skipReasons.keys), lastPushed: last),
+                    skipped: SetupSourceChoice.convergeSkips(cloud, dsync, skip: skipReasons, lastPushed: last), cleared: stale)
+    }
+
+    /// Categories both sides know, for the equal line.
+    static func known(_ cloud: SetupSourceChoice.Summary, _ dsync: SetupSourceChoice.Summary) -> Int {
+        SetupSourceChoice.SHARED.filter { cloud.categories[$0] != nil || dsync.categories[$0] != nil }.count
+    }
+}
+
 // MARK: - Sync providers record (section 10b; Android SyncProviders.kt)
 
 struct SyncProvidersRecord: Equatable, Sendable {

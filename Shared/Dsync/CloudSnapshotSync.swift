@@ -468,6 +468,130 @@ final class CloudSnapshotSync: ObservableObject {
         }
     }
 
+    // MARK: - Push pipeline (holds, fresh-device order, atomic file commit)
+
+    private var follows = CloudFollowQueue()
+    private var followTask: Task<Void, Never>?
+    private var pushGeneration = 0
+
+    /// Pushes one file unless a Rule 4 hold applies. True when written or deliberately held.
+    @discardableResult
+    func pushCategory(_ c: DsyncCategory, _ label: String? = nil) async -> Bool {
+        let shared = CloudCanon.SHARED_FILES.contains(c)
+        let file = CloudCanon.fileName(c)
+        // Rule 4: never push this device's (not yet chosen) shared data over the backup.
+        if let why = CloudPushRules.hold(shared: shared, choiceHeld: sharedHeld(), unknown: cloudUnknown(), deferred: replaceDeferred()) {
+            debugLog(CloudPushRules.heldLine(file, why))
+            return true
+        }
+        // Fresh-device order (Rule 4, Dispatcharr chosen): the first push of each shared file waits
+        // until the Dispatcharr pull applied its categories here, whatever they count.
+        let waiting = shared && replaceWaiting(c)
+        if waiting {
+            if !dsync.isEnabled {
+                clearReplaceWait(c)
+            } else {
+                let st = await dsync.cloudOrderState()
+                let scopes = DsyncLocal.scopes()
+                let names = SetupSourceChoice.namesInFile(c).filter { n in SetupSourceChoice.itemId(n).map { !SetupSourceChoice.itemOff(scopes, $0) } ?? true }
+                if let hold = SetupSourceChoice.freshDeviceHold(names, read: st?.read) {
+                    debugLog(CloudPushRules.heldLine(file, "\(hold) (fresh-device order)"))
+                    return true
+                }
+                clearReplaceWait(c)
+            }
+        }
+        guard let text = payload(c, label ?? (waiting ? "replace" : (follows.pending.contains(c) ? "follow" : nil))) else { return false }
+        // Atomic file commit: the write, the follow bookkeeping, and the push line run together,
+        // with no suspension point in between; turning iCloud off stops only the next file.
+        return commit(c, text, why: label ?? (waiting ? "replace" : nil), follows: follows.take(c))
+    }
+
+    /// Pushes [files] in order; a newer push or iCloud turned off stops before the next file.
+    func pushFiles(_ files: [DsyncCategory], _ label: String? = nil) async {
+        pushGeneration += 1
+        let gen = pushGeneration
+        for c in files {
+            if let why = CloudPushRules.stopReason(cloudOn: cloudOn, superseded: gen != pushGeneration) {
+                debugLog(CloudPushRules.stoppedLine(CloudCanon.fileName(c), why))
+                break
+            }
+            await pushCategory(c, label)
+        }
+    }
+
+    /// Rule 5 follow: a local change, or a Dispatcharr pull that applied a shared key, pushes the
+    /// file to iCloud within 15 s (debounced, one push for every file waiting).
+    func follow(_ c: DsyncCategory, _ why: String) {
+        guard cloudOn, CloudCanon.SHARED_FILES.contains(c), fileEnabled(c) else { return }
+        follows.note(c, why)
+        followTask?.cancel()
+        followTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CloudFollowQueue.DELAY_MS) * 1_000_000)
+            guard let self, !Task.isCancelled else { return }
+            await self.pushFiles(self.follows.pending)
+        }
+    }
+
+    /// The user chose Dispatcharr: overwrite the iCloud backup with this device's copy of every
+    /// shared file now; a file still waiting (fresh-device order) goes out with the next follow.
+    func replaceBackupNow() async {
+        debugLog("[CLOUD] next push replaces backup (user chose Dispatcharr)")
+        guard cloudOn else { return }
+        await pushFiles(CloudCanon.SHARED_FILES.filter(fileEnabled), "replace")
+    }
+
+    // MARK: - Rule 5 converge (Dispatcharr is the source of truth)
+
+    private func convergeKey(_ pid: String, _ name: String) -> String { "cloud.conv|\(pid)|\(name)" }
+
+    /// After each complete Dispatcharr pull: compare per category and push the differing files to
+    /// iCloud. Never prompts, never pulls iCloud. A category pushed once for a given Dispatcharr
+    /// state is not pushed again until that state changes (no ping-pong).
+    func converge(_ pid: String, _ dsyncSummary: SetupSourceChoice.Summary, _ skipReasons: [String: String]) async {
+        let coordinator = SetupSourceCoordinator.shared
+        if replaceDeferred() {
+            coordinator.retryDeferredReplace()
+            return
+        }
+        if coordinator.setupChoicePending || sharedHeld() { return }
+        guard cloudOn, dsync.ownsCategory(.favorites) else { return }
+        if cloudUnknown() {
+            await coordinator.retryUnknownCloud()
+            return
+        }
+        guard let d = readSharedSummary() else {
+            debugLog("[SYNC] converge skipped: iCloud unreadable (unknown, not empty)")
+            return
+        }
+        var marked: [String: String] = [:]
+        for n in SetupSourceChoice.SHARED { if let v = state.string(convergeKey(pid, n)) { marked[n] = v } }
+        let plan = CloudConverge.plan(cloud: d, dsync: dsyncSummary, skipReasons: skipReasons, marked: marked) { n in
+            guard let file = SetupSourceChoice.cloudFile(n), let text = self.payload(file, nil) else { return false }
+            guard let now = self.sharedCategories(file, text).first(where: { $0.0 == n })?.1 else { return false }
+            return !SetupSourceChoice.categoryEqual(now, d.categories[n])
+        }
+        for n in plan.cleared { debugLog("[SYNC] converge mark cleared \(n) (local copy changed)") }
+        for (n, why) in plan.skipped { debugLog(SetupSourceChoice.convergeSkipLine(n, reason: why, cloud: d.categories[n], dsync: dsyncSummary.categories[n])) }
+        if plan.push.isEmpty {
+            let n = CloudConverge.known(d, dsyncSummary)
+            if plan.skipped.isEmpty { debugLog(SetupSourceChoice.convergeEqualLine(categories: n, skipped: plan.skipped)) }
+            else { debugLog("[SYNC] converge nothing pushed categories=\(n) differing=\(plan.skipped.count)") }
+            return
+        }
+        for n in plan.push { debugLog(SetupSourceChoice.convergeLine(n, cloud: d.categories[n], dsync: dsyncSummary.categories[n])) }
+        let files = plan.push.compactMap { SetupSourceChoice.cloudFile($0) }.distinctOrdered().filter(fileEnabled)
+        var ok: [DsyncCategory: Bool] = [:]
+        for c in files {
+            // A file still waiting (fresh-device order) is not marked pushed, so the next converge retries it.
+            let pushed = await pushCategory(c, "converge")
+            ok[c] = pushed && !replaceWaiting(c) && !sharedHeld() && !cloudUnknown() && !replaceDeferred()
+        }
+        for n in plan.push where ok[SetupSourceChoice.cloudFile(n) ?? .playlists] == true {
+            state.set(convergeKey(pid, n), SetupSourceChoice.convergeMark(dsyncSummary.categories[n]))
+        }
+    }
+
     // MARK: - Backup update (Rule 4 canonical ids; Android migrateCanonicalIds)
 
     private func acceptedKey(_ key: String) -> String { "cloud.idmig_ok|\(key)|default" }
@@ -927,6 +1051,11 @@ final class CloudSnapshotSync: ObservableObject {
             guard let m = self?.mirrorLanes, m.0 == pid else { return [:] }
             return m.1
         }
+        dsync.cloudFollow = { [weak self] key, why in
+            guard let c = key.category else { return }
+            self?.follow(c, "\(key.suffix) \(why)")
+        }
+        dsync.cloudConverge = { [weak self] pid, summary, skip in await self?.converge(pid, summary, skip) }
         registerHooks()
         retryIdUpdate("launch")
         refreshUpdateOffer()
@@ -947,6 +1076,7 @@ final class CloudSnapshotSync: ObservableObject {
         h.applySharedNow = { CloudSnapshotSync.shared.applySharedNow($0) }
         h.clearReplaceWaits = { CloudSnapshotSync.shared.clearReplaceWaits() }
         h.armReplaceWait = { CloudSnapshotSync.shared.armReplaceWait() }
+        h.replaceBackupNow = { await CloudSnapshotSync.shared.replaceBackupNow() }
         h.markReplaceDeferred = { CloudSnapshotSync.shared.markReplaceDeferred() }
         h.clearReplaceDeferred = { CloudSnapshotSync.shared.clearReplaceDeferred() }
         h.replaceDeferred = { CloudSnapshotSync.shared.replaceDeferred() }
