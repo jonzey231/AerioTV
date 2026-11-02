@@ -5302,6 +5302,8 @@ final class GuideFocusScratch {
     var preRightStepAt = Date.distantPast
     /// A short Right step deferred to the press RELEASE.
     var pendingRightStep = false
+    /// The cell the engine moved the ring onto for that deferred Right.
+    var pendingRightDestPID: String?
     /// Guide key rows: the programme focused BEFORE the latest focus change,
     /// so a remapped short Left/Right can put the ring back where the press
     /// started (onMoveCommand runs after the engine already moved it).
@@ -6479,7 +6481,9 @@ struct EPGGuideView: View {
                     rightHoldOriginPID = nil
                 } else if focusScratch.pendingRightStep {
                     focusScratch.pendingRightStep = false
-                    if !rightHoldPinningTimeline { performRightStep() }
+                    let dest = focusScratch.pendingRightDestPID
+                    focusScratch.pendingRightDestPID = nil
+                    if !rightHoldPinningTimeline { performRightStep(destinationPID: dest) }
                 }
                 #endif
             }
@@ -7300,9 +7304,10 @@ struct EPGGuideView: View {
                 && NowPlayingManager.shared.isActive
                 && NowPlayingManager.shared.isMinimized {
                 focusScratch.pendingRightStep = true
+                focusScratch.pendingRightDestPID = rightStepDestinationPID()
                 break
             }
-            performRightStep()
+            performRightStep(destinationPID: rightStepDestinationPID())
         default:
             break
         }
@@ -7381,19 +7386,56 @@ struct EPGGuideView: View {
     }
 
     /// One half-hour Right step of the timeline plus the focus retarget.
-    private func performRightStep() {
-        do {
-            // Capture the pre-gesture offset ONCE per press train. A
-            // held Right emits repeats before the hold recognizes;
-            // overwriting per step made the hold's restore land one or
-            // more steps to the RIGHT of where the user started.
-            // 0.35s of quiet = a new gesture; repeats arrive faster.
-            let stepNow = Date()
-            if focusScratch.preRightStepOffset == nil
-                || stepNow.timeIntervalSince(focusScratch.preRightStepAt) > 0.35 {
-                focusScratch.preRightStepOffset = horizontalOffset
+    /// The cell the engine moved the ring onto for this Right, or nil when
+    /// focus did not move (end of the row, or no next cell composed yet).
+    /// onMoveCommand runs AFTER the engine moved focus, so the focused cell
+    /// is the destination only when the change is this press's.
+    private func rightStepDestinationPID() -> String? {
+        guard Date().timeIntervalSince(focusScratch.lastFocusChangeAt) < 0.25 else { return nil }
+        return focusedProgramID
+    }
+
+    /// Capture the pre-gesture offset ONCE per press train. A held Right
+    /// emits repeats before the hold recognizes; overwriting per step made
+    /// the hold's restore land one or more steps to the RIGHT of where the
+    /// user started. 0.35s of quiet = a new gesture; repeats arrive faster.
+    private func stampPreRightStepOffset() {
+        let stepNow = Date()
+        if focusScratch.preRightStepOffset == nil
+            || stepNow.timeIntervalSince(focusScratch.preRightStepAt) > 0.35 {
+            focusScratch.preRightStepOffset = horizontalOffset
+        }
+        focusScratch.preRightStepAt = stepNow
+    }
+
+    /// Short Right (Android GuideGridState.stepRight, 2135661a + 6775a5ec):
+    /// focus moves to the next program first. The grid scrolls only when
+    /// that program starts at or past the right edge, by the minimum that
+    /// shows its first half hour (never more than one page). Without a next
+    /// program the timeline pans half an hour and the ring rides it.
+    private func performRightStep(destinationPID: String?) {
+        stampPreRightStepOffset()
+        if let pid = destinationPID,
+           let chID = channelID(ofProgram: pid),
+           let prog = guideStore.programs[chID]?.first(where: { $0.id == pid }) {
+            let left = timeAtViewportLeft
+            let span = TimeInterval(visibleProgramWidth / pixelsPerHour) * 3600
+            let viewportEnd = left.addingTimeInterval(span)
+            guard prog.start >= viewportEnd else {
+                debugLog("[GuideFocus] Right: next program on screen, no scroll")
+                return
             }
-            focusScratch.preRightStepAt = stepNow
+            let wanted = prog.start.addingTimeInterval(30 * 60 - span)
+            let target = min(max(wanted, left), viewportEnd)
+            let offset = -CGFloat(target.timeIntervalSince(windowStart) / totalDuration) * totalGridWidth
+            let clamped = min(0, max(maxHorizontalOffset, offset))
+            debugLog("[GuideFocus] Right: next program starts off screen, scroll to its start plus 30 min")
+            withAnimation(.easeOut(duration: 0.3)) {
+                horizontalOffset = clamped
+            }
+            return
+        }
+        do {
             withAnimation(.easeOut(duration: 0.3)) {
                 horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
             }
