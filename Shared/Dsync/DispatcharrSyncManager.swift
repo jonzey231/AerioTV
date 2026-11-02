@@ -715,7 +715,32 @@ final class DispatcharrSyncManager: ObservableObject {
     }
 
     private func bucketRaw(_ s: DsyncSession, _ b: DsyncBucket) -> DsyncObject? { state.object(k("braw", s) + "|" + b.rawValue) }
-    private func saveBucketRaw(_ s: DsyncSession, _ b: DsyncBucket, _ raw: DsyncObject) { state.setObject(k("braw", s) + "|" + b.rawValue, raw) }
+    private func saveBucketRaw(_ s: DsyncSession, _ b: DsyncBucket, _ raw: DsyncObject) {
+        state.setObject(k("braw", s) + "|" + b.rawValue, raw)
+        foldProviders(s, raw)
+    }
+
+    // ---- syncProviders record (schema section 10b) ----
+
+    /// The base user only: a sub-profile's key never feeds the owner's record.
+    private func foldProviders(_ s: DsyncSession, _ raw: DsyncObject) {
+        guard isBase(s) else { return }
+        let rec = SyncProvidersRules.fromJson(raw[DsyncV2.CATEGORIES]?.asObject?[SyncProvidersRules.DSYNC_CATEGORY]?.asObject?["data"])
+        SyncProvidersStore.fold(SyncProvidersStore.dsyncScope(s.playlistId), rec)
+    }
+
+    /// Every PUT by the base user re-emits the union record; other users round-trip theirs untouched.
+    private func withProviders(_ s: DsyncSession, _ value: DsyncObject) -> DsyncObject {
+        guard isBase(s), let rec = SyncProvidersStore.forPush(SyncProvidersStore.dsyncScope(s.playlistId), dispatcharrOn: true,
+                                                                icloudOn: SyncManager.shared.isSyncEnabled, deviceId: deviceId) else { return value }
+        var cats = value[DsyncV2.CATEGORIES]?.asObject ?? DsyncObject()
+        let name = SyncProvidersRules.DSYNC_CATEGORY
+        cats[name] = .object(DsyncV2.encodeCategory(cats[name]?.asObject, deviceId: rec.deviceId.isEmpty ? deviceId : rec.deviceId,
+                                                    updatedAt: rec.updatedAt / 1000, data: SyncProvidersRules.toJson(rec)))
+        var out = value
+        out[DsyncV2.CATEGORIES] = .object(cats)
+        return out
+    }
 
     /// The `profiles` roster rows as last read (kept for the Profiles feature, a later batch).
     func profileRoster() -> [ProfileRow] {
@@ -1101,7 +1126,7 @@ final class DispatcharrSyncManager: ObservableObject {
         }
         let sub = DsyncV2.encodeCategory(raw, deviceId: deviceId, updatedAt: now, data: data)
         // No byte guard before the PUT: send the full value; trim only on a 413.
-        var value = DsyncV2.encodeBucket(bucketRaw(s, b), deviceId: deviceId, appVersion: appVersion, updatedAt: now, replace: [(key, sub)])
+        var value = withProviders(s, DsyncV2.encodeBucket(bucketRaw(s, b), deviceId: deviceId, appVersion: appVersion, updatedAt: now, replace: [(key, sub)]))
         var step = 0
         while true {
             let (status, _) = await c.put(b, key: key, value: value)

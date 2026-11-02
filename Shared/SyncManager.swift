@@ -879,6 +879,7 @@ final class SyncManager: ObservableObject {
 
         debugLog("🔵 SyncManager.processRemoteChange: merging (initial=\(wasImporting))")
         doMerge(servers: servers, isInitial: wasImporting)
+        CloudSnapshotSync.shared.foldProviders()
         doApplyPreferences(prefs: prefs)
         mergeRemoteWatchProgress(watchProgress)
         mergeRemoteReminders(reminders)
@@ -910,7 +911,27 @@ final class SyncManager: ObservableObject {
         )
     }
 
-    private func doApplyPreferences(prefs: [String: Any]?, replace: Bool = false) {
+    /// Coexistence Rules 1 and 4 for one shared category on an iCloud pull: true when it must not
+    /// apply. iCloud keeps pushing the full snapshot as the backup; a held or owned category waits.
+    private func cloudPullBlocked(_ c: DsyncCategory, ignoreOwnership: Bool) -> Bool {
+        let file = CloudCanon.fileName(c)
+        let cloud = CloudSnapshotSync.shared
+        if cloud.sharedHeld() {
+            debugLog("[CLOUD] pull \(file) held: waiting for the setup choice")
+            return true
+        }
+        if !ignoreOwnership && cloud.cloudUnknown() {
+            debugLog("[CLOUD] pull \(file) held: iCloud state unknown (setup probe failed)")
+            return true
+        }
+        if !ignoreOwnership && DispatcharrSyncManager.shared.ownsCategory(c) {
+            debugLog("[CLOUD] pull \(file) skipped: Dispatcharr Sync owns it")
+            return true
+        }
+        return false
+    }
+
+    private func doApplyPreferences(prefs: [String: Any]?, replace: Bool = false, ignoreOwnership: Bool = false) {
         guard let dict = prefs else {
             debugLog("🔵 SyncManager.doApplyPreferences: no preference data")
             return
@@ -936,6 +957,16 @@ final class SyncManager: ObservableObject {
         defer { isMerging = false }
 
         let ud = UserDefaults.standard
+        // Rule 1: the preferences payload carries favorites, My List, hidden titles, recents,
+        // collections, groups, the remote map, Radio Mode, and settings. While Dispatcharr Sync
+        // owns them only the Sync category toggles apply (iCloud's own configuration).
+        let blocked = [DsyncCategory.favorites, .watchlist, .preferences].filter { cloudPullBlocked($0, ignoreOwnership: ignoreOwnership) }
+        if !blocked.isEmpty {
+            for k in SyncCategory.allDefaultsKeys {
+                if let v = dict[k] as? Bool { ud.set(v, forKey: k) }
+            }
+            return
+        }
         if cloudT > 0 { ud.set(cloudT, forKey: Self.prefsLocalModifiedAtDefaultsKey) }
 
         // v1.6.17, the per-category sync toggle states ALWAYS apply, even
@@ -1460,13 +1491,14 @@ final class SyncManager: ObservableObject {
     /// path can ever trap on a duplicate again, if two payloads
     /// share a composite key (corrupted state, double-push race),
     /// the most recently updated wins.
-    private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?, replace: Bool = false) {
+    private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?, replace: Bool = false, ignoreOwnership: Bool = false) {
         // nil means the cloud has no watch-progress key at all, nothing to
         // apply in either mode. An EMPTY array during a replace is meaningful
         // ("the authoritative device has no progress"), so it falls through
         // to the delete pass below instead of returning early.
         guard let remoteEntries else { return }
         guard replace || !remoteEntries.isEmpty else { return }
+        guard !cloudPullBlocked(.watchProgress, ignoreOwnership: ignoreOwnership) else { return }
         guard let context = WatchProgressManager.modelContext else { return }
         // v1.6.17, granular per-category gate. Local watch progress
         // stays authoritative on this device when the user opts out.
@@ -1604,8 +1636,9 @@ final class SyncManager: ObservableObject {
     }
 
     /// Merge remote reminders from iCloud into local ReminderManager.
-    private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?) {
+    private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?, ignoreOwnership: Bool = false) {
         guard let remoteEntries else { return }
+        guard !cloudPullBlocked(.reminders, ignoreOwnership: ignoreOwnership) else { return }
         // v1.6.17, granular per-category gate.
         guard SyncCategory.reminders.isEnabled else {
             debugLog("🔵 SyncManager.mergeRemoteReminders: category disabled by user, ignoring \(remoteEntries.count) remote entries")
@@ -1653,7 +1686,9 @@ final class SyncManager: ObservableObject {
     ///   "Pull from iCloud" button, which confirms with the user first
     ///   (mirrors Android's "Pull Config from Drive"). Every automatic path
     ///   (foreground resume, KVS change notification) still merges.
-    func pullFromCloud(force: Bool = false, replace: Bool = false) {
+    /// - Parameter ignoreOwnership: Rule 4, the user chose the iCloud backup: apply even the
+    ///   categories Dispatcharr Sync owns.
+    func pullFromCloud(force: Bool = false, replace: Bool = false, ignoreOwnership: Bool = false) {
         guard isSyncEnabled, !isMerging, !isImporting else { return }
 
         // Throttle: skip if we pulled within the last 60 seconds. An explicit
@@ -1702,11 +1737,12 @@ final class SyncManager: ObservableObject {
 
             SyncManager.shared.doMerge(servers: servers, isInitial: false, replace: replace)
             await Task.yield()
-            SyncManager.shared.doApplyPreferences(prefs: prefs, replace: replace)
+            CloudSnapshotSync.shared.foldProviders()
+            SyncManager.shared.doApplyPreferences(prefs: prefs, replace: replace, ignoreOwnership: ignoreOwnership)
             await Task.yield()
-            SyncManager.shared.mergeRemoteWatchProgress(wp, replace: replace)
+            SyncManager.shared.mergeRemoteWatchProgress(wp, replace: replace, ignoreOwnership: ignoreOwnership)
             await Task.yield()
-            SyncManager.shared.mergeRemoteReminders(reminders)
+            SyncManager.shared.mergeRemoteReminders(reminders, ignoreOwnership: ignoreOwnership)
             debugLog("🔵 SyncManager.pullFromCloud: \(replace ? "replace" : "merge") complete")
         }
     }

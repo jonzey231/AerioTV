@@ -130,8 +130,27 @@ final class CloudSnapshotSync: ObservableObject {
         CloudCanon.writerEnvelope(nowMs: Self.nowMs(), device: device, providers: providersForPush())
     }
 
-    /// The providers record every file of a push carries (part 4 of this port fills it; nil until then).
-    func providersForPush() -> SyncProvidersRecord? { nil }
+    /// The providers record every file of a push carries (section 10b): this device sets
+    /// icloud and dispatcharr, googleDrive is preserved. Apple has no profiles: always the base user.
+    func providersForPush() -> SyncProvidersRecord? {
+        SyncProvidersStore.forPush(SyncProvidersStore.ICLOUD, dispatcharrOn: dsync.isEnabled && DsyncLocal.activeDispatcharrPlaylist() != nil,
+                                   icloudOn: cloudOn, deviceId: dsync.deviceId)
+    }
+
+    /// Pull fold: the newest record any iCloud snapshot carries.
+    func foldProviders() {
+        for c in CloudCanon.SHARED_FILES {
+            if let t = readSnapshot(c) { SyncProvidersStore.fold(SyncProvidersStore.ICLOUD, SyncProvidersRules.fromBody(t)) }
+        }
+    }
+
+    /// "Keep your devices in sync" (part 4 shows it): providers the owner's records mark on that are off here.
+    func providerOffers() -> [String] {
+        let active = DsyncLocal.activeDispatcharrPlaylist()
+        let dsyncRec = active.flatMap { SyncProvidersStore.record(SyncProvidersStore.dsyncScope($0.id.uuidString)) }
+        let rec = SyncProvidersRules.newer(SyncProvidersStore.record(SyncProvidersStore.ICLOUD), dsyncRec)
+        return SyncProvidersRules.offers(rec, icloudOnHere: cloudOn, dispatcharrOnHere: dsync.isEnabled, activeIsDispatcharr: active != nil)
+    }
 
     /// A source of the preference-lane values: this device's UserDefaults, or an older iCloud payload.
     private struct PrefSource {
@@ -1037,7 +1056,7 @@ final class CloudSnapshotSync: ObservableObject {
     /// No choice was needed: apply whatever iCloud held (a merge, as before).
     func applySharedNow(_ ignoreOwnership: Bool) {
         debugLog("[CLOUD] applying backup (held shared categories released)")
-        SyncManager.shared.pullFromCloud(force: true)
+        SyncManager.shared.pullFromCloud(force: true, ignoreOwnership: ignoreOwnership)
     }
 
     // MARK: - Lifecycle
@@ -1084,4 +1103,38 @@ final class CloudSnapshotSync: ObservableObject {
     }
 
     static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+}
+
+/// Which sync providers the owner runs, per scope (Android SyncProvidersStore): "icloud" for the
+/// iCloud copy, "dsync|<playlist>" for the base user's Dispatcharr copy.
+@MainActor
+enum SyncProvidersStore {
+    static let ICLOUD = "icloud"
+    static func dsyncScope(_ playlistId: String) -> String { "dsync|\(playlistId)" }
+
+    private static var state: DsyncStateStore { DsyncStateStore.shared }
+
+    static func record(_ scope: String) -> SyncProvidersRecord? {
+        state.string("providers.rec|\(scope)").flatMap { DsyncJSONParser.parse($0) }.flatMap { SyncProvidersRules.fromJson($0) }
+    }
+
+    private static func save(_ scope: String, _ r: SyncProvidersRecord) {
+        state.set("providers.rec|\(scope)", DsyncJSONEncoder.encode(SyncProvidersRules.toJson(r)))
+    }
+
+    /// Pull: keep the newer of the stored and the incoming record.
+    static func fold(_ scope: String, _ incoming: SyncProvidersRecord?) {
+        guard let incoming, let next = SyncProvidersRules.newer(record(scope), incoming), next != record(scope) else { return }
+        save(scope, next)
+    }
+
+    /// Push: the record to write for [scope] (nil = nothing to write).
+    static func forPush(_ scope: String, dispatcharrOn: Bool, icloudOn: Bool, deviceId: String) -> SyncProvidersRecord? {
+        let reported = Set((state.string("providers.rep|\(scope)") ?? "").split(separator: ",").map(String.init))
+        let p = SyncProvidersRules.forPush(stored: record(scope), isBaseProfile: true, dispatcharrOn: dispatcharrOn, icloudOn: icloudOn,
+                                           reported: reported, deviceId: deviceId, nowMs: CloudSnapshotSync.nowMs())
+        state.set("providers.rep|\(scope)", p.reported.sorted().joined(separator: ","))
+        if let r = p.record { save(scope, r) }
+        return p.record
+    }
 }

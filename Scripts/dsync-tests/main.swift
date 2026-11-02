@@ -778,6 +778,15 @@ do {
        "Your other devices also use iCloud and Dispatcharr Sync. Turn it on here too?", "offer text")
     eq(SyncProvidersRules.offers(both, icloudOnHere: false, dispatcharrOnHere: false, activeIsDispatcharr: false), [SyncProvidersRules.ICLOUD],
        "Dispatcharr only on a Dispatcharr playlist")
+    eq(DsyncJSONEncoder.encode(SyncProvidersRules.toJson(SyncProvidersRecord(dispatcharr: true, googleDrive: true, icloud: false,
+                                                                              updatedAt: 1761700000000, deviceId: "6F1C"))),
+       #"{"dispatcharr":true,"googleDrive":true,"icloud":false,"updatedAt":1761700000000,"deviceId":"6F1C"}"#,
+       "section 10b wire shape (Dispatcharr category data and iCloud envelope)")
+    // Rule 1: the shared categories iCloud stops applying while Dispatcharr Sync owns them.
+    for c in CloudCanon.SHARED_FILES {
+        check(DsyncCoexistence.owns(c, activeIsDispatcharr: true, dispatcharrSyncOn: true, firstPullDoneForUser: true), "Dispatcharr owns \(c)")
+    }
+    eq(Set(CloudCanon.SHARED_FILES), DsyncCoexistence.SHARED_CATEGORIES, "the iCloud snapshot files are the shared categories")
 }
 
 print("\(checks) checks, \(failures) failures")
