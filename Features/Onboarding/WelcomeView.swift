@@ -224,27 +224,38 @@ struct WelcomeView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
 
-            ScrollView(.vertical, showsIndicators: false) {
-                Group {
-                    if isRegularWidth {
-                        HStack(alignment: .top, spacing: isTV ? 80 : 48) {
-                            brandColumn
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            choicesColumn
-                                .frame(maxWidth: .infinity, alignment: .leading)
+            GeometryReader { geo in
+                // Android WelcomeScreen.kt: two columns only when the window
+                // is wider than tall (screenWidthDp >= 720 and height < 720);
+                // tablet portrait uses the single centered column (max 560).
+                // iPad is regular/regular in both orientations, so the
+                // geometry decides. iPhone (compact) and tvOS keep their
+                // existing layout; iPad content is vertically centered.
+                let iPad = !isTV && isRegularWidth
+                let twoColumn = isTV || (iPad && geo.size.width > geo.size.height)
+                ScrollView(.vertical, showsIndicators: false) {
+                    Group {
+                        if twoColumn {
+                            HStack(alignment: iPad ? .center : .top, spacing: isTV ? 80 : 48) {
+                                brandColumn
+                                    .frame(maxWidth: .infinity, alignment: iPad ? .center : .leading)
+                                choicesColumn
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(maxWidth: isTV ? 1600 : 1000)
+                        } else {
+                            VStack(alignment: .leading, spacing: 28) {
+                                brandColumn
+                                choicesColumn
+                            }
+                            .frame(maxWidth: 560)
                         }
-                        .frame(maxWidth: isTV ? 1600 : 1000)
-                    } else {
-                        VStack(alignment: .leading, spacing: 28) {
-                            brandColumn
-                            choicesColumn
-                        }
-                        .frame(maxWidth: 560)
                     }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, isTV ? 80 : (iPad ? 48 : 20))
+                    .padding(.vertical, isTV ? 60 : 24)
+                    .frame(minHeight: iPad ? geo.size.height : nil)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, isTV ? 80 : 20)
-                .padding(.vertical, isTV ? 60 : 24)
             }
         }
         .navigationBarHidden(true)
@@ -276,23 +287,26 @@ struct WelcomeView: View {
 
     private var brandColumn: some View {
         VStack(alignment: .leading, spacing: isTV ? 20 : 12) {
-            // The logo with the name, centered (Android WelcomeLogo).
-            HStack(spacing: isTV ? 16 : 10) {
-                Image("AerioLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(height: isTV ? 64 : 44)
-                Text("AerioTV")
-                    .scaledFont(.system(size: isTV ? 44 : 28, weight: .bold))
+            // The logo with the name sits centered over the headline
+            // (Android WelcomeLogo). On iPad it is larger and lifted a little.
+            VStack(alignment: .center, spacing: isTV ? 20 : (isRegularWidth ? 20 : 12)) {
+                HStack(spacing: isTV ? 16 : (isRegularWidth ? 16 : 10)) {
+                    Image("AerioLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: isTV ? 64 : (isRegularWidth ? 96 : 44))
+                    Text("AerioTV")
+                        .scaledFont(.system(size: isTV ? 44 : (isRegularWidth ? 56 : 28), weight: .bold))
+                        .foregroundColor(.textPrimary)
+                }
+                .accessibilityElement(children: .combine)
+                .frame(maxWidth: isRegularWidth && !isTV ? nil : .infinity)
+                .padding(.vertical, isRegularWidth && !isTV ? 0 : 12)
+                Text(headline)
+                    .scaledFont(.system(size: isTV ? 56 : (isRegularWidth ? 40 : 30), weight: .bold))
                     .foregroundColor(.textPrimary)
+                    .fixedSize(horizontal: isRegularWidth && !isTV, vertical: true)
             }
-            .accessibilityElement(children: .combine)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, isTV ? 12 : 12)
-            Text(headline)
-                .scaledFont(.system(size: isTV ? 56 : (isRegularWidth ? 40 : 30), weight: .bold))
-                .foregroundColor(.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
             if isTV {
                 HStack(spacing: 10) {
                     Image(systemName: "chevron.left")
