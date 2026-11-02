@@ -25,6 +25,9 @@ struct WelcomeView: View {
     /// entirely, so Welcome's cards are never focusable underneath on tvOS.
     private enum Stage: Equatable {
         case welcome
+        /// "Setting Up" between Connect and the first chain step (Android shows its
+        /// Setting Up card there), so Welcome is never visible in between.
+        case settingUp
         case restoring
         case backupUpdate(String)
         case dispatcharrSync(auto: Bool)
@@ -127,6 +130,13 @@ struct WelcomeView: View {
             .navigationDestination(isPresented: $showConnect) {
                 AddServerView(initialType: connectType, isOnboarding: true)
             }
+            .onChange(of: servers.count) { old, new in
+                // The playlist saved under Connect: cover Welcome before the pop reveals it.
+                if new > old && showConnect && hold.holding && stage == .welcome {
+                    debugLog("[SYNC] chain: setting up (playlist saved)")
+                    stage = .settingUp
+                }
+            }
             .onChange(of: showConnect) { _, shown in
                 if !shown { Task { @MainActor in await afterConnect() } }
             }
@@ -142,6 +152,8 @@ struct WelcomeView: View {
         switch stage {
         case .welcome:
             welcomeBody
+        case .settingUp:
+            OnboardingSettingUpView()
         case .restoring:
             OnboardingRestoreProgressView()
         case .backupUpdate(let key):
@@ -493,13 +505,18 @@ struct WelcomeView: View {
 
     /// Back from Connect a Server: a Dispatcharr Direct Connect playlist goes to the sync step.
     private func afterConnect() async {
-        guard hold.holding, stage == .welcome else {
+        guard hold.holding, stage == .welcome || stage == .settingUp else {
             debugLog("[SYNC] after connect: skipped (holding=\(hold.holding))")
             return
         }
         debugLog("[SYNC] after connect: playlists=\(servers.count)")
+        if !servers.isEmpty && stage != .settingUp {
+            debugLog("[SYNC] chain: setting up")
+            stage = .settingUp
+        }
         if servers.isEmpty {
             enableAfterConnect = false
+            stage = .welcome
             hold.end("connect backed out")
             return
         }

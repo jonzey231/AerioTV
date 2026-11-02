@@ -221,6 +221,28 @@ struct CloudBackupOfferStepView: View {
 // MARK: - Restore progress
 
 /// Shown for the whole iCloud restore stretch; replaces Welcome so its cards are not focusable underneath.
+/// "Setting Up" after Connect while the playlist loads and the chain picks its first step.
+struct OnboardingSettingUpView: View {
+    var body: some View {
+        SyncStepFrame {
+            VStack(spacing: 16) {
+                ProgressView().tint(.accentPrimary)
+                Text("Setting Up")
+                    .scaledFont(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                Text("Loading your playlist.")
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .navigationBarHidden(true)
+        #if os(tvOS)
+        .onExitCommand { }
+        #endif
+    }
+}
+
 struct OnboardingRestoreProgressView: View {
     var body: some View {
         SyncStepFrame {
