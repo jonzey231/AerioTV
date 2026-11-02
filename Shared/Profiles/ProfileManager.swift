@@ -485,6 +485,15 @@ final class ProfileManager: ObservableObject {
         debugLog("[PROFILE] device admin pin removed on \(Self.tag(playlistId))")
     }
 
+    /// Onboarding "Who is this profile for?" shows only for a Standard server login
+    /// (Android ProfileRoleStepViewModel.isStandardUser): read live from /me/.
+    func baseIsStandardUser(_ playlistId: String) async -> Bool {
+        guard let server = DsyncLocal.server(playlistId), let me = await fetchMe(server, server.baseApiKey) else { return false }
+        let admin = me.effectiveUserLevel >= 10 || me.isStaff || me.isSuperuser
+        debugLog("[PROFILE] onboarding role step: level=\(me.effectiveUserLevel) admin=\(admin)")
+        return !admin
+    }
+
     /// Onboarding "Who is this profile for?" = Child, once a Device Admin PIN exists.
     func makeBaseChild(_ playlistId: String) throws {
         guard hasDeviceAdminPin(playlistId) else { throw fail("Set a Device Admin PIN first.") }

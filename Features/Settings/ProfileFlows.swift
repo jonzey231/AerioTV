@@ -551,7 +551,7 @@ struct ProfileExpandRow: View {
 }
 
 /// Password or API key for a user the admin list has no key for.
-private struct CredentialStep: View {
+struct CredentialStep: View {
     let title: String
     let username: String
     let onCancel: () -> Void
@@ -604,7 +604,7 @@ struct ProfileTextField: View {
 }
 
 /// "Enable API access" (server admin only) for a user with no key: mints a key so Add needs no password.
-private struct EnableApiAccessRow: View {
+struct EnableApiAccessRow: View {
     let playlistId: String
     let user: DispatcharrUserSummary
     let enabled: Bool
@@ -668,6 +668,15 @@ struct RosterSuggestionsView: View {
     let users: [DispatcharrUserSummary]?
     var enabled = true
     let onAdded: () -> Void
+    /// Section label (onboarding: "FROM YOUR OTHER DEVICES").
+    var title = "From your other devices"
+    /// Line under the rows (onboarding: ROSTER_FOOTNOTE).
+    var footnote: String? = nil
+    /// Settings: an added row stays listed as "Added" with Remove. Onboarding:
+    /// it leaves the list and shows under ON THIS DEVICE with the red minus.
+    var keepAdded = true
+    /// The id of a profile just added here (onboarding focus hand-off).
+    var onAddedProfile: (String) -> Void = { _ in }
     @ObservedObject private var manager = ProfileManager.shared
     @State private var busy: String?
     @State private var error: String?
@@ -688,14 +697,14 @@ struct RosterSuggestionsView: View {
 
     private func finish(_ r: ProfileRow, _ id: String) {
         addedIds[r.username.lowercased()] = id
-        added.append(r)
+        if keepAdded { added.append(r) }
         if pm.needsPinAfterAdd(playlistId, id) {
             step = .pinAfter(onDone: { ok in
                 if !ok { addedIds.removeValue(forKey: r.username.lowercased()); added.removeAll { $0.username.caseInsensitiveCompare(r.username) == .orderedSame } }
                 step = nil
-                if ok { onAdded() }
+                if ok { onAddedProfile(id); onAdded() }
             })
-        } else { onAdded() }
+        } else { onAddedProfile(id); onAdded() }
     }
 
     func add(_ row: ProfileRow) {
@@ -745,8 +754,9 @@ struct RosterSuggestionsView: View {
         let all = rows + added.filter { a in !rows.contains { $0.username.caseInsensitiveCompare(a.username) == .orderedSame } }
         if !all.isEmpty {
             VStack(alignment: .leading, spacing: ProfileUI.s(4, 10)) {
-                Text("From your other devices").scaledFont(ProfileUI.label).foregroundColor(.textSecondary)
+                Text(title).scaledFont(ProfileUI.label).foregroundColor(.textSecondary)
                 ForEach(all, id: \.username) { r in row(r) }
+                if let footnote { Text(footnote).scaledFont(ProfileUI.small).foregroundColor(.textSecondary).fixedSize(horizontal: false, vertical: true) }
                 if let error { Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor) }
             }
         }

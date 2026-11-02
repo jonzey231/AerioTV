@@ -29,6 +29,10 @@ struct WelcomeView: View {
         case backupUpdate(String)
         case dispatcharrSync(auto: Bool)
         case cloudOffer
+        /// "Who is this profile for?" (Standard server login only), before the sync step.
+        case roleStep(String, auto: Bool)
+        /// "Who watches on this iPhone?" closes the Dispatcharr chain.
+        case addProfiles(String)
     }
     @State private var stage: Stage = .welcome
 
@@ -47,6 +51,10 @@ struct WelcomeView: View {
     @State private var qrSignIn: QrImportBus.SignIn?
     @State private var backupBusy = false
     @State private var cloudOfferBusy = false
+    /// The role step made this a kid-only device: Add Profiles is skipped.
+    @State private var childOnly = false
+    /// "Set up a TV with this playlist" from Add Profiles (iPhone and iPad).
+    @State private var setUpTvFor: ServerConnection?
 
     /// Discord (Glitzbr): he turned iCloud sync on during setup and a
     /// customised remote map from a different-generation Apple TV landed on
@@ -179,11 +187,42 @@ struct WelcomeView: View {
                     SyncManager.shared.syncSettingChanged(enabled: true)
                     debugLog("[CLOUD] enabled from onboarding (backup offer)")
                     cloudOfferBusy = false
-                    finish("cloud offer on")
+                    toAddProfiles("cloud offer on")
                 },
-                onNotNow: { finish("cloud offer not now") }
+                onNotNow: { toAddProfiles("cloud offer not now") }
             )
+        case .roleStep(let pid, let auto):
+            ProfileRoleStepView(playlistId: pid) { child in
+                childOnly = child
+                stage = .dispatcharrSync(auto: auto)
+            }
+        case .addProfiles(let pid):
+            AddProfilesStepView(playlistId: pid, onboarding: true, onSetUpTv: setUpTvAction(pid)) {
+                finish("add profiles done")
+            }
+            #if os(iOS)
+            .sheet(item: $setUpTvFor) { s in SetUpTvView(server: s) { setUpTvFor = nil } }
+            #endif
         }
+    }
+
+    /// iPhone and iPad only; Apple TV receives a setup, it never sends one.
+    private func setUpTvAction(_ pid: String) -> (() -> Void)? {
+        #if os(iOS)
+        return { setUpTvFor = DsyncLocal.server(pid) }
+        #else
+        return nil
+        #endif
+    }
+
+    /// After the sync step and the iCloud offer: Add Profiles, unless the role
+    /// step made this a kid-only device (Android afterDriveOffer).
+    private func toAddProfiles(_ why: String) {
+        if !childOnly, let d = DsyncLocal.activeDispatcharrPlaylist() {
+            stage = .addProfiles(d.id.uuidString)
+            return
+        }
+        finish(why)
     }
 
     private var welcomeBody: some View {
@@ -361,7 +400,9 @@ struct WelcomeView: View {
         // first; shared data waits for the setup choice.
         if cloud && dispatcharr { SetupSourceCoordinator.shared.holdShared() }
         if !cloud {
-            startConnect(type: .dispatcharrAPI, enableSync: true)
+            // Same flow as Connect a Server > Dispatcharr (Scan QR code or Enter
+            // details), with Dispatcharr Sync turned on after the connect (Android 7d16d839).
+            startConnect(type: nil, enableSync: true)
             return
         }
         chainDispatcharr = dispatcharr
@@ -440,7 +481,8 @@ struct WelcomeView: View {
         if await waitForActivePlaylist(seconds: 10), let d = DsyncLocal.activeDispatcharrPlaylist() {
             // Signed in from a Dispatcharr user QR (iPhone and iPad): the step checks for a restore.
             qrSignIn = QrImportBus.takeSignIn(savedApiKey: d.baseApiKey)
-            stage = .dispatcharrSync(auto: enableAfterConnect)
+            childOnly = false
+            stage = .roleStep(d.id.uuidString, auto: enableAfterConnect)
             enableAfterConnect = false
             return
         }
@@ -464,7 +506,7 @@ struct WelcomeView: View {
             stage = .cloudOffer
             return
         }
-        finish("dispatcharr step done")
+        toAddProfiles("dispatcharr step done")
     }
 
     private func finish(_ why: String) {
@@ -505,7 +547,7 @@ struct OnboardingCardContent: View {
     var trailing: Trailing = .chevron
     var isFocused: Bool = false
 
-    enum Trailing { case chevron, toggle(Bool), busy, none }
+    enum Trailing { case chevron, toggle(Bool), busy, none, symbol(String) }
 
     var body: some View {
         let tv = onboardingIsTV
@@ -541,6 +583,10 @@ struct OnboardingCardContent: View {
                     .foregroundColor(on ? .accentPrimary : Color.contrastText(.textTertiary))
             case .busy:
                 ProgressView().tint(.accentPrimary)
+            case .symbol(let name):
+                Image(systemName: name)
+                    .scaledFont(.system(size: tv ? 20 : 14, weight: .semibold))
+                    .foregroundColor(.accentPrimary)
             case .none:
                 EmptyView()
             }
@@ -607,20 +653,24 @@ struct OnboardingActionCard: View {
     var highlighted: Bool = false
     var isOn: Bool? = nil
     var isBusy: Bool = false
+    /// Expandable cards: chevron.up / chevron.down in place of the chevron.
+    var trailingSymbol: String? = nil
     let action: () -> Void
     #if os(tvOS)
     @FocusState private var isFocused: Bool
     #endif
 
     init(icon: String, title: String, detail: String, highlighted: Bool = false,
-         isOn: Bool? = nil, isBusy: Bool = false, action: @escaping () -> Void) {
+         isOn: Bool? = nil, isBusy: Bool = false, trailingSymbol: String? = nil, action: @escaping () -> Void) {
         self.icon = icon; self.title = title; self.detail = detail
         self.highlighted = highlighted; self.isOn = isOn; self.isBusy = isBusy
+        self.trailingSymbol = trailingSymbol
         self.action = action
     }
 
     private var trailing: OnboardingCardContent.Trailing {
         if isBusy { return .busy }
+        if let trailingSymbol { return .symbol(trailingSymbol) }
         if let isOn { return .toggle(isOn) }
         return .chevron
     }

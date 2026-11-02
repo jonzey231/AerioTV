@@ -229,6 +229,11 @@ struct QrScanActions: View {
     var enabled: Bool = true
     var prompt: String = "Point the camera at a Dispatcharr user QR code or an AerioTV setup code."
     var accept: (ScannedCode.Result) -> String? = acceptAnyKnownCode
+    /// Onboarding Add Profiles: only "Choose from Photos" and "Import file" as small
+    /// links; the Scan a QR code card opens the camera through scanTrigger (Android linksOnly).
+    var linksOnly = false
+    /// Bump to open the camera from outside (the onboarding Scan a QR code card).
+    var scanTrigger = 0
     let onResult: (ScannedCode.Result) -> Void
 
     @State private var scanning = false
@@ -241,12 +246,21 @@ struct QrScanActions: View {
     @State private var fromScanner: (ScannedCode.Result, ImportSource?)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                actionButton("Scan QR code", icon: "qrcode.viewfinder") { error = nil; scanning = true }
-                actionButton("Choose from Photos", icon: "photo.on.rectangle", loading: busy) { error = nil; showPhotos = true }
+        VStack(alignment: linksOnly ? .center : .leading, spacing: linksOnly ? 2 : 6) {
+            if linksOnly {
+                HStack(spacing: 8) {
+                    linkButton("Choose from Photos") { error = nil; showPhotos = true }
+                    linkButton("Import file") { error = nil; showFile = true }
+                    if busy { ProgressView().controlSize(.small) }
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                HStack(spacing: 10) {
+                    actionButton("Scan QR code", icon: "qrcode.viewfinder") { error = nil; scanning = true }
+                    actionButton("Choose from Photos", icon: "photo.on.rectangle", loading: busy) { error = nil; showPhotos = true }
+                }
+                actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
             }
-            actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
             if let error {
                 Text(error)
                     .scaledFont(.bodySmall)
@@ -255,6 +269,7 @@ struct QrScanActions: View {
         }
         .modifier(CodeImportPickers(showPhotos: $showPhotos, showFile: $showFile, busy: $busy, error: $error,
                                     deliver: { r, src in accepted(r, src) }))
+        .onChange(of: scanTrigger) { _, n in if n > 0 { error = nil; scanning = true } }
         .fullScreenCover(isPresented: $scanning, onDismiss: {
             if let (r, src) = fromScanner { fromScanner = nil; finish(r, src) }
         }) {
@@ -291,6 +306,14 @@ struct QrScanActions: View {
 
     private func kind(_ r: ScannedCode.Result) -> String {
         switch r { case .userKey: return "user"; case .setupLink: return "setup"; case .invalid: return "invalid" }
+    }
+
+    private func linkButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).scaledFont(.bodyMedium).foregroundColor(.accentPrimary).frame(minHeight: 40)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || busy)
     }
 
     private func actionButton(_ title: String, icon: String, loading: Bool = false, action: @escaping () -> Void) -> some View {

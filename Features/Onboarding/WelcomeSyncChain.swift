@@ -4,9 +4,9 @@
 //  Welcome "Keep your devices in sync" (Dispatcharr Sync port, part 4):
 //  both cards are selectable and Continue runs one chain. Port of the
 //  Android feature/onboarding/WelcomeSyncChain.kt; Android's Google Drive
-//  is iCloud here. Apple has no profiles, so the Add Profiles step is left
-//  out. The plan is pure so the order is easy to diff against Android;
-//  WelcomeView walks it.
+//  is iCloud here. Add Profiles ("Who watches on this iPhone?") closes every
+//  Dispatcharr chain, as on Android. The plan is pure so the order is easy
+//  to diff against Android; WelcomeView walks it.
 
 import Foundation
 
@@ -22,6 +22,8 @@ enum WelcomeSyncChain {
         case dispatcharrSync
         /// "Also back up to iCloud?"
         case cloudOffer
+        /// "Who watches on this iPhone?" (AddProfilesStepView); skipped for a kid-only device.
+        case addProfiles
         case main
     }
 
@@ -38,9 +40,11 @@ enum WelcomeSyncChain {
             if !(cloud && restoredIsDispatcharr) { steps.append(.connectServer) }
             steps.append(.dispatcharrSync)
             if showCloudOffer(cloudOn: cloud, cloudAvailable: cloudAvailable) { steps.append(.cloudOffer) }
+            steps.append(.addProfiles)
         } else if restoredIsDispatcharr {
-            // iCloud only, restore brought a Dispatcharr playlist: the step asks (no auto-on).
+            // iCloud only, restore brought a Dispatcharr playlist: the step asks (no auto-on), then Add Profiles.
             steps.append(.dispatcharrSync)
+            steps.append(.addProfiles)
         }
         steps.append(.main)
         return steps
