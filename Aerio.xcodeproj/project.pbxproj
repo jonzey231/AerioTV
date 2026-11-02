@@ -351,6 +351,8 @@
 		9F0F11E50000000000000202 /* ProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000002 /* ProfileStore.swift */; };
 		9F0F11E50000000000000103 /* ProfilePinStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000003 /* ProfilePinStore.swift */; };
 		9F0F11E50000000000000203 /* ProfilePinStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000003 /* ProfilePinStore.swift */; };
+		9F0F11E50000000000000104 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000004 /* ProfileManager.swift */; };
+		9F0F11E50000000000000204 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000004 /* ProfileManager.swift */; };
 		9F0F11E50000000000000101 /* ProfileRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000001 /* ProfileRules.swift */; };
 		9F0F11E50000000000000201 /* ProfileRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000001 /* ProfileRules.swift */; };
 		D5C0DA7A0000000000000103 /* DsyncSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000003 /* DsyncSchema.swift */; };
@@ -628,6 +630,7 @@
 		D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSyncItems.swift; sourceTree = "<group>"; };
 		9F0F11E50000000000000002 /* ProfileStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileStore.swift; path = ../Profiles/ProfileStore.swift; sourceTree = "<group>"; };
 		9F0F11E50000000000000003 /* ProfilePinStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfilePinStore.swift; path = ../Profiles/ProfilePinStore.swift; sourceTree = "<group>"; };
+		9F0F11E50000000000000004 /* ProfileManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileManager.swift; path = ../Profiles/ProfileManager.swift; sourceTree = "<group>"; };
 		9F0F11E50000000000000001 /* ProfileRules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileRules.swift; path = ../Profiles/ProfileRules.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000003 /* DsyncSchema.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSchema.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000004 /* DsyncV2.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncV2.swift; sourceTree = "<group>"; };
@@ -1211,6 +1214,7 @@
 				D5C0DA7A0000000000000002 /* DsyncSyncItems.swift */,
 				D5C0DA7A0000000000000003 /* DsyncSchema.swift */,
 				9F0F11E50000000000000001 /* ProfileRules.swift */,
+				9F0F11E50000000000000004 /* ProfileManager.swift */,
 				9F0F11E50000000000000003 /* ProfilePinStore.swift */,
 				9F0F11E50000000000000002 /* ProfileStore.swift */,
 				D5C0DA7A0000000000000004 /* DsyncV2.swift */,
@@ -1594,6 +1598,7 @@
 				D5C0DA7A0000000000000102 /* DsyncSyncItems.swift in Sources */,
 				D5C0DA7A0000000000000103 /* DsyncSchema.swift in Sources */,
 				9F0F11E50000000000000101 /* ProfileRules.swift in Sources */,
+				9F0F11E50000000000000104 /* ProfileManager.swift in Sources */,
 				9F0F11E50000000000000103 /* ProfilePinStore.swift in Sources */,
 				9F0F11E50000000000000102 /* ProfileStore.swift in Sources */,
 				D5C0DA7A0000000000000104 /* DsyncV2.swift in Sources */,
@@ -1776,6 +1781,7 @@
 				D5C0DA7A0000000000000202 /* DsyncSyncItems.swift in Sources */,
 				D5C0DA7A0000000000000203 /* DsyncSchema.swift in Sources */,
 				9F0F11E50000000000000201 /* ProfileRules.swift in Sources */,
+				9F0F11E50000000000000204 /* ProfileManager.swift in Sources */,
 				9F0F11E50000000000000203 /* ProfilePinStore.swift in Sources */,
 				9F0F11E50000000000000202 /* ProfileStore.swift in Sources */,
 				D5C0DA7A0000000000000204 /* DsyncV2.swift in Sources */,

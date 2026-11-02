@@ -1,0 +1,992 @@
+//  ProfileManager.swift
+//  Aerio
+//
+//  Profiles for Dispatcharr playlists, ported from the Android
+//  core/profiles/ProfileManager.kt. Owns the profile records, the one-time
+//  migration (each Dispatcharr Direct Connect playlist gets exactly one
+//  default profile named after its login), add, rename, avatar, role, PIN,
+//  order, remove, the roster catalog from Dispatcharr Sync, and the switch.
+//  Xtream and M3U playlists never get a profile.
+//
+//  Apple differences, each forced by the platform:
+//  - No ProfileScope overlay: the playlist row (ServerConnection) is always
+//    the default profile; another profile's per-user facts stay on its
+//    record and its API key in the Keychain (activeApiKey reads it).
+//  - Settings swap on switch (ProfileSettingsStore) instead of scoped keys.
+//  - Logs carry the profile id prefix, never a username or display name.
+//
+//  The UI (part 3) and onboarding (part 4) bind to the @Published state
+//  below; Dispatcharr Sync binds to onProfilesMutated, onPickerOpened, and
+//  onSwitched.
+
+import Foundation
+import Combine
+
+/// The Keychain behind the profile stores (KeychainHelper, device only).
+final class KeychainSecretBox: ProfileSecretBox {
+    func get(_ key: String) -> String? { KeychainHelper.load(key: key) }
+    func set(_ value: String?, _ key: String) {
+        if let value { KeychainHelper.save(value, for: key) } else { KeychainHelper.delete(key) }
+    }
+}
+
+enum ProfileError: LocalizedError {
+    case message(String)
+    var errorDescription: String? { if case .message(let m) = self { return m }; return nil }
+}
+
+private func fail(_ m: String) -> ProfileError { .message(m) }
+
+@MainActor
+final class ProfileManager: ObservableObject {
+    static let shared = ProfileManager()
+
+    let store: ProfileStore
+    let pinStore: ProfilePinStore
+    let settings: ProfileSettingsStore
+
+    // MARK: Published state for the UI (part 3) and onboarding (part 4)
+
+    /// Every playlist's profiles in list order.
+    @Published private(set) var profilesByPlaylist: [String: [DispatcharrProfile]] = [:]
+    /// Active profile id per playlist (the default profile when none is set).
+    @Published private(set) var activeProfileIds: [String: String] = [:]
+    /// The active playlist's active role (nil = no Dispatcharr playlist).
+    @Published private(set) var activeRoleNow: ProfileRole? = nil
+    /// "From your other devices": synced roster rows with no local profile, per playlist.
+    @Published private(set) var rosterSuggestions: [String: [ProfileRow]] = [:]
+    /// Profile ids undoAdd accepts right now (onboarding shows Remove on these rows).
+    @Published private(set) var undoableRosterAdds: Set<String> = []
+    /// True from the first step of a switch until it landed.
+    @Published private(set) var switching = false
+    /// The locked profile whose PIN must be entered before any content shows.
+    @Published private(set) var launchGate: DispatcharrProfile? = nil
+    /// Non-null while the TV "who is watching" picker covers the app at launch.
+    @Published private(set) var launchPicker: LaunchPicker? = nil
+    /// A switch asked for a profile with a PIN and no ticket: the UI shows the PIN pad.
+    @Published var pendingPinPrompt: PinPrompt? = nil
+    /// Bumps on every PIN change (set, remove, migration, synced import).
+    @Published private(set) var pinChanges: Int64 = 0
+
+    struct LaunchPicker: Equatable { let playlistId: String; let lastProfileId: String? }
+    struct PinPrompt: Equatable { let playlistId: String; let profileId: String }
+
+    enum PinCheck: Equatable { case ok, wrong, locked(Int) }
+
+    // MARK: Hooks
+
+    /// Dispatcharr Sync: every profile list mutation (add, remove, rename,
+    /// role, PIN, order) reports here so the `profiles` key is stamped and re-sent.
+    var onProfilesMutated: ((_ playlistId: String, _ username: String, _ what: String, _ stampAt: Int64) -> Void)?
+    /// Dispatcharr Sync: a profile picker surface opened (launch, switch, addProfile, foreground).
+    var onPickerOpened: ((_ playlistId: String, _ reason: String) -> Void)?
+    /// A switch landed: Dispatcharr Sync re-keys its session; the UI reloads channels, groups, and VOD.
+    var onSwitched: ((_ playlistId: String, _ from: String?, _ to: String) -> Void)?
+    /// Dispatcharr Sync: before a switch, push the outgoing profile's pending changes (Android flush on session end).
+    var beforeSwitch: ((_ playlistId: String) async -> Void)?
+    /// True while anything is playing (main player, mini player, background audio).
+    var isPlaying: () -> Bool = { false }
+    /// The stop-playback confirmation ("Switching profiles stops playback"); true = go ahead.
+    var confirmStopPlayback: (() async -> Bool)?
+
+    private var started = false
+    private var cancellables: [AnyCancellable] = []
+    private var lastActivePlaylist: String?
+
+    private init() {
+        let box = KeychainSecretBox()
+        store = ProfileStore(defaults: .standard, secrets: box)
+        pinStore = ProfilePinStore(defaults: .standard, secrets: box)
+        settings = ProfileSettingsStore(defaults: .standard)
+        store.onChange = { [weak self] in self?.publish() }
+        pinStore.onChange = { [weak self] in
+            guard let self else { return }
+            self.pinChanges = self.pinStore.changes
+        }
+        publish()
+    }
+
+    private static func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+    private static func nowS() -> Int64 { Int64(Date().timeIntervalSince1970) }
+    private static func tag(_ id: String) -> String { String(id.prefix(8)) }
+
+    private func publish() {
+        var by: [String: [DispatcharrProfile]] = [:]
+        for pid in Set(store.profiles.map(\.playlistId)) { by[pid] = store.forPlaylist(pid) }
+        if by != profilesByPlaylist { profilesByPlaylist = by }
+        var act: [String: String] = [:]
+        for pid in by.keys { if let a = activeProfileIdNow(pid) { act[pid] = a } }
+        if act != activeProfileIds { activeProfileIds = act }
+        var s: [String: [ProfileRow]] = [:]
+        for (pid, rows) in rosterRows { s[pid] = ProfileRoster.suggestions(rows, store.forPlaylist(pid).map(\.username)) }
+        if s != rosterSuggestions { rosterSuggestions = s }
+        refreshActiveRole()
+    }
+
+    // MARK: Lifecycle
+
+    /// Migration, launch restore, and active-playlist tracking. Idempotent.
+    func start() {
+        guard !started else { return }
+        started = true
+        restoreAtLaunch()
+        ChannelStore.shared.$channels
+            .sink { [weak self] _ in Task { @MainActor in await self?.activePlaylistMaybeChanged() } }
+            .store(in: &cancellables)
+        Task {
+            await activePlaylistMaybeChanged()
+            let ids = store.profiles.filter { !$0.isDefault }.map(\.id)
+            let n = settings.seedExistingOnce(ids, source: settings.capture())
+            if n > 0 { debugLog("[PROFILE] settings seeded for \(n) existing profile(s)") }
+        }
+    }
+
+    /// Synchronous launch restore (Android restoreSync): the launch picker or the PIN gate.
+    private func restoreAtLaunch() {
+        guard let pid = store.lastActivePlaylistId else { return }
+        let all = store.forPlaylist(pid)
+        let active = store.activeProfileId(pid).flatMap(store.byId)
+        let restored = (active?.playlistId == pid ? active : nil) ?? all.first { $0.isDefault }
+        if RoleRules.showLaunchPicker(isTv: DsyncLocal.isTv, isDispatcharr: !all.isEmpty, toggleOn: store.askAtLaunch(pid),
+                                      profileCount: all.count, lastRole: restored?.effectiveRole) {
+            launchPicker = LaunchPicker(playlistId: pid, lastProfileId: restored?.id)
+            debugLog("[PROFILE] launch picker armed (\(all.count) profiles)")
+            return
+        }
+        if let restored, pinStore.hasPin(restored.id) {
+            launchGate = restored
+            debugLog("[PROFILE] launch gate armed for \(Self.tag(restored.id))")
+        }
+    }
+
+    private func activePlaylistMaybeChanged() async {
+        let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString
+        guard pid != lastActivePlaylist else { return }
+        lastActivePlaylist = pid
+        guard let pid, let server = DsyncLocal.server(pid) else { refreshActiveRole(); return }
+        store.lastActivePlaylistId = pid
+        await ensureDefaultProfile(server)
+        if let base = store.forPlaylist(pid).first(where: \.isDefault) {
+            followServerRole(base.id, server.dispatcharrIsSuperuser || server.dispatcharrIsStaff ? 10 : server.dispatcharrUserLevel)
+        }
+        publish()
+    }
+
+    /// Every Dispatcharr playlist has exactly one default profile.
+    private func ensureDefaultProfile(_ server: ServerConnection) async {
+        guard server.type == .dispatcharrAPI else { return }
+        let pid = server.id.uuidString
+        if store.forPlaylist(pid).contains(where: \.isDefault) { return }
+        var username = server.dispatcharrCredentialType == .usernamePassword ? server.username : ""
+        if username.trimmingCharacters(in: .whitespaces).isEmpty {
+            // API-key login: ask the server who the key belongs to.
+            username = (await fetchMe(server, server.effectiveApiKey))?.username ?? ""
+        }
+        if store.forPlaylist(pid).contains(where: \.isDefault) { return }
+        var p = DispatcharrProfile(id: UUID().uuidString, playlistId: pid,
+                                   displayName: username.isEmpty ? server.name : username,
+                                   username: username, isDefault: true)
+        p.userLevel = server.dispatcharrUserLevel
+        // The role follows the Dispatcharr access (owner 2026-10-29).
+        p.role = ProfileRole.defaultFor(server.dispatcharrUserLevel)
+        p.createdAt = 0
+        store.upsert(p)
+        debugLog("[PROFILE] migrated playlist \(Self.tag(pid)) -> default profile")
+    }
+
+    // MARK: Reads
+
+    func profiles(_ playlistId: String) -> [DispatcharrProfile] { store.forPlaylist(playlistId) }
+
+    func activeProfileIdNow(_ playlistId: String) -> String? {
+        if let a = store.activeProfileId(playlistId), store.byId(a) != nil { return a }
+        return store.forPlaylist(playlistId).first(where: \.isDefault)?.id
+    }
+
+    func activeProfile(_ playlistId: String) -> DispatcharrProfile? { activeProfileIdNow(playlistId).flatMap(store.byId) }
+    func roleOf(_ profileId: String) -> ProfileRole? { store.byId(profileId)?.effectiveRole }
+    func activeRole(_ playlistId: String) -> ProfileRole? { activeProfile(playlistId)?.effectiveRole }
+    func anyChild(_ playlistId: String) -> Bool { store.forPlaylist(playlistId).contains { $0.effectiveRole == .child } }
+    func profileIdFor(_ playlistId: String, _ username: String) -> String? {
+        store.forPlaylist(playlistId).first { $0.username.caseInsensitiveCompare(username) == .orderedSame }?.id
+    }
+
+    /// The API key requests for [playlistId] use: the active profile's own key, or the playlist's for the default.
+    func activeApiKey(_ playlistId: String) -> String? {
+        guard let p = activeProfile(playlistId) else { return nil }
+        if p.isDefault { return DsyncLocal.server(playlistId)?.effectiveApiKey }
+        return store.apiKey(p.id)
+    }
+
+    private func refreshActiveRole() {
+        let role = store.lastActivePlaylistId.flatMap { activeRole($0) }
+        if activeRoleNow != role {
+            activeRoleNow = role
+            debugLog("[PROFILE] active role \(role?.label ?? "none")")
+        }
+    }
+
+    /// Admin profiles may add and remove profiles. Reads the ACTIVE user.
+    func activeIsAdmin(_ playlistId: String) -> Bool {
+        guard let p = activeProfile(playlistId) else { return false }
+        if p.isDefault, let s = DsyncLocal.server(playlistId) {
+            return s.dispatcharrUserLevel >= 10 || s.dispatcharrIsSuperuser || s.dispatcharrIsStaff
+        }
+        return p.userLevel >= 10 || p.isSuperuser || p.isStaff
+    }
+
+    /// The BASE login (the playlist row's own credentials) is a server admin.
+    func baseIsServerAdmin(_ playlistId: String) -> Bool {
+        guard let s = DsyncLocal.server(playlistId) else { return false }
+        return s.dispatcharrUserLevel >= 10 || s.dispatcharrIsSuperuser || s.dispatcharrIsStaff
+    }
+
+    // MARK: Network helpers
+
+    /// An API instance signed in as one user's key. serverID stays nil: the
+    /// base user's silent re-bootstrap must never swap in the playlist's key.
+    private func api(_ server: ServerConnection, key: String) -> DispatcharrAPI {
+        DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(key), userAgent: server.effectiveUserAgent,
+                       authMode: server.dispatcharrHeaderMode)
+    }
+
+    /// The playlist's own (base) credential, with its normal recovery.
+    private func baseApi(_ server: ServerConnection) -> DispatcharrAPI {
+        let jwt = server.dispatcharrCredentialType == .usernamePassword
+        return DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey),
+                              userAgent: server.effectiveUserAgent, authMode: server.dispatcharrHeaderMode,
+                              serverID: server.id, savedUsername: jwt ? server.username : nil)
+    }
+
+    private func fetchMe(_ server: ServerConnection, _ key: String) async -> DispatcharrUser? {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !k.isEmpty else { return nil }
+        return try? await api(server, key: k).fetchCurrentUser()
+    }
+
+    private struct Auth { let key: String; let me: DispatcharrUser }
+
+    /// Sign in as one user: a stored API key first with one GET /me/, then the
+    /// password login (POST token + GET me) when the key is missing, rejected,
+    /// or belongs to someone else.
+    private func authenticate(_ server: ServerConnection, username: String, password: String?, apiKey: String?) async throws -> Auth {
+        if let stored = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !stored.isEmpty {
+            if let me = await fetchMe(server, stored),
+               username.isEmpty || me.username.caseInsensitiveCompare(username) == .orderedSame {
+                return Auth(key: stored, me: me)
+            }
+            if password?.isEmpty ?? true { throw fail("The API key for \(username) was rejected.") }
+        }
+        guard let password, !password.isEmpty, !username.isEmpty else { throw fail("Enter a password or an API key.") }
+        let pair: DispatcharrJWTPair
+        do {
+            pair = try await DispatcharrAPI.login(baseURL: server.effectiveBaseURL, username: username, password: password,
+                                                  userAgent: server.effectiveUserAgent)
+        } catch {
+            throw fail("Sign-in for \(username) was rejected. Try again in a minute.")
+        }
+        let jwtApi = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .bearer(pair.access),
+                                    userAgent: server.effectiveUserAgent, authMode: server.dispatcharrHeaderMode)
+        let me = try await jwtApi.fetchCurrentUser()
+        return Auth(key: me.apiKey, me: me)
+    }
+
+    private func applyMe(_ p: DispatcharrProfile, _ me: DispatcharrUser) -> DispatcharrProfile {
+        var c = p
+        c.userId = me.id
+        c.username = me.username
+        c.userLevel = me.effectiveUserLevel
+        let props = me.customPropertiesJSON.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        c.hideAdultContent = (props?["hide_adult_content"] as? Bool) == true
+        c.dvrAccess = me.dvrAccessRaw?.lowercased() ?? ""
+        c.catchupEnabled = me.catchupEnabled
+        c.vodMoviesEnabled = me.vodMoviesEnabled
+        c.vodSeriesEnabled = me.vodSeriesEnabled
+        c.accountProfileIds = me.channelProfiles.map(String.init).joined(separator: ",")
+        c.isStaff = me.isStaff
+        c.isSuperuser = me.isSuperuser
+        c.customProperties = me.customPropertiesJSON
+        c.capabilitiesFetchedAt = Self.nowMs()
+        return c
+    }
+
+    /// Owner rule 2026-10-29: the AerioTV role follows the Dispatcharr access.
+    private func followServerRole(_ profileId: String, _ newLevel: Int) {
+        guard let p = store.byId(profileId) else { return }
+        let next = RoleRules.serverRoleChange(p.role, newLevel)
+        if next == nil && p.userLevel == newLevel { return }
+        store.update(profileId) { var c = $0; c.userLevel = newLevel; if let next { c.role = next }; return c }
+        if let next {
+            debugLog("[PROFILES] server role changed for \(Self.tag(profileId)): \(p.role?.label ?? "none") -> \(next.label)")
+            mutated(profileId, "role")
+            refreshActiveRole()
+        }
+    }
+
+    // MARK: Sync hooks
+
+    /// [stampAt] > 0 stamps the row with that time (a roster add); 0 = now.
+    private func mutated(_ profileId: String, _ what: String, _ stampAt: Int64 = 0) {
+        guard let p = store.byId(profileId) else { return }
+        onProfilesMutated?(p.playlistId, p.username, what, stampAt)
+    }
+
+    /// [reason] is launch, switch, addProfile, or foreground. Never blocks.
+    func notePickerOpened(_ playlistId: String, _ reason: String) { onPickerOpened?(playlistId, reason) }
+
+    // MARK: PIN
+
+    private var switchTickets = Set<String>()
+    private var adminTickets = Set<String>()
+    private var pendingPinAdds = Set<String>()
+    /// The Admin whose PIN last passed verifyAnyAdminPin (holds a switch ticket).
+    private(set) var lastAdminUnlock: String?
+
+    func hasPin(_ profileId: String) -> Bool { pinStore.hasPin(profileId) }
+    func pinType(_ profileId: String) -> PinType? { pinStore.type(profileId) }
+    func pinLength(_ profileId: String) -> Int? { pinStore.length(profileId) }
+    func pinLockSeconds(_ profileId: String) -> Int { pinStore.backoff(profileId).remainingSeconds(Self.nowMs()) }
+    func hasSwitchTicket(_ profileId: String) -> Bool { switchTickets.contains(profileId) }
+    func isPendingPinAdd(_ profileId: String) -> Bool { pendingPinAdds.contains(profileId) }
+    func consumeAdminTicket(_ playlistId: String) -> Bool { adminTickets.remove(playlistId) != nil }
+
+    /// Check [entries] against [profileId]'s PIN, with the wrong-PIN backoff.
+    func verifyPin(_ profileId: String, _ entries: [String]) -> PinCheck {
+        let now = Self.nowMs()
+        let b = pinStore.backoff(profileId)
+        let left = b.remainingSeconds(now)
+        if left > 0 { return .locked(left) }
+        if pinStore.check(profileId, entries) {
+            pinStore.saveBackoff(profileId, b.onOk())
+            switchTickets.insert(profileId)
+            debugLog("[PROFILE] pin ok for \(Self.tag(profileId))")
+            return .ok
+        }
+        let next = b.onWrong(now)
+        pinStore.saveBackoff(profileId, next)
+        debugLog("[PROFILE] pin wrong for \(Self.tag(profileId))")
+        let l = next.remainingSeconds(now)
+        return l > 0 ? .locked(l) : .wrong
+    }
+
+    /// Launch gate: enter the restored profile's PIN.
+    func unlockLaunchGate(_ entries: [String]) -> PinCheck {
+        guard let g = launchGate else { return .ok }
+        let r = verifyPin(g.id, entries)
+        if r == .ok {
+            switchTickets.remove(g.id)
+            launchGate = nil
+        }
+        return r
+    }
+
+    /// Admin and Standard profiles on [playlistId] that have a PIN.
+    func adminPinHolders(_ playlistId: String) -> [DispatcharrProfile] {
+        store.forPlaylist(playlistId).filter { RoleRules.isFullAccess($0.effectiveRole) && pinStore.hasPin($0.id) }
+    }
+
+    func adminHasPin(_ playlistId: String) -> Bool { !adminPinHolders(playlistId).isEmpty || hasDeviceAdminPin(playlistId) }
+
+    /// Assumption A: Admin and Standard profiles that still need a PIN while a Child exists.
+    func pinsMissingForChild(_ playlistId: String, becomingChild: String? = nil) -> [DispatcharrProfile] {
+        let actor = activeProfileIdNow(playlistId)
+        let all = store.forPlaylist(playlistId)
+        let ids = RoleRules.pinsMissingForChild(all.map {
+            RoleRules.PinHolder(id: $0.id, role: $0.effectiveRole, hasPin: pinStore.hasPin($0.id), isActor: $0.id == actor)
+        }, becomingChild: becomingChild)
+        return ids.compactMap { id in all.first { $0.id == id } }
+    }
+
+    func needsPinAfterAdd(_ playlistId: String, _ profileId: String) -> Bool {
+        anyChild(playlistId) && RoleRules.isFullAccess(roleOf(profileId)) && !pinStore.hasPin(profileId)
+    }
+
+    /// The PIN step after an add was cancelled: the add is undone (a Child exists, so a PIN is required).
+    func discardPendingAdds(_ playlistId: String) async {
+        let drop = store.forPlaylist(playlistId).filter { pendingPinAdds.contains($0.id) && !pinStore.hasPin($0.id) && !$0.isDefault }
+        for p in drop {
+            pendingPinAdds.remove(p.id)
+            await deleteLocal(p, fromSync: false)
+            debugLog("[PROFILE] add of \(Self.tag(p.id)) undone: no PIN while a Child exists")
+        }
+    }
+
+    // Device Admin PIN (device-local, never synced).
+    func deviceAdminPinId(_ playlistId: String) -> String { DevicePin.id(playlistId) }
+    func hasDeviceAdminPin(_ playlistId: String) -> Bool { pinStore.hasPin(deviceAdminPinId(playlistId)) }
+    func deviceAdminPinType(_ playlistId: String) -> PinType? { pinStore.type(deviceAdminPinId(playlistId)) }
+
+    /// Every Admin PIN id that passes "Enter an Admin PIN": Admin profiles, then the device PIN.
+    func adminPinIds(_ playlistId: String) -> [String] {
+        adminPinHolders(playlistId).map(\.id) + (hasDeviceAdminPin(playlistId) ? [deviceAdminPinId(playlistId)] : [])
+    }
+
+    func setDeviceAdminPin(_ playlistId: String, _ type: PinType, _ entries: [String], current: [String]?, onboarding: Bool = false) throws {
+        let id = deviceAdminPinId(playlistId)
+        if pinStore.hasPin(id) {
+            guard verifyPin(id, current ?? []) == .ok else { throw fail("Wrong PIN") }
+        } else if !(onboarding || RoleRules.isFullAccess(activeRole(playlistId))) {
+            throw fail("Only an Admin or Standard profile can set the Device Admin PIN.")
+        }
+        guard pinStore.set(id, type, entries) else { throw fail("Enter 4 to 6") }
+        debugLog("[PROFILE] device admin pin set on \(Self.tag(playlistId))")
+    }
+
+    /// Nil = removable; otherwise why the device PIN must stay.
+    func deviceAdminPinRemovalBlock(_ playlistId: String) -> String? {
+        RoleRules.canRemoveDevicePin(childExists: anyChild(playlistId), otherPins: adminPinHolders(playlistId).count) ? nil
+            : "This is the last PIN that can leave a Child profile, so it stays while any profile is a Child."
+    }
+
+    func removeDeviceAdminPin(_ playlistId: String, current: [String]) throws {
+        let id = deviceAdminPinId(playlistId)
+        if let b = deviceAdminPinRemovalBlock(playlistId) { throw fail(b) }
+        guard verifyPin(id, current) == .ok else { throw fail("Wrong PIN") }
+        pinStore.remove(id)
+        debugLog("[PROFILE] device admin pin removed on \(Self.tag(playlistId))")
+    }
+
+    /// Onboarding "Who is this profile for?" = Child, once a Device Admin PIN exists.
+    func makeBaseChild(_ playlistId: String) throws {
+        guard hasDeviceAdminPin(playlistId) else { throw fail("Set a Device Admin PIN first.") }
+        guard let base = store.forPlaylist(playlistId).first(where: \.isDefault) else { throw fail("Profile not found") }
+        guard !ProfileRole.isServerAdmin(base.userLevel) else { throw fail(RoleRules.SERVER_ADMIN_STAYS) }
+        store.update(base.id) { var c = $0; c.role = .child; return c }
+        refreshActiveRole()
+        debugLog("[PROFILE] onboarding: \(Self.tag(base.id)) is a Child; device admin pin holds Admin")
+    }
+
+    /// "Enter a PIN from an Admin or Standard profile": any full-access PIN (or the Device Admin PIN) passes.
+    func verifyAnyAdminPin(_ playlistId: String, _ entries: [String]) -> PinCheck {
+        let holders = adminPinIds(playlistId)
+        guard !holders.isEmpty else { return .wrong }
+        let device = deviceAdminPinId(playlistId)
+        let now = Self.nowMs()
+        var minLock = Int.max
+        var tried = false
+        for h in holders {
+            let b = pinStore.backoff(h)
+            let left = b.remainingSeconds(now)
+            if left > 0 { minLock = min(minLock, left); continue }
+            tried = true
+            if pinStore.check(h, entries) {
+                pinStore.saveBackoff(h, b.onOk())
+                adminTickets.insert(playlistId)
+                if h != device {
+                    switchTickets.insert(h)
+                    lastAdminUnlock = h
+                }
+                debugLog("[PROFILE] pin ok for \(h == device ? "device admin" : Self.tag(h))")
+                return .ok
+            }
+        }
+        // Count the miss against every Admin that was tried.
+        var lock = Int.max
+        for h in holders {
+            let b = pinStore.backoff(h)
+            if b.remainingSeconds(now) > 0 { continue }
+            let next = b.onWrong(now)
+            pinStore.saveBackoff(h, next)
+            let l = next.remainingSeconds(now)
+            if l > 0 { lock = min(lock, l) }
+            debugLog("[PROFILE] pin wrong for \(h == device ? "device admin" : Self.tag(h))")
+        }
+        if !tried { return .locked(minLock) }
+        let anyOpen = holders.contains { pinStore.backoff($0).remainingSeconds(now) == 0 }
+        return anyOpen ? .wrong : .locked(min(lock, minLock))
+    }
+
+    /// An Admin or Standard profile may manage any profile's PIN; a Child only its own.
+    func canManagePin(_ playlistId: String, _ profileId: String) -> Bool {
+        RoleRules.isFullAccess(activeRole(playlistId)) || activeProfileIdNow(playlistId) == profileId
+            || (pendingPinAdds.contains(profileId) && !pinStore.hasPin(profileId))
+    }
+
+    /// Changing or removing ANY PIN needs that profile's existing PIN (phase 2b).
+    func needsCurrentPin(_ playlistId: String, _ profileId: String) -> Bool { pinStore.hasPin(profileId) }
+
+    /// Nil = removable; otherwise why the PIN must stay (assumption A: a Child exists).
+    func pinRemovalBlock(_ playlistId: String, _ profileId: String) -> String? {
+        guard let role = roleOf(profileId) else { return nil }
+        return RoleRules.canRemovePin(role, childExists: anyChild(playlistId)) ? nil : RoleRules.KEEP_PIN_REASON
+    }
+
+    func resetGate(_ playlistId: String) -> RoleRules.ResetGate {
+        let actor = activeProfile(playlistId)
+        return RoleRules.resetGate(actor: activeRole(playlistId), actorHasPin: actor.map { pinStore.hasPin($0.id) } ?? false,
+                                   childExists: anyChild(playlistId))
+    }
+
+    func resetPin(_ playlistId: String, _ profileId: String, adminEntries: [String]?, replacement: (PinType, [String])? = nil) throws {
+        guard let actor = activeProfile(playlistId) else { throw fail("Profile not found") }
+        guard actor.id != profileId else { throw fail("Use Remove PIN for this profile.") }
+        if let keep = pinRemovalBlock(playlistId, profileId), replacement == nil { throw fail(keep) }
+        switch resetGate(playlistId) {
+        case .denied(let r): throw fail(r)
+        case .enterOwnPin:
+            guard verifyPin(actor.id, adminEntries ?? []) == .ok else { throw fail("Wrong PIN") }
+            switchTickets.remove(actor.id)
+        case .confirmOnly: break
+        }
+        if let (type, entries) = replacement {
+            guard pinStore.set(profileId, type, entries) else { throw fail("Enter 4 to 6") }
+            mutated(profileId, "pin reset")
+            debugLog("[PROFILE] pin reset to a temporary pin for \(Self.tag(profileId))")
+        } else {
+            pinStore.remove(profileId)
+            mutated(profileId, "pin reset")
+            debugLog("[PROFILE] pin removed for \(Self.tag(profileId))")
+        }
+    }
+
+    func setPin(_ playlistId: String, _ profileId: String, _ type: PinType, _ entries: [String], current: [String]?) throws {
+        guard canManagePin(playlistId, profileId) else { throw fail("Only an Admin or Standard profile can change another profile's PIN.") }
+        let had = pinStore.hasPin(profileId)
+        if needsCurrentPin(playlistId, profileId) {
+            guard verifyPin(profileId, current ?? []) == .ok else { throw fail("Wrong PIN") }
+            switchTickets.remove(profileId)
+        }
+        guard pinStore.set(profileId, type, entries) else { throw fail("Enter 4 to 6") }
+        pendingPinAdds.remove(profileId)
+        mutated(profileId, "pin set")
+        debugLog("[PROFILE] pin \(had ? "changed" : "set") for \(Self.tag(profileId))")
+    }
+
+    func removePin(_ playlistId: String, _ profileId: String, current: [String]?) throws {
+        guard canManagePin(playlistId, profileId) else { throw fail("Only an Admin or Standard profile can remove another profile's PIN.") }
+        if let b = pinRemovalBlock(playlistId, profileId) { throw fail(b) }
+        if needsCurrentPin(playlistId, profileId) {
+            guard verifyPin(profileId, current ?? []) == .ok else { throw fail("Wrong PIN") }
+            switchTickets.remove(profileId)
+        }
+        pinStore.remove(profileId)
+        mutated(profileId, "pin removed")
+        debugLog("[PROFILE] pin removed for \(Self.tag(profileId))")
+    }
+
+    // MARK: Roles
+
+    /// Pure decision for the UI: what setting [profileId] to [to] needs.
+    func roleChangeGate(_ playlistId: String, _ profileId: String, to: ProfileRole) -> RoleRules.RoleChange {
+        guard let target = store.byId(profileId) else { return .denied("Profile not found") }
+        let full = store.forPlaylist(playlistId).filter { RoleRules.isFullAccess($0.effectiveRole) }.count
+        return RoleRules.roleChange(actor: activeRole(playlistId), from: target.effectiveRole, to: to,
+                                    missingPins: pinsMissingForChild(playlistId, becomingChild: profileId).count,
+                                    anyPinExists: adminPinIds(playlistId).contains { $0 != profileId },
+                                    targetIsLastFullAccess: RoleRules.isFullAccess(target.effectiveRole) && full <= 1,
+                                    targetIsServerAdmin: ProfileRole.isServerAdmin(target.userLevel))
+    }
+
+    /// Set [profileId]'s role. Leaving Child needs a PIN ticket (verifyAnyAdminPin).
+    func setRole(_ playlistId: String, _ profileId: String, to: ProfileRole) throws {
+        guard let target = store.byId(profileId) else { throw fail("Profile not found") }
+        switch roleChangeGate(playlistId, profileId, to: to) {
+        case .denied(let r): throw fail(r)
+        case .needsPinsCreated: throw fail(RoleRules.KEEP_PIN_REASON)
+        case .needsPinEntry: guard consumeAdminTicket(playlistId) else { throw fail("Enter a PIN from an Admin or Standard profile") }
+        case .allowed: break
+        }
+        store.update(profileId) { var c = $0; c.role = to; return c }
+        mutated(profileId, "role")
+        refreshActiveRole()
+        debugLog("[PROFILE] role \(target.effectiveRole.label) -> \(to.label) for \(Self.tag(profileId))")
+    }
+
+    // MARK: Add
+
+    /// The TV picker's Add Profile: an Admin PIN unlocks adding for one dialog, whoever is active.
+    var pickerAddUnlocked: String?
+
+    private func canAdd(_ playlistId: String) -> Bool {
+        RoleRules.canManageProfiles(activeRole(playlistId)) || pickerAddUnlocked == playlistId
+    }
+
+    enum AddCandidates { case serverList([DispatcharrUserSummary]), manual }
+
+    /// Add Profile entry: a server admin gets the users list; anyone else, or a 403, gets the manual form.
+    func addCandidates(_ playlistId: String) async throws -> AddCandidates {
+        guard canAdd(playlistId) else { throw fail("Only an Admin or Standard profile can add profiles.") }
+        let serverAdmin = baseIsServerAdmin(playlistId) && activeIsAdmin(playlistId)
+        if RoleRules.addPath(baseIsServerAdmin: serverAdmin, usersListForbidden: false) == .manual { return .manual }
+        do {
+            return .serverList(try await listServerUsers(playlistId))
+        } catch {
+            let m = error.localizedDescription
+            if m.contains("HTTP 403") || m.contains("HTTP 401") { return .manual }
+            throw error
+        }
+    }
+
+    /// Add Profile step 1: the server's users, fetched with the admin key.
+    func listServerUsers(_ playlistId: String) async throws -> [DispatcharrUserSummary] {
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        guard canAdd(playlistId) else { throw fail("Only an Admin or Standard profile can add profiles.") }
+        guard activeIsAdmin(playlistId) else { throw fail("Only a Dispatcharr admin can list server users.") }
+        let taken = Set(store.forPlaylist(playlistId).map(\.username))
+        return try await baseApi(server).listUsers().filter { !taken.contains($0.username) }
+            .sorted { $0.username.lowercased() < $1.username.lowercased() }
+    }
+
+    /// Enable API access is offered: the base login is a server admin and the active profile is an Admin.
+    func canManageUserApiKeys(_ playlistId: String) -> Bool { baseIsServerAdmin(playlistId) && activeIsAdmin(playlistId) }
+
+    /// Mint a key for server user [userId] with the base admin key. Returns the raw key (never logged).
+    func generateUserApiKey(_ playlistId: String, userId: Int) async throws -> String {
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        guard canManageUserApiKeys(playlistId) else { throw fail("Only a Dispatcharr admin can enable API access.") }
+        return try await baseApi(server).generateUserApiKey(userId: userId)
+    }
+
+    /// Clear server user [userId]'s key with the base admin key.
+    func revokeUserApiKey(_ playlistId: String, userId: Int) async throws {
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        guard canManageUserApiKeys(playlistId) else { throw fail("Only a Dispatcharr admin can revoke API access.") }
+        try await baseApi(server).revokeUserApiKey(userId: userId)
+    }
+
+    /// Manual add (non-admin base): [username] signs in with [password] or [apiKey].
+    func addProfileManual(_ playlistId: String, username: String, password: String?, apiKey: String?, role: ProfileRole? = nil) async throws -> DispatcharrProfile {
+        let name = username.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { throw fail("Enter a username.") }
+        if store.forPlaylist(playlistId).contains(where: { $0.username.caseInsensitiveCompare(name) == .orderedSame }) {
+            throw fail("\(name) already has a profile.")
+        }
+        return try await addProfile(playlistId, user: DispatcharrUserSummary(id: 0, username: name), password: password, apiKey: apiKey, role: role)
+    }
+
+    /// Manual add by API key only: /me/ with [apiKey] names the user.
+    func addProfileByApiKey(_ playlistId: String, apiKey: String, role: ProfileRole? = nil) async throws -> DispatcharrProfile {
+        let key = apiKey.trimmingCharacters(in: .whitespaces)
+        guard !key.isEmpty else { throw fail("Enter an API key.") }
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        guard let me = await fetchMe(server, key) else { throw fail("This API key was not accepted by the server.") }
+        if store.forPlaylist(playlistId).contains(where: { $0.username.caseInsensitiveCompare(me.username) == .orderedSame }) {
+            throw fail("\(me.username) already has a profile.")
+        }
+        return try await addProfile(playlistId, user: DispatcharrUserSummary(id: me.id, username: me.username, userLevel: me.userLevel,
+                                                                             isSuperuser: me.isSuperuser, isStaff: me.isStaff),
+                                    password: nil, apiKey: key, role: role)
+    }
+
+    /// Add Profile step 2: validate by signing in as [user] once, then store the credential. Never changes the server.
+    func addProfile(_ playlistId: String, user: DispatcharrUserSummary, password: String?, apiKey: String?,
+                    role: ProfileRole? = nil, seed: ProfileRow? = nil) async throws -> DispatcharrProfile {
+        // Same rule as setRole (assumption A): before a Child is added, every Admin and Standard profile holds a PIN.
+        if role == .child, !(adminHasPin(playlistId) && pinsMissingForChild(playlistId).isEmpty) { throw fail(RoleRules.KEEP_PIN_REASON) }
+        guard canAdd(playlistId) else { throw fail("Only an Admin or Standard profile can add profiles.") }
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        let id = UUID().uuidString
+        // The admin users list carries each user's api_key: use it directly,
+        // and only fall back to a typed password or key when the server has none.
+        let listed = user.apiKey.flatMap { $0.isEmpty ? nil : $0 }
+        let typedNone = (password?.isEmpty ?? true) && (apiKey?.isEmpty ?? true)
+        let auth = try await authenticate(server, username: user.username, password: typedNone ? nil : password,
+                                          apiKey: typedNone ? listed : apiKey)
+        guard auth.me.username.caseInsensitiveCompare(user.username) == .orderedSame else {
+            throw fail("This API key belongs to \(auth.me.username), not \(user.username).")
+        }
+        var profile = applyMe(DispatcharrProfile(id: id, playlistId: playlistId, displayName: user.username, username: auth.me.username), auth.me)
+        profile.createdAt = Self.nowMs()
+        profile.role = ProfileRole.resolve(profile.userLevel, role)
+        // A roster add: name, role, avatar, order, and user id land in the FIRST store write.
+        if let seed { profile = ProfileRoster.applyRow(profile, seed) }
+        // Credentials first, so the profile never exists without its key.
+        store.setApiKey(id, auth.key)
+        store.setPassword(id, password)
+        store.upsert(profile)
+        if needsPinAfterAdd(playlistId, id) { pendingPinAdds.insert(id) }
+        settings.seed(id, source: defaultProfileSettings(playlistId))
+        if let seed {
+            if let type = PinRules.typeFromWire(seed.pinType), seed.pinHash.count == 64, seed.pinSalt.count == 32 {
+                pinStore.importSynced(id, type, hash: seed.pinHash, salt: seed.pinSalt)
+            }
+            // Keep the row's own stamp: the server row stays authoritative for every field this device did not change.
+            mutated(id, "roster-add", seed.updatedAt)
+        } else {
+            mutated(id, "add")
+        }
+        debugLog("[PROFILE] added \(Self.tag(id)) on \(Self.tag(playlistId)) level=\(ProfileLevel.of(profile.userLevel).rawValue) role=\(profile.effectiveRole.label)")
+        return store.byId(id) ?? profile
+    }
+
+    /// The default profile's settings: live when it is active, else its saved slot.
+    private func defaultProfileSettings(_ playlistId: String) -> [String: Any] {
+        guard let def = store.forPlaylist(playlistId).first(where: \.isDefault) else { return settings.capture() }
+        if activeProfileIdNow(playlistId) == def.id { return settings.capture() }
+        return settings.slot(def.id) ?? settings.capture()
+    }
+
+    // MARK: Roster (Dispatcharr Sync `profiles` key)
+
+    private var rosterRows: [String: [ProfileRow]] = [:]
+    private var freshUndoable = Set<String>()
+
+    /// Merge a pulled `profiles` list PER ROW (schema 4.12). The roster is a
+    /// catalog: a row with no local profile is never added here (it is offered
+    /// in rosterSuggestions and added only by addFromRoster). Returns 0 (opt-in only).
+    @discardableResult
+    func mergeSyncedProfiles(_ playlistId: String, _ rows: [ProfileRow],
+                             localUpdatedAt: (String) -> Int64 = { _ in 0 },
+                             adopted: (String, Int64) -> Void = { _, _ in },
+                             removedAt: (String) -> Int64 = { _ in 0 },
+                             customized: (String, String, AvatarSpec?) -> Bool = { _, _, _ in true }) -> Int {
+        rosterRows[playlistId] = rows
+        publish()
+        let plan = ProfileRoster.plan(rows, store.forPlaylist(playlistId).map(\.username))
+        debugLog("[DSYNC] profiles: \(plan.available.count) roster rows available, not added (opt-in)")
+        guard RoleRules.canWriteProfilesKey(activeRole(playlistId)) else { return 0 }
+        for r in plan.merge {
+            guard var local = store.forPlaylist(playlistId).first(where: { $0.username.caseInsensitiveCompare(r.username) == .orderedSame }) else { continue }
+            let id = local.id
+            debugLog("[DSYNC] profiles: row \(Self.tag(id)) updatedAt=\(r.updatedAt) removedAt=\(removedAt(r.username)) local=yes")
+            if local.userId == 0 && r.userId > 0 { store.update(id) { var c = $0; c.userId = r.userId; return c } }
+            let mine = localUpdatedAt(local.username)
+            // No local claim on name/avatar: the server's name and avatar apply whatever the stamps say.
+            if let adopt = ProfileRoster.adoptUncustomized(localName: local.displayName, localAvatar: local.avatar,
+                                                           customized: customized(local.username, local.displayName, local.avatar), r) {
+                store.update(id) { var c = $0; c.displayName = adopt.0; c.avatar = adopt.1; return c }
+                debugLog("[DSYNC] profiles: adopted synced name/avatar for \(Self.tag(id))")
+                local = store.byId(id) ?? local
+            }
+            let repair = ProfileRoster.repair(localName: local.displayName, localAvatar: local.avatar, localAt: mine, r)
+            if repair == .resendLocal {
+                debugLog("[DSYNC] profiles: server row \(Self.tag(id)) looks stripped; re-sending local")
+                mutated(id, "repair")
+                continue
+            }
+            if repair == .applyServer {
+                debugLog("[DSYNC] profiles: local row \(Self.tag(id)) is stripped; applying server name/avatar")
+            } else if !DsyncGate.profileRowWins(localUpdatedAt: mine, remote: r) {
+                debugLog("[DSYNC] profiles: keep local row for \(Self.tag(id)) (local \(mine) >= server \(r.updatedAt))")
+                continue
+            }
+            if !r.displayName.trimmingCharacters(in: .whitespaces).isEmpty && r.displayName != local.displayName {
+                store.update(id) { var c = $0; c.displayName = r.displayName; return c }
+            }
+            if let role = ProfileRole.fromWire(r.role).map({ ProfileRole.resolve(local.userLevel, $0) }),
+               role != local.effectiveRole || local.role == nil {
+                store.update(id) { var c = $0; c.role = role; return c }
+                debugLog("[DSYNC] profiles: role \(role.label) for \(Self.tag(id))")
+            }
+            // Absent order (older writer, -1) keeps the local position.
+            if r.order >= 0 && r.order != local.order {
+                store.update(id) { var c = $0; c.order = r.order; return c }
+                debugLog("[DSYNC] profiles: order \(r.order) for \(Self.tag(id))")
+            }
+            // Absent (older writer) keeps the local avatar; {} is a deliberate default.
+            if r.avatar != nil {
+                let avatar = AvatarCatalog.normalize(r.avatar)
+                if avatar != local.avatar {
+                    store.update(id) { var c = $0; c.avatar = avatar; return c }
+                    debugLog("[DSYNC] profiles: avatar for \(Self.tag(id))")
+                }
+            }
+            if let type = PinRules.typeFromWire(r.pinType) {
+                if r.pinHash.count == 64 && r.pinSalt.count == 32 { pinStore.importSynced(id, type, hash: r.pinHash, salt: r.pinSalt) }
+            } else if pinStore.hasPin(id) && !pinStore.isLegacy(id) {
+                // A v1 PIN set on this device before sync stays until re-entered.
+                pinStore.remove(id)
+                debugLog("[DSYNC] profiles: pin removed for \(Self.tag(id)) (server row newer)")
+            }
+            adopted(local.username, r.updatedAt)
+        }
+        refreshActiveRole()
+        return 0
+    }
+
+    /// Add a profile from a roster suggestion (an explicit choice).
+    func addFromRoster(_ playlistId: String, row: ProfileRow, user: DispatcharrUserSummary, password: String?, apiKey: String?) async throws -> DispatcharrProfile {
+        let role = ProfileRole.fromWire(row.role)
+        let added = try await addProfile(playlistId, user: user, password: password, apiKey: apiKey, role: role, seed: row)
+        refreshActiveRole()
+        debugLog("[DSYNC] profiles: added \(Self.tag(added.id)) from the roster (explicit choice) role=\(role?.label ?? "default") order=\(row.order)")
+        undoableRosterAdds.insert(added.id)
+        return store.byId(added.id) ?? added
+    }
+
+    /// Onboarding manual add: the profile just created here may be removed (its undo writes the tombstone).
+    func markFreshAddUndoable(_ profileId: String) {
+        freshUndoable.insert(profileId)
+        undoableRosterAdds.insert(profileId)
+    }
+
+    func canUndoAdd(_ profileId: String) -> Bool { undoableRosterAdds.contains(profileId) }
+
+    /// Undo a roster add: local cleanup on THIS DEVICE ONLY, no Admin PIN, no tombstone.
+    func undoAdd(_ profileId: String) async throws {
+        guard undoableRosterAdds.contains(profileId) else { throw fail("Only a profile just added here can be undone.") }
+        guard let p = store.byId(profileId) else { undoableRosterAdds.remove(profileId); return }
+        guard !p.isDefault else { throw fail("The default profile cannot be removed.") }
+        let fresh = freshUndoable.remove(profileId) != nil
+        await deleteLocal(p, fromSync: false, tombstone: fresh)
+        undoableRosterAdds.remove(profileId)
+        refreshActiveRole()
+        debugLog("[PROFILES] undo add \(Self.tag(profileId))")
+    }
+
+    // MARK: Edit
+
+    /// Row menu "Avatar". Stamps the synced row like a rename.
+    func setAvatar(_ playlistId: String, _ profileId: String, _ avatar: AvatarSpec?) throws {
+        guard let target = store.byId(profileId) else { throw fail("Profile not found") }
+        let isOwn = activeProfileIdNow(playlistId) == profileId
+        guard RoleRules.canEditAvatar(actor: activeRole(playlistId), isOwn: isOwn) else {
+            throw fail("Only an Admin or Standard profile can change another profile's avatar.")
+        }
+        let clean = AvatarCatalog.normalize(avatar)
+        if clean == target.avatar { return }
+        store.update(profileId) { var c = $0; c.avatar = clean; return c }
+        mutated(profileId, "avatar")
+        debugLog("[PROFILE] avatar \(clean?.icon ?? AvatarCatalog.INITIAL)/\(clean.map { $0.color.isEmpty ? "default" : $0.color } ?? "default") for \(Self.tag(profileId))")
+    }
+
+    func rename(_ profileId: String, _ name: String) {
+        let clean = name.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return }
+        store.update(profileId) { var c = $0; c.displayName = clean; return c }
+        mutated(profileId, "rename")
+    }
+
+    /// Admin reorder (Move Left / Move Right / Move to Front, Move Up / Move Down). Returns the new index.
+    @discardableResult
+    func move(_ playlistId: String, _ profileId: String, _ how: ProfileOrder.Move) throws -> Int {
+        guard RoleRules.isFullAccess(activeRole(playlistId)) else { throw fail("Only an Admin or Standard profile can reorder profiles.") }
+        let list = store.forPlaylist(playlistId)
+        guard let from = list.firstIndex(where: { $0.id == profileId }) else { throw fail("Profile not found") }
+        let ids = ProfileOrder.step(list.map(\.id), profileId, how)
+        let to = ids.firstIndex(of: profileId) ?? from
+        if to == from && list.allSatisfy({ $0.order >= 0 }) { return from }
+        let byId = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+        commitOrder(playlistId, ids.compactMap { byId[$0] })
+        debugLog("[PROFILE] moved \(Self.tag(profileId)) \(from) -> \(to) on \(Self.tag(playlistId))")
+        return to
+    }
+
+    /// Admin reorder with the FULL new order. True when anything was written.
+    @discardableResult
+    func setOrder(_ playlistId: String, _ orderedIds: [String]) throws -> Bool {
+        guard RoleRules.isFullAccess(activeRole(playlistId)) else { throw fail("Only an Admin or Standard profile can reorder profiles.") }
+        let current = store.forPlaylist(playlistId)
+        let ids = ProfileOrder.resolve(current.map(\.id), orderedIds)
+        if ids == current.map(\.id) && current.allSatisfy({ $0.order >= 0 }) { return false }
+        let byId = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        commitOrder(playlistId, ids.compactMap { byId[$0] })
+        debugLog("[PROFILE] set order n=\(ids.count) on \(Self.tag(playlistId))")
+        return true
+    }
+
+    /// Persist [list] as the playlist's order and stamp every row whose position changed.
+    private func commitOrder(_ playlistId: String, _ list: [DispatcharrProfile]) {
+        let before = Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0.order) })
+        store.setOrder(playlistId, list.map(\.id))
+        for (i, q) in list.enumerated() where before[q.id] != i { mutated(q.id, "order") }
+    }
+
+    // MARK: Remove
+
+    /// Remove a profile and its local state on this device. Never touches the
+    /// server user. The default profile cannot be removed.
+    func remove(_ profileId: String) async throws {
+        guard let p = store.byId(profileId) else { return }
+        guard !p.isDefault else { throw fail("The default profile cannot be removed.") }
+        guard RoleRules.isFullAccess(activeRole(p.playlistId)) else { throw fail("Only an Admin or Standard profile can remove profiles.") }
+        if RoleRules.removeNeedsPin(p.effectiveRole) {
+            guard consumeAdminTicket(p.playlistId) else { throw fail("Enter a PIN from an Admin or Standard profile") }
+        }
+        await deleteLocal(p, fromSync: false)
+    }
+
+    /// A synced removal tombstone beat this local profile: the same cleanup, no PIN, no new tombstone.
+    func removeFromSync(_ playlistId: String, _ username: String) async -> Bool {
+        guard let p = store.forPlaylist(playlistId).first(where: { $0.username.caseInsensitiveCompare(username) == .orderedSame }),
+              !p.isDefault, RoleRules.canWriteProfilesKey(activeRole(playlistId)) else { return false }
+        await deleteLocal(p, fromSync: true)
+        return true
+    }
+
+    private func deleteLocal(_ p: DispatcharrProfile, fromSync: Bool, tombstone: Bool? = nil) async {
+        let tomb = tombstone ?? !fromSync
+        if store.activeProfileId(p.playlistId) == p.id, let def = store.forPlaylist(p.playlistId).first(where: \.isDefault) {
+            // The Admin removing the active profile: internal, no PIN prompt.
+            try? await switchTo(p.playlistId, def.id, bypassPin: true)
+        }
+        pinStore.remove(p.id)
+        settings.deleteScope(p.id)
+        if tomb { onProfilesMutated?(p.playlistId, p.username, "remove", 0) }
+        else if !fromSync { onProfilesMutated?(p.playlistId, p.username, "undo-add", 0) }
+        store.remove(p.id)
+        debugLog("[PROFILE] removed \(Self.tag(p.id)) on \(Self.tag(p.playlistId)); local state deleted\(fromSync ? " (synced removal)" : "")")
+    }
+
+    // MARK: Switch
+
+    /// The UI entry for a switch: PIN prompt policy, then the stop-playback confirm, then switchTo.
+    /// Returns false when it stopped for the PIN pad or the user kept playing.
+    func requestSwitch(_ playlistId: String, _ profileId: String) async throws -> Bool {
+        if pinStore.hasPin(profileId) && !switchTickets.contains(profileId) {
+            pendingPinPrompt = PinPrompt(playlistId: playlistId, profileId: profileId)
+            return false
+        }
+        if profileId != activeProfileIdNow(playlistId), isPlaying(), let confirm = confirmStopPlayback {
+            guard await confirm() else { return false }
+        }
+        try await switchTo(playlistId, profileId)
+        return true
+    }
+
+    /// Picker choice at launch. A locked profile has already passed verifyPin (its ticket).
+    func pickAtLaunch(_ profileId: String) async throws {
+        guard let pk = launchPicker else { return }
+        if pinStore.hasPin(profileId) && !switchTickets.contains(profileId) { throw fail("Enter PIN") }
+        if profileId == activeProfileIdNow(pk.playlistId) {
+            switchTickets.remove(profileId)
+            launchPicker = nil
+            debugLog("[PROFILE] launch picker: kept \(Self.tag(profileId))")
+            return
+        }
+        debugLog("[PROFILE] launch picker: chose \(Self.tag(profileId))")
+        try await switchTo(pk.playlistId, profileId)
+        launchPicker = nil
+    }
+
+    func askAtLaunch(_ playlistId: String) -> Bool { store.askAtLaunch(playlistId) }
+    func setAskAtLaunch(_ playlistId: String, _ on: Bool) {
+        store.setAskAtLaunch(playlistId, on)
+        debugLog("[PROFILE] ask who is watching at launch = \(on)")
+    }
+
+    /// Switch [playlistId] to [profileId]. The caller already confirmed stopping
+    /// playback. Signs in as the profile (stored key first, then the password),
+    /// re-reads permissions, swaps the settings, and hands the switch to
+    /// Dispatcharr Sync and the reload (onSwitched).
+    func switchTo(_ playlistId: String, _ profileId: String, bypassPin: Bool = false) async throws {
+        if !bypassPin && pinStore.hasPin(profileId) {
+            guard switchTickets.remove(profileId) != nil else { throw fail("Enter PIN") }
+        }
+        guard let target = store.byId(profileId) else { throw fail("Profile not found") }
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        let from = activeProfile(playlistId)
+        switching = true
+        defer { switching = false }
+        let t0 = Self.nowMs()
+        // The outgoing profile's pending sync changes go first (Android flushes the old session).
+        await beforeSwitch?(playlistId)
+        if target.isDefault {
+            if let me = await fetchMe(server, server.effectiveApiKey) {
+                store.update(target.id) { var c = $0; c.userId = me.id; return c }
+                followServerRole(target.id, me.effectiveUserLevel)
+            }
+        } else {
+            let a = try await authenticate(server, username: target.username, password: store.password(target.id), apiKey: store.apiKey(target.id))
+            store.setApiKey(target.id, a.key)
+            store.upsert(applyMe(target, a.me))
+            followServerRole(target.id, a.me.effectiveUserLevel)
+        }
+        settings.swap(from: from?.id, to: target.id)
+        store.setActiveProfileId(playlistId, target.isDefault ? nil : target.id)
+        publish()
+        debugLog("[PROFILE] switch \(from.map { Self.tag($0.id) } ?? "?") -> \(Self.tag(target.id))")
+        debugLog("[SWITCH] profile gate=\(Self.nowMs() - t0)ms")
+        onSwitched?(playlistId, from?.id, target.id)
+    }
+}

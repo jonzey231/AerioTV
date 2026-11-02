@@ -1469,3 +1469,109 @@ enum PlaylistHostChange {
         server.credentialGeneration &+= 1
     }
 }
+
+// MARK: - Profiles (Android DispatcharrClient listUsers, generateUserApiKey, revokeUserApiKey)
+
+/// One row of GET /api/accounts/users/ (admin only). Android DispatcharrUserSummary.
+struct DispatcharrUserSummary: Decodable, Equatable, Sendable {
+    let id: Int
+    let username: String
+    /// Returned to admins by Dispatcharr; nil or blank when the user never minted a key.
+    let apiKey: String?
+    let userLevel: Int?
+    let isSuperuser: Bool
+    let isStaff: Bool
+    /// Assigned Channel Profile ids; empty = All channels.
+    let channelProfiles: [Int]
+
+    init(id: Int, username: String, apiKey: String? = nil, userLevel: Int? = nil,
+         isSuperuser: Bool = false, isStaff: Bool = false, channelProfiles: [Int] = []) {
+        self.id = id
+        self.username = username
+        self.apiKey = apiKey
+        self.userLevel = userLevel
+        self.isSuperuser = isSuperuser
+        self.isStaff = isStaff
+        self.channelProfiles = channelProfiles
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, username
+        case apiKey = "api_key"
+        case userLevel = "user_level"
+        case isSuperuser = "is_superuser"
+        case isStaff = "is_staff"
+        case channelProfiles = "channel_profiles"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        username = try c.decode(String.self, forKey: .username)
+        apiKey = try? c.decodeIfPresent(String.self, forKey: .apiKey)
+        userLevel = try? c.decodeIfPresent(Int.self, forKey: .userLevel)
+        isSuperuser = (try? c.decodeIfPresent(Bool.self, forKey: .isSuperuser)) ?? false
+        isStaff = (try? c.decodeIfPresent(Bool.self, forKey: .isStaff)) ?? false
+        channelProfiles = (try? c.decodeIfPresent([Int].self, forKey: .channelProfiles)) ?? []
+    }
+}
+
+extension DispatcharrAPI {
+    private func profilesRequest(_ method: String, _ path: String, body: [String: Any]? = nil) throws -> URLRequest {
+        var request = URLRequest(url: try appDataURL(path: path), timeoutInterval: 20)
+        request.httpMethod = method
+        appDataHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        return request
+    }
+
+    private static func reason(_ data: Data) -> String? {
+        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return (o["detail"] as? String) ?? (o["error"] as? String)
+    }
+
+    /// Profiles > Add Profile: GET /api/accounts/users/ with the ADMIN key.
+    /// Accepts a bare array or a paginated {"results": [...]} body. A non-admin key answers 403.
+    func listUsers() async throws -> [DispatcharrUserSummary] {
+        let (data, response) = try await dataWithJWTRetry(for: profilesRequest("GET", "/api/accounts/users/"))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200...299).contains(status) else { throw DispatcharrDirectConnectError.transport("Users list: HTTP \(status)") }
+        let root = try? JSONSerialization.jsonObject(with: data)
+        let rows = (root as? [Any]) ?? ((root as? [String: Any])?["results"] as? [Any]) ?? []
+        return rows.compactMap { row in
+            guard let d = try? JSONSerialization.data(withJSONObject: row) else { return nil }
+            return try? JSONDecoder().decode(DispatcharrUserSummary.self, from: d)
+        }
+    }
+
+    /// Profiles > Enable API access (admin only): POST /api/accounts/api-keys/generate/
+    /// with {"user_id": id} mints a key for that user (a second call overwrites it).
+    /// Dispatcharr answers 201 {"key", "user"}; 403 for a non-admin, 404 for an unknown user.
+    /// Returns the raw key. The key is a credential: never log it.
+    func generateUserApiKey(userId: Int) async throws -> String {
+        let (data, response) = try await dataWithJWTRetry(for: profilesRequest("POST", "/api/accounts/api-keys/generate/", body: ["user_id": userId]))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200...299).contains(status) else {
+            throw DispatcharrDirectConnectError.transport("Enable API access: HTTP \(status)" + (Self.reason(data).map { " (\($0))" } ?? ""))
+        }
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        func str(_ x: [String: Any]?, _ k: String) -> String? { (x?[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+        guard let key = str(o, "key") ?? str(o, "api_key") ?? str(o?["user"] as? [String: Any], "api_key") else {
+            throw DispatcharrDirectConnectError.transport("Enable API access: the server sent no key")
+        }
+        return key
+    }
+
+    /// Profiles > Enable API access off (admin only): POST /api/accounts/api-keys/revoke/
+    /// with {"user_id": id} clears that user's key (Dispatcharr answers {"success": true}).
+    func revokeUserApiKey(userId: Int) async throws {
+        let (data, response) = try await dataWithJWTRetry(for: profilesRequest("POST", "/api/accounts/api-keys/revoke/", body: ["user_id": userId]))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard (200...299).contains(status) else {
+            throw DispatcharrDirectConnectError.transport("Revoke API access: HTTP \(status)" + (Self.reason(data).map { " (\($0))" } ?? ""))
+        }
+    }
+}
