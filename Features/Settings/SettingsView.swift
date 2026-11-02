@@ -77,6 +77,7 @@ struct SettingsView: View {
     /// Read-only here: the Sync row's value on the Settings root. The
     /// toggle itself lives on SyncSettingsView.
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
+    @AppStorage(DispatcharrSyncManager.enabledKey) private var dispatcharrSyncEnabled = false
     #if os(tvOS)
     @State private var navPath = NavigationPath()
     /// Tracks classic-`NavigationLink` pushes that bypass `navPath`
@@ -725,7 +726,15 @@ struct SettingsView: View {
 
     /// The Sync row's value: the whole page is behind one row now, so the
     /// root still says whether iCloud Sync is on.
-    private var syncValueLabel: String { iCloudSyncEnabled ? "On" : "Off" }
+    /// The provider label (Android syncProviderLabel): Off, iCloud, Dispatcharr, or both.
+    private var syncValueLabel: String {
+        switch (iCloudSyncEnabled, dispatcharrSyncEnabled) {
+        case (true, true): return "iCloud and Dispatcharr"
+        case (true, false): return "iCloud"
+        case (false, true): return "Dispatcharr"
+        case (false, false): return "Off"
+        }
+    }
 
     // MARK: - Active Server
 
