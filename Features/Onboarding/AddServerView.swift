@@ -1066,6 +1066,15 @@ struct AddServerView: View {
                     Text("This Device").tag(RecordingDestination.local)
                 }
                 .pickerStyle(.segmented)
+            } else {
+                Divider().padding(.vertical, 8)
+
+                Text("Default Recording Destination")
+                    .scaledFont(.headline)
+                    .foregroundColor(.textPrimary)
+                Text(Self.dvrDeniedLine)
+                    .scaledFont(.subheadline)
+                    .foregroundColor(Color.contrastText(.textSecondary))
             }
         }
         .padding(16)
