@@ -20,5 +20,6 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/dsync_tests" \
     "$SRC/DsyncHeld.swift" \
     "$SRC/SetupSourceChoice.swift" \
     "$SRC/DsyncManagerRules.swift" \
-    "$SRC/DsyncSettingsMap.swift"
+    "$SRC/DsyncSettingsMap.swift" \
+    "$SRC/CloudSnapshots.swift"
 "$OUT/dsync_tests"

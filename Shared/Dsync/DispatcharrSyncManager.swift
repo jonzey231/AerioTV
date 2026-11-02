@@ -124,6 +124,8 @@ final class DispatcharrSyncManager: ObservableObject {
     var cloudConverge: ((String, SetupSourceChoice.Summary, [String: String]) async -> Void)?
     /// Rule 4 mirror: the settings lanes the chosen cloud copy just applied.
     var cloudMirrorLanes: ((String) -> [String: [String: DsyncJSON]])?
+    /// The VOD catalog wrote a page (the iCloud backup update retries once the sweep is quiet).
+    var cloudCatalogPage: (() -> Void)?
     /// Rule 5 gate: a setup choice prompt is open (SetupSourceCoordinator).
     var setupChoicePending: () -> Bool = { false }
 
@@ -336,6 +338,7 @@ final class DispatcharrSyncManager: ObservableObject {
     /// VODCatalogStore wrote a page: deferred VOD keys re-check (at most every
     /// 3 s), and a forced key retries once the sweep has been quiet for 3 s.
     func noteCatalogPageWritten() {
+        cloudCatalogPage?()
         guard let s = session, !s.awaitingCache.isEmpty else { return }
         let now = Self.nowMs()
         if now - lastCatalogRecheckMs >= DsyncReadiness.PAGE_RECHECK_MS {

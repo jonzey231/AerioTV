@@ -1478,6 +1478,8 @@ struct RootView: View {
                 DispatcharrSyncManager.shared.start()
                 // Rule 4 coordinator: registers the Rule 5 "choice pending" gate with the manager.
                 _ = SetupSourceCoordinator.shared
+                // iCloud side of Dispatcharr Sync coexistence: backup format and the launch retry.
+                CloudSnapshotSync.shared.start()
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }

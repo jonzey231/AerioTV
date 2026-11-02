@@ -601,5 +601,94 @@ do {
     check(Set(DsyncSettingsMap.ENTRIES.map(\.appleKey)).count == DsyncSettingsMap.ENTRIES.count, "Apple keys unique")
 }
 
+// MARK: - Cloud snapshots (DriveCanonTest, DriveSnapshotRulesTest, HeldProgressTest snapshot parts)
+
+do {
+    let env = CloudCanon.writerEnvelope(nowMs: 1_000, device: "iPhone", providers: nil)
+    eq(env.format, 2, "every write carries format 2")
+    let fav = CloudFavorites(envelope: env, entries: [CloudFavoriteEntry(channelId: "11", channelName: "One", displayOrder: 0, addedAt: 5)])
+    let text = fav.text
+    check(text.contains(#""channelId":"11""#) && text.contains(#""dispatcharrChannelId":null"#) && text.contains(#""format":2"#),
+          "Android field names on the wire")
+    eq(CloudFavorites.decode(text: text), fav, "favorites round trip")
+    let old = #"{"envelope":{"version":1,"lastModified":5,"device":"x","extra":1},"entries":[{"channelId":"3","channelName":"c","displayOrder":1,"addedAt":2}]}"#
+    eq(CloudCanon.envelopeFormat(old), nil, "older file has no format")
+    check(CloudCanon.isOldFormat(nil) && CloudCanon.isOldFormat(1) && !CloudCanon.isOldFormat(2), "null or < 2 is old")
+    check(CloudCanon.backupOutdated([2, nil]) && !CloudCanon.backupOutdated([2, 2]) && !CloudCanon.backupOutdated([]), "any present old file")
+    eq(CloudCanon.oldFormatNames([("Favorites", nil), ("WatchProgress", 2), ("Preferences", 1)]), ["Favorites", "Preferences"], "old names in order")
+    let stamped = CloudCanon.stampFormat(old)!
+    eq(CloudCanon.envelopeFormat(stamped), 2, "stamp sets format 2")
+    check(stamped.contains(#""extra":1"#) && stamped.contains(#""channelId":"3""#), "stamp keeps every other field")
+    eq(CloudCanon.stampFormat(#"{"entries":[]}"#), nil, "no envelope, no stamp")
+    eq(CloudCanon.pendingCategories(accepted: false, all: ["a", "b"], done: { _ in false }), [], "never without Update backup")
+    eq(CloudCanon.pendingCategories(accepted: true, all: ["a", "b"], done: { $0 == "a" }), ["b"], "done files skipped")
+
+    // Enrichment fills only unresolved rows.
+    let (ef, n) = CloudCanon.enrichFavorites(CloudFavorites.decode(text: old)!, CloudCanon.Ids(channels: ["3": 30]))
+    eq(n, 1, "one favorite enriched")
+    eq(ef.entries[0].dispatcharrChannelId, 30, "canonical channel id")
+    let wl = CloudWatchlist(envelope: env, entries: [CloudWatchlistEntry(vodId: "7", vodType: "series", title: "S", addedAt: 1),
+                                                     CloudWatchlistEntry(vodId: "8", title: "M", addedAt: 1)],
+                            hidden: [CloudHiddenEntry(vodId: "9", hiddenAt: 1)])
+    let (ew, nw, nh) = CloudCanon.enrichWatchlist(wl, CloudCanon.Ids(movies: ["8": 8, "9": 9]))
+    eq([nw, nh], [2, 1], "series ids are local integers, movies via the map")
+    eq(ew.hidden[0].dispatcharrVodId, 9, "hidden row id")
+    let pr = CloudPreferences(envelope: env, keys: [CloudCanon.K_RECENTS: "1\n2", CloudCanon.K_COLLECTIONS:
+        CloudCanon.encodeCollections([.init(id: "c1", name: "Kids", memberIds: ["2", "3"], placement: "beginning")])])
+    let (ep, np) = CloudCanon.enrichPreferences(pr, CloudCanon.Ids(channels: ["1": 10, "2": 20]))
+    eq(np, 2, "recents and collection channels mapped")
+    eq(ep.dispatcharrChannelIds, ["1": 10, "2": 20], "map written")
+    eq(CloudPreferences.decode(text: ep.text)?.dispatcharrChannelIds, ["1": 10, "2": 20], "map round trip")
+    eq(CloudCanon.collectionsCategory(ep, .init()).fingerprint, nil, "an unresolved member leaves the fingerprint nil")
+    eq(CloudCanon.recentsCategory(ep, .init()).rows, 2, "recents from the stored map")
+
+    // Single progress builder: local rows, held placeholders, the last Dispatcharr rows; resolved local wins.
+    let local = CloudProgress(envelope: env, entries: [
+        CloudProgressEntry(videoId: "11", title: "Local", positionMs: 1_000, durationMs: 9_000, updatedAt: 5_000, dispatcharrVodId: 11),
+        CloudProgressEntry(videoId: "uuid-12", title: "Unmapped", positionMs: 1, durationMs: 2, updatedAt: 1),
+        CloudProgressEntry(videoId: "dsync:m:99", title: "Stale", positionMs: 0, durationMs: 0, updatedAt: 0, dispatcharrVodId: 99)])
+    let extra = [ProgressRow(vodId: 11, type: "m", position: 3, duration: 9, updatedAt: 9, finished: false, seriesId: nil, season: 0, episode: 0, title: "Srv"),
+                 ProgressRow(vodId: 12, type: "m", position: 3, duration: 9, updatedAt: 9, finished: false, seriesId: nil, season: 0, episode: 0, title: "U"),
+                 ProgressRow(vodId: 13, type: "e", position: 3, duration: 9, updatedAt: 9, finished: true, seriesId: 4, season: 1, episode: 2, title: "Ep")]
+    let snap = CloudCanon.progressSnapshot(local, extra: extra) { t, id in id == 12 && t == "m" ? "uuid-12" : nil }
+    eq(snap.entries.map(\.videoId), ["11", "uuid-12", "dsync:e:13"], "resolved local wins, stale placeholder replaced, held rides")
+    eq(snap.entries[1].dispatcharrVodId, 12, "reverse id fills the local row")
+    eq(CloudCanon.heldRow(snap.entries[2]), ProgressRow(vodId: 13, type: "e", position: 3, duration: 9, updatedAt: 9, finished: true,
+                                                         seriesId: 4, season: 1, episode: 2, title: "Ep"), "placeholder round trip")
+    eq(CloudProgress.decode(text: snap.text), snap, "progress round trip")
+
+    eq(CloudCanon.pushLine("Favorites", rows: 3, shared: [("favorites", 3)], label: nil, follows: ["favorites local"], ok: true),
+       "[CLOUD] push Favorites rows=3 (follow favorites local)", "follow push line")
+    eq(CloudCanon.pushLine("Preferences", rows: 9, shared: [("recents", 2), ("settings", 7)], label: "replace", follows: [], ok: false),
+       "[CLOUD] push Preferences rows=9 recents=2 settings=7 (replace) failed", "replace push line")
+    eq(CloudCanon.migrationLine("progress", rows: 4), "[CLOUD] id migration: progress 4 rows enriched", "migration line")
+}
+
+// MARK: - SyncProvidersTest (Apple writes icloud, preserves googleDrive)
+
+do {
+    let stored = SyncProvidersRecord(dispatcharr: false, googleDrive: true, icloud: false, updatedAt: 10, deviceId: "a")
+    let p = SyncProvidersRules.forPush(stored: stored, isBaseProfile: true, dispatcharrOn: true, icloudOn: true, reported: [], deviceId: "me", nowMs: 99)
+    eq(p.record, SyncProvidersRecord(dispatcharr: true, googleDrive: true, icloud: true, updatedAt: 99, deviceId: "me"), "union with own flags")
+    let q = SyncProvidersRules.forPush(stored: p.record, isBaseProfile: true, dispatcharrOn: true, icloudOn: false, reported: p.reported, deviceId: "me", nowMs: 120)
+    eq(q.record?.icloud, false, "a flag this device reported goes false once")
+    check(!q.reported.contains(SyncProvidersRules.ICLOUD), "then stops forcing it")
+    let r = SyncProvidersRules.forPush(stored: q.record, isBaseProfile: true, dispatcharrOn: true, icloudOn: false, reported: q.reported, deviceId: "me", nowMs: 130)
+    eq(r.record?.updatedAt, 120, "no change keeps updatedAt")
+    eq(SyncProvidersRules.forPush(stored: stored, isBaseProfile: false, dispatcharrOn: true, icloudOn: true, reported: [], deviceId: "me", nowMs: 1).record,
+       stored, "a sub-profile never changes the record")
+    eq(SyncProvidersRules.newer(stored, SyncProvidersRecord(updatedAt: 10, deviceId: "b"))?.deviceId, "b", "tie: higher deviceId")
+    eq(SyncProvidersRules.newer(stored, nil), stored, "nil never replaces")
+    let env = CloudEnvelope(lastModified: 1, device: "d", syncProviders: stored, format: 2)
+    eq(SyncProvidersRules.fromBody(CloudReminders(envelope: env, entries: []).text), stored, "record rides the envelope")
+    eq(SyncProvidersRules.fromJson(.object(DsyncObject([("icloud", .bool(true))]))), nil, "no updatedAt: ignored")
+    eq(SyncProvidersRules.offers(stored, icloudOnHere: false, dispatcharrOnHere: false, activeIsDispatcharr: true), [], "Drive never offered on Apple")
+    let both = SyncProvidersRecord(dispatcharr: true, icloud: true, updatedAt: 1)
+    eq(SyncProvidersRules.offerText(SyncProvidersRules.offers(both, icloudOnHere: false, dispatcharrOnHere: false, activeIsDispatcharr: true)),
+       "Your other devices also use iCloud and Dispatcharr Sync. Turn it on here too?", "offer text")
+    eq(SyncProvidersRules.offers(both, icloudOnHere: false, dispatcharrOnHere: false, activeIsDispatcharr: false), [SyncProvidersRules.ICLOUD],
+       "Dispatcharr only on a Dispatcharr playlist")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
