@@ -2,6 +2,11 @@ import SwiftUI
 
 // MARK: - Appearance Settings View (full replacement for the inline one in SettingsView)
 struct AppearanceSettingsView: View {
+    /// Hex field draft. Only a complete six-digit value is committed to
+    /// the theme (and so to sync): committing every keystroke stored and
+    /// pushed partial values such as "E6", which rendered the accent black
+    /// and was rejected by the other devices' validator.
+    @State private var hexDraft: String? = nil
     @ObservedObject private var theme = ThemeManager.shared
     // Phase 1 regroup (2026-09-17): Appearance is now theme, text and
     // clock only. Channel List / Guide Presentation, Category Colors, the
@@ -148,7 +153,17 @@ struct AppearanceSettingsView: View {
                         // as every other field in Settings.
                         SettingsTextField("Hex Color",
                                           placeholder: "2DD4BF",
-                                          text: $theme.customAccentHex,
+                                          text: Binding(
+                                            get: { hexDraft ?? theme.customAccentHex },
+                                            set: { newValue in
+                                                let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                                                let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
+                                                hexDraft = cleaned
+                                                if cleaned.count == 6, cleaned != theme.customAccentHex {
+                                                    theme.customAccentHex = cleaned
+                                                }
+                                            }
+                                          ),
                                           helper: "Six hex digits, for example 2DD4BF.",
                                           autocapitalization: .characters)
                             .padding(.horizontal, 20)
@@ -589,6 +604,9 @@ struct AppearanceSettingsView: View {
             // (.textSecondary, .textTertiary) and section header
             // tints stuck on the previous theme. Keying the List
             // identity to the active theme forces a clean rebuild.
+            // The hex is keyed only once committed (six digits), so typing in the
+            // Hex Color field no longer rebuilds the list on every keystroke,
+            // which dropped focus and characters mid-entry.
             .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
 
@@ -686,11 +704,14 @@ struct AppearanceSettingsView: View {
             SettingsTextField("Hex Color",
                               placeholder: "2DD4BF",
                               text: Binding(
-                                get: { theme.customAccentHex },
+                                get: { hexDraft ?? theme.customAccentHex },
                                 set: { newValue in
                                     let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                                    let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
-                                    theme.customAccentHex = String(cleaned.prefix(6))
+                                    let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
+                                    hexDraft = cleaned
+                                    if cleaned.count == 6, cleaned != theme.customAccentHex {
+                                        theme.customAccentHex = cleaned
+                                    }
                                 }
                               ),
                               helper: "Six hex digits, for example 2DD4BF.",

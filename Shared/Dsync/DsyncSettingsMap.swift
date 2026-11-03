@@ -184,7 +184,12 @@ enum DsyncSettingsMap {
             guard let s = raw as? String else { return nil }
             return TABS.first { $0.1 == s }.map { .string($0.0) }
         case .hex:
-            return (raw as? String).map { .string($0) }
+            // Only a complete RRGGBB goes out; a partial value would be
+            // rejected by every receiver's validator anyway.
+            guard let s = raw as? String else { return nil }
+            let body = s.hasPrefix("#") ? String(s.dropFirst()) : s
+            guard body.count == 6, body.allSatisfy(\.isHexDigit) else { return nil }
+            return .string(s)
         case .groupToken:
             guard let s = raw as? String else { return nil }
             if s.isEmpty { return .string("") }
