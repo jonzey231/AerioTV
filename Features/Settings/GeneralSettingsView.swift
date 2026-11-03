@@ -66,6 +66,14 @@ struct GeneralSettingsView: View {
         SettingsChoice("time", "Time of Day", subtitle: "Once a day at a set time")
     ]
 
+    struct AboutRefreshingItem { let icon: String; let title: String; let body: String }
+    static let aboutRefreshingItems: [AboutRefreshingItem] = [
+        AboutRefreshingItem(icon: "tv", title: "Live TV", body: "Channels and the guide open from your device's cache, then refresh quietly in the background each time the app opens and whenever you return after the data is more than 30 minutes old. The Background Refresh interval above keeps them current while the app is closed."),
+        AboutRefreshingItem(icon: "film", title: "Movies & TV Shows", body: "Your library opens from the cache and re-scans in the background on the Refresh Library schedule in Movies & TV Shows (every launch, daily, or weekly), or when the server reports a change."),
+        AboutRefreshingItem(icon: "record.circle", title: "DVR", body: "Recordings open from the cache and update every 30 seconds while the app is open."),
+        AboutRefreshingItem(icon: "arrow.triangle.2.circlepath", title: "Loading indicator", body: "The spinner appears only when nothing is cached yet or when you refresh by hand."),
+    ]
+
     /// Background Refresh intervals, in minutes (bgRefreshIntervalMins).
     private static let intervalOptions: [SettingsChoice<Int>] = [
         SettingsChoice(15, "15 Minutes"),
@@ -302,7 +310,7 @@ struct GeneralSettingsView: View {
                             "Interval",
                             options: Self.intervalOptions,
                             selection: $bgRefreshInterval,
-                            footer: "How often AerioTV asks for fresh channel lists and guide data.",
+                            footer: "How often AerioTV refreshes channels and the guide while the app is closed. While it is open, they refresh on launch and whenever you return and the data is more than 30 minutes old.",
                             iconColor: theme.accent
                         )
                         .listRowBackground(Color.cardBackground)
@@ -338,6 +346,36 @@ struct GeneralSettingsView: View {
                     Text("Automatically refresh channel lists and guide data while the app is in the background.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: About Refreshing
+            // Android GeneralSettingsScreen ABOUT_REFRESHING_ITEMS, same copy:
+            // what opens from the cache, what refreshes while the app is open,
+            // and what the background job does.
+            Section {
+                ForEach(Self.aboutRefreshingItems, id: \.title) { item in
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: item.icon)
+                            .foregroundColor(theme.accent)
+                            .scaledFont(.system(size: 18))
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.title)
+                                .scaledFont(.bodyMedium).fontWeight(.semibold).foregroundColor(.textPrimary)
+                            Text(item.body)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    #if os(tvOS)
+                    .focusable()
+                    #endif
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("About Refreshing").sectionHeaderStyle()
             }
             .listSectionSeparator(.hidden)
 
