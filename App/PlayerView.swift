@@ -5296,6 +5296,13 @@ final class AVPlayerProgressDriver {
     private var naturalEdgeOffset: Double = 4
     /// When the user paused a live rewind session (nil while playing).
     private var userPauseStartedAt: Date?
+    /// A long-pause resume latched timeshifting: Go Live stays until the
+    /// user rejoins live (Android parity, the pause rule holds timeshift
+    /// until Go Live). Without it the edge pump cleared the flag within
+    /// 0.5 s whenever the resume landed inside cushion+5 s of the
+    /// playlist end, which a short direct HLS window always does (iPad
+    /// 2026-11-03 14:58:42, resume after 21 s at 5.1 s behind the end).
+    private var pauseTimeshiftLatched = false
     /// Host-provided sink for aspect changes (the overlay has no handle
     /// to the AVPlayerLayer; the host owns it and applies the gravity).
     private let applyGravity: (AVLayerVideoGravity) -> Void
@@ -6959,7 +6966,7 @@ final class AVPlayerProgressDriver {
         // below already flagged). Rejoining within cushion+5s flips back.
         let behind = end - cur
         if engine.timeshifting {
-            if behind < naturalEdgeOffset + 5 { engine.noteTimeshifting(false) }
+            if behind < naturalEdgeOffset + 5, !pauseTimeshiftLatched { engine.noteTimeshifting(false) }
         } else if player.timeControlStatus == .playing {
             if behind < naturalEdgeOffset + 10 {
                 naturalEdgeOffset = naturalEdgeOffset * 0.95 + behind * 0.05
@@ -7023,6 +7030,7 @@ final class AVPlayerProgressDriver {
                     let pausedFor = Date().timeIntervalSince(started)
                     if pausedFor > 6 {
                         debugLog(String(format: "[AVP-REWIND] resume after %.0fs pause -> timeshifting (Go Live)", pausedFor))
+                        self.pauseTimeshiftLatched = true
                         Task { @MainActor in LiveRewindEngine.shared.noteTimeshifting(true) }
                     }
                 }
@@ -7093,6 +7101,7 @@ final class AVPlayerProgressDriver {
                 let window = end - start
                 let target = min(max(0, Double(ms) / 1000.0), window)
                 if target >= window - 5 {
+                    self.pauseTimeshiftLatched = false
                     LiveRewindEngine.shared.noteTimeshifting(false)
                     debugLog("[AVP-REWIND] seek -> live edge")
                     player.seek(to: CMTime(seconds: max(start, end - 1), preferredTimescale: 600))
