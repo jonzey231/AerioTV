@@ -7762,10 +7762,23 @@ struct AVPlayerMultiviewTile: View {
                         forceHLSSession = resolved
                         debugLog("[FORCE-HLS] tile channel=\(channelName) entry 302 -> \(resolved.playlistURL.absoluteString) token=\(resolved.token?.prefix(8) ?? "none") in \(ms)ms")
                         debugLog("[FORCE-HLS] tile channel=\(channelName) AVPlayer opening token playlist (engine=AVPlayer direct HLS, no TS remuxer, no mpv)")
-                        startPlayer(url: resolved.playlistURL, requestHeaders: hdrs)
+                        // Security (Android 5381694d parity): a token
+                        // playlist on another host never receives the
+                        // server's X-API-Key / Authorization.
+                        let sameHost = resolved.playlistURL.host?.lowercased() == entry.host?.lowercased()
+                        if !sameHost {
+                            debugLog("[FORCE-HLS] tile channel=\(channelName) token playlist is on another host; server auth headers dropped")
+                        }
+                        startPlayer(url: resolved.playlistURL,
+                                    requestHeaders: sameHost ? hdrs : TSHLSRemuxer.withoutServerAuth(hdrs))
                     } else {
-                        debugLog("[FORCE-HLS] tile channel=\(channelName) could not resolve the entry redirect in \(ms)ms; opening the entry URL directly")
-                        startPlayer(url: entry, requestHeaders: hdrs)
+                        // Unresolved entry: handing AVPlayer the entry URL
+                        // with the server's auth headers let AVFoundation
+                        // follow a 302 to a provider host carrying them. The
+                        // TS remux arm follows redirects itself and strips
+                        // auth cross-host.
+                        debugLog("[FORCE-HLS] tile channel=\(channelName) could not resolve the entry redirect in \(ms)ms; falling back to the TS remux")
+                        fallBackFromForceHLS(entry: entry, reason: "entry redirect unresolved")
                     }
                     LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
                 }
