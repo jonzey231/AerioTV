@@ -277,7 +277,11 @@ struct AddServerView: View {
                 }
                 .fullScreenCover(isPresented: $showReceiveSetup) {
                     ReceiveSetupView(onCancel: { showReceiveSetup = false },
-                                     onDone: { showReceiveSetup = false; dismiss() })
+                                     onDone: {
+                                         showReceiveSetup = false
+                                         // Continue into Add Profiles so extra users can be added.
+                                         if let d = DsyncLocal.activeDispatcharrPlaylist() { addProfilesFor = d.id.uuidString } else { dismiss() }
+                                     })
                 }
             }
             #endif

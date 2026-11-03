@@ -25,6 +25,8 @@ struct SetUpTvView: View {
 
     enum Step: Equatable {
         case pick
+        /// First step for a target: copy everything, or this user only.
+        case scope(SetupTarget, String?)
         case code(SetupTarget, String?)
         case choose(SetupTarget, String)
         case sending
@@ -42,6 +44,7 @@ struct SetUpTvView: View {
     @State private var picked: Set<String> = []
     @State private var sync = false
     @State private var codeText = ""
+    @State private var userOnly = false
 
     private static let noLongerWaiting = "The device is no longer waiting for setup. Start setup on the other device again."
 
@@ -77,6 +80,7 @@ struct SetUpTvView: View {
     private var stepView: some View {
         switch step {
         case .pick: pickStep
+        case .scope(let t, let c): scopeStep(t, c)
         case .code(let t, let err): codeStep(t, err)
         case .choose(let t, let c): chooseStep(t, c)
         case .sending:
@@ -101,7 +105,7 @@ struct SetUpTvView: View {
 
     private var pickStep: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("On the other device, open AerioTV and choose Set up from another device. Then pick the device below, or scan the code on it.")
+            Text("On the other device, open AerioTV and choose Set up from another device. Then pick it below, or scan the code it shows.")
                 .scaledFont(.bodyMedium.subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))
             if center.tvs.isEmpty {
@@ -141,6 +145,27 @@ struct SetUpTvView: View {
         }
     }
 
+    // MARK: Scope
+
+    private func scopeStep(_ t: SetupTarget, _ code: String?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Send to \(t.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
+            VStack(spacing: 4) {
+                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
+                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+            }
+            .padding(8)
+            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            PrimaryButton("Continue") { step = code.map { .choose(t, $0) } ?? .code(t, nil) }
+        }
+    }
+
+    /// Only a Dispatcharr playlist has profiles to choose between.
+    private func firstStep(_ t: SetupTarget, _ code: String?) -> Step {
+        if playlist?.type == .dispatcharrAPI { return .scope(t, code) }
+        return code.map { .choose(t, $0) } ?? .code(t, nil)
+    }
+
     // MARK: Code
 
     private func codeStep(_ t: SetupTarget, _ err: String?) -> some View {
@@ -169,7 +194,7 @@ struct SetUpTvView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Send to \(t.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
                 Text("Playlist: \(source.playlistName)").scaledFont(.bodyLarge).foregroundColor(.textPrimary)
-                if source.isDispatcharr && !source.choices.isEmpty {
+                if source.isDispatcharr && !source.choices.isEmpty && !userOnly {
                     Text("Profiles").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
                     ForEach(source.choices) { c in
                         let enabled = c.credentialLabel != nil && !c.isDefault
@@ -191,6 +216,8 @@ struct SetUpTvView: View {
                         .buttonStyle(.plain)
                         .disabled(!enabled)
                     }
+                }
+                if source.isDispatcharr {
                     Button { sync.toggle() } label: {
                         HStack(spacing: 10) {
                             Image(systemName: sync ? "checkmark.square.fill" : "square").foregroundColor(.accentPrimary)
@@ -208,8 +235,9 @@ struct SetUpTvView: View {
             .onAppear {
                 if !loaded {
                     loaded = true
-                    picked = Set(source.choices.filter { ($0.isDefault || $0.isCurrent) && $0.credentialLabel != nil }.map(\.id))
-                    sync = source.isDispatcharr && source.syncOnHere
+                    // Copy entire setup: every profile that has a sign-in saved here.
+                    picked = Set(source.choices.filter { $0.credentialLabel != nil }.map(\.id))
+                    sync = source.isDispatcharr
                 }
             }
         } else {
@@ -221,26 +249,28 @@ struct SetUpTvView: View {
 
     private func load() {
         if let link, let l = SetupProtocol.parseLink(link) {
-            step = .choose(SetupTarget.fromLink(l), l.code)
+            step = firstStep(SetupTarget.fromLink(l), l.code)
         } else if let target {
-            step = .code(target, nil)
+            step = firstStep(target, nil)
         }
         center.discovery.start()
     }
 
     private func useLink(_ link: String) {
         guard let l = SetupProtocol.parseLink(link) else { return }
-        step = .choose(SetupTarget.fromLink(l), l.code)
+        step = firstStep(SetupTarget.fromLink(l), l.code)
     }
 
     private func pick(_ t: SetupTarget) {
         codeText = ""
-        step = t.code.map { .choose(t, $0) } ?? .code(t, nil)
+        step = firstStep(t, t.code)
     }
 
     private func back() {
         switch step {
-        case .choose(let t, _): step = t.code != nil ? .pick : .code(t, nil)
+        case .choose(let t, let c):
+            if t.code != nil { step = playlist?.type == .dispatcharrAPI ? .scope(t, c) : .pick } else { step = .code(t, nil) }
+        case .code(let t, _): step = playlist?.type == .dispatcharrAPI ? .scope(t, nil) : .pick
         case .error(_, let b):
             switch b {
             case .pick: step = .pick
@@ -262,7 +292,9 @@ struct SetUpTvView: View {
             step = .error(Self.noLongerWaiting, .pick)
             return
         }
-        let payload = SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
+        let payload = userOnly && pl.type == .dispatcharrAPI
+            ? SetupSender.buildUserOnlyPayload(pl, turnOnSync: sync)
+            : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
         step = .sending
         Task { @MainActor in
             switch await SetupSender.send(t, code: code, payload: payload) {
@@ -289,6 +321,7 @@ struct SetUpTvView: View {
         switch step {
         case .code(let t, _): current = t
         case .choose(let t, _): current = t
+        case .scope(let t, _): current = t
         default: current = nil
         }
         guard let t = current else { return }

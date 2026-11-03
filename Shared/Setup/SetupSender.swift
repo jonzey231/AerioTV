@@ -336,6 +336,30 @@ enum SetupSender {
         }
     }
 
+    /// "Import this user only": the playlist signs in as the active profile, which
+    /// goes out as the payload's one (default) profile. Wire format unchanged.
+    @MainActor
+    static func buildUserOnlyPayload(_ server: ServerConnection, turnOnSync: Bool) -> SetupProtocol.Payload {
+        var full = buildPayload(server, profileIds: [], turnOnSync: turnOnSync)
+        guard server.type == .dispatcharrAPI else { return full }
+        let sources = profileSources(server)
+        let activeId = ProfileManager.shared.activeProfileIdNow(server.id.uuidString)
+        guard let s = sources.first(where: { $0.id == activeId }) ?? sources.first(where: \.isDefault) else { return full }
+        if !s.isDefault {
+            let c = SetupProtocol.Credential(apiKey: s.apiKey.flatMap(nonEmpty), username: nonEmpty(s.username),
+                                             password: s.password.flatMap(nonEmpty))
+            if c.apiKey != nil || c.password != nil { full.playlist.credential = c }
+        }
+        var only = SetupProfileRules.parts([s], selected: [s.id]).first
+            ?? SetupProtocol.ProfilePart(username: s.username, displayName: s.displayName, role: s.role, avatar: s.avatar)
+        only.isDefault = true
+        only.credential = nil
+        only.order = 0
+        full.profiles = [only]
+        debugLog("[SETUP] payload user only, sync=\(turnOnSync)")
+        return full
+    }
+
     @MainActor
     static func buildPayload(_ server: ServerConnection, profileIds: Set<String>, turnOnSync: Bool) -> SetupProtocol.Payload {
         let type = wireType(server.type)

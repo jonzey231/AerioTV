@@ -214,7 +214,8 @@ struct WelcomeView: View {
                     hold.end("receive setup cancelled")
                     stage = .welcome
                 },
-                onDone: { finish("set up from another device") }
+                // Continue into Add Profiles so extra users can be added (else finish).
+                onDone: { toAddProfiles("set up from another device") }
             )
             .navigationBarHidden(true)
         case .addProfiles(let pid):

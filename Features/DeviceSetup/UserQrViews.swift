@@ -163,7 +163,7 @@ private struct UserQrCard: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            SecondaryButton("Close") { close() }
+            SecondaryButton("Done") { close() }
         }
         .padding(24)
         .frame(maxWidth: 380)
