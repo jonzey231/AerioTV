@@ -1115,11 +1115,20 @@ final class ProfileManager: ObservableObject {
             store.upsert(applyMe(target, a.me))
             followServerRole(target.id, a.me.effectiveUserLevel)
         }
-        settings.swap(from: from?.id, to: target.id)
+        let sw = settings.swap(from: from?.id, to: target.id)
         store.setActiveProfileId(playlistId, target.isDefault ? nil : target.id)
         publish()
         // After the overlay moved, so iCloud (default profile only) never sees the incoming data as a change.
         data.swap(playlistId, from: from?.id, to: target.id)
+        // The swap wrote UserDefaults directly; the in-memory settings holders
+        // (ThemeManager, RemoteControlStore, the channel list, Movies, TV Shows)
+        // re-read on the same notice a Dispatcharr Sync or iCloud apply posts.
+        // Android re-keys every settings Flow on the token change instead.
+        NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
+        debugLog("[PROFILE] settings swap -> \(Self.tag(target.id)) slot=\(sw.loaded) keys=\(sw.keys); stores re-read")
+        if !DispatcharrSyncManager.shared.isEnabled {
+            debugLog("[PROFILE] switch: Dispatcharr Sync is off; no pull for this profile (local slots only)")
+        }
         debugLog("[PROFILE] switch \(from.map { Self.tag($0.id) } ?? "?") -> \(Self.tag(target.id))")
         debugLog("[SWITCH] profile gate=\(Self.nowMs() - t0)ms")
         onSwitched?(playlistId, from?.id, target.id)

@@ -257,9 +257,13 @@ final class ProfileSettingsStore {
     }
 
     /// A switch from [from] to [to]: the outgoing values are kept, the incoming ones go live.
-    func swap(from: String?, to: String) {
-        if let from, from != to { saveLive(as: from) }
-        if from != to { loadLive(from: to) }
+    /// Returns whether [to] had a slot (false leaves the live values in place) and its key count.
+    @discardableResult
+    func swap(from: String?, to: String) -> (loaded: Bool, keys: Int) {
+        guard from != to else { return (false, 0) }
+        if let from { saveLive(as: from) }
+        let loaded = loadLive(from: to)
+        return (loaded, slot(to)?.count ?? 0)
     }
 
     /// Android seedProfileSettings: a new profile starts with the default

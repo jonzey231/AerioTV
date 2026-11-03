@@ -211,6 +211,7 @@ final class DispatcharrSyncManager: ObservableObject {
             .sink { [weak self] _ in Task { @MainActor in self?.evaluateTarget() } }
             .store(in: &cancellables)
         pm.start()
+        debugLog("[DSYNC] start enabled=\(isEnabled) dispatcharrPlaylist=\(DsyncLocal.activeDispatcharrPlaylist() != nil)")
         evaluateTarget()
     }
 
