@@ -43,7 +43,7 @@ struct SetUpTvView: View {
     @State private var sync = false
     @State private var codeText = ""
 
-    private static let noLongerWaiting = "The TV is no longer waiting for setup. Start setup on the TV again."
+    private static let noLongerWaiting = "The device is no longer waiting for setup. Start setup on the other device again."
 
     private var playlist: ServerConnection? { server ?? servers.first(where: \.isActive) }
 
@@ -51,7 +51,7 @@ struct SetUpTvView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Set up a TV")
+                    Text("Set up another device")
                         .scaledFont(.headlineLarge)
                         .foregroundColor(.textPrimary)
                     stepView
@@ -82,10 +82,10 @@ struct SetUpTvView: View {
         case .sending:
             HStack(spacing: 12) {
                 ProgressView()
-                Text("Sending to the TV").foregroundColor(.textPrimary)
+                Text("Sending to the other device").foregroundColor(.textPrimary)
             }
         case .sent:
-            Text("Sent. The TV is finishing setup now.")
+            Text("Sent. The device is finishing setup now.")
                 .scaledFont(.bodyLarge)
                 .foregroundColor(.textPrimary)
             PrimaryButton("Done") { onClose() }
@@ -101,22 +101,22 @@ struct SetUpTvView: View {
 
     private var pickStep: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("On the TV, open AerioTV and choose Set up from your phone. Then pick the TV below, or scan the code on the TV.")
+            Text("On the other device, open AerioTV and choose Set up from another device. Then pick the device below, or scan the code on it.")
                 .scaledFont(.bodyMedium.subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))
             if center.tvs.isEmpty {
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
-                    Text("Looking for TVs on this network").foregroundColor(Color.contrastText(.textSecondary))
+                    Text("Looking for devices on this network").foregroundColor(Color.contrastText(.textSecondary))
                 }
             }
             ForEach(center.tvs) { t in
                 Button { pick(t) } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "tv").foregroundColor(.accentPrimary)
+                        Image(systemName: t.kind.symbol).foregroundColor(.accentPrimary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(t.name).scaledFont(.headlineSmall).foregroundColor(.textPrimary)
-                            Text("Check that the TV shows \(t.fingerprint)")
+                            Text("Check that the device shows \(t.fingerprint)")
                                 .scaledFont(.bodySmall.subtext())
                                 .foregroundColor(Color.contrastText(.textSecondary))
                         }
@@ -129,11 +129,11 @@ struct SetUpTvView: View {
                 .buttonStyle(.plain)
             }
             QrScanActions(
-                prompt: "Point the camera at the code on the TV.",
+                prompt: "Point the camera at the code on the other device.",
                 accept: { r in
                     switch r {
                     case .setupLink: return nil
-                    case .userKey: return "This is a Dispatcharr user code. Scan the code shown on the TV."
+                    case .userKey: return "This is a Dispatcharr user code. Scan the code shown on the other device."
                     case .invalid: return ScannedCode.invalidMessage
                     }
                 },
@@ -182,7 +182,7 @@ struct SetUpTvView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(c.displayName).foregroundColor(.textPrimary)
                                     Text(c.isDefault ? "Signs in with the playlist login. Always sent."
-                                         : (c.credentialLabel ?? "No saved sign-in on this device. Add it on the TV later."))
+                                         : (c.credentialLabel ?? "No saved sign-in on this device. Add it on the other device later."))
                                         .scaledFont(.bodySmall.subtext())
                                         .foregroundColor(Color.contrastText(.textSecondary))
                                 }
@@ -194,14 +194,14 @@ struct SetUpTvView: View {
                     Button { sync.toggle() } label: {
                         HStack(spacing: 10) {
                             Image(systemName: sync ? "checkmark.square.fill" : "square").foregroundColor(.accentPrimary)
-                            Text("Turn on Dispatcharr Sync on the TV").foregroundColor(.textPrimary)
+                            Text("Turn on Dispatcharr Sync on the other device").foregroundColor(.textPrimary)
                         }
                     }
                     .buttonStyle(.plain)
                 }
                 PrimaryButton("Send") { send(t, code, pl) }
                     .padding(.top, 4)
-                Text("Sent only to this TV over your network, encrypted with its code. Nothing goes through your server.")
+                Text("Sent only to this device over your network, encrypted with its code. Nothing goes through your server.")
                     .scaledFont(.bodySmall.subtext())
                     .foregroundColor(Color.contrastText(.textSecondary))
             }
@@ -252,7 +252,7 @@ struct SetUpTvView: View {
 
     private func submitCode(_ t: SetupTarget) {
         let c = codeText.filter(\.isNumber)
-        guard c.count == 6 else { step = .code(t, "Enter the 6-digit code shown on the TV."); return }
+        guard c.count == 6 else { step = .code(t, "Enter the 6-digit code shown on the other device."); return }
         step = .choose(t, c)
     }
 
@@ -273,7 +273,7 @@ struct SetUpTvView: View {
                 var again = t
                 again.code = nil
                 codeText = ""
-                step = .code(again, "The TV did not accept that code. Check the code on the TV and try again.")
+                step = .code(again, "The device did not accept that code. Check the code on the device and try again.")
             case .refused:
                 step = .error(Self.noLongerWaiting, .pick)
             case .failed(let m):
@@ -317,7 +317,7 @@ private struct SetupTvOfferContent: View {
                 HStack(spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.25))
-                        Image(systemName: "tv")
+                        Image(systemName: target.kind.symbol)
                             .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
                             .foregroundStyle(ThemeManager.shared.accent)
                     }
@@ -400,15 +400,15 @@ struct SetUpTvSettingsRow: View {
     let subtitle: String
     let action: () -> Void
 
-    static let listSubtitle = "Send the active playlist to AerioTV on a TV. Nothing to type on the TV."
-    static let detailSubtitle = "Send this playlist, your profiles, and sync to a TV on your network."
+    static let listSubtitle = "Send the active playlist to AerioTV on another device. Nothing to type there."
+    static let detailSubtitle = "Send this playlist, your profiles, and sync to another device on your network."
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: "tv").foregroundColor(.accentPrimary)
+                Image(systemName: "rectangle.portrait.and.arrow.right").foregroundColor(.accentPrimary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Set up a TV").scaledFont(.bodyMedium.weight(.semibold)).foregroundColor(.textPrimary)
+                    Text("Set up another device").scaledFont(.bodyMedium.weight(.semibold)).foregroundColor(.textPrimary)
                     Text(subtitle).scaledFont(.bodySmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 }
                 Spacer()

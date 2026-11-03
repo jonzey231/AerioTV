@@ -79,7 +79,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>AerioTV uses the camera only to read QR codes.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>AerioTV needs local network access to connect to your media server on your home network, to find and stream to your AirPlay and Google Cast TVs, and to set up AerioTV on a TV.</string>
+	<string>AerioTV needs local network access to connect to your media server on your home network, to find and stream to your AirPlay and Google Cast TVs, and to set up AerioTV on another device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>AerioTV asks for access only when you choose to delete a QR code image you imported.</string>
 	<key>UIApplicationSceneManifest</key>

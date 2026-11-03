@@ -414,7 +414,7 @@ struct AddProfilesStepView: View {
     private var setUpTvLink: some View {
         if let onSetUpTv {
             Button(action: onSetUpTv) {
-                Text("Set up a TV with this playlist")
+                Text("Set up another device with this playlist")
                     .scaledFont(.system(size: 16, weight: .medium))
                     .foregroundColor(.accentPrimary)
                     .frame(maxWidth: .infinity, minHeight: 48)

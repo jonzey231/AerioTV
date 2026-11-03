@@ -28,6 +28,8 @@ struct SetupTarget: Identifiable, Equatable, Sendable {
     var serviceName: String? = nil
     /// When this advert (or QR) was first seen; the TV session lasts 10 minutes.
     var seenAt: Date = Date()
+    /// TXT `kind`; a QR link carries none, so it reads as tv (the only receiver before kind).
+    var kind: SetupProtocol.Kind = .tv
 
     /// Name plus key: a TV that rotates its key is a new target.
     var id: String { name + "|" + SetupCrypto.b64(pk) }
@@ -36,11 +38,18 @@ struct SetupTarget: Identifiable, Equatable, Sendable {
     var isExpired: Bool { Date().timeIntervalSince(seenAt) > SetupProtocol.windowSeconds }
 
     static func fromLink(_ l: SetupProtocol.Link) -> SetupTarget {
-        SetupTarget(name: l.name.isEmpty ? "TV" : l.name, host: l.ip, port: l.port, pk: l.pk, code: l.code)
+        SetupTarget(name: l.name.isEmpty ? "AerioTV" : l.name, host: l.ip, port: l.port, pk: l.pk, code: l.code)
     }
 
     static func == (a: SetupTarget, b: SetupTarget) -> Bool {
         a.id == b.id && a.host == b.host && a.port == b.port && a.code == b.code
+    }
+}
+
+extension SetupProtocol.Kind {
+    /// Device-type icon in the sender's list, the dock card, and the banner.
+    var symbol: String {
+        switch self { case .phone: return "iphone"; case .tablet: return "ipad"; case .tv: return "appletv" }
     }
 }
 
@@ -81,7 +90,8 @@ final class SetupDiscovery: ObservableObject {
                 guard txt[SetupProtocol.txtVersion] == String(SetupProtocol.version),
                       let pk = txt[SetupProtocol.txtPk].flatMap(SetupCrypto.unb64), pk.count == 32 else { return nil }
                 let shown = txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name
-                return (name, pk, shown, r.endpoint)
+                let kind = SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind])
+                return (name, pk, shown + "\u{1F}" + kind.rawValue, r.endpoint)
             }
             Task { @MainActor in self?.apply(snapshot) }
         }
@@ -109,19 +119,23 @@ final class SetupDiscovery: ObservableObject {
         for gone in resolving.keys where !live.contains(gone) {
             resolving.removeValue(forKey: gone)?.cancel()
         }
-        for (service, pk, shown, endpoint) in snapshot {
+        for (service, pk, shownKind, endpoint) in snapshot {
+            // This device's own receiver (Add Playlist open while the banner runs) is never offered.
+            if pk == SetupReceiver.ownPk { continue }
+            let shown = String(shownKind.split(separator: "\u{1F}", omittingEmptySubsequences: false).first ?? "")
+            let kind = SetupProtocol.Kind.fromTxt(shownKind.split(separator: "\u{1F}").last.map(String.init))
             if let existing = byService[service], existing.pk == pk, existing.name == shown { continue }
             if let existing = byService[service], existing.pk != pk {
                 // Key rotation: the stale target is dropped until the new one resolves.
                 debugLog("[SETUP] tv key changed old=\(existing.fingerprint) new=\(SetupCrypto.keyFingerprint(pk))")
                 byService.removeValue(forKey: service)
             }
-            resolve(service: service, pk: pk, shown: shown, endpoint: endpoint)
+            resolve(service: service, pk: pk, shown: shown, kind: kind, endpoint: endpoint)
         }
         publish()
     }
 
-    private func resolve(service: String, pk: Data, shown: String, endpoint: NWEndpoint) {
+    private func resolve(service: String, pk: Data, shown: String, kind: SetupProtocol.Kind, endpoint: NWEndpoint) {
         resolving.removeValue(forKey: service)?.cancel()
         let params = NWParameters.tcp
         if let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
@@ -141,7 +155,7 @@ final class SetupDiscovery: ObservableObject {
                 @unknown default: return
                 }
                 let clean = hostString.split(separator: "%").first.map(String.init) ?? hostString
-                let t = SetupTarget(name: shown, host: clean, port: Int(port.rawValue), pk: pk, serviceName: service)
+                let t = SetupTarget(name: shown, host: clean, port: Int(port.rawValue), pk: pk, serviceName: service, kind: kind)
                 Task { @MainActor in self?.resolved(service: service, target: t) }
             case .failed, .waiting:
                 c?.cancel()
@@ -365,7 +379,7 @@ enum SetupSender {
         case failed(String)
     }
 
-    static let unreachableMessage = "Could not reach the TV. Check that both devices are on the same network."
+    static let unreachableMessage = "The device could not be reached. Check that both devices are on the same network."
 
     /// POST the sealed envelope once. Never retried here: a wrong code spends
     /// one of the TV's three attempts, and a timeout after the body went out
@@ -408,7 +422,7 @@ enum SetupSender {
             case (200, true?, _): return .ok
             case (403, _, "wrong_code"?): return .wrongCode
             case (403, _, _): return .refused
-            default: return .failed("The TV answered HTTP \(status).")
+            default: return .failed("The device answered HTTP \(status).")
             }
         } catch let e as URLError where e.code == .timedOut {
             // Ambiguous: never claim success, never resend on our own.
