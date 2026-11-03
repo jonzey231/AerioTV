@@ -406,30 +406,15 @@ struct PlaybackChromeOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
-                // No rewind window (direct HLS live never arms one): the
-                // band alone had no Pause, so the transport row vanished
-                // on those sessions. Pause/Resume rides the audio tile's
-                // progress store exactly as on the rewind bar.
+                // No rewind window (Live Rewind off, or a live path
+                // without a seekable window): the row still renders,
+                // matching Android, with the skips disabled individually
+                // instead of the row disappearing (Logan 2026-11-02: all
+                // player controls visible regardless of engine or format).
                 VStack(spacing: 8) {
                     liveProgressBand
-                    if let ps = store.audioProgressStore, store.tiles.count == 1 {
-                        ProgressStoreReader(progress: ps) { p in
-                            Button {
-                                p.userTogglePause()
-                            } label: {
-                                Image(systemName: p.isPaused ? "play.fill" : "pause.fill")
-                                    .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
-                                    .foregroundStyle(.white)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color.black.opacity(0.55), in: Circle())
-                            }
-                            .accessibilityLabel(p.isPaused ? "Play" : "Pause")
-                        }
-                        .frame(maxWidth: .infinity)
+                    LiveNoWindowTransport_iOS(progress: store.audioProgressStore)
                         .overlay(alignment: .bottom) { streamReadout_iOS }
-                    } else {
-                        streamReadout_iOS
-                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
@@ -497,7 +482,10 @@ struct PlaybackChromeOverlay: View {
                         .accessibilityLabel("Playback pipeline \(engine)")
                 }
                 Spacer(minLength: 0)
-                if let audioStore = store.audioProgressStore {
+                // The Go Live pill takes this corner while rewound; the
+                // format badge was drawn over it.
+                if !(liveRewindIOS.buffering && liveRewindIOS.timeshifting),
+                   let audioStore = store.audioProgressStore {
                     TVVideoFormatBadge(progress: audioStore, fontSize: size)
                 }
             }
@@ -961,6 +949,63 @@ struct RewindTransportBar_iOS: View {
     }
 
     private func transportButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.black.opacity(0.55), in: Circle())
+        }
+    }
+}
+#endif
+
+// MARK: - Live transport without a seek window (iOS unified chrome)
+
+#if !os(tvOS)
+/// The rewind bar's control cluster when there is nothing to seek in:
+/// Back and Forward render disabled, Pause/Play works, LIVE on the right.
+/// Same glyphs, order, and sizes as RewindTransportBar_iOS.
+struct LiveNoWindowTransport_iOS: View {
+    let progress: PlayerProgressStore?
+    @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
+    @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 26) {
+                circle(SkipIntervals.backSymbol(skipBackSeconds)) {}
+                    .disabled(true)
+                    .opacity(0.4)
+                    .accessibilityLabel(SkipIntervals.backLabel(skipBackSeconds))
+                if let progress {
+                    ProgressStoreReader(progress: progress) { p in
+                        circle(p.isPaused ? "play.fill" : "pause.fill") { p.userTogglePause() }
+                            .accessibilityLabel(p.isPaused ? "Play" : "Pause")
+                    }
+                } else {
+                    circle("pause.fill") {}.disabled(true).opacity(0.4)
+                }
+                circle(SkipIntervals.forwardSymbol(skipForwardSeconds)) {}
+                    .disabled(true)
+                    .opacity(0.4)
+                    .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
+            }
+            HStack {
+                Spacer()
+                HStack(spacing: 4) {
+                    Circle().fill(Color.red).frame(width: 7, height: 7)
+                    Text("LIVE")
+                        .scaledFont(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color.white)
+                }
+                .padding(.bottom, 56)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func circle(_ icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed

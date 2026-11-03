@@ -5623,6 +5623,11 @@ struct AVPlayerMultiviewTile: View {
     /// Solo live direct-HLS session (not Force HLS) that Kept Live may
     /// hand to LiveChannelRetention when the tile goes away or flips.
     @State private var directHLSRetainable = false
+    /// Solo live tile on direct HLS: the server playlist's own sliding
+    /// window (AVPlayer seekableTimeRanges) drives the same Live Rewind
+    /// chrome the remux spill does, so the full transport row shows on
+    /// every live engine (Logan 2026-11-02).
+    @State private var directHLSWindowArmed = false
     /// Identity of the session THIS tile is actually running, snapshotted
     /// at start(). stop() retains under these - NEVER under the struct's
     /// current streamURL/channelID, which a channel-flip onChange has
@@ -6187,8 +6192,9 @@ struct AVPlayerMultiviewTile: View {
             restartAsVideoProgram("Switch to Video Mode")
         }
         .onReceive(NotificationCenter.default.publisher(for: .aerioLiveRewindDropRelay)) { _ in
-            guard liveRewindArmed else { return }
+            guard liveRewindArmed || directHLSWindowArmed else { return }
             liveRewindArmed = false
+            directHLSWindowArmed = false
             driver?.liveRewindWindowActive = false
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             debugLog("[AVP-REWIND] window dropped (second tile)")
@@ -7714,6 +7720,8 @@ struct AVPlayerMultiviewTile: View {
         }
         switch classifyStreamURL(sourceURL) {
         case .hls:
+            directHLSWindowArmed = MultiviewStore.shared.tiles.count == 1
+                && !isVOD && !isDVR && catchup == nil
             // Full headers, not just UA: server-side HLS upgrades hit the
             // same Dispatcharr endpoints as the TS path and expect the
             // same auth.
@@ -7794,6 +7802,13 @@ struct AVPlayerMultiviewTile: View {
             LivePrewarm.shared.cancel(reason: "tile playing direct HLS")
             debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
         default:
+            if directHLSWindowArmed {
+                // Fell back from direct HLS to the remux path: the remux
+                // spill owns the window from here.
+                directHLSWindowArmed = false
+                driver?.liveRewindWindowActive = false
+                LiveRewindEngine.shared.endExternalWindow(owner: tileID)
+            }
             statusText = "Preparing..."
             // Live Rewind (task #145, AVPlayer port 2026-08-27): solo
             // live sessions spill every closed segment to disk and the
@@ -8671,9 +8686,12 @@ struct AVPlayerMultiviewTile: View {
             progressStore.durationMs = cu.programDurationMs
             progressStore.seekAction = { target in performCatchupSeek(target, cu) }
         }
-        if liveRewindArmed, !isVOD, !isDVR {
+        if liveRewindArmed || directHLSWindowArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
             LiveRewindEngine.shared.beginExternalWindow(owner: tileID)
+            if directHLSWindowArmed {
+                debugLog("[AVP-REWIND] direct HLS: server playlist window drives the transport channel=\(channelName)")
+            }
         }
         // MKV-remux tiles: tell the loopback server about every user seek
         // so it can drop the old neighbourhood's span/segment caches
@@ -8969,6 +8987,10 @@ struct AVPlayerMultiviewTile: View {
         if streamFailed, allowRetain, LiveChannelRetention.isEnabled,
            liveRewindArmed || directHLSRetainable {
             debugLog("[AVP-RETAIN] not kept \(sessionRetainName ?? channelName): stream failed")
+        }
+        if directHLSWindowArmed {
+            directHLSWindowArmed = false
+            if !liveRewindArmed { LiveRewindEngine.shared.endExternalWindow(owner: tileID) }
         }
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
