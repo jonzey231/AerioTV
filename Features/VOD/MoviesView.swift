@@ -3450,6 +3450,11 @@ struct MoviesHero: View {
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        // Tapping the artwork opens Details, same as the Info button
+        // (Logan 2026-11-03, Android parity); the buttons in the copy
+        // column take their own taps first, so Resume still plays.
+        .contentShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .onTapGesture(perform: onDetails)
         // On the phone the card deck places the card (its front edge lines
         // up with the library grid, Logan 2026-09-09); iPad's carousel keeps
         // the 16 pt inset.
