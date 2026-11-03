@@ -150,6 +150,9 @@ final class LiveFMP4Remuxer {
     private var emittedSegments = 0
     private var videoParamsSent = false
     private var parsedSPSInfo: HEVCSPSInfo?
+    /// VUI colour description written into the init segment (primaries,
+    /// transfer, matrix), nil when the SPS carried none.
+    private(set) var videoColour: (primaries: Int, transfer: Int, matrix: Int)?
     /// Video sample durations accumulated across segments for the cadence
     /// estimate (needs >= 240 access units, see finalizeSegment).
     private var videoDurationSamples: [Int64] = []
@@ -572,9 +575,17 @@ final class LiveFMP4Remuxer {
             let rough = Double(sorted[sorted.count / 2])
             let kept = sorted.map(Double.init).filter { $0 <= rough * 3 && $0 >= rough / 3 }
             let median = kept.isEmpty ? rough : kept[kept.count / 2]
-            var fps = median > 0 ? Double(Self.ticksPerSecond) / median : 0
-            fps = VideoRateStandards.snap(fps)
-            log("[FMP4] video: \(info.width)x\(info.height) \(String(format: "%.2f", fps))fps \(info.bitDepthLuma)-bit")
+            let measured = median > 0 ? Double(Self.ticksPerSecond) / median : 0
+            // The SPS VUI's declared rate wins: a 4K HDR feed whose PTS
+            // deltas jitter measured 58.82 fps, which missed the 1% snap,
+            // and tvOS had no 58.82 Hz HDR mode for the display criteria,
+            // so the panel stayed 60 Hz SDR (Apple TV 2026-11-02 22:35:12).
+            // Without a declared rate, snap the measurement within 3%.
+            let declared = sps.flatMap { CastVideoCodecConfig.parseHEVCSPS(Array($0))?.fps }
+                .flatMap { $0 > 10 && $0 < 121 ? $0 : nil }
+            let fps = declared.map { VideoRateStandards.snap($0) }
+                ?? VideoRateStandards.snap(measured, tolerance: 0.03)
+            log("[FMP4] video: \(info.width)x\(info.height) \(String(format: "%.2f", fps))fps \(info.bitDepthLuma)-bit (measured \(String(format: "%.2f", measured)), declared \(declared.map { String(format: "%.3f", $0) } ?? "none"))")
             onVideoParameters?(info.width, info.height, fps, info.bitDepthLuma > 8)
         }
         let segment = buildMediaSegment(video: videoQueue, videoDurations: durations, audio: segAudio)
@@ -641,6 +652,22 @@ final class LiveFMP4Remuxer {
         entry.append(Data(count: 32))
         entry.append(Self.u16(0x0018)); entry.append(Self.u16(0xFFFF))
         entry.append(hvcC)
+        // colr (nclx) from the SPS VUI. Without it AVFoundation treats the
+        // track as BT.709 SDR and tone maps a PQ/HLG picture even with the
+        // panel in HDR (Apple TV, 2026-11-02). Same parse the Cast
+        // transcoder uses; omitted when the SPS carries no colour data.
+        if let vui = CastVideoCodecConfig.parseHEVCSPS(Array(s)),
+           let prim = vui.colourPrimaries, let tf = vui.transferCharacteristics,
+           let mat = vui.matrixCoefficients {
+            var colr = Self.bytes("nclx")
+            colr.append(Self.u16(prim)); colr.append(Self.u16(tf)); colr.append(Self.u16(mat))
+            colr.append(vui.fullRange ? 0x80 : 0x00)
+            entry.append(Self.box("colr", colr))
+            videoColour = (prim, tf, mat)
+            log("[FMP4] colr nclx primaries=\(prim) transfer=\(tf) matrix=\(mat) fullRange=\(vui.fullRange)")
+        } else {
+            log("[FMP4] no VUI colour description in the SPS; init carries no colr")
+        }
         let hvc1 = Self.box("hvc1", entry)
         return Self.trak(trackID: Self.videoTrackID, width: info.width, height: info.height,
                          volume: 0, handler: "vide", handlerName: "VideoHandler",

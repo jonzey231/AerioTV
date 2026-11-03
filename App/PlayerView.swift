@@ -5286,6 +5286,8 @@ final class AVPlayerProgressDriver {
     /// the AVPlayer live cushion self-builds (measured up to ~36s on a
     /// starved feed), so "behind live" can only be declared beyond it.
     private var naturalEdgeOffset: Double = 4
+    /// When the user paused a live rewind session (nil while playing).
+    private var userPauseStartedAt: Date?
     /// Host-provided sink for aspect changes (the overlay has no handle
     /// to the AVPlayerLayer; the host owns it and applies the gravity).
     private let applyGravity: (AVLayerVideoGravity) -> Void
@@ -6999,6 +7001,24 @@ final class AVPlayerProgressDriver {
             }
             let resuming = player.timeControlStatus == .paused
             self?.store.noteUserPause(!resuming, positionSeconds: player.currentTime().seconds)
+            // Live Rewind: a pause leaves the playhead behind live, so the
+            // resume is a timeshift and Go Live shows (Android parity: a
+            // pause over 6 s resumes on the buffer at the pause point).
+            // The edge pump only flips after 20 s beyond the cushion, so a
+            // shorter pause resumed behind live with no Go Live (iPad
+            // 2026-11-02 22:39:05 pause, 22:39:16 resume).
+            if let self, self.isLive, self.liveRewindWindowActive {
+                if !resuming {
+                    self.userPauseStartedAt = Date()
+                } else if let started = self.userPauseStartedAt {
+                    self.userPauseStartedAt = nil
+                    let pausedFor = Date().timeIntervalSince(started)
+                    if pausedFor > 6 {
+                        debugLog(String(format: "[AVP-REWIND] resume after %.0fs pause -> timeshifting (Go Live)", pausedFor))
+                        Task { @MainActor in LiveRewindEngine.shared.noteTimeshifting(true) }
+                    }
+                }
+            }
             // Live, no rewind window: a long pause can outlive the sliding
             // playlist; resume at the live edge instead of a dead position.
             if resuming, let self, self.isLive, !self.liveRewindWindowActive,

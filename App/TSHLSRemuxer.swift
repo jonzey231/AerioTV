@@ -7271,8 +7271,15 @@ struct AVPlayerMultiviewTile: View {
            tileError == nil,
            classifyStreamURL(streamURL) == .hls,
            (streamURL.query ?? "").contains("output_format=hls") {
-            HLSCapabilityStore.shared.markNotCapable(streamURL)
+            // A stream AVPlayer cannot render over HLS (no video track:
+            // HEVC in TS segments) says nothing about the host; keep the
+            // host's HLS verdict and route only this channel to the remux.
+            let channelOnly = reason.contains("no renderable video")
+            if !channelOnly { HLSCapabilityStore.shared.markNotCapable(streamURL) }
             let plain = removingHLSOutputFormat(streamURL)
+            if channelOnly {
+                ForceHLSNotHLSMemory.remember(streamURL, channelID: channelID)
+            }
             if PlaybackFeatureFlags.forceHLS {
                 debugLog("[FORCE-HLS] direct HLS FAILED channel=\(channelName) reason=\(reason); falling back to TS remux on host=\(Self.logHostClass(plain)) path=\(Self.logPathKind(plain))")
                 debugLog("[FORCE-HLS] entry is not HLS (AVPlayer: \(reason)); falling back to TS for this tune")
@@ -7705,7 +7712,8 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         var sourceURL = liveSourceURL
-        if PlaybackFeatureFlags.forceHLS, directHLSFallbackURL == nil,
+        if PlaybackFeatureFlags.forceHLS || ForceHLSNotHLSMemory.contains(streamURL, channelID: channelID),
+           directHLSFallbackURL == nil,
            classifyStreamURL(sourceURL) == .hls,
            (sourceURL.query ?? "").contains("output_format=hls"),
            let why = forceHLSBypassReason {
@@ -8473,6 +8481,26 @@ struct AVPlayerMultiviewTile: View {
             if item.status == .readyToPlay {
                 TuneTimeline.shared.mark("ready")
                 debugLog("[AVP-ITEM] AVPlayerItem readyToPlay")
+                // HDR evidence: what AVFoundation decided the video track's
+                // colour is (an SDR transfer here means the picture is tone
+                // mapped no matter what the panel mode is).
+                let videoTracks = item.tracks.filter { $0.assetTrack?.mediaType == .video }
+                if videoTracks.isEmpty {
+                    debugLog("[AVP-HDR] ready with no video track (tracks=\(item.tracks.count))")
+                }
+                for t in videoTracks {
+                    guard let at = t.assetTrack else { continue }
+                    Task {
+                        let fds = (try? await at.load(.formatDescriptions)) ?? []
+                        for fd in fds {
+                            let sub = CMFormatDescriptionGetMediaSubType(fd)
+                            let fourcc = String(bytes: [24, 16, 8, 0].map { UInt8((sub >> $0) & 0xFF) }, encoding: .ascii) ?? "?"
+                            let tf = CMFormatDescriptionGetExtension(fd, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String ?? "none"
+                            let prim = CMFormatDescriptionGetExtension(fd, extensionKey: kCMFormatDescriptionExtension_ColorPrimaries) as? String ?? "none"
+                            debugLog("[AVP-HDR] video track codec=\(fourcc) transfer=\(tf) primaries=\(prim)")
+                        }
+                    }
+                }
                 if PlaybackFeatureFlags.forceHLS,
                    (url.query ?? "").contains("output_format=hls") {
                     // AVPlayer follows the 302 internally; the access log
@@ -8792,8 +8820,21 @@ struct AVPlayerMultiviewTile: View {
             watchdog.audioOnlyAccept = { hasVideo, hasAudio, playing in
                 if AudioOnlyTuneIntent.shared.radioRequested { return "Radio Mode requested" }
                 if DeclaredRadioChannels.shared.contains(memoryKey) { return "declared radio channel" }
-                if AudioOnlyChannelMemory.isRemembered(memoryKey) { return "remembered audio-only" }
-                if !hasVideo, hasAudio, playing { return "no video track" }
+                // A memory entry written by this path (the old "no video
+                // track" accept) is not evidence either: drop it and let the
+                // TS remuxer decide, which remembers under its own key.
+                if AudioOnlyChannelMemory.isRemembered(memoryKey) {
+                    AudioOnlyChannelMemory.forget(memoryKey, reason: "direct HLS entry is not evidence; TS remuxer decides")
+                }
+                // No video track is NOT evidence of radio on direct HLS:
+                // HEVC carried in TS HLS segments is dropped by AVPlayer
+                // (Apple TV 2026-11-02: a 4K HDR HEVC channel came up as
+                // "audio-only program accepted (no video track)" with a
+                // logo and sound). Fall back to the TS remuxer instead; it
+                // reads the PMT and makes the audio-only call itself.
+                if !hasVideo, hasAudio, playing {
+                    debugLog("[FORCE-HLS] ready with audio but no video track channel=\(name); handing the tune to the TS remuxer")
+                }
                 return nil
             }
             watchdog.onAudioOnlyAccepted = { why in
@@ -8805,9 +8846,6 @@ struct AVPlayerMultiviewTile: View {
                 }
                 MultiviewStore.shared.registerVideoAspect(16.0 / 9.0, for: tileID)
                 // Radio Mode tunes are audio by request, not evidence.
-                if why == "no video track" || why == "remembered audio-only" {
-                    AudioOnlyChannelMemory.remember(memoryKey)
-                }
             }
         }
         #if os(iOS)
