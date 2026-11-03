@@ -2,7 +2,27 @@
 
 ## Unreleased
 
+### Added
+
+- Set up another device: every AerioTV device can now receive a setup, not
+  only TVs. iPhone, iPad, and Apple TV gain "Set up from another device" on
+  Welcome (and in Add Playlist on iPhone and iPad), so a playlist and its
+  profiles come over without typing. Apple TV was planned before and is now
+  a receiver too. Senders show each waiting device with a phone, tablet, or
+  TV icon from a new `kind` advert key.
+- The sender first asks "Copy entire setup from this device" (default) or
+  "Import this user only". After a setup arrives, the receiver continues to
+  the Add Profiles step so other users can be added as in onboarding.
+- Show Dispatcharr User QR Code: next to Scan QR Code and Choose from
+  Photos, shows the profile's Dispatcharr user code so another device can
+  scan it. A Device Admin PIN or profile PIN is asked first when set; the
+  code stays blurred until tapped, hides after 60 seconds or in the
+  background, and blanks while the screen is recorded or shared.
+
 ### Changed
+
+- "Set up a TV" is now "Set up another device", and "Set up from your
+  phone" is now "Set up from another device".
 
 - Guide category tints for what is airing now come from one programs search
   request instead of one detail request per program (about 280 on a cold
@@ -10,6 +30,8 @@
 
 ### Server paths
 
+- Set up another device and Show Dispatcharr User QR Code add no server
+  paths; both work on the local network or on the device only.
 - New: `GET /api/epg/programs/search/` (`airing_at`, `fields`, `page_size`,
   `page`), covered by the existing `/api/*` rule.
 
