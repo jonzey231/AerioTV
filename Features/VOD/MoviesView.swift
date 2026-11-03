@@ -883,11 +883,22 @@ struct MoviesView: View {
             isPlaying = true
             return
         }
-        // Fallback: find the title in the catalog and push to its detail view
+        // No stored URL (a progress row synced from another device, or one
+        // saved before the URL was kept): movies resolve the catalog title
+        // and play it at the saved position, as Android's media hero does
+        // (Resume goes straight to the player). Only a title with no
+        // playable URL, and series, still open the details.
         if let key = heroKey(progress) {
             let k = kind
+            let startMs = startAt ?? progress.positionMs
             Task { @MainActor in
-                if let item = await vodStore.items(kind: k, ids: [key])[key] { navPath.append(item) }
+                guard let item = await vodStore.items(kind: k, ids: [key])[key] else { return }
+                if k == .movie {
+                    debugLog("[VOD-RESUME] continue watching row has no URL, playing catalog title id=\(key) at \(startMs)ms")
+                    playMovie(item, resumePositionMs: startMs)
+                } else {
+                    navPath.append(item)
+                }
             }
         }
     }
