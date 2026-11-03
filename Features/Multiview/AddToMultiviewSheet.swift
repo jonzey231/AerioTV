@@ -281,7 +281,14 @@ struct AddToMultiviewSheet: View {
 
                 iPadContent
             }
-            .searchable(text: $searchText, prompt: iPadSearchPrompt)
+            // Drawer placement: on iPadOS 27 the default placement floats
+            // the search field over the top of the content, which hid
+            // the source pill bar (Channels / Movies / Series /
+            // Recordings) underneath it. The drawer lays the content out
+            // below the field.
+            .searchable(text: $searchText,
+                        placement: .navigationBarDrawer(displayMode: .always),
+                        prompt: iPadSearchPrompt)
             .navigationTitle("Add to Multiview")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
