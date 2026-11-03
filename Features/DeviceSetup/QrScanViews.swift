@@ -260,6 +260,9 @@ struct QrScanActions: View {
     @State private var pendingDelete: ImportSource?
     /// Delivered by the camera screen; handled once its cover is gone.
     @State private var fromScanner: (ScannedCode.Result, ImportSource?)?
+    /// Picker the camera screen asked for (true Photos, false file); opened
+    /// from this form once the camera cover is gone.
+    @State private var pickerAfterScanner: Bool?
 
     var body: some View {
         VStack(alignment: linksOnly ? .center : .leading, spacing: linksOnly ? 2 : 6) {
@@ -288,11 +291,19 @@ struct QrScanActions: View {
         .onChange(of: scanTrigger) { _, n in if n > 0 { error = nil; scanning = true } }
         .fullScreenCover(isPresented: $scanning, onDismiss: {
             if let (r, src) = fromScanner { fromScanner = nil; finish(r, src) }
+            if let photos = pickerAfterScanner {
+                pickerAfterScanner = nil
+                debugLog("[SETUP-QR] scanner closed; opening \(photos ? "Photos" : "file") picker from the form")
+                if photos { showPhotos = true } else { showFile = true }
+            }
         }) {
-            QrScanScreen(prompt: prompt, validate: accept) { r, src in
+            QrScanScreen(prompt: prompt, validate: accept, onResult: { r, src in
                 fromScanner = (r, src)
                 scanning = false
-            } onCancel: { scanning = false }
+            }, onCancel: { scanning = false }, onPickerRequest: { photos in
+                pickerAfterScanner = photos
+                scanning = false
+            })
         }
         .alert(pendingDelete?.isPhoto == true ? "Delete this image from Photos? It contains your sign-in code."
                                               : "Delete this file? It contains your sign-in code.",
@@ -361,6 +372,13 @@ struct QrScanScreen: View {
     let validate: (ScannedCode.Result) -> String?
     let onResult: (ScannedCode.Result, ImportSource?) -> Void
     let onCancel: () -> Void
+    /// When set, "Choose from Photos" (true) and "Import file" (false) are
+    /// handed to the presenter, which closes this cover and opens the picker
+    /// itself. A picker sheet presented over this full-screen cover was
+    /// dismissed about 0.75 s after it appeared when the cover sat inside
+    /// another sheet (Settings > Add Playlist): the cover content was rebuilt
+    /// as the picker presented, taking the picker with it.
+    var onPickerRequest: ((Bool) -> Void)? = nil
 
     @State private var granted = AVCaptureDevice.authorizationStatus(for: .video) == .authorized
     @State private var asked = false
@@ -406,8 +424,14 @@ struct QrScanScreen: View {
                             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                         }
                     }
-                    scannerButton("Choose from Photos", filled: true, loading: busy) { error = nil; showPhotos = true }
-                    scannerButton("Import file", filled: true) { error = nil; showFile = true }
+                    scannerButton("Choose from Photos", filled: true, loading: busy) {
+                        error = nil
+                        if let hand = onPickerRequest { hand(true) } else { showPhotos = true }
+                    }
+                    scannerButton("Import file", filled: true) {
+                        error = nil
+                        if let hand = onPickerRequest { hand(false) } else { showFile = true }
+                    }
                     scannerButton("Cancel", filled: false, action: onCancel)
                 }
                 .frame(maxWidth: 480)
