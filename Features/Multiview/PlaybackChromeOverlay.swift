@@ -406,9 +406,30 @@ struct PlaybackChromeOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
+                // No rewind window (direct HLS live never arms one): the
+                // band alone had no Pause, so the transport row vanished
+                // on those sessions. Pause/Resume rides the audio tile's
+                // progress store exactly as on the rewind bar.
                 VStack(spacing: 8) {
                     liveProgressBand
-                    streamReadout_iOS
+                    if let ps = store.audioProgressStore, store.tiles.count == 1 {
+                        ProgressStoreReader(progress: ps) { p in
+                            Button {
+                                p.userTogglePause()
+                            } label: {
+                                Image(systemName: p.isPaused ? "play.fill" : "pause.fill")
+                                    .font(.system(size: 20, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
+                                    .foregroundStyle(.white)
+                                    .frame(width: 44, height: 44)
+                                    .background(Color.black.opacity(0.55), in: Circle())
+                            }
+                            .accessibilityLabel(p.isPaused ? "Play" : "Pause")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .overlay(alignment: .bottom) { streamReadout_iOS }
+                    } else {
+                        streamReadout_iOS
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
