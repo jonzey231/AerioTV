@@ -6238,7 +6238,9 @@ struct AVPlayerMultiviewTile: View {
                 return
             }
             #endif
-            debugLog("[AVP-MV] tile playback failed channel=\(channelName); falling back to mpv tile")
+            let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
+            let lastEvent = failed.errorLog()?.events.last
+            debugLog("[AVP-MV] tile playback failed channel=\(channelName) error=\(err?.domain ?? "none")/\(err?.code ?? 0) log=\(lastEvent?.errorDomain ?? "none")/\(lastEvent?.errorStatusCode ?? 0) \(lastEvent?.errorComment ?? ""); falling back to mpv tile")
             failOrFallback("playback failed")
         }
     }

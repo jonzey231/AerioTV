@@ -7035,6 +7035,29 @@ final class AVPlayerProgressDriver {
                     return
                 }
             }
+            // Live with a server playlist window (direct HLS): the window is
+            // only a few segments long, so a pause longer than the window
+            // leaves the playhead behind its start and the item fails with
+            // -12640 "Cannot get that close to live" (iPad 2026-11-02
+            // 23:30:24 resume after 19 s, item failed 23:30:26). Resume at
+            // the oldest position still in the window: still behind live,
+            // Go Live stays on.
+            if resuming, let self, self.isLive, self.liveRewindWindowActive,
+               let item = player.currentItem,
+               let range = item.seekableTimeRanges.last?.timeRangeValue {
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                let cur = player.currentTime().seconds
+                if start.isFinite, end.isFinite, cur.isFinite, cur < start + 1 {
+                    let target = max(start, min(start + 3, end - 6))
+                    debugLog(String(format: "[PLAYER] user resume -> window start (paused past the window) pos=%.1fs window=%.1f-%.1fs target=%.1fs", cur, start, end, target))
+                    self.expectPlaying = true
+                    player.seek(to: CMTime(seconds: target, preferredTimescale: 600)) { _ in
+                        player.play()
+                    }
+                    return
+                }
+            }
             if let self, self.store.isDVRWindow {
                 // GH #93 instrumentation: position and buffered-ahead at
                 // every DVR pause/resume, so a post-resume freeze can be
