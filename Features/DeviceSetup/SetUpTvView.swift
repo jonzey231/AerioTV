@@ -27,6 +27,8 @@ struct SetUpTvView: View {
         case pick
         /// First step for a target: copy everything, or this user only.
         case scope(SetupTarget, String?)
+        /// "Import this user only" and the active profile has no sign-in saved here.
+        case credential(SetupTarget, String?, DispatcharrProfile)
         case code(SetupTarget, String?)
         case choose(SetupTarget, String)
         case sending
@@ -81,6 +83,15 @@ struct SetUpTvView: View {
         switch step {
         case .pick: pickStep
         case .scope(let t, let c): scopeStep(t, c)
+        case .credential(let t, let c, let p):
+            // The roster's credential prompt, word for word; cancel returns to the choice.
+            CredentialStep(title: "Add \(p.username)", username: p.username, onCancel: { step = .scope(t, c) }) { pw, key in
+                do {
+                    try await ProfileManager.shared.saveSignIn(p.playlistId, profileId: p.id, password: pw, apiKey: key)
+                    step = c.map { .choose(t, $0) } ?? .code(t, nil)
+                    return nil
+                } catch { return error.localizedDescription }
+            }
         case .code(let t, let err): codeStep(t, err)
         case .choose(let t, let c): chooseStep(t, c)
         case .sending:
@@ -156,7 +167,13 @@ struct SetUpTvView: View {
             }
             .padding(8)
             .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            PrimaryButton("Continue") { step = code.map { .choose(t, $0) } ?? .code(t, nil) }
+            PrimaryButton("Continue") {
+                if userOnly, let pl = playlist, let p = SetupSender.userOnlyMissingSignIn(pl) {
+                    step = .credential(t, code, p)
+                } else {
+                    step = code.map { .choose(t, $0) } ?? .code(t, nil)
+                }
+            }
         }
     }
 
@@ -271,6 +288,7 @@ struct SetUpTvView: View {
         case .choose(let t, let c):
             if t.code != nil { step = playlist?.type == .dispatcharrAPI ? .scope(t, c) : .pick } else { step = .code(t, nil) }
         case .code(let t, _): step = playlist?.type == .dispatcharrAPI ? .scope(t, nil) : .pick
+        case .credential(let t, let c, _): step = .scope(t, c)
         case .error(_, let b):
             switch b {
             case .pick: step = .pick
@@ -322,6 +340,7 @@ struct SetUpTvView: View {
         case .code(let t, _): current = t
         case .choose(let t, _): current = t
         case .scope(let t, _): current = t
+        case .credential(let t, _, _): current = t
         default: current = nil
         }
         guard let t = current else { return }

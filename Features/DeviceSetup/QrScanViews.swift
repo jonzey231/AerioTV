@@ -289,13 +289,13 @@ struct QrScanActions: View {
                     actionButton("Scan QR code", icon: "qrcode.viewfinder") { error = nil; scanning = true }
                     actionButton("Choose from Photos", icon: "photo.on.rectangle", loading: busy) { error = nil; showPhotos = true }
                 }
+                actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
                 if let t = userQrTarget {
                     actionButton("Show Dispatcharr User QR Code", icon: "qrcode") { error = nil; showingUserQr = t }
                         .fullScreenCover(item: $showingUserQr) { t in
                             UserQrCover(playlistId: t.playlistId, profileId: t.profileId) { showingUserQr = nil }
                         }
                 }
-                actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
             }
             if let error {
                 Text(error)

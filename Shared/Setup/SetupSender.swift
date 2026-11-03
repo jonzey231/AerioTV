@@ -338,6 +338,17 @@ enum SetupSender {
 
     /// "Import this user only": the playlist signs in as the active profile, which
     /// goes out as the payload's one (default) profile. Wire format unchanged.
+    /// The active profile when "Import this user only" needs a sign-in first: not
+    /// the default (it uses the playlist login) and nothing saved here.
+    @MainActor
+    static func userOnlyMissingSignIn(_ server: ServerConnection) -> DispatcharrProfile? {
+        guard server.type == .dispatcharrAPI else { return nil }
+        let pm = ProfileManager.shared
+        guard let p = pm.activeProfile(server.id.uuidString), !p.isDefault else { return nil }
+        let has = (pm.store.apiKey(p.id) ?? "").isEmpty == false || (pm.store.password(p.id) ?? "").isEmpty == false
+        return has ? nil : p
+    }
+
     @MainActor
     static func buildUserOnlyPayload(_ server: ServerConnection, turnOnSync: Bool) -> SetupProtocol.Payload {
         var full = buildPayload(server, profileIds: [], turnOnSync: turnOnSync)

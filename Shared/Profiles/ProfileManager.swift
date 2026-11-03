@@ -935,6 +935,19 @@ final class ProfileManager: ObservableObject {
         debugLog("[SETUP] profile applied \(Self.tag(id)) default=\(isDefault)")
     }
 
+    /// Save a sign-in for an existing profile that has none here (validated by one sign-in).
+    func saveSignIn(_ playlistId: String, profileId: String, password: String?, apiKey: String?) async throws {
+        guard let server = DsyncLocal.server(playlistId), let p = store.byId(profileId) else { throw fail("Profile not found") }
+        let auth = try await authenticate(server, username: p.username, password: password, apiKey: apiKey)
+        guard auth.me.username.caseInsensitiveCompare(p.username) == .orderedSame else {
+            throw fail("This API key belongs to \(auth.me.username), not \(p.username).")
+        }
+        store.setApiKey(profileId, auth.key)
+        store.setPassword(profileId, password)
+        publish()
+        debugLog("[PROFILE] sign-in saved for \(Self.tag(profileId))")
+    }
+
     /// Onboarding manual add: the profile just created here may be removed (its undo writes the tombstone).
     func markFreshAddUndoable(_ profileId: String) {
         freshUndoable.insert(profileId)
