@@ -1942,8 +1942,12 @@ struct DispatcharrAccountFacts: Codable, Equatable {
 }
 
 enum DispatcharrAccountFactsStore {
+    /// Per profile, as Android keeps the facts in its profile-scoped store:
+    /// a non-default profile's username and Channel Profiles live under
+    /// "@<profileId>", so the permissions section names the active
+    /// profile's user, not the playlist's own credential.
     private static func key(_ serverID: UUID) -> String {
-        "dispatcharrAccountFacts.\(serverID.uuidString)"
+        "dispatcharrAccountFacts.\(serverID.uuidString)" + ProfileOverlay.cacheSuffix(serverID.uuidString)
     }
 
     static func load(_ serverID: UUID) -> DispatcharrAccountFacts {

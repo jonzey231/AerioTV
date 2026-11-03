@@ -886,7 +886,7 @@ struct ServerDetailView: View {
                             .foregroundColor(Color.contrastText(.textSecondary))
                     }
                 } else {
-                    let account = facts.username.isEmpty ? server.username : facts.username
+                    let account = facts.username.isEmpty ? activeAccountUsername : facts.username
                     TVSettingsReadOnlyCard {
                         if !account.isEmpty {
                             infoRow("Account", value: account)
@@ -910,7 +910,7 @@ struct ServerDetailView: View {
                         permissionRow("Switch Stream",
                                       value: caps.canSwitchStream.isAllowed ? "Allowed" : "Not Allowed",
                                       allowed: caps.canSwitchStream.isAllowed)
-                        if let fetched = server.dispatcharrPermissionsFetchedAt,
+                        if let fetched = caps.fetchedAt,
                            fetched.timeIntervalSince1970 > 0 {
                             infoRow("Last Checked",
                                     value: fetched.formatted(.relative(presentation: .named)))
@@ -1140,6 +1140,15 @@ struct ServerDetailView: View {
         dispatcharrPermissionsSection
     }
 
+    /// The username the active profile signs in as: a non-default profile
+    /// names its own Dispatcharr user, the default the playlist's credential.
+    private var activeAccountUsername: String {
+        if let p = ProfileManager.shared.activeProfile(server.id.uuidString), !p.isDefault, !p.username.isEmpty {
+            return p.username
+        }
+        return server.username
+    }
+
     @ViewBuilder
     private var dispatcharrPermissionsSection: some View {
         if server.type == .dispatcharrAPI {
@@ -1151,7 +1160,7 @@ struct ServerDetailView: View {
                         .scaledFont(.bodyMedium.subtext())
                         .foregroundColor(Color.contrastText(.textSecondary))
                 } else {
-                    let account = facts.username.isEmpty ? server.username : facts.username
+                    let account = facts.username.isEmpty ? activeAccountUsername : facts.username
                     if !account.isEmpty {
                         infoRow("Account", value: account)
                     }
@@ -1172,7 +1181,7 @@ struct ServerDetailView: View {
                     permissionRow("Switch Stream",
                                   value: caps.canSwitchStream.isAllowed ? "Allowed" : "Not Allowed",
                                   allowed: caps.canSwitchStream.isAllowed)
-                    if let fetched = server.dispatcharrPermissionsFetchedAt,
+                    if let fetched = caps.fetchedAt,
                        fetched.timeIntervalSince1970 > 0 {
                         infoRow("Last Checked",
                                 value: fetched.formatted(.relative(presentation: .named)))

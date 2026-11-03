@@ -170,6 +170,7 @@ final class ProfileManager: ObservableObject {
         store.upsert(next)
         followServerRole(p.id, me.effectiveUserLevel)
         publish()
+        await saveAccountFacts(server, key: key, me: me)
         debugLog("[PERMS] profile probe OK \(Self.tag(p.id)) level=\(next.userLevel) dvr=\(next.dvrAccess.isEmpty ? "default" : next.dvrAccess) catchup=\(next.catchupEnabled) vod=\(next.vodMoviesEnabled) series=\(next.vodSeriesEnabled) changed=\(changed) reason=\(reason)")
         if changed { NotificationCenter.default.post(name: .dispatcharrCapabilitiesDidChange, object: nil) }
         return true
@@ -342,6 +343,21 @@ final class ProfileManager: ObservableObject {
     }
 
     private struct Auth { let key: String; let me: DispatcharrUser }
+
+    /// The active profile's display facts (username, Channel Profile names)
+    /// for the Playlist Detail permissions section. Call after publish() so
+    /// the store keys on the active profile (Android: profile-scoped facts).
+    private func saveAccountFacts(_ server: ServerConnection, key: String, me: DispatcharrUser) async {
+        var facts = DispatcharrAccountFacts()
+        facts.username = me.username
+        if !me.channelProfiles.isEmpty,
+           let profiles = try? await api(server, key: key).listChannelProfiles() {
+            facts.profileNames = me.channelProfiles.compactMap { id in
+                profiles.first(where: { $0.id == id })?.name
+            }
+        }
+        DispatcharrAccountFactsStore.save(facts, for: server.id)
+    }
 
     /// Sign in as one user: a stored API key first with one GET /me/, then the
     /// password login (POST token + GET me) when the key is missing, rejected,
@@ -1118,6 +1134,9 @@ final class ProfileManager: ObservableObject {
         let sw = settings.swap(from: from?.id, to: target.id)
         store.setActiveProfileId(playlistId, target.isDefault ? nil : target.id)
         publish()
+        if !target.isDefault, let key = store.apiKey(target.id), let me = await fetchMe(server, key) {
+            await saveAccountFacts(server, key: key, me: me)
+        }
         // After the overlay moved, so iCloud (default profile only) never sees the incoming data as a change.
         data.swap(playlistId, from: from?.id, to: target.id)
         // The swap wrote UserDefaults directly; the in-memory settings holders
