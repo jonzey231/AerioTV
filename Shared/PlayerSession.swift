@@ -894,7 +894,15 @@ final class PlayerSession: ObservableObject {
             }
             debugLog("[FORCE-HLS] channel=\(item.name) not a Dispatcharr Direct Connect TS channel (server=\(server.map { "\($0.type)" } ?? "none")); toggle ignored")
         }
-        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr {
+        // Force HLS off (Android parity, ForceHls.kt): a raw TS channel is
+        // never upgraded to the server's HLS output on the strength of a
+        // saved "host can do HLS" verdict. iPad simulator 2026-11-03: with
+        // Force HLS off a tune still logged "tile playing direct HLS" from
+        // the cached verdict. The upgrade now happens only when Force HLS is
+        // on (handled above); a server that itself redirects to HLS is still
+        // followed downstream.
+        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr,
+           PlaybackFeatureFlags.forceHLS {
             // Tune time (Apple TV review 2026-09-11 section 1 proposal 1;
             // session.txt:259-261, 724-728, 1568-1570): this used to call
             // HLSCapabilityStore.probeBlocking, which parks the MAIN ACTOR
