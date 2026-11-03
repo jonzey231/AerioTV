@@ -395,6 +395,17 @@ struct SearchView: View {
         if embedsInTabChrome, prog.isLive {
             debugLog("[SEARCH] live result: channel not in the loaded list")
         }
+        #else
+        // iPhone and iPad (Android f08ebb04 parity): a live airing plays its
+        // channel instead of jumping to the guide. Entering the player
+        // closes Search on these platforms (standing rule 2026-09-16).
+        if prog.isLive, let ch = channelsByID[prog.channelID], !ch.streamURLs.isEmpty {
+            debugLog("[SEARCH] live result: open channel")
+            if let onClose { onClose() } else { dismiss() }
+            NotificationCenter.default.post(name: .aerioOpenChannel, object: nil,
+                                            userInfo: ["channelID": ch.id])
+            return
+        }
         #endif
         jumpToGuide(prog)
     }
