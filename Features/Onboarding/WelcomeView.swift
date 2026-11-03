@@ -38,6 +38,8 @@ struct WelcomeView: View {
         case roleStep(String, auto: Bool)
         /// "Who watches on this iPhone?" closes the Dispatcharr chain.
         case addProfiles(String)
+        /// "Set up from another device": this device receives a playlist and profiles.
+        case receiveSetup
     }
     @State private var stage: Stage = .welcome
 
@@ -73,7 +75,7 @@ struct WelcomeView: View {
     #endif
 
     #if os(tvOS)
-    private enum Field: Hashable { case connect, cloudSync, dispatcharr, proceed, skip }
+    private enum Field: Hashable { case receive, connect, cloudSync, dispatcharr, proceed, skip }
     @FocusState private var focus: Field?
     #endif
 
@@ -206,6 +208,15 @@ struct WelcomeView: View {
                 debugLog("[SYNC] chain: Dispatcharr Sync step (childOnly=\(child))")
                 stage = .dispatcharrSync(auto: auto)
             }
+        case .receiveSetup:
+            ReceiveSetupView(
+                onCancel: {
+                    hold.end("receive setup cancelled")
+                    stage = .welcome
+                },
+                onDone: { finish("set up from another device") }
+            )
+            .navigationBarHidden(true)
         case .addProfiles(let pid):
             AddProfilesStepView(playlistId: pid, onboarding: true, onSetUpTv: setUpTvAction(pid)) {
                 finish("add profiles done")
@@ -276,7 +287,7 @@ struct WelcomeView: View {
         }
         .navigationBarHidden(true)
         #if os(tvOS)
-        .defaultFocus($focus, .connect)
+        .defaultFocus($focus, .receive)
         // Menu at the top of setup never closes the app.
         .onExitCommand { }
         #endif
@@ -340,17 +351,22 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: isTV ? 16 : 10) {
             OnboardingSectionLabel("Start here")
 
+            // TV: first and highlighted (Android). Phone and tablet: after Connect a Server.
+            if isTV { receiveCard }
+
             OnboardingActionCard(
                 icon: "server.rack",
                 title: "Connect a Server",
                 detail: connectDetail,
-                highlighted: true
+                highlighted: !isTV
             ) {
                 startConnect(type: nil, enableSync: false)
             }
             #if os(tvOS)
             .focused($focus, equals: .connect)
             #endif
+
+            if !isTV { receiveCard }
 
             OnboardingSectionLabel("Keep your devices in sync")
                 .padding(.top, isTV ? 20 : 14)
@@ -419,6 +435,22 @@ struct WelcomeView: View {
                 .padding(.top, isTV ? 16 : 10)
             }
         }
+    }
+
+    /// "Set up from another device" (docs/DeviceSetupHandoff.md): every platform receives.
+    private var receiveCard: some View {
+        OnboardingActionCard(
+            icon: "iphone.radiowaves.left.and.right",
+            title: ReceiveSetupView.title,
+            detail: "Fastest. On your other device, scan the code on the next screen, tap the banner on the Live TV tab, or navigate to Settings. Your playlist, profiles, and preferences come over in one step.",
+            highlighted: isTV
+        ) {
+            hold.begin("receive setup")
+            stage = .receiveSetup
+        }
+        #if os(tvOS)
+        .focused($focus, equals: .receive)
+        #endif
     }
 
     // MARK: - Welcome chain (WelcomeSyncChain)

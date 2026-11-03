@@ -61,6 +61,8 @@ struct AddServerView: View {
     @State private var showScanDetails = false
     /// Settings > Add Playlist from a user QR: the restore offer over the sync screen.
     @State private var qrRestoreSignIn: QrImportBus.SignIn?
+    /// "Set up from another device" from Settings > Add Playlist.
+    @State private var showReceiveSetup = false
     #endif
 
     enum XMLTVTestState: Equatable {
@@ -262,6 +264,23 @@ struct AddServerView: View {
             dispatcharrHeroCard
 
             otherSourceTypes
+
+            #if os(iOS)
+            // Settings > Add Playlist: receive from another device (Welcome has its own card).
+            if !isOnboarding {
+                OnboardingActionCard(
+                    icon: "iphone.radiowaves.left.and.right",
+                    title: ReceiveSetupView.title,
+                    detail: "Fastest. On your other device, scan the code on the next screen, tap the banner on the Live TV tab, or navigate to Settings. Your playlist, profiles, and preferences come over in one step."
+                ) {
+                    showReceiveSetup = true
+                }
+                .fullScreenCover(isPresented: $showReceiveSetup) {
+                    ReceiveSetupView(onCancel: { showReceiveSetup = false },
+                                     onDone: { showReceiveSetup = false; dismiss() })
+                }
+            }
+            #endif
 
             if isOnboarding && isTV {
                 tvFooter

@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		74ABA3546724390FC9E98E47 /* ReceiveSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */; };
+		C2468A7914D98AAC3893C0B7 /* ReceiveSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */; };
+		A16708AB33C773863EA22F90 /* SetupReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4A99C7C2AFF25536FB9F750 /* SetupReceiver.swift */; };
+		1E653DB5BE09D697E0C5F44A /* SetupReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4A99C7C2AFF25536FB9F750 /* SetupReceiver.swift */; };
 		840687943FCCCE62BDED11A2 /* SetUpTvView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */; };
 		61AC54DD611AB8A912D13900 /* SetUpTvView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */; };
 		E3A2ED87A113140BDF2CF848 /* QrScanViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CC018C28968E4CD360302C /* QrScanViews.swift */; };
@@ -431,6 +435,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReceiveSetupView.swift; sourceTree = "<group>"; };
+		F4A99C7C2AFF25536FB9F750 /* SetupReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupReceiver.swift; sourceTree = "<group>"; };
 		6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetUpTvView.swift; sourceTree = "<group>"; };
 		40CC018C28968E4CD360302C /* QrScanViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QrScanViews.swift; sourceTree = "<group>"; };
 		8B56507D6BBD6E556B2B44EF /* SetupSender.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupSender.swift; sourceTree = "<group>"; };
@@ -711,6 +717,7 @@
 			isa = PBXGroup;
 			children = (
 				40CC018C28968E4CD360302C /* QrScanViews.swift */,
+				D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */,
 				6049EA3DC1A81A2E91D76D23 /* SetUpTvView.swift */,
 			);
 			path = DeviceSetup;
@@ -720,6 +727,7 @@
 			isa = PBXGroup;
 			children = (
 				DCB8724FB2417E85C6830222 /* SetupProtocol.swift */,
+				F4A99C7C2AFF25536FB9F750 /* SetupReceiver.swift */,
 				8B56507D6BBD6E556B2B44EF /* SetupSender.swift */,
 			);
 			path = Setup;
@@ -1519,6 +1527,8 @@
 			files = (
 				61AC54DD611AB8A912D13900 /* SetUpTvView.swift in Sources */,
 				169119F5C074E675E5D95C35 /* QrScanViews.swift in Sources */,
+				74ABA3546724390FC9E98E47 /* ReceiveSetupView.swift in Sources */,
+				A16708AB33C773863EA22F90 /* SetupReceiver.swift in Sources */,
 				87EF48431B1FC52F768BA18A /* SetupSender.swift in Sources */,
 				A033846791D84DCD15BE0E86 /* SetupProtocol.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DB60 /* AudioOnlySampleClock.swift in Sources */,
@@ -1703,6 +1713,8 @@
 			files = (
 				840687943FCCCE62BDED11A2 /* SetUpTvView.swift in Sources */,
 				E3A2ED87A113140BDF2CF848 /* QrScanViews.swift in Sources */,
+				C2468A7914D98AAC3893C0B7 /* ReceiveSetupView.swift in Sources */,
+				1E653DB5BE09D697E0C5F44A /* SetupReceiver.swift in Sources */,
 				7F69C24644D6250EDA4FE939 /* SetupSender.swift in Sources */,
 				89D0668D36AB27D423AA395F /* SetupProtocol.swift in Sources */,
 				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,

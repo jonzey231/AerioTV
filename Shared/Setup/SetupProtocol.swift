@@ -117,6 +117,14 @@ enum SetupProtocol {
     static let txtVersion = "v"
     static let txtName = "name"
     static let txtPk = "pk"
+    /// Receiver form factor: phone, tablet, or tv. Absent (older builds) = tv.
+    static let txtKind = "kind"
+
+    enum Kind: String, Sendable {
+        case phone, tablet, tv
+        /// Absent or unknown TXT value: older receivers were TVs only.
+        static func fromTxt(_ s: String?) -> Kind { s.flatMap { Kind(rawValue: $0.lowercased()) } ?? .tv }
+    }
     static let windowSeconds: TimeInterval = 10 * 60
     static let maxFailures = 3
     /// Encoded POST body limit (the TV answers 413 above it).

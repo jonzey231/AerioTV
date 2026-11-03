@@ -906,6 +906,35 @@ final class ProfileManager: ObservableObject {
         return store.byId(added.id) ?? added
     }
 
+    /// "Set up from another device" (docs/DeviceSetupHandoff.md, Receiver apply;
+    /// Android ProfileManager.applySetupProfile): the default profile takes the
+    /// sent name, role, avatar, order, and PIN; any other profile goes through
+    /// the roster add path (one sign-in with the sent credential), then its PIN.
+    func applySetupProfile(_ playlistId: String, row: ProfileRow, isDefault: Bool, password: String?, apiKey: String?) async throws {
+        guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        await ensureDefaultProfile(server)
+        let id: String
+        if isDefault {
+            guard let base = store.forPlaylist(playlistId).first(where: \.isDefault) else { throw fail("Profile not found") }
+            store.update(base.id) { ProfileRoster.applyRow($0, row) }
+            id = base.id
+        } else if let existing = store.forPlaylist(playlistId).first(where: { $0.username.caseInsensitiveCompare(row.username) == .orderedSame }) {
+            store.update(existing.id) { ProfileRoster.applyRow($0, row) }
+            id = existing.id
+        } else {
+            let added = try await addProfile(playlistId, user: DispatcharrUserSummary(id: 0, username: row.username),
+                                             password: password, apiKey: apiKey, role: ProfileRole.fromWire(row.role), seed: row)
+            id = added.id
+        }
+        if let type = PinRules.typeFromWire(row.pinType), row.pinHash.count == 64, !row.pinSalt.isEmpty {
+            pinStore.importSynced(id, type, hash: row.pinHash, salt: row.pinSalt)
+            pendingPinAdds.remove(id)
+        }
+        refreshActiveRole()
+        publish()
+        debugLog("[SETUP] profile applied \(Self.tag(id)) default=\(isDefault)")
+    }
+
     /// Onboarding manual add: the profile just created here may be removed (its undo writes the tombstone).
     func markFreshAddUndoable(_ profileId: String) {
         freshUndoable.insert(profileId)
