@@ -597,7 +597,7 @@ struct VODDetailView: View {
         guard usesTVMovieLayout, tmdbBackdropURL == nil,
               TMDBArtCache.shared.backdropURL(for: item) == nil,
               TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
-        tmdbBackdropURL = await TMDBService.backdropURL(forTitle: item.displayName, isMovie: item.type == .movie, apiKey: apiKey)
+        tmdbBackdropURL = await TMDBService.backdropURL(for: item, apiKey: apiKey)
     }
 
     // Server-wins merges (provider value first, TMDB backfill for blanks),

@@ -1441,6 +1441,24 @@ struct VODDisplayItem: Identifiable, Hashable, Codable {
     /// 2026-09-04). The raw `name` stays for matching and search.
     var displayName: String { VODDisplayItem.cleanDisplayName(name) }
 
+    /// TMDB query title: the display name plus its year as "(YYYY)", which
+    /// the TMDB lookups turn into a year filter or preference. The year in
+    /// the provider name wins (it is what the server matched), then the
+    /// row's release year. displayName alone dropped the year, so "#Unknown
+    /// (2022)" matched the 2011 film (iPad 2026-11-03).
+    var tmdbSearchTitle: String {
+        let base = displayName
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var year: String?
+        if let r = trimmed.range(of: #"\((19|20)\d{2}\)"#, options: [.regularExpression, .backwards]) {
+            year = String(trimmed[r].dropFirst().dropLast())
+        } else if releaseYear.count == 4, Int(releaseYear) != nil {
+            year = releaseYear
+        }
+        guard let y = year else { return base }
+        return "\(base) (\(y))"
+    }
+
     /// Provider names carry a leading language code ("EN - Title"), trailing
     /// "(YYYY)", region/language groups "(GB)", "(ES)", "(DUAL/ES)",
     /// "(MULTI)" and quality brackets "[1080p]" (Logan 2026-09-04). All of

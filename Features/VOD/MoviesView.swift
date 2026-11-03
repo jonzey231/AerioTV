@@ -1218,10 +1218,9 @@ struct MoviesView: View {
         guard TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
         let missing = pages.filter { heroBackdrops[$0.item.id] == nil && TMDBArtCache.shared.backdropURL(for: $0.item) == nil }
         guard !missing.isEmpty else { return }
-        let isMovie = kind == .movie
         Task { @MainActor in
             for page in missing {
-                if let url = await TMDBService.backdropURL(forTitle: page.item.displayName, isMovie: isMovie, apiKey: apiKey) {
+                if let url = await TMDBService.backdropURL(for: page.item, apiKey: apiKey) {
                     heroBackdrops[page.item.id] = url
                 }
             }

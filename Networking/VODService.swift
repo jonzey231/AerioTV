@@ -1125,6 +1125,18 @@ enum TMDBService {
 
     nonisolated(unsafe) private static let backdropCache = NSCache<NSString, NSString>()
 
+    /// Landscape art for a VOD item, Android parity (OnDemandViewModel
+    /// heroBackdropUrl): the item's exact tmdb_id first, so the hero shows
+    /// the same title the details page loads, then a year-aware title search.
+    static func backdropURL(for item: VODDisplayItem, apiKey: String, size: String = "w1280") async -> URL? {
+        let isMovie = item.type != .series
+        let id = (item.movie?.tmdbID ?? item.series?.tmdbID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !id.isEmpty, let d = await details(forTMDBID: id, isMovie: isMovie, apiKey: apiKey) {
+            return d.backdropPath.flatMap { imageURL(path: $0, size: size) }
+        }
+        return await backdropURL(forTitle: item.tmdbSearchTitle, isMovie: isMovie, apiKey: apiKey, size: size)
+    }
+
     /// Landscape art for a title (hero fallback when the provider row has
     /// none): /search/multi, year-preferred, w1280. Cached per title.
     static func backdropURL(forTitle title: String, isMovie: Bool, apiKey: String, size: String = "w1280") async -> URL? {
@@ -1249,6 +1261,7 @@ struct TMDBDetails: Sendable {
     let year: String?
     let voteAverage: String?
     let posterPath: String?
+    var backdropPath: String? = nil
 }
 
 /// One cast or crew member. `id` stays a String even though TMDB sends an
@@ -1320,6 +1333,7 @@ extension TMDBService {
         let firstAirDate: String?
         let voteAverage: Double?
         let posterPath: String?
+        let backdropPath: String?
         let createdBy: [CreatedBy]?
         let credits: CreditsBlock?
         struct Genre: Decodable { let name: String? }
@@ -1362,6 +1376,7 @@ extension TMDBService {
             case firstAirDate = "first_air_date"
             case voteAverage = "vote_average"
             case posterPath = "poster_path"
+            case backdropPath = "backdrop_path"
             case createdBy = "created_by"
         }
     }
@@ -1565,7 +1580,8 @@ extension TMDBService {
             director: nonBlank(director),
             year: year,
             voteAverage: vote,
-            posterPath: nonBlank(decoded.posterPath)
+            posterPath: nonBlank(decoded.posterPath),
+            backdropPath: nonBlank(decoded.backdropPath)
         )
         detailsCache.setObject(Box(details), forKey: cacheKey)
         debugLog("🎬 TMDB details id \(trimmed) (\(kind)) -> ok")
@@ -2226,6 +2242,9 @@ final class TMDBArtCache: ObservableObject {
         AppCacheDirectory.url.appendingPathComponent("tmdb-art-cache.json")
     }
 
+    /// v3: rows are matched with the title's year (see tmdbSearchTitle).
+    nonisolated static let diskVersion = 3
+
     static func key(for item: VODDisplayItem) -> String {
         (item.type == .movie ? "m:" : "t:") + LibraryMatcher.cleanTitle(item.name)
     }
@@ -2234,7 +2253,13 @@ final class TMDBArtCache: ObservableObject {
         guard !loaded else { return }
         loaded = true
         guard let data = try? Data(contentsOf: Self.fileURL) else { return }
-        if let file = try? JSONDecoder().decode(DiskFile.self, from: data) {
+        if let file = try? JSONDecoder().decode(DiskFile.self, from: data), file.v < Self.diskVersion {
+            // v2 rows were matched on the title WITHOUT its year, so "#Unknown
+            // (2022)" cached the 2011 "Unknown" art (iPad 2026-11-03). Drop
+            // them once; enrichment re-resolves with the year.
+            dirty = true
+            debugLog("[TMDB-ART] dropping v\(file.v) cache (\(file.rows.count) entries), rows were matched without the year")
+        } else if let file = try? JSONDecoder().decode(DiskFile.self, from: data) {
             var map: [String: Entry] = [:]
             map.reserveCapacity(file.rows.count)
             for r in file.rows { map[r.key] = r.entry }
@@ -2336,7 +2361,7 @@ final class TMDBArtCache: ObservableObject {
             Task.detached(priority: .utility) {
                 let data: Data
                 do {
-                    data = try JSONEncoder().encode(DiskFile(v: 2, rows: rows))
+                    data = try JSONEncoder().encode(DiskFile(v: Self.diskVersion, rows: rows))
                 } catch {
                     debugLog("[TMDB-ART] encode failed: \(error.localizedDescription)")
                     return
@@ -2400,7 +2425,7 @@ final class TMDBArtCache: ObservableObject {
                     let k = Self.key(for: item)
                     guard seen.insert(k).inserted else { continue }
                     if let e = entries[k], !(e.poster.isEmpty && e.at < cutoff) { continue }
-                    if let e = await TMDBService.lookupArt(title: item.displayName, isMovie: isMovie, apiKey: apiKey) {
+                    if let e = await TMDBService.lookupArt(title: item.tmdbSearchTitle, isMovie: isMovie, apiKey: apiKey) {
                         store(e, key: k)
                         resolved += 1
                     } else {
@@ -2431,7 +2456,7 @@ final class TMDBArtCache: ObservableObject {
             let k = Self.key(for: item)
             guard seen.insert(k).inserted else { return nil }
             if let e = entries[k], !(e.poster.isEmpty && e.at < cutoff) { return nil }
-            return (k, item.displayName)
+            return (k, item.tmdbSearchTitle)
         }
         guard !todo.isEmpty else { return }
         debugLog("[TMDB-ART] enrich \(kindKey): \(todo.count) of \(ordered.count) titles to resolve")
