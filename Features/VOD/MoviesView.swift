@@ -3429,8 +3429,10 @@ struct MoviesHero: View {
         ZStack(alignment: .leading) {
             artwork
                 .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-                .mask(leadingFadeMask)
-                .mask(bottomFadeMask)
+                // A fitted portrait poster is drawn whole, unfaded
+                // (Android parity); the fades are for wide backdrops.
+                .mask(portraitArtWidth == nil ? AnyView(leadingFadeMask) : AnyView(Color.white))
+                .mask(portraitArtWidth == nil ? AnyView(bottomFadeMask) : AnyView(Color.white))
             copy
         }
         .frame(height: heroHeight)
@@ -3443,7 +3445,10 @@ struct MoviesHero: View {
             // phone deck showed its title and buttons through this one.
             Color.appBackground
             artwork
+            // Android parity (MediaHeroCard): the scrim stops at a portrait
+            // poster's slot so the fitted poster is drawn clean.
             gradient
+                .padding(.trailing, portraitArtWidth ?? 0)
             copy
         }
         .frame(height: heroHeight)
