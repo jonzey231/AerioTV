@@ -924,9 +924,12 @@ struct RewindTransportBar_iOS: View {
                         }
                     }
                     .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
-                    // Inside the centered group, right of Forward, so it
-                    // never covers the engine and format badges in the
-                    // row's bottom corners (Logan 2026-11-03).
+                }
+                .overlay(alignment: .trailing) {
+                    // Right of Forward, outside the group's layout, so
+                    // Pause stays on the screen center whether or not the
+                    // pill shows (Android anchors Pause on the center), and
+                    // it never covers the corner badges (Logan 2026-11-03).
                     if liveRewind.timeshifting {
                         Button {
                             store.audioProgressStore?.seekAction?(Int32(clamping: window))
@@ -938,6 +941,8 @@ struct RewindTransportBar_iOS: View {
                                 .padding(.vertical, 6)
                                 .background(Color.accentColor, in: Capsule())
                         }
+                        .fixedSize()
+                        .alignmentGuide(.trailing) { d in d[.leading] - 26 }
                     }
                 }
             }
