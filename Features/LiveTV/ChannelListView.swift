@@ -37,7 +37,13 @@ enum DefaultChannelGroupStore {
     static let allToken = "All"
     private static let hiddenGroupsKey = "hiddenChannelGroups"
 
-    static var current: String { UserDefaults.standard.string(forKey: key) ?? "" }
+    /// The stored default in the Apple spelling. A value written in the
+    /// wire spelling ("__favorites__", by a sync pull before the settings
+    /// map translated group tokens) is read as its Apple token.
+    static var current: String {
+        let raw = UserDefaults.standard.string(forKey: key) ?? ""
+        return DsyncSettingsMap.GROUP_TOKENS.first { $0.wire == raw }?.apple ?? raw
+    }
 
     static func isDefault(_ token: String) -> Bool {
         let stored = current
@@ -559,6 +565,8 @@ struct ChannelListView: View {
     /// Empty = All. Applied once per playlist load.
     private let defaultChannelGroupKey = DefaultChannelGroupStore.key
     @State private var defaultGroupApplied = false
+    /// The group the list landed on when the default was last decided.
+    @State private var landingGroup: String = "All"
     /// Mirrors the stored default so the pinned pill / drawer row re-renders
     /// the moment a long press changes it.
     @State private var defaultGroupToken: String = DefaultChannelGroupStore.current
@@ -982,11 +990,20 @@ struct ChannelListView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     ManageGroupsSheet.seedRecentlyWatchedHidden(storageKey: hiddenGroupsKey)
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                    let previousDefault = defaultGroupToken
                     defaultGroupToken = DefaultChannelGroupStore.current
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
                     if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
                         selectedGroup = fallbackGroup
+                    }
+                    // A default group restored by sync (the onboarding first
+                    // pull lands after the guide already chose its group) is
+                    // applied while the user is still on the landing group;
+                    // a group the user picked is never replaced.
+                    if previousDefault != defaultGroupToken, selectedGroup == landingGroup {
+                        defaultGroupApplied = false
+                        applyDefaultGroupIfNeeded()
                     }
                     filterChannels()
                 }
@@ -2983,8 +3000,9 @@ struct ChannelListView: View {
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
         defaultGroupApplied = true
-        guard let wanted = UserDefaults.standard.string(forKey: defaultChannelGroupKey),
-              !wanted.isEmpty, wanted != selectedGroup else { return }
+        defer { landingGroup = selectedGroup }
+        let wanted = DefaultChannelGroupStore.current
+        guard !wanted.isEmpty, wanted != selectedGroup else { return }
         if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
             selectedGroup = wanted
             debugLog("[GROUPS] default group applied: \(wanted)")

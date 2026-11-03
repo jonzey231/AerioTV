@@ -30,6 +30,11 @@ enum DsyncSettingsMap {
         case theme
         /// Apple AppTab raw values ("livetv"); the schema spells "LiveTV".
         case tab
+        /// Live TV group token. Provider group names and "collection:<id>"
+        /// pass through; the synthetic groups are spelled the Android way on
+        /// the wire ("__favorites__", "__recent__", "All") and the Apple way
+        /// locally ("favorites", "recentlyWatched", "" for All).
+        case groupToken
         /// Apple stores the category hex uppercased without "#".
         case hex
     }
@@ -107,7 +112,7 @@ enum DsyncSettingsMap {
         Entry(name: "showRemoteHints", appleKey: "showRemoteHints", kind: .bool),
         Entry(name: "guideTuneInMini", appleKey: "guideTuneInMini.tv", kind: .bool),
         // Group Order item (rides `settings`)
-        Entry(name: "defaultGroup", appleKey: "defaultChannelGroup", kind: .string),
+        Entry(name: "defaultGroup", appleKey: "defaultChannelGroup", kind: .groupToken),
     ]
 
     private static let byName: [String: Entry] = Dictionary(ENTRIES.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
@@ -144,6 +149,9 @@ enum DsyncSettingsMap {
             guard let s = v.asStr else { return nil }
             if s.isEmpty { return nil }
             return TABS.first { $0.0 == s }?.1
+        case .groupToken:
+            guard let s = v.asStr else { return nil }
+            return GROUP_TOKENS.first { $0.wire == s }?.apple ?? s
         case .hex:
             // "" (preset accent) has no Apple spelling: leave local unchanged.
             guard let s = v.asStr, !s.isEmpty else { return nil }
@@ -177,6 +185,18 @@ enum DsyncSettingsMap {
             return TABS.first { $0.1 == s }.map { .string($0.0) }
         case .hex:
             return (raw as? String).map { .string($0) }
+        case .groupToken:
+            guard let s = raw as? String else { return nil }
+            if s.isEmpty { return .string("") }
+            return .string(GROUP_TOKENS.first { $0.apple == s }?.wire ?? s)
         }
     }
+
+    /// Synthetic Live TV group tokens: (wire spelling, Apple spelling).
+    /// Wire "All" and Apple "" both mean All Channels; Apple writes "" back.
+    static let GROUP_TOKENS: [(wire: String, apple: String)] = [
+        ("__favorites__", "favorites"),
+        ("__recent__", "recentlyWatched"),
+        ("All", ""),
+    ]
 }
