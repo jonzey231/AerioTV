@@ -7184,10 +7184,41 @@ final class AVPlayerProgressDriver {
             // (the chrome domain). Map onto the playlist timeline;
             // within 5s of the head = rejoin live.
             if let self, self.isLive, self.liveRewindWindowActive {
-                guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+                // Go Live from a pause, one tap on every engine. The chrome
+                // sends the window length; while paused the remuxer path's
+                // seekable range did not answer, so the tap returned silently
+                // and Play had to come first (iPad 2026-11-03 15:29:05 pause,
+                // no seek logged until after Play at 15:29:49).
+                let wasPaused = player.timeControlStatus == .paused
+                let chromeWindow = max(Int64(1), LiveRewindEngine.shared.headWallMs - LiveRewindEngine.shared.tailWallMs)
+                if wasPaused, Int64(ms) >= chromeWindow - 5_000 {
+                    self.stopPausedLivePump()
+                    self.userPauseStartedAt = nil
+                    self.pauseTimeshiftLatched = false
+                    LiveRewindEngine.shared.noteTimeshifting(false)
+                    self.store.noteUserPause(false, positionSeconds: player.currentTime().seconds)
+                    self.expectPlaying = true
+                    if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue,
+                       CMTimeGetSeconds(CMTimeRangeGetEnd(range)).isFinite {
+                        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                        debugLog("[AVP-REWIND] Go Live while paused -> resume at live edge")
+                        player.seek(to: CMTime(seconds: max(CMTimeGetSeconds(range.start), end - 1), preferredTimescale: 600)) { _ in
+                            player.play()
+                        }
+                    } else {
+                        debugLog("[AVP-REWIND] Go Live while paused, no seekable range -> play (rejoins live)")
+                        player.play()
+                    }
+                    return
+                }
+                guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else {
+                    debugLog("[AVP-REWIND] seek ignored: no seekable range"); return
+                }
                 let start = CMTimeGetSeconds(range.start)
                 let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
-                guard start.isFinite, end.isFinite, end > start else { return }
+                guard start.isFinite, end.isFinite, end > start else {
+                    debugLog("[AVP-REWIND] seek ignored: range not usable"); return
+                }
                 let window = end - start
                 let target = min(max(0, Double(ms) / 1000.0), window)
                 if target >= window - 5 {
