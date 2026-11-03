@@ -5463,6 +5463,8 @@ extension UIWindow {
 #endif
 
 struct EPGGuideView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Focus bookkeeping that no body reads. Held as a reference so writes
     /// during a D-pad move do not invalidate the guide (see GuideFocusScratch).
     @State private var focusScratch = GuideFocusScratch()
@@ -8586,6 +8588,8 @@ struct EPGGuideView: View {
 /// @State instead. The locale-aware hour/minute format honors the
 /// device's 12 or 24-hour setting.
 private struct GuideCornerClock: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let fontSize: CGFloat
     /// Jump target while the guide is away from now; drawn in the accent.
     var target: Date? = nil
@@ -8674,6 +8678,8 @@ private struct GuideGlyphBand: ViewModifier {
 #endif
 
 private struct GuideChannelButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let channel: ChannelDisplayItem
     /// Channel cell size, so the logo can grow into the space a hidden
     /// number and/or name frees up without changing the column or row.
@@ -9032,6 +9038,8 @@ enum GuideDragEndCost {
 }
 
 private struct GuideProgramButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let prog: GuideProgram
     let channelItem: ChannelDisplayItem
     let width: CGFloat
@@ -10361,6 +10369,8 @@ struct SystemMenuAnchor: UIViewRepresentable {
 /// Shared by the Guide and the List so staging from either Live TV view
 /// shows the same banner in the same top-edge placement.
 struct MultiviewStagingBanner: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     let activeServer: ServerConnection?
 
@@ -10519,6 +10529,8 @@ struct MultiviewStagingBanner: View {
 /// "Playing in Radio Mode", then Switch to Video Mode (default focus; back to
 /// the video, no re-tune) and Stop. Foreground only on Apple TV.
 struct RadioModeBannerSlot: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var radio = RadioModeSession.shared
     @ObservedObject private var store = MultiviewStore.shared
     @FocusState private var returnFocused: Bool
@@ -10639,6 +10651,8 @@ struct RadioModeBannerSlot: View {
 /// (Add / Remove from Multiview in the long-press menu change them in place).
 /// Return to Multiview expands it as it was; Stop ends it.
 struct MultiviewBackgroundBannerSlot: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var session = MultiviewBackgroundSession.shared
     @ObservedObject private var store = MultiviewStore.shared
 

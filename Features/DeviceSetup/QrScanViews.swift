@@ -242,6 +242,8 @@ private struct CodeImportPickers: ViewModifier {
 /// accepted results go to `onResult`. After a successful Photos or file
 /// import the delete offer appears here.
 struct QrScanActions: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var enabled: Bool = true
     var prompt: String = "Point the camera at a Dispatcharr user QR code or an AerioTV setup code."
     var accept: (ScannedCode.Result) -> String? = acceptAnyKnownCode
@@ -368,6 +370,8 @@ private let cameraRationale = "AerioTV uses the camera only to read QR codes."
 /// and Cancel. The first code `validate` accepts ends the scan; a rejected
 /// code shows its message and scanning goes on.
 struct QrScanScreen: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let prompt: String
     let validate: (ScannedCode.Result) -> String?
     let onResult: (ScannedCode.Result, ImportSource?) -> Void

@@ -3,6 +3,8 @@ import SwiftData
 
 // MARK: - TV Shows View
 struct TVShowsView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var vodStore: VODStore
     @Query private var servers: [ServerConnection]
     @Binding var isPlaying: Bool

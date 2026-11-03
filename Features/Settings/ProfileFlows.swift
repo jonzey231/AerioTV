@@ -455,6 +455,8 @@ struct AvatarPickerFlow: View {
 }
 
 private struct AvatarTileStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let selected: Bool
     @Environment(\.isFocused) private var focused
     func makeBody(configuration: Configuration) -> some View {
@@ -470,6 +472,8 @@ private struct AvatarTileStyle: ButtonStyle {
 // MARK: - Simple dialogs
 
 struct RenameProfileFlow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let profile: DispatcharrProfile
     let onClose: () -> Void
     @State private var name = ""
@@ -504,6 +508,8 @@ struct StopPlaybackConfirm: View {
 
 /// The switch path every surface shares: PIN pad when locked, the stop-playback confirm, then switchTo.
 struct ProfileSwitchFlow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let profile: DispatcharrProfile
     let onClose: (String?) -> Void
@@ -535,6 +541,8 @@ struct ProfileSwitchFlow: View {
 
 /// Collapsed row that expands a section in place (TV: one focus stop).
 struct ProfileExpandRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     let expanded: Bool
     let onToggle: () -> Void
@@ -552,6 +560,8 @@ struct ProfileExpandRow: View {
 
 /// Password or API key for a user the admin list has no key for.
 struct CredentialStep: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let username: String
     let onCancel: () -> Void
@@ -581,6 +591,8 @@ struct CredentialStep: View {
 }
 
 struct ProfileTextField: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     @Binding var text: String
     var placeholder = ""
@@ -605,6 +617,8 @@ struct ProfileTextField: View {
 
 /// "Enable API access" (server admin only) for a user with no key: mints a key so Add needs no password.
 struct EnableApiAccessRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let user: DispatcharrUserSummary
     let enabled: Bool
@@ -664,6 +678,8 @@ struct EnableApiAccessRow: View {
 
 /// "From your other devices": synced roster users with no profile on this device.
 struct RosterSuggestionsView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let users: [DispatcharrUserSummary]?
     var enabled = true
@@ -800,6 +816,8 @@ struct RosterSuggestionsView: View {
 /// users with a profile on this device hidden, a role chip per row, and
 /// "Enable API access" for users with no key.
 struct AddProfileFlow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let onClose: () -> Void
 

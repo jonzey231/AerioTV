@@ -231,12 +231,21 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     /// Called after iCloud sync applies remote preferences so @Published properties
     /// reflect the updated values without requiring an app restart.
     @objc func reloadFromStorage() {
-        selectedTheme    = AppTheme(rawValue: storedTheme) ?? .aerio
-        liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
+        // Equal-value guard: every observer (about 200 views follow the theme
+        // live) re-renders on any @Published write, and a sync apply posts
+        // this notice for every settings pull, changed theme or not.
+        let t = AppTheme(rawValue: storedTheme) ?? .aerio
+        if t != selectedTheme { selectedTheme = t }
+        let g = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
+        if g != liquidGlassStyle { liquidGlassStyle = g }
         // Re-read the synced appearance mode so an iCloud push applies live.
-        appearanceMode   = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
-        useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
-        customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+        let m = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
+        if m != appearanceMode { appearanceMode = m }
+        let ca = UserDefaults.standard.bool(forKey: "useCustomAccent")
+        if ca != useCustomAccent { useCustomAccent = ca }
+        let hex = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+        if hex != customAccentHex { customAccentHex = hex }
+        debugLog("[THEME] reload theme=\(selectedTheme.rawValue) customAccent=\(useCustomAccent)")
         let black = UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
         if black != trueBlack { trueBlack = black }
         let contrast = TextContrast.stored

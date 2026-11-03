@@ -777,6 +777,8 @@ struct ContinueWatchingSection: View {
 // MARK: - Continue Watching Card (extracted for tvOS @Environment(\.isFocused) support)
 
 private struct ContinueWatchingCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let posterURLString: String?
     let title: String
     let subtitle: String?

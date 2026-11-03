@@ -260,6 +260,8 @@ final class VODCatalogFacts: ObservableObject {
 /// "Searching server…" row those screens already carry: a small spinner and
 /// tertiary text, nothing that competes with the content.
 struct VODUpdatingBadge: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var body: some View {
         HStack(spacing: 6) {
             ProgressView()

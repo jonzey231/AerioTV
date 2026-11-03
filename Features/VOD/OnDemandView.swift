@@ -4,6 +4,8 @@ import SwiftUI
 /// Wrapper that combines MoviesView and TVShowsView into a single tab
 /// with a segment picker, keeping the tab bar within iOS's 5-tab limit.
 struct OnDemandView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var vodStore: VODStore
     @Binding var isPlaying: Bool
     @Binding var isDetailPushed: Bool

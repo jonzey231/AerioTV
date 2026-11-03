@@ -3,6 +3,8 @@ import SwiftUI
 /// In-app banner that slides down from the top when a program reminder fires
 /// while the app is in the foreground. Auto-dismisses after 8 seconds.
 struct ReminderBannerView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var reminderManager = ReminderManager.shared
     @State private var dismissTask: Task<Void, Never>?
 

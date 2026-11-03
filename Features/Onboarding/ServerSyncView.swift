@@ -64,6 +64,8 @@ struct SyncStage: Identifiable, Equatable {
 /// in Settings or via a cold app launch that still needs to hydrate
 /// channels / EPG / VOD / DVR from disk or network.
 struct ServerSyncView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     enum Mode {
         /// After the user manually adds or edits a server. The view
         /// drives its own fetches and owns the stage state.
@@ -915,6 +917,8 @@ enum PlaylistSaveRunner {
 /// too small to read from the couch); same shape as Settings' compact
 /// buttons.
 private struct TVSkipButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let action: () -> Void
     @FocusState private var isFocused: Bool
 

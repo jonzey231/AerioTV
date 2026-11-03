@@ -747,6 +747,8 @@ struct EditServerSheet: View {
 /// `ChannelStore.fetchDispatcharr`. Mirrors Android
 /// EditPlaylistScreen's Channel Profile section.
 private struct ChannelProfilePickerSection: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Bindable var server: ServerConnection
     @State private var profiles: [DispatcharrAPI.ChannelProfileSummary] = []
     @State private var loadFailed = false

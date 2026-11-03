@@ -64,6 +64,8 @@ private struct PendingVODAdd {
 /// The sheet stays open across multiple adds. Cancel / swipe-down
 /// dismisses.
 struct AddToMultiviewSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Binding var isPresented: Bool
 
     /// Swap Stream: when non-nil this same picker re-points an EXISTING
@@ -1754,6 +1756,8 @@ struct AddToMultiviewSheet: View {
 /// poster fetch (Dispatcharr posters 401 without them). Recordings
 /// have no art and fall back to a film-icon placeholder.
 private struct VODPickerRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Trailing-icon state. `disclosure` is for a series row (tap
     /// drills in rather than adds); the others mirror
     /// `CompactChannelRow.trailing`.
@@ -2049,6 +2053,8 @@ private struct SharedSheetModifiers: ViewModifier {
 /// - Resting: elevated background, secondary-text label, slight
 ///   opacity dip so the focused chip clearly leads.
 struct PickerGroupPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 

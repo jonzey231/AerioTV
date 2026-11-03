@@ -218,6 +218,8 @@ extension View {
 }
 
 struct TVNoHighlightButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
     @Environment(\.tvFocusRingShape) private var ringShape
     /// When false, this style draws NO focus ring of its own and only
@@ -284,6 +286,8 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
 /// Open Source Licenses); this style suppresses it and gives the row the
 /// same accent tint + inset accent ring the rest of Settings uses.
 struct TVInlineCardRowButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
     /// Corner radius of the tint/ring. 10pt reads correctly for a row
     /// nested inside the standard 12pt Settings card.
@@ -350,6 +354,8 @@ typealias TVNoRingButtonStyle = TVNoHighlightButtonStyle
 /// The accent border is applied by VODPosterCard directly on the poster image
 /// (not the whole card including text), so this style only handles scale + shadow.
 struct TVCardButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
@@ -387,6 +393,8 @@ enum UIKeyboardType: Int { case `default` = 0, URL = 3 }
 
 // MARK: - App Card
 struct AppCard<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let content: Content
     var padding: CGFloat = 16
 
@@ -459,6 +467,8 @@ struct TMDBAttributionView: View {
 
 // MARK: - Primary Button
 struct PrimaryButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let icon: String?
     let action: () -> Void
@@ -510,6 +520,8 @@ struct PrimaryButton: View {
 
 // MARK: - Secondary Button
 struct SecondaryButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let icon: String?
     let action: () -> Void
@@ -550,6 +562,8 @@ struct SecondaryButton: View {
 
 // MARK: - Styled Text Field
 struct AppTextField: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let placeholder: String
     @Binding var text: String
@@ -848,6 +862,8 @@ struct LiveBadge: View {
 
 // MARK: - Section Header
 struct SectionHeader: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var action: (() -> Void)? = nil
     var actionTitle: String = "See All"
@@ -875,6 +891,8 @@ struct SectionHeader: View {
 
 // MARK: - Loading View
 struct LoadingView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var message: String = "Loading..."
 
     var body: some View {
@@ -893,6 +911,8 @@ struct LoadingView: View {
 
 // MARK: - Empty State View
 struct EmptyStateView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     let title: String
     let message: String
@@ -967,6 +987,8 @@ struct NoPosterPlaceholder: View {
 // MARK: - tvOS Category Pill (shared)
 #if os(tvOS)
 struct TVCategoryPill: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     let isSelected: Bool
     let action: () -> Void
@@ -1207,6 +1229,8 @@ struct TVQRLink: Identifiable {
 /// Keeps the screen awake while visible; the user is fumbling for a
 /// phone and aiming a camera at the TV.
 struct TVQRLinkSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let link: TVQRLink
     /// Caption under the title; defaults to the generic scan hint.
     var subtitle: String = "Scan with your phone to open this page."
@@ -1285,6 +1309,8 @@ enum PhoneCardDeckStats {
 }
 
 struct PhoneCardDeck<Item: Identifiable, Card: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let items: [Item]
     let cardHeight: CGFloat
     var onCurrentChange: ((Item) -> Void)? = nil

@@ -31,6 +31,8 @@ import SwiftUI
 /// 3 pt gap, so a focused+selected chip shows both and neither is white.
 /// No scale bump.
 struct TVSettingsPill<Label: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var isSelected: Bool = false
     var isDisabled: Bool = false
     /// Ghost variant: accent label on a faint accent fill with a hairline,
@@ -147,6 +149,8 @@ struct TVSettingsStepKey: View {
 /// away from it: minus goes to the nearest stop below, plus to the
 /// nearest stop above.
 struct TVSettingsStepperRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let stops: [Int]
     @Binding var value: Int
@@ -337,6 +341,8 @@ struct StreamBufferSlider: View {
 /// suppress it with TVNoHighlightButtonStyle and draw our own focus
 /// border + fill (mirroring TVSettingsActionRow's approach).
 struct TVCompactButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Phase 3 item 7 (Logan 2026-09-19, Movies & TV Shows): Test and Save
     /// both read as bare text at rest on the TV. They now match the phone:
     /// the PRIMARY action is an accent-filled button, the secondary one is

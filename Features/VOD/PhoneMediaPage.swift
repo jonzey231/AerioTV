@@ -52,6 +52,8 @@ struct PhoneSearch {
 /// jumps. Scroll-time numbers live in a plain box, never in view state, so
 /// nothing here re-renders per frame (see the scroll-churn rule).
 struct PhoneMediaPage: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var decks: [PhoneDeck] = []
     var rows: [PhoneRow] = []
     let headerTitle: String

@@ -3361,6 +3361,8 @@ Legal Terms
 /// The screen. `standalone: true` wraps it for sheet presentation
 /// (its own navigation + Close); false rides the host's navigation.
 struct OpenSourceLicensesView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var standalone = false
     @Environment(\.dismiss) private var dismiss
 
@@ -3494,6 +3496,8 @@ struct OpenSourceLicensesView: View {
 
 #if !os(tvOS)
 private struct OSSDetailView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let component: OSSComponent
     var body: some View {
         ScrollView {
@@ -3551,6 +3555,8 @@ private struct OSSTVDetailView: View {
 }
 
 private struct FocusableParagraph: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let text: String
     @FocusState private var focused: Bool
     var body: some View {

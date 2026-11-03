@@ -24,6 +24,8 @@ import CoreMedia
 /// page. Sized to match the toggles already here (36 pt box on iOS,
 /// 48 pt on tvOS) and kept at a low tint opacity, never a bright fill.
 struct DevIconTile: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     var tint: Color = .accentPrimary
     /// Off-state rows sit on the neutral elevated fill instead of the
@@ -1065,6 +1067,8 @@ struct DeveloperSettingsView: View {
 // MARK: - Log Viewer View
 
 struct LogViewerView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let url: URL
 
     @State private var content: String = ""
@@ -1382,6 +1386,8 @@ final class LogShareServer: ObservableObject {
 /// LogShareServer's lifecycle: starts when shown (via the caller's
 /// shareFile flow), stops on dismiss.
 struct TvOSLogShareSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Binding var isPresented: Bool
     @ObservedObject private var server = LogShareServer.shared
 

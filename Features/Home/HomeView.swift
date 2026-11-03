@@ -4670,6 +4670,8 @@ struct TVNavActionCircle: View {
 /// circle like Android TV's action circles; focused it flips to the white
 /// pill-platter look of the adjacent system tab bar.
 struct TVNavCircleButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var isSelected: Bool = false
     @Environment(\.isFocused) private var isFocused
 
@@ -4691,6 +4693,8 @@ struct TVNavCircleButtonStyle: ButtonStyle {
 /// keeps it. A tab that has never been opened costs nothing when a store it
 /// observes publishes (2026-09-12).
 private struct LazyTabContent<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @ViewBuilder var content: () -> Content
     @State private var everSelected = false
@@ -10853,6 +10857,8 @@ extension View {
 /// a thin blur, a 1 pt hairline in the text color at 12 percent, and a soft
 /// shadow, so it reads over the dark guide and bright poster art alike.
 struct PadPillSurface<S: InsettableShape>: ViewModifier {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let shape: S
     func body(content: Content) -> some View {
         content

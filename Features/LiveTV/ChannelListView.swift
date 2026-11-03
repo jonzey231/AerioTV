@@ -76,6 +76,8 @@ enum DefaultChannelGroupStore {
 // The store begins fetching as soon as any server is configured, so this view is
 // typically ready instantly when the user switches to the Live TV tab.
 struct ChannelListView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @ObservedObject private var recentsStore = RecentChannelsStore.shared
@@ -3682,6 +3684,8 @@ struct EPGEntry: Identifiable, Equatable {
 
 // MARK: - Channel Row
 struct ChannelRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Settings > Appearance > Text Size (fixed text frames grow with it).
     @Environment(\.aerioTextScale) private var textScale
     @Environment(\.aerioSubtextScale) private var subtextScale
@@ -5752,6 +5756,8 @@ struct ChannelRow: View {
 /// Plain-looking ButtonStyle that gives each EPG row focusability
 /// without adding a visible press effect or focus ring.
 private struct EPGRowButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
@@ -5960,6 +5966,8 @@ private struct TVGroupPill: View {
 /// TVGroupPillButtonStyle's look for a non-Button pill. Focus is passed in
 /// from the row's `@FocusState` (same as GroupSidebarRowChrome).
 private struct TVGroupPillChrome: ViewModifier {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     let isFocused: Bool
 
@@ -5981,6 +5989,8 @@ private struct TVGroupPillChrome: ViewModifier {
 }
 
 struct TVGroupPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
@@ -6100,6 +6110,8 @@ enum LogoFetcher {
 
 /// Drop-in replacement for AsyncImage that caches logos in memory.
 struct CachedLogoImage: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let url: URL?
     let width: CGFloat
     let height: CGFloat
@@ -6979,6 +6991,8 @@ struct PhoneGroupDrawer: View {
 /// hold-and-drag reorder, so a reorder also pinned the moved group. The row
 /// is back to the plain Button it shipped as, and `.onMove` is untouched.
 private struct PhoneGroupDrawerRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let token: String
     let isSelected: Bool
     let isDefault: Bool

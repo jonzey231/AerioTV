@@ -5485,6 +5485,8 @@ enum AVPBackgroundGrace {
 #endif
 
 struct AVPlayerMultiviewTile: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
     /// see the audio note below).
@@ -9735,6 +9737,8 @@ enum AudioOnlyCardRenderer {
     }
 
     private struct Card: View {
+        /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+        @ObservedObject private var themeLive = ThemeManager.shared
         let channelName: String
         let logo: UIImage?
         let size: CGSize

@@ -111,6 +111,8 @@ struct ProfileFlowHost: View {
 
 /// The row actions sheet: "Switch to this profile" first (hidden on the active one).
 struct ProfileActionsSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let profile: DispatcharrProfile
     @ObservedObject var model: ProfilesFlowModel
@@ -175,6 +177,8 @@ struct ProfileActionsSheet: View {
 
 /// One profile row's content (Android ProfileRow).
 struct ProfileRowContent: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let profile: DispatcharrProfile
     let isActive: Bool
     let locked: Bool
@@ -211,6 +215,8 @@ struct ProfileRowContent: View {
 #if os(iOS)
 /// iPhone and iPad: the PROFILES section inside the playlist page List.
 struct ProfilesSettingsSection: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     @ObservedObject var model: ProfilesFlowModel
     @ObservedObject private var manager = ProfileManager.shared
@@ -294,6 +300,8 @@ struct ProfilesSettingsSection: View {
 /// accent stroke, "Moving", the others dimmed); Up and Down move it, Select
 /// places it with one setOrder save, Menu cancels.
 struct ProfilesTVSection: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     @ObservedObject var model: ProfilesFlowModel
     @ObservedObject private var manager = ProfileManager.shared
@@ -457,6 +465,8 @@ extension View {
 
 /// Admin only: assign the user's Dispatcharr Channel Profiles (Android ChannelProfilesDialog).
 struct ChannelProfilesFlow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let profile: DispatcharrProfile
     let onClose: (String?) -> Void

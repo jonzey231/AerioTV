@@ -25,6 +25,8 @@ import UniformTypeIdentifiers
 ///   `MultiviewContainerView.onMoveCommand`).
 /// - Add-sheet + exit wiring (handled by `MultiviewTransportBar`).
 struct MultiviewTileView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let tile: MultiviewTile
     @ObservedObject var store: MultiviewStore
 
@@ -2412,6 +2414,8 @@ struct MultiviewTileView: View {
 /// 5 s of remote idle the icon fades with the rest of the focus
 /// chrome so the tiles read as one flush display surface.
 private struct CenterAudioIconView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isAudioActive: Bool
     /// Channel name rendered as a pill beneath the speaker icon so
     /// the user knows which stream they're focused on without having
@@ -2619,6 +2623,8 @@ struct MultiviewTileButtonStyle: ButtonStyle {
 /// borderless while the user is just watching, and suppressed on the
 /// relocating tile (which keeps its amber lift from the tile body).
 private struct TileFocusBorder: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let tileID: String
     let isRelocating: Bool
     @Environment(\.isFocused) private var isFocused

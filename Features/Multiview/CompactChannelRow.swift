@@ -31,6 +31,8 @@ import SwiftUI
 /// becomes focusable via `TVNoHighlightButtonStyle`; no custom
 /// focus ring needed.
 struct CompactChannelRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let item: ChannelDisplayItem
     let isAlreadyAdded: Bool

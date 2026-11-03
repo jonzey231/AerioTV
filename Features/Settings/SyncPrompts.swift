@@ -107,6 +107,8 @@ struct BackupUpdateStepView: View {
 
 /// Centered, scrollable frame every onboarding sync step uses.
 struct SyncStepFrame<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -126,6 +128,8 @@ struct SyncStepFrame<Content: View>: View {
 
 /// Filled Capsule CTA. tvOS: white ring on focus (primary action rule).
 struct SyncStepPrimaryButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var busy: Bool = false
     let action: () -> Void
@@ -189,6 +193,8 @@ struct SyncStepSecondaryButton: View {
 /// preselected (SetupSourceChoice.defaultSelection), Continue applies the
 /// selection, Cancel backs out. Present it in a sheet with interactive dismiss off.
 struct SetupSourcePromptView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let cloud: SetupSourceChoice.Summary
     let dsync: SetupSourceChoice.Summary
     var busy: Bool = false
@@ -261,6 +267,8 @@ struct SetupSourcePromptView: View {
 
 /// One side of the setup prompt: radio mark, name, updated line, count line.
 private struct SetupSourceCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let summary: SetupSourceChoice.Summary
     let now: Int64
@@ -338,6 +346,8 @@ enum DsyncManualCopy {
 
 /// The result line under a manual action row; in the accessibility tree as static text.
 struct SyncActionStatusLine: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let status: SyncActionStatus
 
     var body: some View {

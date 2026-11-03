@@ -211,6 +211,8 @@ struct MoreCategoriesView: View {
 // reset + sync, but in its own screen so the toggles list above
 // stays scannable.
 struct SingleCategoryColorEditor: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let category: ProgramCategory
     @State private var storedHex: String = ""
 

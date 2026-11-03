@@ -37,6 +37,8 @@ struct TVSettingsRailItem: Identifiable {
 }
 
 struct TVSettingsSplitView<Detail: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let items: [TVSettingsRailItem]
     @Binding var selection: SettingsRoute
     /// Reported up to the host for the Menu-press semantics.
@@ -305,6 +307,8 @@ struct TVSettingsSplitView<Detail: View>: View {
 /// wash on focus, with a persistent tint for the selected row so the rail
 /// shows which pane is displayed even while focus is in the detail.
 private struct TVRailRowStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 

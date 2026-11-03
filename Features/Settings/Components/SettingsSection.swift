@@ -31,6 +31,8 @@
 import SwiftUI
 
 struct SettingsSection<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     enum Style {
         /// Uppercased eyebrow header, bare content column.
         case plain

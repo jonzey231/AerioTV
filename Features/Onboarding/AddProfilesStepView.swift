@@ -56,6 +56,8 @@ private var stepIsTV: Bool {
 
 /// Android StepCaption: "Step 2 of 3" in the accent color.
 struct OnboardingStepCaption: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let current: Int
     let total: Int
     var body: some View {
@@ -90,6 +92,8 @@ private struct ProfilesStepHeader: View {
 /// Child sets a Device Admin PIN here (device-local, never synced), then the
 /// profile becomes a Child: a kid-only device whose Admin is the device PIN.
 struct ProfileRoleStepView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let onDone: (_ child: Bool) -> Void
 
@@ -214,6 +218,8 @@ private struct OnThisDeviceSection: View {
 }
 
 private struct AddedChip: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "checkmark").font(.system(size: stepIsTV ? 18 : 12, weight: .bold))
@@ -234,6 +240,8 @@ private struct AddedChip: View {
 /// iPad) and Enter details. Both list ON THIS DEVICE and the roster
 /// suggestions first.
 struct AddProfilesStepView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     /// Onboarding: "Step 2 of 3" caption.
     var onboarding = true

@@ -236,6 +236,8 @@ private func aerioRestoreRootSafeAreaInsets() {
 #endif
 
 struct VODDetailView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let item: VODDisplayItem
     @Query private var servers: [ServerConnection]
@@ -2516,6 +2518,8 @@ struct VODDetailView: View {
 
 /// Extracted into its own view so it can own a @FocusState for per-row focus highlighting.
 private struct TVEpisodeRowButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let ep: VODEpisode
     let headers: [String: String]
     /// Optional resume/watched state. v1.6.8: lets the row surface a
@@ -2702,6 +2706,8 @@ extension EnvironmentValues {
 /// Episode card for the series page: 16:9 still with the episode number,
 /// a progress bar and a watched check, title and duration underneath.
 private struct TVEpisodeCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let episode: VODEpisode
     let title: String
     let stillURL: URL?
@@ -2769,6 +2775,8 @@ private struct TVEpisodeCard: View {
 #endif
 
 private struct TVPlayButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isResolvingURL: Bool
     /// "Resume" when the movie has saved progress (Android MovieDetailScreen
     /// hasResume parity), else "Play".
@@ -2828,6 +2836,8 @@ struct IdentifiableURL: Identifiable {
 /// double the Android dp values (the Android TV design canvas is 960x540dp
 /// against tvOS's 1920x1080pt).
 private struct PersonCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let person: TMDBPerson
     let onSelect: () -> Void
 
@@ -2928,6 +2938,8 @@ private struct PersonCard: View {
 /// the bio loads. The Close button stays pinned below the scrolling body
 /// so long biographies never push it off-screen for remote users.
 private struct PersonBioSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let person: TMDBPerson
     /// Parent-supplied Known For resolver: returns false when the title
     /// is not in the user's library (the sheet shows the miss message);

@@ -56,6 +56,8 @@ enum SettingsSummary {
 // MARK: - Master row + sub-toggles
 
 struct SettingsSubgroup<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let summary: String
     var icon: String = "switch.2"
@@ -238,6 +240,8 @@ struct SettingsSubgroup<Content: View>: View {
 /// tvOS renders that as an oversized system title drawn over the
 /// scrolling rows.
 struct TVSettingsSubgroupPage<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var footer: String? = nil
     @ViewBuilder let content: Content
@@ -284,6 +288,8 @@ struct TVSettingsSubgroupPage<Content: View>: View {
 
 #if !os(tvOS)
 struct SettingsSubgroupPage<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var footer: String? = nil
     @ViewBuilder let content: Content

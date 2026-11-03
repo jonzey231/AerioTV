@@ -179,6 +179,8 @@ extension LinearGradient {
 
 // MARK: - Glass Effect Helper
 struct GlassBackground: ViewModifier {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var tint: Color = .accentPrimary
     var opacity: Double = 0.06
     var border: Bool = true

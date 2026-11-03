@@ -5,6 +5,8 @@ import SwiftUI
 /// that day; a time pill moves to that hour. `onPick(nil)` means back to
 /// now. tvOS presents it as a system sheet with the app's pills.
 struct GuideJumpSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let daysBack: Int
     let daysAhead: Int
     let onPick: (Date?) -> Void

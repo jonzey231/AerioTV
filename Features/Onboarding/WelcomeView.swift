@@ -15,6 +15,8 @@ import SwiftData
 /// brand left and cards right, with the tablet headline. No device-specific
 /// branching: the system's own bars are respected through the safe area.
 struct WelcomeView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
     @ObservedObject private var syncManager = SyncManager.shared
@@ -585,6 +587,8 @@ struct OnboardingSectionLabel: View {
 
 /// The inside of every onboarding card: icon tile, title, detail, trailing.
 struct OnboardingCardContent: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     let title: String
     let detail: String
@@ -644,6 +648,8 @@ struct OnboardingCardContent: View {
 
 /// Card surface: quiet border, accent border when highlighted or on.
 struct OnboardingCardBackground: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var highlighted: Bool = false
     var radius: CGFloat = onboardingIsTV ? 18 : 14
 
@@ -745,6 +751,8 @@ struct OnboardingActionCard: View {
 
 /// Capsule pill button: filled (primary) or outlined.
 struct OnboardingPillButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var filled: Bool = false
     var fullWidth: Bool = false
@@ -794,6 +802,8 @@ struct OnboardingPillButton: View {
 
 /// Step indicator dots ("Step 1 of 3").
 struct OnboardingStepDots: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let current: Int
     let total: Int
 
@@ -839,6 +849,8 @@ private func tvOnboardingCardBG(_ focused: Bool) -> some View {
 /// `tvOnboardingCardBG`, keep the text block left-aligned, and light the
 /// On/Off indicator white while focused so it reads against the fill.
 private struct TVOnboardingCategoryRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let category: SyncCategory
     @Binding var isOn: Bool
     @FocusState private var isFocused: Bool
@@ -890,6 +902,8 @@ private struct TVOnboardingCategoryRow: View {
 /// the focus visual instead - the fill stays put and focus reads as a white
 /// border plus a small grow, so the white label never loses contrast.
 private struct TVOnboardingPrimaryButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let action: () -> Void
     @FocusState private var isFocused: Bool
@@ -921,6 +935,8 @@ private struct TVOnboardingPrimaryButton: View {
 /// light pill behind dim grey text, which is what made it unreadable
 /// exactly when it was selected.
 private struct TVOnboardingTextButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let action: () -> Void
     @FocusState private var isFocused: Bool
@@ -937,6 +953,8 @@ private struct TVOnboardingTextButton: View {
 
 /// "Skip for now" text button with subtle focus highlight.
 private struct TVOnboardingSkipButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let action: () -> Void
     @FocusState private var isFocused: Bool
 
@@ -968,6 +986,8 @@ private struct TVOnboardingSkipButton: View {
 /// the same `syncEnabled.<rawValue>` defaults keys the Settings screen binds
 /// to - one source of truth, and a choice made here shows up there.
 struct OnboardingSyncCategoryChooser: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let onContinue: () -> Void
     let onCancel: () -> Void
 

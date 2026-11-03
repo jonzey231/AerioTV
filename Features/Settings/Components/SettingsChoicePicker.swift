@@ -315,6 +315,8 @@ struct TVSettingsSingleChoiceSheet<Value: Hashable>: View {
 /// pushed Settings children use, so MainTabView's Menu handler pops this
 /// first (LIFO) exactly as it would pop a pushed page.
 struct TVSettingsSheetCard<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var footer: String? = nil
     /// The row `.id(...)` to drag into view when the card opens, so a long

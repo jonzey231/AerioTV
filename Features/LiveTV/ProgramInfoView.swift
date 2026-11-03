@@ -189,6 +189,8 @@ struct ProgramInfoTarget: Identifiable, Equatable {
 // inside the app" requirement, a silent empty field teaches the
 // user nothing about why a program isn't tinted.
 struct ProgramInfoView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let target: ProgramInfoTarget
     /// Phone: the tvOS card layout at phone scale in a glass system sheet,
     /// instead of the navigation form (Logan 2026-09-05).

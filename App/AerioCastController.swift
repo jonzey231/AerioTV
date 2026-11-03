@@ -2945,6 +2945,8 @@ struct CastButton: UIViewRepresentable {
 /// this drives the TV. One layout, two transports -- the callbacks decide.
 /// Inlined here (not its own file) so no pbxproj target surgery is needed.
 struct RemoteControlScreen: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var title: String
     var subtitle: String?
     var artURL: String?
@@ -3184,6 +3186,8 @@ struct RemoteControlScreen: View {
 ///    "AirPlay to <receiver>", program + LIVE badge, time range + progress,
 ///    Channel Down / Up, Back / Pause / Forward, Options, Stop AirPlay.
 struct RemoteSessionSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// idle: connected / route selected, nothing playing (production
     /// 2026-09-25): transport glyph, device name, "Connected. Select a
     /// channel to start." and a single Change Device button.
@@ -3986,6 +3990,8 @@ struct MultiviewCompositePreviewGrid: View {
 /// speaker, a tap gives a channel the audio on the TV. Below, the Layout row
 /// with the options the TV reports. Android NativeMultiviewPanel parity.
 struct NativeMultiviewPanel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let state: NativeMultiviewState
     private var accent: Color { ThemeManager.shared.accent }
 
@@ -4107,6 +4113,8 @@ struct RemoteSeekWindow: Equatable {
 /// once, then the thumb holds at the target until the receiver reports a
 /// position within 4 s of it, or 6 s pass.
 struct RemoteTimelineScrubber: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let window: RemoteSeekWindow
     let onCommit: (Double) -> Void
 
@@ -4911,6 +4919,8 @@ struct AirPlayStreamInfo: Equatable {
 }
 
 struct AirPlayStreamInfoCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let info: AirPlayStreamInfo
     /// Radio Mode: local audio only, the video track is not decoded.
@@ -4967,6 +4977,8 @@ struct AirPlayStreamInfoCard: View {
 /// (StreamInfoCardView's monospaced label/value rows): what the phone is
 /// ingesting, what it serves, and how the pipeline is pacing.
 private struct CastStreamInfoCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let stats: CastHLSProxySession.Stats
     let receiverName: String?
@@ -5441,6 +5453,8 @@ struct CompanionPickerSheet: View {
 /// bar, 44 pt art tile, and THREE lines -- channel name, program, then the
 /// accent status line -- with accent play/pause and X trailing.
 struct RemoteSessionCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
 
     enum Transport {
         case cast, airPlay, companion, carPlay, radio
@@ -5815,6 +5829,8 @@ final class MultiviewDockState: ObservableObject {
 /// body (44 pt tile, title and subtitle, 18/8 pt padding, same capsule
 /// surface). Tapping the body opens the Multiview sheet; Play plays.
 struct MultiviewDockCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var store = MultiviewStore.shared
     let onShowSheet: () -> Void
 
@@ -5962,6 +5978,8 @@ final class MultiviewBackgroundSession: ObservableObject {
 /// (44 pt icon tile, title and subtitle, 18/8 pt padding, the dock
 /// capsule). Tap returns to the fullscreen Multiview; Stop ends it.
 struct MultiviewBackgroundCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var store = MultiviewStore.shared
     @ObservedObject private var session = MultiviewBackgroundSession.shared
 
@@ -6028,6 +6046,8 @@ struct MultiviewBackgroundCard: View {
 /// swipe to remove, Reorder/Finish (the Switch Stream pattern), Clear, and
 /// the play buttons with the play-where sheet's wording.
 struct MultiviewStagedSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var store = MultiviewStore.shared
     @ObservedObject private var cast = AerioCastController.shared
     @ObservedObject private var companion = CompanionClient.shared
@@ -6148,6 +6168,8 @@ struct MultiviewStagedSheet: View {
 /// Stop. More: a header with Stop All and one row per channel, each with its
 /// own Stop. Tapping a channel tunes it (adopts the retained remuxer).
 struct KeptLiveCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let channels: [KeptLiveChannels.Channel]
     let onTune: (KeptLiveChannels.Channel) -> Void
     let onStop: (KeptLiveChannels.Channel) -> Void

@@ -364,6 +364,8 @@ private func displayName(_ action: GuideRemoteAction) -> String {
 /// guide pickers; `Hashable` gives `ForEach` identity plus the `==` that
 /// marks the current choice.
 private struct TVSlotChoiceRow<Action: Hashable>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var subtitle: String? = nil
     let choices: [Action]

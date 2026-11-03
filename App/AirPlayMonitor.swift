@@ -812,6 +812,8 @@ final class AirPlayRoutePickerDelegate: NSObject, @MainActor AVRoutePickerViewDe
 /// opens the system route picker, the X hides it for that receiver, and it
 /// goes away once the route leaves AirPlay.
 struct AirPlayAudioRouteChip: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @State private var device: (name: String, uid: String)?
     @State private var dismissedUID: String?
     @State private var loggedUID: String?

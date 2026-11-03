@@ -27,6 +27,8 @@ func openManageProfiles() {
 /// Phone and tablet Live TV header: the active profile's avatar, only with
 /// 2+ profiles and never for a Child. Tap opens "Switch Profile".
 struct ProfileSwitcherButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var size: CGFloat = 38
     @ObservedObject private var manager = ProfileManager.shared
     @State private var open = false
@@ -51,6 +53,8 @@ struct ProfileSwitcherButton: View {
 
 /// "Switch Profile": every profile, the active one checked, then Manage Profiles.
 private struct SwitchProfileSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlistId: String
     let onClose: () -> Void
     @ObservedObject private var manager = ProfileManager.shared
@@ -142,6 +146,8 @@ private struct WhoIsWatchingTileStyle: ButtonStyle {
 }
 
 private struct WhoIsWatchingTileLabel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String?
     let profile: DispatcharrProfile?
     let label: String
@@ -192,6 +198,8 @@ private struct WhoIsWatchingTileLabel: View {
 /// pickAtLaunch). Switch: the current profile captioned, Back closes, and
 /// Manage Profiles opens the playlist page.
 struct WhoIsWatchingView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     enum Mode { case launch, switcher }
     let playlistId: String
     let mode: Mode
@@ -349,6 +357,8 @@ struct WhoIsWatchingView: View {
 /// Root chrome for profiles: the switch scrim, the launch PIN gate, and the
 /// TV launch picker. Applied once on the main tab view.
 struct ProfileRootChrome: ViewModifier {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject private var manager = ProfileManager.shared
 
     func body(content: Content) -> some View {

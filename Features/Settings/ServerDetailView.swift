@@ -1361,6 +1361,8 @@ struct ServerDetailView: View {
 
 // MARK: - Playlist List Row
 struct PlaylistListRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let playlist: M3UPlaylist
 
     var body: some View {

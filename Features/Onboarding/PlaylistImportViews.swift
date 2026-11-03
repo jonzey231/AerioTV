@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 // MARK: - M3U Import View
 struct M3UImportView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
@@ -340,6 +342,8 @@ struct M3UImportView: View {
 
 // MARK: - EPG Import View
 struct EPGImportView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 

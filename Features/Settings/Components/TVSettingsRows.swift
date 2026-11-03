@@ -107,6 +107,8 @@ struct TVSettingsCardButtonRow<Content: View>: View {
 /// Plain action row (Add Playlist, Copy to Clipboard, etc.)
 /// with the same teal card highlight on focus.
 struct TVSettingsActionRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     let label: String
     var isAccent: Bool = false
@@ -177,6 +179,8 @@ struct TVSettingsActionRow: View {
 /// tiles). `titleColor` keeps a warning or destructive row amber or red
 /// without changing its shape.
 struct TVSettingsTileActionRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     var iconColor: Color = .accentPrimary
     let title: String
@@ -247,6 +251,8 @@ struct TVSettingsReadOnlyCard<Content: View>: View {
 /// Supports an optional icon, leading badge (e.g. theme swatch), and
 /// subtitle.
 struct TVSettingsSelectionRow<Leading: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     var subtitle: String? = nil
     let isSelected: Bool
@@ -394,6 +400,8 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
 
 // MARK: - Server List Row
 struct ServerListRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let server: ServerConnection
     /// iOS only: when non-nil the leading indicator becomes its own
     /// borderless button that activates this playlist without opening
@@ -548,6 +556,8 @@ struct ServerListRow: View {
 
 // MARK: - LAN / WAN Badge
 struct LANWANBadge: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isLAN: Bool
 
     #if os(tvOS)
@@ -583,6 +593,8 @@ struct LANWANBadge: View {
 
 #if os(tvOS)  // Phase 1 split: re-opened, block spanned the extraction cut
 struct TVSettingsTextField: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let placeholder: String
     @Binding var text: String
     var isSecure: Bool = false

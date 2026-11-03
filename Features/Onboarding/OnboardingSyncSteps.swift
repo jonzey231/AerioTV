@@ -14,6 +14,8 @@ import SwiftUI
 // MARK: - "Turn on Dispatcharr Sync?"
 
 struct DispatcharrSyncStepView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Came from the Welcome "Sync with Dispatcharr" card: turn on without asking.
     let autoEnable: Bool
     /// Set when the playlist was just signed in from a Dispatcharr user QR.
@@ -223,6 +225,8 @@ struct CloudBackupOfferStepView: View {
 /// Shown for the whole iCloud restore stretch; replaces Welcome so its cards are not focusable underneath.
 /// "Setting Up" after Connect while the playlist loads and the chain picks its first step.
 struct OnboardingSettingUpView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var body: some View {
         SyncStepFrame {
             VStack(spacing: 16) {
@@ -244,6 +248,8 @@ struct OnboardingSettingUpView: View {
 }
 
 struct OnboardingRestoreProgressView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var body: some View {
         SyncStepFrame {
             VStack(spacing: 16) {

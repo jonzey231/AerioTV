@@ -643,6 +643,8 @@ extension Notification.Name {
 /// held, else the channel logo (also when the art fails to load), both
 /// fitted inside the fixed 50x70 box; the logo keeps 5 pt of breathing room.
 private struct SearchProgramThumb: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let art: URL?
     let logo: URL?
     let icon: String

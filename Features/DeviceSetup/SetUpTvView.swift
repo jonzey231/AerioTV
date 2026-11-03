@@ -13,6 +13,8 @@ import SwiftUI
 import SwiftData
 
 struct SetUpTvView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// nil = the active playlist.
     var server: ServerConnection? = nil
     /// A scanned or system-camera aeriotv://setup link.
@@ -303,6 +305,8 @@ struct SetUpTvView: View {
 
 /// The TV name, "Waiting for setup, key XXXX", Set up, and dismiss.
 private struct SetupTvOfferContent: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let target: SetupTarget
     let onSetUp: () -> Void
     let onDismiss: () -> Void
@@ -374,6 +378,8 @@ struct SetupTvDockCard: View {
 
 /// Settings root banner for the same TV as the dock card.
 struct SetupTvSettingsBanner: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let target: SetupTarget
     let onSetUp: () -> Void
     let onDismiss: () -> Void
@@ -389,6 +395,8 @@ struct SetupTvSettingsBanner: View {
 
 /// "Set up a TV" row for Settings > Playlists (list and playlist detail).
 struct SetUpTvSettingsRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let subtitle: String
     let action: () -> Void
 

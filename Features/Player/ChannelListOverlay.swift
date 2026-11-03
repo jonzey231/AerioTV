@@ -33,6 +33,8 @@ import SwiftUI
 /// glow), matching the app's `TVNoRingButtonStyle` convention and the guide's
 /// `ChannelRow` card look.
 struct ChannelPickRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let item: ChannelDisplayItem
     var isPlaying: Bool
@@ -157,6 +159,8 @@ struct ChannelPickRow: View {
 /// platter + inset accent border. Unfocused rows are transparent so the live
 /// picture shows through the overlay's left scrim.
 private struct ChannelPickRowButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {

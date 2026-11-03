@@ -196,6 +196,8 @@ enum SwitchStreamFlow {
 }
 
 struct SwitchStreamView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.dismiss) private var dismiss
     @Query private var servers: [ServerConnection]
 
@@ -953,6 +955,8 @@ private struct SwitchStreamRow: View {
 }
 
 private struct SwitchStreamRowLabel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let meta: String
     let isSelected: Bool
@@ -1098,6 +1102,8 @@ private struct SwitchStreamRowStyle: ButtonStyle {
 }
 
 private struct SwitchStreamActionStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

@@ -593,6 +593,8 @@ struct MyRecordingsView: View {
 // MARK: - Recording Row
 
 private struct RecordingRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let recording: Recording
     @Environment(\.modelContext) private var modelContext
 
@@ -846,6 +848,8 @@ private struct RecordingRow: View {
 /// items that iOS shows as a .contextMenu, the dialog avoids the
 /// flashing / rebuilding issues that .contextMenu has on tvOS.
 private struct TVRecordingRow<Menu: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let recording: Recording
     let onSelect: () -> Void
     @ViewBuilder let menu: () -> Menu
@@ -935,6 +939,8 @@ struct DVRSegmentPill: View {
 
 #if os(tvOS)
 private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
@@ -967,6 +973,8 @@ private struct DVRSegmentPillButtonStyle: ButtonStyle {
 
 #if os(iOS)
 private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
 
     func makeBody(configuration: Configuration) -> some View {

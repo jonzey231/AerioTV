@@ -746,6 +746,8 @@ enum WhatsNewStore {
 // closer to a system-level "Welcome to <new version>" alert.
 
 struct WhatsNewSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let release: WhatsNewRelease
     let onPermanentlyDisable: () -> Void
 

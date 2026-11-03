@@ -5,6 +5,8 @@ import SwiftData
 /// program in the EPG guide. Lets the user pick pre/post-roll buffers,
 /// destination, and confirm.
 struct RecordProgramSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @Query private var servers: [ServerConnection]
@@ -1264,6 +1266,8 @@ private struct RecordOptionPill: View {
 }
 
 private struct RecordOptionPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
@@ -1316,6 +1320,8 @@ private struct RecordActionPill: View {
 }
 
 private struct RecordActionPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let tintColor: Color
     @Environment(\.isFocused) private var isFocused
 
@@ -1343,6 +1349,8 @@ private struct RecordActionPillButtonStyle: ButtonStyle {
 #if os(iOS)
 /// Capsule chip used by the record sheet's buffer rows.
 private struct RecordChip: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     let isSelected: Bool
     let action: () -> Void
@@ -1406,6 +1414,8 @@ private struct ChipFlowLayout: Layout {
 
 /// Card wrapper for the sheet's warning notes.
 private struct WarningCard<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ViewBuilder let content: Content
     var body: some View {
         content

@@ -93,6 +93,8 @@ func groupSidebarLabel(_ token: String) -> String {
 /// reason the guide cells avoid one), so `focused` is passed in from the
 /// panel's `@FocusState` instead of read from the button environment.
 private struct GroupSidebarRowChrome: ViewModifier {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isActive: Bool
     let isFocused: Bool
 
@@ -139,6 +141,8 @@ private struct GroupSidebarRowChrome: ViewModifier {
 /// because, on tvOS, `List` paints its own white highlight over the focused
 /// row; the ScrollView path gives the row button style full visual control.
 struct GroupSidebarPanel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let groups: [String]
     let selectedToken: String
     let onSelect: (String) -> Void
@@ -354,6 +358,8 @@ struct GroupSidebarPanel: View {
 /// the same. Both route through `onDismiss`, which the host uses to collapse
 /// the pane.
 struct GuideGroupSidebarPane: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let groups: [String]
     let selectedToken: String
     let onSelect: (String) -> Void

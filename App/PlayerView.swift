@@ -108,6 +108,8 @@ struct StreamInfo: Equatable {
 /// fewer "why is the resolution different on Apple TV vs iPhone"
 /// questions, less plumbing to maintain.
 struct StreamInfoCardView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let info: StreamInfo
 
     var body: some View {
@@ -1423,6 +1425,8 @@ enum TVPlayerFocus: Hashable {
 #endif
 
 private struct PlayerRootView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Live Rewind engine state: drives the live scrubber window
     /// (fullscreen single live with a rolling buffer session).
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
@@ -4353,6 +4357,8 @@ struct PlayerOverflowMenu: View, Equatable {
 /// sleep timer, and stream info toggles in a focusable list.
 /// Compact floating options panel that extends upward from the Options pill.
 struct TVPlayerOptionsPanel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let audioTracks: [MediaTrack]
     let currentAudioTrackID: Int
     let subtitleTracks: [MediaTrack]
@@ -4771,6 +4777,8 @@ struct TVPlayerOptionsPanel: View {
 /// for selected state inverts color when the pill is focused so
 /// it stays readable over the accent-tinted background.
 private struct OptionPillLabel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let text: String
     let systemImage: String?
     let isSelected: Bool
@@ -7220,6 +7228,8 @@ final class AVPlayerProgressDriver {
 /// intents, so the SAME view can sit over an AVPlayerLayer today and
 /// the mpv render surface when that host migrates.
 struct UnifiedPlayerChrome: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var progress: PlayerProgressStore
     let title: String
     let programName: String?
@@ -7568,6 +7578,8 @@ struct UnifiedPlayerChrome: View {
 /// Deliberately NOT integrated with the app's custom chrome, channel-flip,
 /// or multiview; this is an engine evaluation surface, not a replacement.
 struct NativeHLSPlayerScreen: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let item: ChannelDisplayItem
     let userAgent: String?
     /// When true, the stream is raw MPEG-TS: an on-device TSHLSRemuxer

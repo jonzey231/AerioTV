@@ -1500,6 +1500,8 @@ struct DVRView: View {
 /// Full-bleed hero, same construction as MoviesHero (art clipped to the
 /// rounded shape, alpha-mask fades, copy over it, capsule actions).
 struct DVRHero<Menu: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Settings > Appearance > Text Size: the hero keeps its fixed height
     /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
     @Environment(\.aerioTextScale) private var textScale
@@ -1809,6 +1811,8 @@ extension View {
 /// when neither exists), REC badge, progress bar, title and meta below,
 /// like the Movies grid (Logan 2026-09-05).
 struct DVRPosterCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let recording: Recording
     var headers: [String: String] = [:]
@@ -1899,6 +1903,8 @@ struct DVRPosterCard: View {
 
 /// duration bottom-right, progress bar, centred title and meta below.
 struct DVRRecordingCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let recording: Recording
     var headers: [String: String] = [:]
     var progress: Double = 0

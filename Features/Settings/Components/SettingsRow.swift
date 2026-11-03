@@ -19,6 +19,8 @@ import SwiftData
 /// within a page, every row that has an icon uses THIS tile, and a row
 /// either has this tile or no icon at all. Never a bare glyph.
 struct SettingsIconTile: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     var color: Color = .accentPrimary
     /// White-on-accent variant for the iPad sidebar's selection pill.

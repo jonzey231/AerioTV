@@ -104,6 +104,8 @@ final class GuidePreviewArtAnchor: ObservableObject {
 }
 
 struct GuidePreviewBanner: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let program: GuideProgram?
     let channel: ChannelDisplayItem?
     let shortTimeFormatter: DateFormatter

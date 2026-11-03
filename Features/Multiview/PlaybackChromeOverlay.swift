@@ -1137,6 +1137,8 @@ private struct iPadOverflowAdapter: View {
 /// chrome-overlay level (behind the top bar) rather than inside the
 /// HStack of menu buttons.
 private struct AudioOnlyForegroundOverlay: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var progressStore: PlayerProgressStore
     let title: String
 
@@ -1212,6 +1214,8 @@ private struct AudioOnlyForegroundOverlay: View {
 /// (the `allowsHitTesting` flip would break focus routing when
 /// faded).
 struct PlaybackBottomChrome_tvOS: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var store: MultiviewStore
 
     /// The container's shared D-pad scrub controller. The timeline

@@ -17,6 +17,8 @@ private final class AuthImageCache: @unchecked Sendable {
 }
 
 struct AuthPosterImage: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let url: URL?
     var headers: [String: String] = [:]
     /// GH #53: reports the loaded image's pixel size so callers that
@@ -113,6 +115,8 @@ struct AuthPosterImage: View {
 
 // MARK: - Movies View
 struct MoviesView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ObservedObject var vodStore: VODStore
     @Query private var servers: [ServerConnection]
     @Binding var isPlaying: Bool
@@ -2906,6 +2910,8 @@ struct MoviesView: View {
 
 // MARK: - VOD Poster Card
 struct VODPosterCard: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.aerioTextScale) private var textScale
     let item: VODDisplayItem
     var headers: [String: String] = [:]
@@ -3052,6 +3058,8 @@ struct MoviesHeroPage: Identifiable {
 /// tvOS, focus moving right off a page's last button lands on the next
 /// page's first button and the banner slides over; on iOS it swipes.
 struct MoviesHeroCarousel: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let pages: [MoviesHeroPage]
     var headers: [String: String] = [:]
     /// Owner sets true to put focus on the aligned page's Resume; reset here.
@@ -3323,6 +3331,8 @@ struct MoviesHeroCarousel: View {
 }
 
 struct MoviesHero: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     /// Settings > Appearance > Text Size: the hero keeps its fixed height
     /// (focus and scroll thresholds depend on it), so copy sheds lines instead.
     @Environment(\.aerioTextScale) private var textScale
@@ -3689,6 +3699,8 @@ struct MoviesHero: View {
 /// white ring on the primary (an accent ring would vanish on the accent
 /// fill) and the usual accent ring on secondaries.
 struct MoviesHeroButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let systemImage: String
     let isPrimary: Bool
@@ -3732,6 +3744,8 @@ struct MoviesHeroButton: View {
 }
 
 private struct MoviesHeroButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isPrimary: Bool
     #if os(tvOS)
     @Environment(\.isFocused) private var isFocused
@@ -3878,6 +3892,8 @@ struct MoviesFilterPage: View {
 /// tvOS action-sheet row look: translucent capsule at rest, white with
 /// accent text when focused; a selected tab is accent-filled.
 private struct NativeSheetRowStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
@@ -3914,6 +3930,8 @@ private extension View {
 /// and inert. On tvOS a letter jumps as soon as it takes focus (and on
 /// click); on iOS a tap jumps.
 struct AlphabetRail: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let available: Set<String>
     /// Set by the owner to move focus onto a letter (tvOS); cleared here.
     var focusRequest: Binding<String?> = .constant(nil)
@@ -4367,6 +4385,8 @@ enum TVFocusBridge {
 /// pill shape; on focus a white ring when selected, accent when not (Logan
 /// 2026-09-05). The guide keeps TVGroupPillButtonStyle and its own ruling.
 struct MoviesPillStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 

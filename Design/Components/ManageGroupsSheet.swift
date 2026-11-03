@@ -105,6 +105,8 @@ enum GroupOrderStore {
 /// A sheet that toggles group visibility and (when `orderStorageKey` is
 /// supplied) orders the groups via a Default / A-Z / Manual selector.
 struct ManageGroupsSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let allGroups: [String]
     let storageKey: String
@@ -667,6 +669,8 @@ struct ManageGroupsSheet: View {
 
 /// Small icon button shown in the filter bar to open the manage-groups sheet.
 struct ManageGroupsButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let action: () -> Void
     let hiddenCount: Int
 
@@ -730,6 +734,8 @@ private struct TVModeChip: View {
 /// button's focus highlight matches the filter pills beside it instead of
 /// the squared system focus platter.
 private struct TVManageGroupsButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
@@ -756,6 +762,8 @@ private struct TVManageGroupsButtonStyle: ButtonStyle {
 /// A single row in the tvOS ManageGroups list. Uses the app's own
 /// focus-ring style (teal tinted card) instead of the system white highlight.
 struct TVGroupToggleRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let group: String
     let isOn: Bool
     let onToggle: () -> Void
@@ -828,6 +836,8 @@ struct TVGroupToggleRow: View {
 /// the list stays fully visible behind it. The grabbed row shows "Moving"
 /// with a bright border instead of a centered modal.
 private struct TVReorderableGroupRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let group: String
     let isOn: Bool
     let isGrabbed: Bool

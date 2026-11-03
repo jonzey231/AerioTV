@@ -157,6 +157,8 @@ struct ProfileAvatarView: View {
 // MARK: - Badges and rows
 
 struct ProfileRoleBadge: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let text: String
     var body: some View {
         Text(text)
@@ -170,6 +172,8 @@ struct ProfileRoleBadge: View {
 
 /// The card button look for profile rows: theme card, accent focus ring on TV.
 struct ProfileRowButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var lifted = false
     var destructive = false
     @Environment(\.isFocused) private var focused
@@ -192,6 +196,8 @@ struct ProfileRowButtonStyle: ButtonStyle {
 
 /// Capsule pill (Add, Remove, dialog buttons): accent focus ring, white ring when selected on TV.
 struct ProfilePillStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     var filled = true
     var destructive = false
     var selected = false
@@ -222,6 +228,8 @@ struct ProfilePillStyle: ButtonStyle {
 
 /// One choice row (Android ChoiceRow): radio for one-of-N, plain for actions.
 struct ProfileChoiceRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     var subtitle: String? = nil
     var checked: Bool? = nil
@@ -258,6 +266,8 @@ struct ProfileChoiceRow: View {
 
 /// The themed dialog card every profile prompt uses (Android SettingsAlertDialog).
 struct ProfileDialog<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     var centeredTitle = false
     var subtitle: String? = nil
@@ -329,6 +339,8 @@ struct ProfileDialogHost<Content: View>: View {
 /// show (the entry clears) or nil when accepted. [onDismiss] nil = the
 /// launch gate, which cannot be dismissed.
 struct ProfilePinEntry: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let type: PinType
     var pinLength: Int? = nil
@@ -486,6 +498,8 @@ struct ProfilePinEntry: View {
 }
 
 private struct ProfilePadKeyStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var focused
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

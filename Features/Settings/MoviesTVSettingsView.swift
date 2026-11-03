@@ -389,6 +389,8 @@ private enum SettingsActionButtonMetrics {
 /// inside a Settings card, so the primary action draws its own accent
 /// fill instead.
 struct SettingsPrimaryButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let accent: Color
     @Environment(\.isEnabled) private var isEnabled
 
