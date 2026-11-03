@@ -1297,7 +1297,10 @@ struct VODDetailView: View {
                         let rawServerRating = (infoRating.isEmpty ? item.rating : infoRating)
                             .trimmingCharacters(in: .whitespaces)
                         let serverRating = (rawServerRating == "0" || rawServerRating == "0.0") ? "" : rawServerRating
-                        let displayRating = serverRating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : serverRating
+                        let chosenRating = serverRating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : serverRating
+                        // One decimal, like the grid card and Android's
+                        // formatRating: a provider sends "4.333".
+                        let displayRating = Double(chosenRating).map { String(format: "%.1f", $0) } ?? chosenRating
                         if !displayRating.isEmpty {
                             HStack(spacing: 3) {
                                 Image(systemName: "star.fill")
@@ -1692,7 +1695,8 @@ struct VODDetailView: View {
     // MARK: - Helpers
 
     private func playButton(url: URL?, title: String) -> some View {
-        TVPlayButton(isResolvingURL: isResolvingURL) {
+        TVPlayButton(isResolvingURL: isResolvingURL,
+                     label: item.type == .movie && (WatchProgressManager.getResumePosition(vodID: item.id, serverID: item.serverID.uuidString) ?? 0) > 0 ? "Resume" : "Play") {
             // GH #63 diagnosis: log EVERY press so a silent guard-return is
             // distinguishable from focus never reaching the button.
             debugLog("[VOD-Play] pressed url=\(url?.absoluteString ?? "NIL") resolving=\(isResolvingURL)")
@@ -2766,6 +2770,9 @@ private struct TVEpisodeCard: View {
 
 private struct TVPlayButton: View {
     let isResolvingURL: Bool
+    /// "Resume" when the movie has saved progress (Android MovieDetailScreen
+    /// hasResume parity), else "Play".
+    var label: String = "Play"
     let action: () -> Void
 
     #if os(tvOS)
@@ -2780,7 +2787,7 @@ private struct TVPlayButton: View {
                 } else {
                     Image(systemName: "play.fill")
                 }
-                Text(isResolvingURL ? "Loading…" : "Play")
+                Text(isResolvingURL ? "Loading…" : label)
             }
             .scaledFont(.headlineSmall)
             .foregroundColor(.white)
