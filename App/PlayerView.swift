@@ -6976,6 +6976,59 @@ final class AVPlayerProgressDriver {
         }
     }
 
+    /// Paused on live: the periodic time observer stops with the player, so
+    /// the chrome froze at LIVE with a full scrubber and no Go Live for the
+    /// whole pause (iPad 2026-11-03 15:16:55 pause, 73 s, Go Live only after
+    /// Play). Android measures behind-live against wall time during the
+    /// pause and shows Go Live past 5 s. This 0.5 s pump does the same:
+    /// behind = the cushion-free lag at pause + elapsed wall time.
+    private var pausedLiveTimer: Timer?
+    private var pausedBehindAtStart: Double = 0
+
+    private func startPausedLivePump(_ player: AVPlayer) {
+        stopPausedLivePump()
+        if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            let cur = player.currentTime().seconds
+            if end.isFinite, cur.isFinite {
+                pausedBehindAtStart = max(0, (end - cur) - naturalEdgeOffset)
+            }
+        }
+        let started = Date()
+        pausedLiveTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak player] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                guard let player, self.isLive, self.liveRewindWindowActive,
+                      player.timeControlStatus == .paused else { self.stopPausedLivePump(); return }
+                self.pumpPausedLive(player, elapsed: Date().timeIntervalSince(started))
+            }
+        }
+    }
+
+    private func stopPausedLivePump() {
+        pausedLiveTimer?.invalidate()
+        pausedLiveTimer = nil
+    }
+
+    private func pumpPausedLive(_ player: AVPlayer, elapsed: Double) {
+        let behind = pausedBehindAtStart + elapsed
+        var windowSec = behind
+        if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+            let w = CMTimeGetSeconds(range.duration)
+            if w.isFinite { windowSec = max(w, behind) }
+        }
+        let windowMs = Int64(windowSec * 1000)
+        store.currentMs = Int32(clamping: max(0, windowMs - Int64(behind * 1000)))
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let engine = LiveRewindEngine.shared
+        engine.updateExternalWindow(tailWallMs: now - windowMs, headWallMs: now)
+        if behind > 5, !pauseTimeshiftLatched {
+            pauseTimeshiftLatched = true
+            engine.noteTimeshifting(true)
+            debugLog(String(format: "[CHROME] paused %.1fs behind live -> Go Live shown, LIVE badge off", behind))
+        }
+    }
+
     /// GH #93: an in-progress recording's playlist is live-shaped and its
     /// seekable end is the last segment the server has published. A seek
     /// that lands on (or past) that end leaves AVPlayer nothing to buffer
@@ -7025,10 +7078,19 @@ final class AVPlayerProgressDriver {
             if let self, self.isLive, self.liveRewindWindowActive {
                 if !resuming {
                     self.userPauseStartedAt = Date()
+                    self.startPausedLivePump(player)
                 } else if let started = self.userPauseStartedAt {
                     self.userPauseStartedAt = nil
+                    self.stopPausedLivePump()
                     let pausedFor = Date().timeIntervalSince(started)
-                    if pausedFor > 6 {
+                    if pausedFor <= 6 {
+                        // Short pause: the pause-time Go Live drops again
+                        // (the ruling is a pause over ~6 s keeps it).
+                        if self.pauseTimeshiftLatched {
+                            self.pauseTimeshiftLatched = false
+                            LiveRewindEngine.shared.noteTimeshifting(false)
+                        }
+                    } else {
                         debugLog(String(format: "[AVP-REWIND] resume after %.0fs pause -> timeshifting (Go Live)", pausedFor))
                         self.pauseTimeshiftLatched = true
                         Task { @MainActor in LiveRewindEngine.shared.noteTimeshifting(true) }
