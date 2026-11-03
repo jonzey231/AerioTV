@@ -401,14 +401,8 @@ struct PlaybackChromeOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else if liveRewindIOS.buffering {
-                // Android places the readout in its own row ABOVE the
-                // progress bar, so the Go Live pill on the transport row's
-                // right never covers resolution and frame rate (Logan
-                // 2026-11-03: Go Live replaced the badges).
-                VStack(spacing: 8) {
-                    streamReadout_iOS
-                    RewindTransportBar_iOS(store: store)
-                }
+                RewindTransportBar_iOS(store: store)
+                    .overlay(alignment: .bottom) { streamReadout_iOS }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
@@ -930,10 +924,10 @@ struct RewindTransportBar_iOS: View {
                         }
                     }
                     .accessibilityLabel(SkipIntervals.forwardLabel(skipForwardSeconds))
-                }
-                if liveRewind.timeshifting {
-                    HStack {
-                        Spacer()
+                    // Inside the centered group, right of Forward, so it
+                    // never covers the engine and format badges in the
+                    // row's bottom corners (Logan 2026-11-03).
+                    if liveRewind.timeshifting {
                         Button {
                             store.audioProgressStore?.seekAction?(Int32(clamping: window))
                         } label: {
