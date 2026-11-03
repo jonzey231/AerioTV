@@ -401,8 +401,14 @@ struct PlaybackChromeOverlay: View {
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else if liveRewindIOS.buffering {
-                RewindTransportBar_iOS(store: store)
-                    .overlay(alignment: .bottom) { streamReadout_iOS }
+                // Android places the readout in its own row ABOVE the
+                // progress bar, so the Go Live pill on the transport row's
+                // right never covers resolution and frame rate (Logan
+                // 2026-11-03: Go Live replaced the badges).
+                VStack(spacing: 8) {
+                    streamReadout_iOS
+                    RewindTransportBar_iOS(store: store)
+                }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
@@ -482,10 +488,7 @@ struct PlaybackChromeOverlay: View {
                         .accessibilityLabel("Playback pipeline \(engine)")
                 }
                 Spacer(minLength: 0)
-                // The Go Live pill takes this corner while rewound; the
-                // format badge was drawn over it.
-                if !(liveRewindIOS.buffering && liveRewindIOS.timeshifting),
-                   let audioStore = store.audioProgressStore {
+                if let audioStore = store.audioProgressStore {
                     TVVideoFormatBadge(progress: audioStore, fontSize: size)
                 }
             }
