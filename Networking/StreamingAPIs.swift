@@ -2949,6 +2949,31 @@ struct DispatcharrAPI {
     /// block the whole batch.
     func enrichCategories(programIDs: [Int]) async -> [Int: (categories: String?, isRepeat: Bool)] {
         guard !programIDs.isEmpty else { return [:] }
+        // Android 1a279aba: one programs search answers every now-airing
+        // program (about 280 detail calls per cold launch before). The
+        // per-id detail call stays only for servers without the search
+        // action (404/405), remembered per server for the session.
+        if !NowAiringSearchSupport.isUnsupported(baseURL) {
+            do {
+                if let bulk = try await getNowAiringCategories(airingAt: Date()) {
+                    var out: [Int: (categories: String?, isRepeat: Bool)] = [:]
+                    for pid in programIDs {
+                        guard let row = bulk.rows[pid] else { continue }
+                        if !row.categories.isEmpty || row.isRepeat {
+                            out[pid] = (row.categories.isEmpty ? nil : row.categories, row.isRepeat)
+                        }
+                    }
+                    debugLog("[EPG-ENRICH] bulk now-airing: \(bulk.rows.count) programs in \(bulk.requests) request\(bulk.requests == 1 ? "" : "s"); \(out.count)/\(programIDs.count) wanted have data")
+                    return out
+                }
+                NowAiringSearchSupport.markUnsupported(baseURL)
+                debugLog("[EPG-ENRICH] bulk now-airing unsupported (404/405); per-program fallback for this session")
+            } catch {
+                // Transient failure: the next refresh retries the search.
+                debugLog("[EPG-ENRICH] bulk now-airing failed: \(type(of: error)); nothing applied this pass")
+                return [:]
+            }
+        }
         let semaphore = AsyncSemaphore(value: 4)
         var results: [Int: (categories: String?, isRepeat: Bool)] = [:]
         await withTaskGroup(of: (Int, String?, Bool).self) { group in
@@ -2975,6 +3000,39 @@ struct DispatcharrAPI {
             }
         }
         return results
+    }
+
+    /// GET /api/epg/programs/search/?airing_at=<now>&fields=id,custom_properties
+    /// (Android DispatcharrClient.getNowAiringCategories): every program airing
+    /// now in pages of 500. Nil on HTTP 404 (first page) or 405, the servers
+    /// without the search action. Pages are walked by `page=N`, never `next`,
+    /// which carries the server's own host and scheme (wrong behind a proxy).
+    func getNowAiringCategories(airingAt: Date, maxPages: Int = 20) async throws -> (rows: [Int: NowAiringSearchParser.Row], requests: Int)? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        let at = f.string(from: airingAt).addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? ""
+        var all: [Int: NowAiringSearchParser.Row] = [:]
+        var requests = 0
+        var page = 1
+        while page <= maxPages {
+            let url = try buildURL(path: "/api/epg/programs/search/?airing_at=\(at)&fields=id,custom_properties&page_size=500&page=\(page)")
+            var request = URLRequest(url: url, timeoutInterval: 30)
+            request.httpMethod = "GET"
+            headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+            let (data, response) = try await dataWithJWTRetry(for: request)
+            requests += 1
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (code == 404 && page == 1) || code == 405 { return nil }
+            guard (200..<300).contains(code) else {
+                if all.isEmpty { throw APIError.serverError(code) }
+                break
+            }
+            let parsed = NowAiringSearchParser.parse(data)
+            all.merge(parsed.rows) { _, new in new }
+            if !parsed.hasNext { break }
+            page += 1
+        }
+        return (all, requests)
     }
 
     /// One page of `/api/epg/programs/?<query>&page_size=50`, no paging,
@@ -7365,4 +7423,60 @@ extension DispatcharrAPI {
 
     /// `buildURL(path:)` for DispatcharrAppDataClient.
     func appDataURL(path: String) throws -> URL { try buildURL(path: path) }
+}
+
+
+/// Servers whose /api/epg/programs/search/ answered 404/405 this session.
+enum NowAiringSearchSupport {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var unsupported = Set<String>()
+    static func isUnsupported(_ base: String) -> Bool { lock.lock(); defer { lock.unlock() }; return unsupported.contains(base) }
+    static func markUnsupported(_ base: String) { lock.lock(); unsupported.insert(base); lock.unlock() }
+}
+
+/// Pure parser for one page of /api/epg/programs/search/ (Android
+/// NowAiringSearchParser): the DRF envelope {count, next, previous, results}
+/// or a flat array. custom_properties may be null or lack categories.
+enum NowAiringSearchParser {
+    struct Row: Equatable { let categories: String; let isRepeat: Bool }
+    struct Page { let rows: [Int: Row]; let hasNext: Bool }
+
+    static func parse(_ data: Data) -> Page {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return Page(rows: [:], hasNext: false) }
+        let rows: [Any]
+        var hasNext = false
+        if let arr = root as? [Any] {
+            rows = arr
+        } else if let obj = root as? [String: Any] {
+            rows = obj["results"] as? [Any] ?? []
+            if let n = obj["next"] as? String, !n.trimmingCharacters(in: .whitespaces).isEmpty { hasNext = true }
+        } else {
+            rows = []
+        }
+        var out: [Int: Row] = [:]
+        for case let o as [String: Any] in rows {
+            let id: Int? = (o["id"] as? Int) ?? (o["id"] as? String).flatMap { Int($0) }
+            guard let id else { continue }
+            let cp = o["custom_properties"] as? [String: Any]
+            let cats = (cp?["categories"] as? [Any] ?? [])
+                .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            out[id] = Row(categories: cats.joined(separator: ","), isRepeat: Self.truthy(cp?["previously_shown"]))
+        }
+        return Page(rows: out, hasNext: hasNext)
+    }
+
+    /// Dispatcharr's detail serializer: is_previously_shown = bool(custom_properties.previously_shown).
+    /// The search serializer has no is_previously_shown, so the rerun flag is read the same way here.
+    private static func truthy(_ v: Any?) -> Bool {
+        switch v {
+        case nil, is NSNull: return false
+        case let b as Bool: return b
+        case let n as NSNumber: return n.intValue != 0
+        case let s as String: return !s.isEmpty
+        case let a as [Any]: return !a.isEmpty
+        case let d as [String: Any]: return !d.isEmpty
+        default: return true
+        }
+    }
 }

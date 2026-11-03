@@ -3655,7 +3655,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 enrich SKIP: gridPrograms=\(gridPrograms.count) tvgMap=\(tvgIDToChannelIDs.count) uuidMap=\(uuidToChannelID.count); no currently-airing program matched all guards")
             return
         }
-        debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
+        debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; programs search (per-program fallback)")
         let cats = await api.enrichCategories(programIDs: Array(currentByChannelID.values))
         var byChannel: [String: String] = [:]
         var repeatChannels: Set<String> = []

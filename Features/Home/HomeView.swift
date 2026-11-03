@@ -2610,7 +2610,7 @@ final class ChannelStore: ObservableObject {
                         }
                     }
                     let pids = Array(currentByChannelID.values)
-                    debugLog("📺 Category enrichment: \(pids.count) currently-airing programs across \(currentByChannelID.count) channels; fetching /api/epg/programs/<id>/")
+                    debugLog("📺 Category enrichment: \(pids.count) currently-airing programs across \(currentByChannelID.count) channels; programs search (per-program fallback)")
                     let cats = await dAPIForEnrich.enrichCategories(programIDs: pids)
 
                     // v1.7.x Phase 3: capture title alongside category

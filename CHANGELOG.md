@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Guide category tints for what is airing now come from one programs search
+  request instead of one detail request per program (about 280 on a cold
+  launch). Servers without the search fall back to the per-program request.
+
+### Server paths
+
+- New: `GET /api/epg/programs/search/` (`airing_at`, `fields`, `page_size`,
+  `page`), covered by the existing `/api/*` rule.
+
 ## v1.8.44 - 2026-10-16
 
 ### Added
