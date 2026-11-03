@@ -234,12 +234,18 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         // Equal-value guard: every observer (about 200 views follow the theme
         // live) re-renders on any @Published write, and a sync apply posts
         // this notice for every settings pull, changed theme or not.
-        let t = AppTheme(rawValue: storedTheme) ?? .aerio
+        // Read UserDefaults directly: the @AppStorage boxes on this class
+        // refresh from a change notification that lands after the write, so a
+        // reload right after a profile swap or a sync apply read the previous
+        // profile's theme (iPad 2026-11-03: Jordan's lavender after the
+        // switch back to Logan).
+        let ud = UserDefaults.standard
+        let t = AppTheme(rawValue: ud.string(forKey: "selectedTheme") ?? "") ?? .aerio
         if t != selectedTheme { selectedTheme = t }
-        let g = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
+        let g = LiquidGlassStyle(rawValue: ud.string(forKey: "liquidGlassStyle") ?? "") ?? .tinted
         if g != liquidGlassStyle { liquidGlassStyle = g }
         // Re-read the synced appearance mode so an iCloud push applies live.
-        let m = AppearanceMode(rawValue: storedAppearanceMode) ?? .dark
+        let m = AppearanceMode(rawValue: ud.string(forKey: "appearanceMode") ?? "") ?? .dark
         if m != appearanceMode { appearanceMode = m }
         let ca = UserDefaults.standard.bool(forKey: "useCustomAccent")
         if ca != useCustomAccent { useCustomAccent = ca }
