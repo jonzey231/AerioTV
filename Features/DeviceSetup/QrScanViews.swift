@@ -237,6 +237,12 @@ private struct CodeImportPickers: ViewModifier {
 
 // MARK: - Form actions
 
+struct UserQrTarget: Identifiable, Equatable {
+    let playlistId: String
+    let profileId: String
+    var id: String { playlistId + "|" + profileId }
+}
+
 /// "Scan QR code", "Choose from Photos", and "Import file" for a form.
 /// `accept` returns an error for a result this form cannot use, or nil;
 /// accepted results go to `onResult`. After a successful Photos or file
@@ -265,6 +271,9 @@ struct QrScanActions: View {
     /// Picker the camera screen asked for (true Photos, false file); opened
     /// from this form once the camera cover is gone.
     @State private var pickerAfterScanner: Bool?
+    /// "Show Dispatcharr User QR Code": the active profile, when it has a key saved here.
+    @State private var userQrTarget: UserQrTarget?
+    @State private var showingUserQr: UserQrTarget?
 
     var body: some View {
         VStack(alignment: linksOnly ? .center : .leading, spacing: linksOnly ? 2 : 6) {
@@ -280,6 +289,12 @@ struct QrScanActions: View {
                     actionButton("Scan QR code", icon: "qrcode.viewfinder") { error = nil; scanning = true }
                     actionButton("Choose from Photos", icon: "photo.on.rectangle", loading: busy) { error = nil; showPhotos = true }
                 }
+                if let t = userQrTarget {
+                    actionButton("Show Dispatcharr User QR Code", icon: "qrcode") { error = nil; showingUserQr = t }
+                        .fullScreenCover(item: $showingUserQr) { t in
+                            UserQrCover(playlistId: t.playlistId, profileId: t.profileId) { showingUserQr = nil }
+                        }
+                }
                 actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
             }
             if let error {
@@ -291,6 +306,9 @@ struct QrScanActions: View {
         .modifier(CodeImportPickers(showPhotos: $showPhotos, showFile: $showFile, busy: $busy, error: $error,
                                     deliver: { r, src in accepted(r, src) }))
         .onChange(of: scanTrigger) { _, n in if n > 0 { error = nil; scanning = true } }
+        .onAppear {
+            userQrTarget = UserQrPayload.activeTarget().map { UserQrTarget(playlistId: $0.playlistId, profileId: $0.profileId) }
+        }
         .fullScreenCover(isPresented: $scanning, onDismiss: {
             if let (r, src) = fromScanner { fromScanner = nil; finish(r, src) }
             if let photos = pickerAfterScanner {

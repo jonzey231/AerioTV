@@ -24,6 +24,8 @@ enum ProfileRoute: Equatable {
     case role(DispatcharrProfile)
     case channelProfiles(DispatcharrProfile)
     case switchTo(DispatcharrProfile)
+    /// iPhone and iPad: "Show Dispatcharr User QR Code" (own profile, or any profile for an Admin).
+    case userQr(DispatcharrProfile)
     case add
     case deviceSet
     case deviceRemove
@@ -94,6 +96,12 @@ struct ProfileFlowHost: View {
             case .role(let p): RoleFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .channelProfiles(let p): ChannelProfilesFlow(playlistId: playlistId, profile: p) { model.close($0) }
             case .switchTo(let p): ProfileSwitchFlow(playlistId: playlistId, profile: p) { model.close($0) }
+            case .userQr(let p):
+                #if os(iOS)
+                UserQrFlow(playlistId: playlistId, profileId: p.id) { model.close() }
+                #else
+                EmptyView()
+                #endif
             case .add: AddProfileFlow(playlistId: playlistId) { model.close() }
             case .deviceSet: DeviceAdminPinSetFlow(playlistId: playlistId) { model.close($0) }
             case .deviceRemove: DeviceAdminPinRemoveFlow(playlistId: playlistId) { model.close($0) }
@@ -164,6 +172,11 @@ struct ProfileActionsSheet: View {
             if manager.canAssignChannelProfiles(playlistId) {
                 ProfileChoiceRow(label: "Channel Profiles") { model.route = .channelProfiles(p) }
             }
+            #if os(iOS)
+            if (isActive || g.isRoleAdmin) && UserQrPayload.code(playlistId: playlistId, profileId: p.id) != nil {
+                ProfileChoiceRow(label: "Show Dispatcharr User QR Code") { model.route = .userQr(p) }
+            }
+            #endif
             if g.isAdmin && !p.isDefault {
                 ProfileChoiceRow(label: "Remove", destructive: true) { model.route = .remove(p) }
             }
