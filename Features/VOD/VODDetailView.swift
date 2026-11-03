@@ -573,23 +573,12 @@ struct VODDetailView: View {
     @State private var seriesTMDBID: String?
     @State private var relatedMatchedCount = -1
     @ObservedObject private var relatedLibrary = VODStore.shared
-    #if os(tvOS)
-    /// Per-season episode info and the episode card that holds focus
-    /// (drives "In this episode").
-    @State private var seasonInfo: [Int: [Int: TMDBService.EpisodeInfo]] = [:]
-    @FocusState private var focusedEpisodeID: String?
-    /// Last episode card that held focus. The people strip keys off this,
-    /// not the live focus: keyed off focus it unmounted the instant focus
-    /// left the card, so Down from a card had nowhere to land (Logan
-    /// 2026-09-04: could not reach Cast & Crew).
-    @State private var peopleEpisodeID: String?
 
     /// TMDB backdrop first when a key is set, then the provider's, then a
     /// poster (Logan 2026-09-04: TMDB is the priority, provider the fallback).
     @State private var tmdbBackdropURL: URL?
     private var tvHeroURL: URL? {
-        TMDBArtCache.shared.backdropURL(for: item) ?? tmdbBackdropURL
-            ?? (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
+        detailBackdropURL ?? detailPosterURL
     }
 
     @MainActor
@@ -600,18 +589,42 @@ struct VODDetailView: View {
         tmdbBackdropURL = await TMDBService.backdropURL(for: item, apiKey: apiKey)
     }
 
-    // Server-wins merges (provider value first, TMDB backfill for blanks),
-    // mirroring heroSection / infoSection.
+    // TMDB first once a match exists (Logan 2026-11-03: "It should be
+    // pulling from TMDB"): the matched details record, then the art cache
+    // row the grid and hero use, then the server. With TMDB off both TMDB
+    // sources are nil, so the server values show everywhere.
+    private var art: TMDBArtCache { TMDBArtCache.shared }
     private var mergedYear: String {
+        if let y = tmdbDetails?.year, !y.isEmpty { return y }
+        if let y = art.year(for: item) { return y }
         let detailYear = (fullMovie?.releaseYear ?? fullSeries?.releaseYear) ?? ""
-        let serverYear = detailYear.isEmpty ? item.releaseYear : detailYear
-        return serverYear.isEmpty ? (tmdbDetails?.year ?? "") : serverYear
+        return detailYear.isEmpty ? item.releaseYear : detailYear
     }
     private var mergedRating: String {
+        if let r = tmdbDetails?.voteAverage, !r.isEmpty { return r }
+        if let r = art.rating(for: item) { return r }
         let infoRating = (fullMovie?.rating ?? fullSeries?.rating) ?? ""
         let raw = (infoRating.isEmpty ? item.rating : infoRating).trimmingCharacters(in: .whitespaces)
-        let server = (raw == "0" || raw == "0.0") ? "" : raw
-        return server.isEmpty ? (tmdbDetails?.voteAverage ?? "") : server
+        return (raw == "0" || raw == "0.0") ? "" : raw
+    }
+    private var mergedRuntime: String {
+        if let m = tmdbDetails?.runtimeMinutes, m > 0, item.type == .movie {
+            return m >= 60 ? "\(m / 60)h \(m % 60)m" : "\(m)m"
+        }
+        return fullMovie?.duration ?? ""
+    }
+    /// Poster: the matched TMDB record, the art cache, then the playlist.
+    private var detailPosterURL: URL? {
+        tmdbDetails?.posterPath.flatMap { TMDBService.imageURL(path: $0, size: "w500") }
+            ?? (TMDBPosters.isEnabled ? art.posterURL(for: item) : nil)
+            ?? item.posterURL ?? tmdbPosterURL
+    }
+    /// Backdrop: the matched TMDB record, the art cache, then the server.
+    private var detailBackdropURL: URL? {
+        tmdbDetails?.backdropPath.flatMap { TMDBService.imageURL(path: $0, size: "w1280") }
+            ?? (TMDBPosters.isEnabled ? art.backdropURL(for: item) : nil)
+            ?? tmdbBackdropURL
+            ?? (fullMovie?.backdropURL ?? fullSeries?.backdropURL)
     }
     // TMDB first when it answered, provider otherwise (Logan 2026-09-04).
     private func tmdbFirst(_ tmdb: String?, _ server: String) -> String {
@@ -623,7 +636,7 @@ struct VODDetailView: View {
                   fullMovie?.plot ?? fullSeries?.plot ?? "")
     }
     private var mergedGenre: String {
-        tmdbFirst(tmdbDetails?.genres, fullMovie?.genre ?? fullSeries?.genre ?? "")
+        tmdbFirst(tmdbDetails?.genres ?? art.genres(for: item), fullMovie?.genre ?? fullSeries?.genre ?? "")
     }
     private var mergedCast: String {
         tmdbFirst(tmdbDetails?.castTop, fullMovie?.cast ?? fullSeries?.cast ?? "")
@@ -631,6 +644,16 @@ struct VODDetailView: View {
     private var mergedDirector: String {
         tmdbFirst(tmdbDetails?.director, fullMovie?.director ?? fullSeries?.director ?? "")
     }
+    #if os(tvOS)
+    /// Per-season episode info and the episode card that holds focus
+    /// (drives "In this episode").
+    @State private var seasonInfo: [Int: [Int: TMDBService.EpisodeInfo]] = [:]
+    @FocusState private var focusedEpisodeID: String?
+    /// Last episode card that held focus. The people strip keys off this,
+    /// not the live focus: keyed off focus it unmounted the instant focus
+    /// left the card, so Down from a card had nowhere to land (Logan
+    /// 2026-09-04: could not reach Cast & Crew).
+    @State private var peopleEpisodeID: String?
     private var tvResumeMs: Int32 {
         WatchProgressManager.getResumePosition(vodID: item.id, serverID: item.serverID.uuidString) ?? 0
     }
@@ -708,7 +731,7 @@ struct VODDetailView: View {
         var parts: [String] = []
         let year = mergedYear
         if !year.isEmpty { parts.append(year) }
-        if let d = fullMovie?.duration, !d.isEmpty { parts.append(d) }
+        if !mergedRuntime.isEmpty { parts.append(mergedRuntime) }
         if let g = mergedGenre.components(separatedBy: ",").first?
             .trimmingCharacters(in: .whitespaces), !g.isEmpty { parts.append(g) }
         return parts
@@ -1167,7 +1190,7 @@ struct VODDetailView: View {
         if !genre.isEmpty { facts.append(("Genre", genre)) }
         let released = fullMovie?.releaseDate ?? fullSeries?.releaseDate ?? ""
         if released.count > 4 { facts.append(("Released", released)) }
-        if let d = fullMovie?.duration, !d.isEmpty { facts.append(("Runtime", d)) }
+        if !mergedRuntime.isEmpty { facts.append(("Runtime", mergedRuntime)) }
         if let series = fullSeries, !series.seasons.isEmpty {
             let eps = series.seasons.reduce(0) { $0 + $1.episodes.count }
             let sN = series.seasons.count
@@ -1250,7 +1273,7 @@ struct VODDetailView: View {
             // fill (overflowing internally), and `.clipped()` trims
             // the overflow. No upward width propagation, hero looks
             // identical, layout stays inside the safe area.
-            let heroURL = (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
+            let heroURL = detailBackdropURL ?? detailPosterURL
             GeometryReader { geo in
                 AuthPosterImage(url: heroURL, headers: serverHeaders())
                     .aspectRatio(contentMode: .fill)
@@ -1262,7 +1285,7 @@ struct VODDetailView: View {
 
             HStack(alignment: .bottom, spacing: 14) {
                 // Small poster thumbnail
-                AuthPosterImage(url: item.posterURL ?? tmdbPosterURL, headers: serverHeaders())
+                AuthPosterImage(url: detailPosterURL, headers: serverHeaders())
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 80, height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -1280,10 +1303,9 @@ struct VODDetailView: View {
                         // custom_properties), falling back to the
                         // grid-time `item` snapshot for backwards
                         // compatibility with Xtream payloads.
-                        let detailYear = (fullMovie?.releaseYear ?? fullSeries?.releaseYear) ?? ""
-                        let serverYear = detailYear.isEmpty ? item.releaseYear : detailYear
-                        // TMDB backfill is LAST in the chain: server wins.
-                        let displayYear = serverYear.isEmpty ? (tmdbDetails?.year ?? "") : serverYear
+                        // TMDB is the source of truth once matched
+                        // (Logan 2026-11-03); the server fills gaps.
+                        let displayYear = mergedYear
                         if !displayYear.isEmpty {
                             Text(displayYear)
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
@@ -1295,11 +1317,7 @@ struct VODDetailView: View {
                         // block the TMDB vote backfill (common on Xtream list
                         // payloads). TMDB's vote average is last in the chain
                         // (its own 0.0 was already dropped at parse).
-                        let infoRating = (fullMovie?.rating ?? fullSeries?.rating) ?? ""
-                        let rawServerRating = (infoRating.isEmpty ? item.rating : infoRating)
-                            .trimmingCharacters(in: .whitespaces)
-                        let serverRating = (rawServerRating == "0" || rawServerRating == "0.0") ? "" : rawServerRating
-                        let chosenRating = serverRating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : serverRating
+                        let chosenRating = mergedRating
                         // One decimal, like the grid card and Android's
                         // formatRating: a provider sends "4.333".
                         let displayRating = Double(chosenRating).map { String(format: "%.1f", $0) } ?? chosenRating
@@ -1315,8 +1333,8 @@ struct VODDetailView: View {
                         // v1.6.12: runtime when known (movies only,
                         // series carry per-episode durations on the
                         // episode rows, not at the show level).
-                        if let movie = fullMovie, !movie.duration.isEmpty {
-                            Text(movie.duration)
+                        if !mergedRuntime.isEmpty {
+                            Text(mergedRuntime)
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                         }
                         if item.type == .movie {
@@ -2264,7 +2282,9 @@ struct VODDetailView: View {
         let missingMeta = plot.isEmpty || genre.isEmpty || cast.isEmpty || director.isEmpty
         // With a key TMDB is the priority (Logan 2026-09-04), so fetch on
         // the redesigned pages regardless; elsewhere only fill blanks.
-        guard missingMeta || usesTVMovieLayout else { return }
+        // TMDB is the source of truth once matched (Logan 2026-11-03), so
+        // fetch whenever the opt-in is on, not only to fill blanks.
+        _ = missingMeta
 
         let isMovie = item.type == .movie
         // fullMovie/fullSeries already merged provider-info over the list
@@ -2279,7 +2299,7 @@ struct VODDetailView: View {
             return
         }
         guard !item.name.isEmpty else { return }
-        tmdbDetails = await TMDBService.details(forTitle: item.displayName, isMovie: isMovie, apiKey: apiKey)
+        tmdbDetails = await TMDBService.details(forTitle: item.tmdbSearchTitle, isMovie: isMovie, apiKey: apiKey)
     }
 
     /// Structured credits for the Cast & Crew strip. Same settled gate as

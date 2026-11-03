@@ -1183,8 +1183,12 @@ enum TMDBService {
             let firstAirDate: String?
             let popularity: Double?
             let overview: String?
+            let voteAverage: Double?
+            let genreIds: [Int]?
             enum CodingKeys: String, CodingKey {
                 case id, popularity, overview
+                case voteAverage = "vote_average"
+                case genreIds = "genre_ids"
                 case posterPath = "poster_path"
                 case backdropPath = "backdrop_path"
                 case releaseDate = "release_date"
@@ -1212,10 +1216,28 @@ enum TMDBService {
         let results = decoded.results ?? []
         let hit = results.first(where: { $0.posterPath?.isEmpty == false })
             ?? results.first
+        let date = (isMovie ? hit?.releaseDate : hit?.firstAirDate) ?? ""
+        let vote = hit?.voteAverage ?? 0
+        let genres = (hit?.genreIds ?? []).compactMap { genreNames[$0] }
         return TMDBArtCache.Entry(tmdbID: hit?.id.map(String.init) ?? "",
                                   poster: hit?.posterPath ?? "", backdrop: hit?.backdropPath ?? "",
-                                  at: Date(), overview: hit?.overview ?? "")
+                                  at: Date(), overview: hit?.overview ?? "",
+                                  year: date.count >= 4 ? String(date.prefix(4)) : "",
+                                  rating: vote > 0 ? String(format: "%.1f", vote) : "",
+                                  genres: genres.joined(separator: ", "))
     }
+
+    /// TMDB's fixed genre ids (movie and tv lists combined) for the search
+    /// rows, which carry ids only.
+    static let genreNames: [Int: String] = [
+        28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime",
+        99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History",
+        27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance",
+        878: "Science Fiction", 10770: "TV Movie", 53: "Thriller", 10752: "War",
+        37: "Western", 10759: "Action & Adventure", 10762: "Kids", 10763: "News",
+        10764: "Reality", 10765: "Sci-Fi & Fantasy", 10766: "Soap", 10767: "Talk",
+        10768: "War & Politics",
+    ]
 
     static func imageURL(path: String, size: String) -> URL? {
         path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
@@ -1262,6 +1284,8 @@ struct TMDBDetails: Sendable {
     let voteAverage: String?
     let posterPath: String?
     var backdropPath: String? = nil
+    /// Minutes (movie runtime, or the first episode_run_time for tv).
+    var runtimeMinutes: Int? = nil
 }
 
 /// One cast or crew member. `id` stays a String even though TMDB sends an
@@ -1334,6 +1358,8 @@ extension TMDBService {
         let voteAverage: Double?
         let posterPath: String?
         let backdropPath: String?
+        let runtime: Int?
+        let episodeRunTime: [Int]?
         let createdBy: [CreatedBy]?
         let credits: CreditsBlock?
         struct Genre: Decodable { let name: String? }
@@ -1377,6 +1403,8 @@ extension TMDBService {
             case voteAverage = "vote_average"
             case posterPath = "poster_path"
             case backdropPath = "backdrop_path"
+            case runtime
+            case episodeRunTime = "episode_run_time"
             case createdBy = "created_by"
         }
     }
@@ -1581,7 +1609,8 @@ extension TMDBService {
             year: year,
             voteAverage: vote,
             posterPath: nonBlank(decoded.posterPath),
-            backdropPath: nonBlank(decoded.backdropPath)
+            backdropPath: nonBlank(decoded.backdropPath),
+            runtimeMinutes: (decoded.runtime ?? decoded.episodeRunTime?.first).flatMap { $0 > 0 ? $0 : nil }
         )
         detailsCache.setObject(Box(details), forKey: cacheKey)
         debugLog("🎬 TMDB details id \(trimmed) (\(kind)) -> ok")
@@ -2172,6 +2201,10 @@ final class TMDBArtCache: ObservableObject {
         var at: Date
         /// TMDB's synopsis (the provider's can be in another language).
         var overview: String? = nil
+        /// TMDB year, rating ("7.2") and genres; "" when TMDB has none.
+        var year: String = ""
+        var rating: String = ""
+        var genres: String = ""
     }
 
     /// Bumped (throttled) as entries land so poster cards re-read.
@@ -2206,10 +2239,14 @@ final class TMDBArtCache: ObservableObject {
         var backdrop: String
         var tmdbID: String
         var at: Double
+        var year = ""
+        var rating = ""
+        var genres = ""
 
         init(key: String, entry e: Entry) {
             self.key = key; poster = e.poster; backdrop = e.backdrop
             tmdbID = e.tmdbID; at = e.at.timeIntervalSince1970
+            year = e.year; rating = e.rating; genres = e.genres
         }
 
         init(from decoder: Decoder) throws {
@@ -2219,17 +2256,22 @@ final class TMDBArtCache: ObservableObject {
             backdrop = try c.decode(String.self)
             tmdbID = try c.decode(String.self)
             at = try c.decode(Double.self)
+            if !c.isAtEnd { year = try c.decode(String.self) }
+            if !c.isAtEnd { rating = try c.decode(String.self) }
+            if !c.isAtEnd { genres = try c.decode(String.self) }
         }
 
         func encode(to encoder: Encoder) throws {
             var c = encoder.unkeyedContainer()
             try c.encode(key); try c.encode(poster); try c.encode(backdrop)
             try c.encode(tmdbID); try c.encode(at)
+            try c.encode(year); try c.encode(rating); try c.encode(genres)
         }
 
         var entry: Entry {
             Entry(tmdbID: tmdbID, poster: poster, backdrop: backdrop,
-                  at: Date(timeIntervalSince1970: at), overview: nil)
+                  at: Date(timeIntervalSince1970: at), overview: nil,
+                  year: year, rating: rating, genres: genres)
         }
     }
 
@@ -2243,7 +2285,9 @@ final class TMDBArtCache: ObservableObject {
     }
 
     /// v3: rows are matched with the title's year (see tmdbSearchTitle).
-    nonisolated static let diskVersion = 3
+    /// v4: rows carry TMDB year, rating and genres (TMDB is the source of
+    /// truth for VOD metadata once matched, Logan 2026-11-03).
+    nonisolated static let diskVersion = 4
 
     static func key(for item: VODDisplayItem) -> String {
         (item.type == .movie ? "m:" : "t:") + LibraryMatcher.cleanTitle(item.name)
@@ -2311,6 +2355,20 @@ final class TMDBArtCache: ObservableObject {
     func overview(for item: VODDisplayItem) -> String? {
         guard let o = overviews[Self.key(for: item)], !o.isEmpty else { return nil }
         return o
+    }
+
+    /// TMDB-first metadata for cards (nil: no match or TMDB lacks it).
+    func year(for item: VODDisplayItem) -> String? {
+        guard TMDBPosters.isEnabled, let e = entry(for: item), !e.year.isEmpty else { return nil }
+        return e.year
+    }
+    func rating(for item: VODDisplayItem) -> String? {
+        guard TMDBPosters.isEnabled, let e = entry(for: item), !e.rating.isEmpty else { return nil }
+        return e.rating
+    }
+    func genres(for item: VODDisplayItem) -> String? {
+        guard TMDBPosters.isEnabled, let e = entry(for: item), !e.genres.isEmpty else { return nil }
+        return e.genres
     }
 
     func tmdbID(for item: VODDisplayItem) -> String? {

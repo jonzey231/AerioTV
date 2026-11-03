@@ -2930,6 +2930,9 @@ struct VODPosterCard: View {
     /// background pass resolves titles.
     @ObservedObject private var art = TMDBArtCache.shared
     private var posterURL: URL? { art.posterURL(for: item) ?? item.posterURL }
+    /// TMDB first once matched, server otherwise (Logan 2026-11-03).
+    private var cardRating: String { art.rating(for: item) ?? item.rating }
+    private var cardYear: String { art.year(for: item) ?? item.releaseYear }
 
     #if os(tvOS)
     @Environment(\.isFocused) private var isFocused
@@ -2970,10 +2973,10 @@ struct VODPosterCard: View {
             )
             #endif
             .overlay(alignment: .bottomTrailing) {
-                if !item.rating.isEmpty {
+                if !cardRating.isEmpty {
                     #if os(tvOS)
                     // Readable from the couch (Logan 2026-09-05).
-                    Text(item.rating)
+                    Text(cardRating)
                         .scaledFont(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 8).padding(.vertical, 4)
@@ -2981,7 +2984,7 @@ struct VODPosterCard: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .padding(6)
                     #else
-                    Text(item.rating)
+                    Text(cardRating)
                         .scaledFont(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 5).padding(.vertical, 3)
@@ -3013,13 +3016,13 @@ struct VODPosterCard: View {
 
                 // Year: always rendered (non-breaking space when absent) so every
                 // card reserves the same vertical space for this line.
-                Text(item.releaseYear.isEmpty ? "\u{00A0}" : item.releaseYear)
+                Text(cardYear.isEmpty ? "\u{00A0}" : cardYear)
                     #if os(tvOS)
                     .scaledFont(.system(size: 16, weight: .medium).subtext())
-                    .foregroundColor(item.releaseYear.isEmpty ? .clear : Color.contrastText(.textSecondary))
+                    .foregroundColor(cardYear.isEmpty ? .clear : Color.contrastText(.textSecondary))
                     #else
                     .scaledFont(.system(size: 10).subtext())
-                    .foregroundColor(item.releaseYear.isEmpty ? .clear : Color.contrastText(.textTertiary))
+                    .foregroundColor(cardYear.isEmpty ? .clear : Color.contrastText(.textTertiary))
                     #endif
             }
             .padding(.bottom, 4)
@@ -3374,16 +3377,21 @@ struct MoviesHero: View {
     @Environment(\.heroFocusBinding) private var heroFocusBinding
     #endif
 
+    /// TMDB first once matched, server otherwise (Logan 2026-11-03).
+    private var heroYear: String { art.year(for: item) ?? item.releaseYear }
+    private var heroRating: String { art.rating(for: item) ?? item.rating }
+    private var heroGenre: String { art.genres(for: item) ?? item.genreText }
+
     private var metaParts: [String] {
         var parts: [String] = []
-        if !item.releaseYear.isEmpty { parts.append(item.releaseYear) }
+        if !heroYear.isEmpty { parts.append(heroYear) }
         // Episode rows lead with where the viewer is in the show.
         if let p = progress, p.seasonNumber > 0 {
             parts.append("S\(p.seasonNumber) E\(p.episodeNumber)")
         }
         let d = item.durationText
         if !d.isEmpty { parts.append(d) }
-        if let g = item.genreText.components(separatedBy: ",").first?
+        if let g = heroGenre.components(separatedBy: ",").first?
             .trimmingCharacters(in: .whitespaces), !g.isEmpty { parts.append(g) }
         return parts
     }
@@ -3570,17 +3578,17 @@ struct MoviesHero: View {
                 .scaledFont(titleFont)
                 .foregroundColor(.textPrimary)
                 .lineLimit(textScale > 1.1 ? 1 : 2)
-            if !metaParts.isEmpty || !item.rating.isEmpty {
+            if !metaParts.isEmpty || !heroRating.isEmpty {
                 HStack(spacing: 10) {
                     ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
                         if idx > 0 { Text("·").foregroundColor(Color.contrastText(.textTertiary)) }
                         Text(part)
                     }
-                    if !item.rating.isEmpty {
+                    if !heroRating.isEmpty {
                         if !metaParts.isEmpty { Text("·").foregroundColor(Color.contrastText(.textTertiary)) }
                         HStack(spacing: 4) {
                             Image(systemName: "star.fill").scaledFont(.system(size: metaSize - 4))
-                            Text(item.rating)
+                            Text(heroRating)
                         }
                         .foregroundColor(.accentPrimary)
                     }
