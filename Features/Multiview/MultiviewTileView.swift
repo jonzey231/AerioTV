@@ -791,6 +791,7 @@ struct MultiviewTileView: View {
 
         if canSwitchTileStream {
             Button {
+                debugLog("[SwitchStream] menu tap (tile menu) tile=\(tile.id)")
                 store.pendingStreamSwitchTileID = tile.id
             } label: {
                 Label("Switch Stream", systemImage: "antenna.radiowaves.left.and.right")
@@ -2189,6 +2190,7 @@ struct MultiviewTileView: View {
 
         if canSwitchTileStream {
             Button("Switch Stream") {
+                debugLog("[SwitchStream] menu tap (tile menu) tile=\(tile.id)")
                 store.pendingStreamSwitchTileID = tile.id
             }
         }

@@ -311,18 +311,20 @@ struct SwitchStreamView: View {
         // the denial, and the server refuses a switch from a non-admin
         // regardless.
         let openedAt = Date()
+        debugLog("[SwitchStream] sheet task start channel=\(channelName) id=\(channelID)")
         let allowedTask = Task { @MainActor in
             await SwitchStreamFlow.recheckAdmin(server: activeServer, trigger: "Switch Stream open")
         }
         await loadLists()
         let allowed = await allowedTask.value
         guard allowed else {
+            debugLog("[SwitchStream] sheet denied on fresh read (+\(Int(Date().timeIntervalSince(openedAt) * 1000))ms)")
             streams = []
             loadError = SwitchStreamFlow.switchDeniedMessage
             isLoading = false
             return
         }
-        debugLog("[SwitchStream] sheet open +\(Int(Date().timeIntervalSince(openedAt) * 1000))ms")
+        debugLog("[SwitchStream] sheet open +\(Int(Date().timeIntervalSince(openedAt) * 1000))ms streams=\(streams.count) error=\(loadError != nil)")
     }
 
     private func loadLists() async {

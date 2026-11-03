@@ -330,6 +330,7 @@ struct PlaybackChromeOverlay: View {
                         },
                         onSwitchStream: canSwitchStreamForAudioTile ? {
                             chromeState.reportInteraction()
+                            debugLog("[SwitchStream] menu tap (iPad overflow); presenting sheet")
                             showSwitchStream = true
                         } : nil,
                         versionOptions: store.vodSoloTile != nil ? store.vodVersionOptions : [],

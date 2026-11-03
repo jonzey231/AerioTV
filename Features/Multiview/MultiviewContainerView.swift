@@ -1618,8 +1618,18 @@ struct MultiviewContainerView: View {
                 }
             )
         } else {
+            let _ = logEmptySwitchSheet()
             EmptyView()
         }
+    }
+
+    /// Diagnostic: the sheet was asked for but the audio tile has no
+    /// Dispatcharr identity, so it renders empty. Says which piece is missing.
+    private func logEmptySwitchSheet() {
+        let audio = store.audioTileID.flatMap { id in store.tiles.first(where: { $0.id == id }) }
+        debugLog("[SwitchStream] sheet EMPTY: audioTileID=\(store.audioTileID ?? "nil") tileFound=\(audio != nil) "
+                 + "channelPK=\(audio?.item.dispatcharrChannelID.map(String.init) ?? "nil") "
+                 + "hasUUID=\(!(audio?.item.uuid ?? "").isEmpty) tiles=\(store.tiles.count)")
     }
     #endif
 
