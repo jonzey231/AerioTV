@@ -203,9 +203,19 @@ final class SyncManager: ObservableObject {
         ) { notification in
             // Extract what we need from the notification before crossing isolation boundary.
             let reason = notification.userInfo?[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int
+            CloudAccount.noteExternalChange(reason: reason)
             MainActor.assumeIsolated {
                 SyncManager.shared.handleRemoteChange(reason: reason)
             }
+        }
+
+        // iCloud account or iCloud Drive state changed: re-read availability.
+        if !CloudAccount.identityObserved {
+        CloudAccount.identityObserved = true
+        NotificationCenter.default.addObserver(forName: .NSUbiquityIdentityDidChange, object: nil, queue: .main) { _ in
+            debugLog("[SYNC] iCloud identity changed; available=\(CloudAccount.isAvailable)")
+            NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
+        }
         }
 
         // Observe local reminder changes to push to iCloud
@@ -1958,4 +1968,33 @@ extension Notification.Name {
     /// on the first Back press after un-minimizing, exactly the
     /// regression GH #11 reported. Body has no userInfo.
     static let playerBackPress = Notification.Name("playerBackPress")
+}
+
+/// Whether this device can use iCloud for AerioTV's sync, which runs on the
+/// iCloud key-value store only. `FileManager.ubiquityIdentityToken` is nil
+/// whenever iCloud Drive is off, even with an account signed in and the
+/// key-value store working (iPad simulator 2026-11-03: signed in, Drive Off,
+/// AerioTV said "Not signed in"). So the account counts as present when the
+/// token exists OR the key-value store has delivered a change from iCloud on
+/// this device (remembered across launches). `synchronize()` is not used: it
+/// deadlocks on real devices.
+enum CloudAccount {
+    static let seenKey = "icloud.kvsDeliveredOnce"
+    nonisolated(unsafe) static var identityObserved = false
+
+    static var isAvailable: Bool {
+        FileManager.default.ubiquityIdentityToken != nil
+            || UserDefaults.standard.bool(forKey: seenKey)
+    }
+
+    /// Called for every key-value store change from iCloud. An account
+    /// change clears the memory until iCloud delivers again.
+    static func noteExternalChange(reason: Int?) {
+        if reason == NSUbiquitousKeyValueStoreAccountChange {
+            UserDefaults.standard.set(false, forKey: seenKey)
+        } else if UserDefaults.standard.bool(forKey: seenKey) == false {
+            UserDefaults.standard.set(true, forKey: seenKey)
+            debugLog("[SYNC] iCloud key-value store delivered a change; account counted as present")
+        }
+    }
 }

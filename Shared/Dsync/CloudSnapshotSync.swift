@@ -810,7 +810,7 @@ final class CloudSnapshotSync: ObservableObject {
     func clearReplaceWaits() { for c in CloudCanon.SHARED_FILES { clearReplaceWait(c) } }
 
     /// iCloud is usable on this device: Sync with iCloud on and an iCloud account signed in.
-    var available: Bool { cloudOn && FileManager.default.ubiquityIdentityToken != nil }
+    var available: Bool { cloudOn && CloudAccount.isAvailable }
 
     // MARK: - Probe (read only)
 
@@ -818,7 +818,7 @@ final class CloudSnapshotSync: ObservableObject {
     /// and filters (canonical-id rows only, Off categories left out). Nil when iCloud could not be
     /// read: unknown, never empty. Nothing is applied.
     func readSharedSummary() -> SetupSourceChoice.Summary? {
-        guard FileManager.default.ubiquityIdentityToken != nil else {
+        guard CloudAccount.isAvailable else {
             debugLog(CloudCanon.probeFailedLine("NoAccount"))
             return nil
         }
@@ -1089,7 +1089,7 @@ final class CloudSnapshotSync: ObservableObject {
     /// The coordinator's iCloud hooks (Android DriveSyncManager calls).
     private func registerHooks() {
         var h = DsyncCloudHooks()
-        h.accountPresent = { FileManager.default.ubiquityIdentityToken != nil }
+        h.accountPresent = { CloudAccount.isAvailable }
         h.readSharedSummary = { CloudSnapshotSync.shared.readSharedSummary() }
         h.markUnknown = { CloudSnapshotSync.shared.markCloudUnknown() }
         h.clearUnknown = { CloudSnapshotSync.shared.clearCloudUnknown() }

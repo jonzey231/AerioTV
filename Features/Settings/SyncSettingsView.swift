@@ -81,7 +81,7 @@ struct SyncSettingsView: View {
         return DsyncLocal.activeDispatcharrPlaylist() != nil
     }
 
-    private var cloudSignedIn: Bool { FileManager.default.ubiquityIdentityToken != nil }
+    private var cloudSignedIn: Bool { CloudAccount.isAvailable }
 
     private var manualRows: DsyncManual.Rows {
         DsyncManual.rows(dispatcharrOn: dsyncOn, dispatcharrPlaylist: dsyncAvailable,

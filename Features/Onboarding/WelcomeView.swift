@@ -443,7 +443,7 @@ struct WelcomeView: View {
         showCategoryChooser = true
     }
 
-    private var cloudAvailable: Bool { FileManager.default.ubiquityIdentityToken != nil }
+    private var cloudAvailable: Bool { CloudAccount.isAvailable }
 
     private func startConnect(type: ServerType?, enableSync: Bool) {
         hold.begin(enableSync ? "connect for Dispatcharr Sync" : "connect a server")
