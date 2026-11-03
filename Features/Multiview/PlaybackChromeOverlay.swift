@@ -826,6 +826,7 @@ struct RewindTransportBar_iOS: View {
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     @State private var dragFraction: CGFloat? = nil
+    @State private var goLiveWidth: CGFloat = 0
 
     var body: some View {
         let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
@@ -942,7 +943,11 @@ struct RewindTransportBar_iOS: View {
                                 .background(Color.accentColor, in: Capsule())
                         }
                         .fixedSize()
-                        .alignmentGuide(.trailing) { d in d[.leading] - 26 }
+                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { goLiveWidth = $0 }
+                        // Trailing-aligned to Forward's trailing edge, then
+                        // shifted by its own measured width plus 16 pt, so
+                        // the leading edge sits 16 pt after Forward.
+                        .offset(x: goLiveWidth + 16)
                     }
                 }
             }
