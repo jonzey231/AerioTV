@@ -85,7 +85,7 @@ struct SetUpTvView: View {
         case .scope(let t, let c): scopeStep(t, c)
         case .credential(let t, let c, let p):
             // The roster's credential prompt, word for word; cancel returns to the choice.
-            CredentialStep(title: "Add \(p.username)", username: p.username, onCancel: { step = .scope(t, c) }) { pw, key in
+            CredentialStep(title: "Sign in as \(p.username)", username: p.username, confirmLabel: "Continue", onCancel: { step = .scope(t, c) }) { pw, key in
                 do {
                     try await ProfileManager.shared.saveSignIn(p.playlistId, profileId: p.id, password: pw, apiKey: key)
                     step = c.map { .choose(t, $0) } ?? .code(t, nil)

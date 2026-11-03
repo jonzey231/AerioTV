@@ -117,13 +117,18 @@ has AerioTV sync data, and if so Dispatcharr Sync is offered as a restore.
    advertised `pk`. Ignore adverts whose `v` is not `1`, whose `pk` is not
    32 bytes, or whose `pk` is this device's own receiver key.
 2. Pick a device from this list, the dock card, or the banner.
-3. Choose the scope, one of two radio buttons:
+3. Dispatcharr only (other playlist types skip this step): choose the
+   scope, one of two radio buttons:
    - "Copy entire setup from this device" (default): the playlist plus
      every profile on this device with its credentials, roles, avatars,
      PINs, and order, with every sendable profile and the sync choice
      preselected in step 5.
    - "Import this user only": the playlist plus the active profile only;
      step 5 hides the profile checklist and keeps the sync choice.
+     When the active profile has no saved sign-in here, the sender first
+     shows the profile roster's sign-in prompt for it, saves the sign-in,
+     and continues; Cancel returns to this step. The active profile's own
+     sign-in becomes the playlist sign-in, never the default profile's.
    Both are the same version 1 payload; the second simply carries one
    profile.
 4. Enter the code shown on the device. The sender does not check the code

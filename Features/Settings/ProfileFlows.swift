@@ -564,6 +564,7 @@ struct CredentialStep: View {
     @ObservedObject private var themeLive = ThemeManager.shared
     let title: String
     let username: String
+    var confirmLabel = "Add Profile"
     let onCancel: () -> Void
     let onSubmit: (String?, String?) async -> String?
     @State private var password = ""
@@ -573,7 +574,7 @@ struct CredentialStep: View {
 
     var body: some View {
         let ready = !busy && (!password.isEmpty || !apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
-        ProfileDialog(title: title, confirm: ("Add Profile", ready, false, {
+        ProfileDialog(title: title, confirm: (confirmLabel, ready, false, {
             guard ready else { return }
             busy = true; error = nil
             Task {
