@@ -125,14 +125,22 @@ final class DebugLogger: @unchecked Sendable {
 
     // MARK: - Public State
 
+    /// Default when the user has never touched the toggle: Debug builds
+    /// log by default until the owner turns it off; Release stays off
+    /// until the user enables it in Settings. The Developer toggle reads
+    /// the same constant so it never shows Off while logging runs.
+    #if DEBUG
+    static let defaultEnabled = true
+    #else
+    static let defaultEnabled = false
+    #endif
+
     /// Whether debug logging is currently active.
     var isEnabled: Bool {
         get {
-            #if DEBUG
-            // Debug builds log by default until the owner turns it off;
-            // Release stays off until the user enables it in Settings.
-            if UserDefaults.standard.object(forKey: "debugLoggingEnabled") == nil { return true }
-            #endif
+            if UserDefaults.standard.object(forKey: "debugLoggingEnabled") == nil {
+                return Self.defaultEnabled
+            }
             return UserDefaults.standard.bool(forKey: "debugLoggingEnabled")
         }
     }
