@@ -71,15 +71,6 @@ struct DeveloperSettingsView: View {
     /// the theme that was active when the page was first pushed.
     @ObservedObject private var theme = ThemeManager.shared
     @AppStorage("debugLoggingEnabled") private var debugLoggingEnabled = DebugLogger.defaultEnabled
-    /// Files app location name for the log folder on this device.
-    private static var onMyDeviceName: String {
-        #if os(iOS)
-        return UIDevice.current.userInterfaceIdiom == .pad ? "On My iPad" : "On My iPhone"
-        #else
-        return "On My iPhone"
-        #endif
-    }
-
     /// Mirrors `PlaybackFeatureFlags.useUnifiedPlayback`. The toggle
     /// routes every playback entry point (guide tap, favorites,
     /// CarPlay, deep-link, add-sheet) through `PlayerSession.begin(...)`
@@ -286,7 +277,7 @@ struct DeveloperSettingsView: View {
                     Text("Logging")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("When enabled, detailed logs are written to a file in \(Self.onMyDeviceName) › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
+                    Text("When enabled, detailed logs are written to a file in the app's private storage. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
                         .scaledFont(.labelSmall.subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.top, 4)
