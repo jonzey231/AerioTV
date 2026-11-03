@@ -6813,9 +6813,37 @@ final class AVPlayerProgressDriver {
         if remux.isInterlaced != store.streamInfo.isInterlaced {
             store.streamInfo.isInterlaced = remux.isInterlaced
         }
-        guard store.streamInfo.fps == 0, remux.fps > 0 else { return }
-        store.streamInfo.fps = remux.fps
+        guard store.streamInfo.fps == 0 else { return }
+        if remux.fps > 0 { store.streamInfo.fps = remux.fps; return }
+        // Direct HLS (Force HLS): no remuxer measures the stream, so the
+        // badge read "1080p" only. Android shows "1080p \u{00B7} 59.94 fps" there
+        // from the format rate or its measured fallback. Read the master
+        // playlist's FRAME-RATE for the playing variant first; else snap a
+        // presented rate that sits within 3% of a broadcast rate.
+        if let item = player.currentItem, variantFpsTriedItem !== item,
+           let asset = item.asset as? AVURLAsset {
+            variantFpsTriedItem = item
+            let height = Double(item.presentationSize.height)
+            Task { @MainActor [weak self] in
+                guard let variants = try? await asset.load(.variants) else { return }
+                let rates = variants.compactMap { v -> (Double, Double)? in
+                    guard let a = v.videoAttributes, let r = a.nominalFrameRate, r > 0 else { return nil }
+                    return (Double(a.presentationSize.height), r)
+                }
+                let pick = rates.first(where: { height > 0 && abs($0.0 - height) < 1 }) ?? rates.first
+                guard let self, let pick, self.player.currentItem === item, self.store.streamInfo.fps == 0 else { return }
+                self.store.streamInfo.fps = pick.1
+                debugLog(String(format: "[AVP-STREAM] frame rate %.3f fps from HLS variant FRAME-RATE", pick.1))
+            }
+        }
+        let presented = store.streamInfo.presentedFps
+        if presented > 0, let snapped = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
+            .first(where: { abs($0 - presented) / $0 < 0.03 }) {
+            store.streamInfo.fps = snapped
+            debugLog(String(format: "[AVP-STREAM] frame rate %.3f fps from presented %.2f (no remuxer, no FRAME-RATE)", snapped, presented))
+        }
     }
+    private weak var variantFpsTriedItem: AVPlayerItem?
 
     /// Reads the presented rate off the main actor (see frameRateQueue).
     /// At most one read in flight and one per 2 s, so a stalled item queue
