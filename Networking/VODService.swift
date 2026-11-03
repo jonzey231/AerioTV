@@ -648,6 +648,7 @@ final class VODService {
 
         let duration = formatDuration(seconds: info.durationSecs ?? 0)
         let displayDuration = duration.isEmpty ? existing.duration : duration
+        debugLog("[VOD-Movie] runtime id=\(existing.id) list=\"\(existing.duration)\" info_secs=\(info.durationSecs.map(String.init) ?? "nil") shown=\"\(displayDuration)\"")
 
         let imdbID: String = {
             if let i = info.imdbID, !i.isEmpty { return i }
