@@ -396,13 +396,19 @@ struct PlaybackChromeOverlay: View {
             // (Logan 2026-10-04): pipeline bottom left, format bottom
             // right, level with the 44 pt transport buttons.
             if store.vodSoloTile != nil || store.catchupTile != nil {
-                VODTransportBar_iOS(store: store)
-                    .overlay(alignment: .bottom) { streamReadout_iOS }
+                VStack(spacing: 8) {
+                    streamReadout_iOS(asRow: true)
+                    VODTransportBar_iOS(store: store)
+                        .overlay(alignment: .bottom) { streamReadout_iOS(asRow: false) }
+                }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else if liveRewindIOS.buffering {
-                RewindTransportBar_iOS(store: store)
-                    .overlay(alignment: .bottom) { streamReadout_iOS }
+                VStack(spacing: 8) {
+                    streamReadout_iOS(asRow: true)
+                    RewindTransportBar_iOS(store: store)
+                        .overlay(alignment: .bottom) { streamReadout_iOS(asRow: false) }
+                }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
             } else {
@@ -412,9 +418,10 @@ struct PlaybackChromeOverlay: View {
                 // instead of the row disappearing (Logan 2026-11-02: all
                 // player controls visible regardless of engine or format).
                 VStack(spacing: 8) {
+                    streamReadout_iOS(asRow: true)
                     liveProgressBand
                     LiveNoWindowTransport_iOS(progress: store.audioProgressStore)
-                        .overlay(alignment: .bottom) { streamReadout_iOS }
+                        .overlay(alignment: .bottom) { streamReadout_iOS(asRow: false) }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
@@ -461,11 +468,17 @@ struct PlaybackChromeOverlay: View {
     /// Same sources and strings as the tvOS band: the engine label from
     /// `store.tileEngines` (only while an AVPlayer engine toggle is on)
     /// and `TVVideoFormatBadge` on the audio tile's progress store.
-    /// Hidden on iPhone portrait; scaled per device (iPad 16, phone 12).
+    /// Scaled per device (iPad 16, phone 12). iPad and phone landscape
+    /// lay it over the transport row (`asRow: false`); phone portrait has
+    /// no room beside the transport buttons, so it gets its own row above
+    /// the transport (`asRow: true`), matching the Android phone chrome,
+    /// which shows the badges in both orientations (Logan 2026-11-04: the
+    /// pills were missing in iPhone portrait).
     @ViewBuilder
-    private var streamReadout_iOS: some View {
+    private func streamReadout_iOS(asRow: Bool) -> some View {
         let isPad = UIDevice.current.userInterfaceIdiom == .pad
-        if isPad || verticalSizeClass_iOS == .compact {
+        let overlayLayout = isPad || verticalSizeClass_iOS == .compact
+        if asRow != overlayLayout {
             let size: CGFloat = isPad ? 16 : 12
             HStack(spacing: 12) {
                 if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
@@ -486,7 +499,7 @@ struct PlaybackChromeOverlay: View {
                     TVVideoFormatBadge(progress: audioStore, fontSize: size)
                 }
             }
-            .frame(height: 44)
+            .frame(height: asRow ? nil : 44)
             .allowsHitTesting(false)
         }
     }
