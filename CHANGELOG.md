@@ -4,6 +4,12 @@
 
 ### Added
 
+- Appearance > Color Theme has a new "Custom" theme: pick one Theme Color
+  (color picker or hex field; the hex field on Apple TV) and AerioTV builds
+  the whole theme from it, including backgrounds, cards, sheets, dividers,
+  text, and a matching accent. Light and Dark Mode and True Black Background
+  apply as they do for the presets, and Custom Accent Color still overrides
+  the matched accent. The Theme Color syncs with the Color Theme item.
 - Live TV search finds programs across the whole loaded guide, not only
   what airs now. Below the channel results, a "Programs" section lists every
   program whose title matches, from now forward and in start order, with

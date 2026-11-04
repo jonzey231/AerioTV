@@ -588,7 +588,7 @@ struct PlayerSettingsView: View {
         .settingsPhoneTabBarChrome()
         #endif
         .listStyle(.insetGrouped)
-        .id("player-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+        .id("player-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")-\(theme.selectedTheme == .custom ? theme.customThemeHex : "")")
     }
 
     /// Discrete-stop slider row over an Int ladder: label left, current

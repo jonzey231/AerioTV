@@ -109,7 +109,7 @@ enum DsyncItemCatalog {
 
     static let groups: [DsyncItemGroup] = [
         DsyncItemGroup(id: "appearance", title: "Appearance", items: [
-            S("selectedTheme", "Color Theme", ["selectedTheme"]),
+            S("selectedTheme", "Color Theme", ["selectedTheme", "customThemeHex"]),
             S("appearanceMode", "Light and Dark Mode", ["appearanceMode"]),
             S("trueBlack", "True Black Background", ["trueBlack"]),
             S("customAccent", "Custom Accent Color", ["useCustomAccent", "customAccentHex"]),

@@ -530,7 +530,7 @@ struct LiveTVSettingsView: View {
         // See SettingsView's identically-purposed `.id(...)` - keys the
         // List's identity to the active theme so cell-cache staleness on
         // theme switches doesn't leak accent colors across the rebuild.
-        .id("livetv-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+        .id("livetv-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")-\(theme.selectedTheme == .custom ? theme.customThemeHex : "")")
     }
 
     /// iOS scale-slider row, unchanged from Appearance's Display Scale.

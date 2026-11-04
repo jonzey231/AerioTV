@@ -6703,6 +6703,7 @@ struct MainTabView: View {
         .onChange(of: theme.selectedTheme)   { _, _ in configureTabBarAppearance() }
         .onChange(of: theme.useCustomAccent) { _, _ in configureTabBarAppearance() }
         .onChange(of: theme.customAccentHex) { _, _ in configureTabBarAppearance() }
+        .onChange(of: theme.customThemeHex) { _, _ in configureTabBarAppearance() }
         // aerio://settings/<page> -> select the Settings tab. SettingsView
         // itself drives the navigation once it is mounted. This sits on the
         // outer body, not on `tabContentView`: one more modifier on that

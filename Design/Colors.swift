@@ -30,11 +30,12 @@ extension Color {
     /// Dark-mode ink for secondary/tertiary text and borders in light mode.
     /// A near-black slate (`#0F1B24`) so accent-tinted greys don't wash out
     /// on white; the near-white `E8F4F8` is invisible on a light ground.
-    private static let lightInk = Color(hex: "0F1B24")
+    /// The Custom theme tints it toward its own hue (ThemeManager.lightInk).
+    private static var lightInk: Color { ThemeManager.shared.lightInk }
 
     /// Primary text, near-white on dark grounds, near-black slate on light.
     static var textPrimary: Color {
-        ThemeManager.resolve(dark: Color(hex: "E8F4F8"), light: lightInk)
+        ThemeManager.resolve(dark: ThemeManager.shared.darkTextPrimary, light: lightInk)
     }
     /// Secondary text, accent-tinted on dark; darker, higher-alpha ink on
     /// light (accent-alpha greys wash out on white).

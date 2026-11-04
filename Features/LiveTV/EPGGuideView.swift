@@ -11068,7 +11068,7 @@ struct GuideCanvasRow: View {
             showBadges: showEpgBadges, hiddenBadges: hiddenEpgBadgesRaw,
             categoryColors: categoryColorsEnabled, rounded: roundedGuideCorners,
             isPhone: UIDevice.current.userInterfaceIdiom == .phone,
-            themeToken: "\(theme.selectedTheme)|\(theme.appearanceMode)|\(theme.useCustomAccent)|\(theme.customAccentHex)|\(theme.textContrast)|\(theme.trueBlack)")
+            themeToken: "\(theme.selectedTheme)|\(theme.appearanceMode)|\(theme.useCustomAccent)|\(theme.customAccentHex)|\(theme.customThemeHex)|\(theme.textContrast)|\(theme.trueBlack)")
     }
 
     private func models(now: Date) -> [GuideCanvasCellModel] {

@@ -7,6 +7,8 @@ struct AppearanceSettingsView: View {
     /// pushed partial values such as "E6", which rendered the accent black
     /// and was rejected by the other devices' validator.
     @State private var hexDraft: String? = nil
+    /// Draft for the Custom theme's Theme Color hex field (same commit rule).
+    @State private var themeHexDraft: String? = nil
     @ObservedObject private var theme = ThemeManager.shared
     // Phase 1 regroup (2026-09-17): Appearance is now theme, text and
     // clock only. Channel List / Guide Presentation, Category Colors, the
@@ -137,6 +139,13 @@ struct AppearanceSettingsView: View {
                         ),
                         icon: "paintbrush.fill"
                     )
+
+                    // Custom theme: on TV the hex field is the only input
+                    // (no system color picker on tvOS).
+                    if theme.selectedTheme == .custom {
+                        customThemeHexField
+                            .padding(.horizontal, 20)
+                    }
 
                     // Custom accent toggle
                     TVSettingsToggleRow(
@@ -396,6 +405,7 @@ struct AppearanceSettingsView: View {
         case .lavender:   return "Purple on near-black"
         case .monochrome: return "Grayscale on near-black"
         case .light:      return "Neutral teal-gray that reads on white"
+        case .custom:     return "Your own color, with a matching accent"
         }
     }
 
@@ -458,10 +468,16 @@ struct AppearanceSettingsView: View {
                         }
                     }
 
+                    if theme.selectedTheme == .custom {
+                        customThemeRows
+                    }
+
                 } header: {
                     Text("Color Theme").sectionHeaderStyle()
                 } footer: {
-                    Text("Colors used throughout the app.")
+                    Text(theme.selectedTheme == .custom
+                         ? Self.customThemeFootnote
+                         : "Colors used throughout the app.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                 }
                 .listSectionSeparator(.hidden)
@@ -656,6 +672,32 @@ struct AppearanceSettingsView: View {
         .listRowBackground(Color.cardBackground)
     }
 
+    /// Custom theme: the Theme Color picker and its hex field, shown under
+    /// the theme rows while Custom is selected. Same look as the accent's.
+    @ViewBuilder
+    private var customThemeRows: some View {
+        ColorPicker(
+            selection: Binding(
+                get: { Color(hex: theme.customThemeHex) },
+                set: { theme.setCustomThemeHex($0.toHex()) }
+            ),
+            supportsOpacity: false
+        ) {
+            Text("Theme Color")
+                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+        }
+        .listRowBackground(Color.cardBackground)
+        .alignmentGuide(.listRowSeparatorLeading) { _ in
+            Self.themeRowSeparatorInset
+        }
+
+        customThemeHexField
+            .listRowBackground(Color.cardBackground)
+            .alignmentGuide(.listRowSeparatorLeading) { _ in
+                Self.themeRowSeparatorInset
+            }
+    }
+
     /// Custom accent toggle, system color picker and hex field. Its own
     /// headed card since Phase 3.
     @ViewBuilder
@@ -828,6 +870,26 @@ struct AppearanceSettingsView: View {
     }
 
     #endif
+
+    static let customThemeFootnote = "Build the whole theme from one color. The accent is matched automatically unless you set a custom accent."
+
+    /// Hex entry for the Custom theme's base color (iOS and tvOS). Only a
+    /// complete six-digit value is committed, as with the accent field.
+    private var customThemeHexField: some View {
+        SettingsTextField("Hex Color",
+                          placeholder: "2DD4BF",
+                          text: Binding(
+                            get: { themeHexDraft ?? theme.customThemeHex },
+                            set: { newValue in
+                                let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                                let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
+                                themeHexDraft = cleaned
+                                if cleaned.count == 6 { theme.setCustomThemeHex(cleaned) }
+                            }
+                          ),
+                          helper: "Six hex digits, for example 2DD4BF.",
+                          autocapitalization: .characters)
+    }
 
     private func setSubtextScale(_ value: Double) {
         let snapped = SubtextScale.clamp(value)

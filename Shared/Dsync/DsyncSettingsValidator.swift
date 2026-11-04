@@ -15,7 +15,7 @@ import Foundation
 enum DsyncSettingsValidator {
 
     private static let ENUMS: [String: Set<String>] = [
-        "selectedTheme": ["Aerio", "Midnight", "Sunset", "Forest", "Lavender", "Monochrome", "Light"],
+        "selectedTheme": ["Aerio", "Midnight", "Sunset", "Forest", "Lavender", "Monochrome", "Light", "Custom"],
         "appearanceMode": ["dark", "light", "system"],
         "defaultTab": ["", "LiveTV", "DVR", "Movies", "TVShows", "Settings"],
         "timeFormat": ["system", "12", "24"],
@@ -82,7 +82,7 @@ enum DsyncSettingsValidator {
 
     /// Every schema name this table owns (prefix families excluded; see isOwned).
     static let NAMES: Set<String> = Set(ENUMS.keys).union(RANGES.keys).union(INTS.keys).union(BOOLEANS)
-        .union(STRINGS.keys).union(["customAccentHex"])
+        .union(STRINGS.keys).union(["customAccentHex", "customThemeHex"])
 
     static func isOwned(_ name: String) -> Bool {
         NAMES.contains(name)
@@ -100,6 +100,7 @@ enum DsyncSettingsValidator {
             guard let s = value.asStr else { return false }
             return s.isEmpty || dsyncMatches(HEX, s)
         }
+        if name == "customThemeHex" { return value.asStr.map { dsyncMatches(HEX, $0) } ?? false }
         if name.hasPrefix(COLOR_PREFIX) && isOwned(name) { return value.asStr.map { dsyncMatches(HEX, $0) } ?? false }
         if name.hasPrefix(BUCKET_PREFIX) && isOwned(name) { return value.asBool != nil }
         if let max = STRINGS[name] { return value.asStr.map { kLength($0) <= max } ?? false }

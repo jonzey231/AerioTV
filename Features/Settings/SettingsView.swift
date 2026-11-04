@@ -589,7 +589,7 @@ struct SettingsView: View {
                 // on theme switches, guaranteeing every cell renders
                 // with the new palette. Trade-off is scroll position
                 // resets to top, which is acceptable for Settings.
-                .id("settings-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+                .id("settings-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")-\(theme.selectedTheme == .custom ? theme.customThemeHex : "")")
                 #if os(iOS)
                 // Tapping the Settings tab while already at its root scrolls
                 // the list back to the top. A pushed page pops instead - that

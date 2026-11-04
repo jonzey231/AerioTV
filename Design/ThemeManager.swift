@@ -13,6 +13,7 @@ enum AppTheme: String, CaseIterable, Codable {
     case lavender    = "lavender"      // Purple/violet
     case monochrome  = "monochrome"    // Pure greyscale
     case light       = "light"         // Neutral low-chroma palette that reads on white
+    case custom      = "custom"        // Derived from one user color (CustomThemePalette)
 
     var displayName: String {
         switch self {
@@ -23,12 +24,14 @@ enum AppTheme: String, CaseIterable, Codable {
         case .lavender:    return "Lavender"
         case .monochrome:  return "Monochrome"
         case .light:       return "Light"
+        case .custom:      return "Custom"
         }
     }
 
     // MARK: Dark-rendition accents (hue identity)
     var accentPrimary: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.darkAccent)
         case .aerio: return Color(hex: "1AC4D8")   // Aerio cyan
         case .midnight:    return Color(hex: "60A5FA")
         case .sunset:      return Color(hex: "FB923C")
@@ -41,6 +44,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var accentSecondary: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.darkAccentSecondary)
         case .aerio: return Color(hex: "1A8FA8")   // Aerio deep teal
         case .midnight:    return Color(hex: "3B82F6")
         case .sunset:      return Color(hex: "F97316")
@@ -54,6 +58,7 @@ enum AppTheme: String, CaseIterable, Codable {
     // MARK: Dark-rendition surfaces
     var appBackground: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.darkBackground)
         case .aerio: return Color(hex: "0A1628")   // Aerio navy
         case .midnight:    return Color(hex: "0A0F1A")
         case .sunset:      return Color(hex: "0F0A07")
@@ -66,6 +71,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var cardBackground: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.darkCard)
         case .aerio: return Color(hex: "0D1E35")   // Aerio card navy
         case .midnight:    return Color(hex: "111827")
         case .sunset:      return Color(hex: "1A1108")
@@ -81,6 +87,7 @@ enum AppTheme: String, CaseIterable, Codable {
     // Mode = surface luminance, orthogonal to the theme's hue identity above.
     var lightAppBackground: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.lightBackground)
         case .aerio:       return Color(hex: "F2F7FA")
         case .midnight:    return Color(hex: "F4F6FB")
         case .sunset:      return Color(hex: "FCF7F2")
@@ -94,7 +101,7 @@ enum AppTheme: String, CaseIterable, Codable {
     var lightCardBackground: Color {
         switch self {
         case .aerio, .midnight, .sunset, .forest,
-             .lavender, .monochrome, .light:
+             .lavender, .monochrome, .light, .custom:
             return Color(hex: "FFFFFF")
         }
     }
@@ -107,6 +114,7 @@ enum AppTheme: String, CaseIterable, Codable {
     // would be invisible on white, so they get the largest darkening.
     var lightAccentPrimary: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.lightAccent)
         case .aerio:       return Color(hex: "0E8FA0")   // deep teal-cyan
         case .midnight:    return Color(hex: "2563EB")
         case .sunset:      return Color(hex: "E8590C")
@@ -119,6 +127,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var lightAccentSecondary: Color {
         switch self {
+        case .custom:      return Color(hex: ThemeManager.shared.customPalette.lightAccentSecondary)
         case .aerio:       return Color(hex: "0B6E7C")
         case .midnight:    return Color(hex: "1D4ED8")
         case .sunset:      return Color(hex: "C2410C")
@@ -192,6 +201,22 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         didSet { UserDefaults.standard.set(customAccentHex, forKey: "customAccentHex") }
     }
 
+    /// Settings > Appearance > Color Theme > Custom > Theme Color. The one
+    /// base color the Custom theme is built from (see CustomThemePalette).
+    /// Synced with the Color Theme item as `customThemeHex`. Like the custom
+    /// accent, it is NOT part of the Appearance List identity, so changing
+    /// it repaints the page without resetting its scroll.
+    static let customThemeHexKey = "customThemeHex"
+    @Published var customThemeHex: String = CustomThemePalette.defaultHex {
+        didSet {
+            guard oldValue != customThemeHex else { return }
+            customPalette = CustomThemePalette.derive(customThemeHex)
+            UserDefaults.standard.set(customThemeHex, forKey: ThemeManager.customThemeHexKey)
+        }
+    }
+    /// Derived once per base color change; every themed color reads it.
+    private(set) var customPalette = CustomThemePalette.derive(CustomThemePalette.defaultHex)
+
     /// Settings > Appearance > Text Contrast (0...1). @Published so every
     /// observer re-renders and `Color.contrastText` picks up the new value
     /// live, the same path a custom accent change takes.
@@ -217,6 +242,10 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
         customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
         trueBlack        = UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
+        let base = CustomThemePalette.clean(UserDefaults.standard.string(forKey: ThemeManager.customThemeHexKey))
+            ?? CustomThemePalette.defaultHex
+        customPalette    = CustomThemePalette.derive(base)
+        customThemeHex   = base
 
         // Re-apply in-memory state whenever iCloud sync pushes new preferences.
         NotificationCenter.default.addObserver(
@@ -251,6 +280,9 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         if ca != useCustomAccent { useCustomAccent = ca }
         let hex = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
         if hex != customAccentHex { customAccentHex = hex }
+        let base = CustomThemePalette.clean(ud.string(forKey: ThemeManager.customThemeHexKey))
+            ?? CustomThemePalette.defaultHex
+        if base != customThemeHex { customThemeHex = base }
         debugLog("[THEME] reload theme=\(selectedTheme.rawValue) customAccent=\(useCustomAccent)")
         let black = UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
         if black != trueBlack { trueBlack = black }
@@ -270,6 +302,13 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         useCustomAccent = false   // Preset selection always overrides a custom accent
         selectedTheme   = theme
         storedTheme     = theme.rawValue
+    }
+
+    /// Sets the Custom theme's base color from a hex string (with or
+    /// without "#"). Only a complete RRGGBB is stored.
+    func setCustomThemeHex(_ raw: String) {
+        guard let clean = CustomThemePalette.clean(raw), clean != customThemeHex else { return }
+        customThemeHex = clean
     }
 
     func setLiquidGlassStyle(_ style: LiquidGlassStyle) {
@@ -335,6 +374,17 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         useCustomAccent ? Color(hex: customAccentHex).opacity(0.8) : selectedTheme.lightAccentSecondary
     }
 
+    /// Primary text on the dark rendition: the fixed near-white for presets,
+    /// a hue-tinted near-white for the Custom theme.
+    var darkTextPrimary: Color {
+        selectedTheme == .custom ? Color(hex: customPalette.darkText) : Color(hex: "E8F4F8")
+    }
+    /// Ink for text and borders on the light rendition: the fixed slate for
+    /// presets, a hue-tinted near-black for the Custom theme.
+    var lightInk: Color {
+        selectedTheme == .custom ? Color(hex: customPalette.lightInk) : Color(hex: "0F1B24")
+    }
+
     // MARK: - Dynamic Colors (respects current theme + custom accent + mode)
     var accent: Color { ThemeManager.resolve(dark: darkAccent, light: lightAccent) }
 
@@ -363,3 +413,144 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     }
 }
 
+
+// MARK: - Custom theme palette
+//
+// CUSTOM THEME DERIVATION (shared formula; Android ui/theme/CustomThemePalette.kt
+// implements the same steps, keep the two identical so both platforms land on
+// the same hex values):
+//
+// 1. Parse the base color "RRGGBB" and convert it to HSL: h in degrees
+//    [0, 360), s and l in [0, 1]. Let cap(x) = min(s, x).
+// 2. Dark rendition:
+//      background   = HSL(h, cap(0.55), 0.07)
+//      card / sheet = HSL(h, cap(0.50), 0.12)
+//      text primary = HSL(h, cap(0.30), 0.94)
+// 3. Light rendition:
+//      background   = HSL(h, cap(0.45), 0.965)
+//      card / sheet = #FFFFFF (as every preset)
+//      text ink     = HSL(h, cap(0.40), 0.10)
+//    Secondary text, tertiary text, and dividers keep the preset rules
+//    (accent or ink at the preset opacities), so they follow these values.
+// 4. Matching accent: hue ha = (h - 30) mod 360 (the step from AerioTV's
+//    navy ground to its cyan accent); saturation sa = s when s < 0.08 (a gray
+//    base keeps a gray accent), otherwise clamp(s, 0.65, 0.90).
+//      dark accent    = HSL(ha, sa, L), L = 0.60 + 0.02 * k for the smallest
+//                       k in 0...15 whose WCAG contrast on the dark
+//                       background is at least 4.5
+//      dark secondary = HSL(ha, sa, L - 0.12)
+//      light accent   = HSL(ha, sa, L), L = 0.40 - 0.02 * k for the smallest
+//                       k in 0...12 whose WCAG contrast on the light
+//                       background is at least 4.5
+//      light secondary= HSL(ha, sa, L - 0.08)
+// 5. HSL to RGB uses the standard chroma formula; each channel is
+//    floor(v * 255 + 0.5). Contrast is measured on those 8-bit values.
+// Mode (Light, Dark, System) and True Black Background apply on top exactly
+// as for presets (ThemeManager.background / card). Custom Accent Color, when
+// on, replaces the matching accent in both modes.
+struct CustomThemePalette: Equatable, Sendable {
+    let darkBackground: String
+    let darkCard: String
+    let darkText: String
+    let lightBackground: String
+    let lightInk: String
+    let darkAccent: String
+    let darkAccentSecondary: String
+    let lightAccent: String
+    let lightAccentSecondary: String
+
+    /// AerioTV navy, so a first pick of Custom looks close to the default.
+    static let defaultHex = "0A1628"
+
+    /// "RRGGBB" uppercased, a leading "#" dropped; nil unless six hex digits.
+    static func clean(_ raw: String?) -> String? {
+        guard var s = raw?.trimmingCharacters(in: .whitespaces) else { return nil }
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6, s.allSatisfy(\.isHexDigit) else { return nil }
+        return s.uppercased()
+    }
+
+    static func derive(_ hex: String) -> CustomThemePalette {
+        let v = UInt32(clean(hex) ?? defaultHex, radix: 16) ?? 0x0A1628
+        let (h, s, _) = rgbToHsl(Int(v >> 16 & 0xFF), Int(v >> 8 & 0xFF), Int(v & 0xFF))
+        func cap(_ x: Double) -> Double { min(s, x) }
+        let darkBg = hsl(h, cap(0.55), 0.07)
+        let lightBg = hsl(h, cap(0.45), 0.965)
+        let ha = h >= 30 ? h - 30 : h + 330
+        let sa = s < 0.08 ? s : min(0.90, max(0.65, s))
+        var dl = 0.60
+        for k in 0...15 {
+            dl = 0.60 + 0.02 * Double(k)
+            if contrast(hsl(ha, sa, dl), darkBg) >= 4.5 { break }
+        }
+        var ll = 0.40
+        for k in 0...12 {
+            ll = 0.40 - 0.02 * Double(k)
+            if contrast(hsl(ha, sa, ll), lightBg) >= 4.5 { break }
+        }
+        return CustomThemePalette(
+            darkBackground: hexString(darkBg),
+            darkCard: hexString(hsl(h, cap(0.50), 0.12)),
+            darkText: hexString(hsl(h, cap(0.30), 0.94)),
+            lightBackground: hexString(lightBg),
+            lightInk: hexString(hsl(h, cap(0.40), 0.10)),
+            darkAccent: hexString(hsl(ha, sa, dl)),
+            darkAccentSecondary: hexString(hsl(ha, sa, max(0, dl - 0.12))),
+            lightAccent: hexString(hsl(ha, sa, ll)),
+            lightAccentSecondary: hexString(hsl(ha, sa, max(0, ll - 0.08)))
+        )
+    }
+
+    typealias RGB = (r: Int, g: Int, b: Int)
+
+    static func rgbToHsl(_ r8: Int, _ g8: Int, _ b8: Int) -> (Double, Double, Double) {
+        let r = Double(r8) / 255, g = Double(g8) / 255, b = Double(b8) / 255
+        let mx = max(r, g, b), mn = min(r, g, b)
+        let l = (mx + mn) / 2
+        let d = mx - mn
+        if d == 0 { return (0, 0, l) }
+        let s = d / (1 - abs(2 * l - 1))
+        var h: Double
+        if mx == r { h = ((g - b) / d).truncatingRemainder(dividingBy: 6) }
+        else if mx == g { h = (b - r) / d + 2 }
+        else { h = (r - g) / d + 4 }
+        h *= 60
+        if h < 0 { h += 360 }
+        return (h, min(1, s), l)
+    }
+
+    static func hsl(_ h: Double, _ s: Double, _ l: Double) -> RGB {
+        let c = (1 - abs(2 * l - 1)) * s
+        let hp = h / 60
+        let x = c * (1 - abs(hp.truncatingRemainder(dividingBy: 2) - 1))
+        let m = l - c / 2
+        let (r1, g1, b1): (Double, Double, Double)
+        switch hp {
+        case ..<1: (r1, g1, b1) = (c, x, 0)
+        case ..<2: (r1, g1, b1) = (x, c, 0)
+        case ..<3: (r1, g1, b1) = (0, c, x)
+        case ..<4: (r1, g1, b1) = (0, x, c)
+        case ..<5: (r1, g1, b1) = (x, 0, c)
+        default:   (r1, g1, b1) = (c, 0, x)
+        }
+        func q(_ v: Double) -> Int { min(255, max(0, Int(floor((v + m) * 255 + 0.5)))) }
+        return (q(r1), q(g1), q(b1))
+    }
+
+    static func luminance(_ c: RGB) -> Double {
+        func ch(_ v: Int) -> Double {
+            let x = Double(v) / 255
+            return x <= 0.03928 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b)
+    }
+
+    static func contrast(_ a: RGB, _ b: RGB) -> Double {
+        let la = luminance(a), lb = luminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    static func hexString(_ c: RGB) -> String {
+        String(format: "%02X%02X%02X", c.r, c.g, c.b)
+    }
+}

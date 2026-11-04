@@ -48,6 +48,7 @@ enum DsyncSettingsMap {
     static let ENTRIES: [Entry] = [
         // Appearance
         Entry(name: "selectedTheme", appleKey: "selectedTheme", kind: .theme),
+        Entry(name: "customThemeHex", appleKey: "customThemeHex", kind: .hex),
         Entry(name: "appearanceMode", appleKey: "appearanceMode", kind: .string),
         Entry(name: "trueBlack", appleKey: "appearance.trueBlack", kind: .bool),
         Entry(name: "useCustomAccent", appleKey: "useCustomAccent", kind: .bool),
@@ -132,7 +133,7 @@ enum DsyncSettingsMap {
         return nil
     }
 
-    static let THEMES = ["Aerio", "Midnight", "Sunset", "Forest", "Lavender", "Monochrome", "Light"]
+    static let THEMES = ["Aerio", "Midnight", "Sunset", "Forest", "Lavender", "Monochrome", "Light", "Custom"]
     static let TABS: [(String, String)] = [
         ("LiveTV", "livetv"), ("DVR", "dvr"), ("Movies", "movies"), ("TVShows", "tvshows"), ("Settings", "settings"),
     ]

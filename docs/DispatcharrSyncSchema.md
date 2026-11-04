@@ -265,6 +265,7 @@ compatibility):
 | Schema name | Type | Item | Apple key | Android key | Drive name |
 |---|---|---|---|---|---|
 | selectedTheme | string | selectedTheme | selectedTheme | selected_theme | |
+| customThemeHex | string | selectedTheme | customThemeHex | custom_theme_hex | |
 | appearanceMode | string | appearanceMode | appearanceMode | appearance_mode | |
 | trueBlack | bool | trueBlack | appearance.trueBlack | appearance_true_black | appearanceTrueBlack |
 | useCustomAccent | bool | customAccent | useCustomAccent | use_custom_accent | |
@@ -332,7 +333,7 @@ Values (Apple maps to exactly these strings and numbers). On read, an unknown va
 wrong type is ignored and the local setting is left unchanged:
 | Schema name | Values |
 |---|---|
-| selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"` (Android AppTheme enum names, case sensitive) |
+| selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"`, `"Custom"` (Android AppTheme enum names, case sensitive) |
 | appearanceMode | `"dark"` (default), `"light"`, `"system"` |
 | defaultTab | `"LiveTV"`, `"DVR"`, `"Movies"`, `"TVShows"`, `"Settings"` (Android AppTab enum names); absent or `""` = Live TV |
 | timeFormat | `"system"` (default), `"12"`, `"24"` |
@@ -346,6 +347,7 @@ wrong type is ignored and the local setting is left unchanged:
 | guideLayout | `"basic"` (default), `"preview"` |
 | defaultLiveTvView | the Android wire value as stored, up to 20 characters; `""` = the device's form-factor default |
 | customAccentHex, categoryColor.<bucket> | `"RRGGBB"` hex, an optional leading `#` accepted; customAccentHex `""` = the theme's accent |
+| customThemeHex | `"RRGGBB"` hex, an optional leading `#` accepted; the Custom theme's base color (the whole Custom palette and its matching accent derive from it) |
 | hiddenEpgBadges | one string, badge ids separated by commas (no spaces), up to 1024 characters; `""` = none hidden |
 | customCategories | JSON array string, up to 4 KiB |
 | skipBack, skipForward | int seconds, one of 5, 10, 15, 30, 60 |
