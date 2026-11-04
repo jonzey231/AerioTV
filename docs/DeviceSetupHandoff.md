@@ -80,7 +80,7 @@ and `base_url` only. The same payload may also arrive as a file or as text
 instead of an image. AerioTV reads this code and the `aeriotv://setup` code
 through three inputs, all with one parser (phones and tablets; TVs have none
 of them). Where these buttons appear they come in this order: Scan QR code,
-Choose from Photos, Import file, Show Dispatcharr User QR Code (see below). Import is manual only: AerioTV is not a share target and never
+Choose from Photos, Import file, Show User QR Code (see below). Import is manual only: AerioTV is not a share target and never
 reads the clipboard.
 
 The display draws the code at error correction level H with the AerioTV mark centered on a rounded white plate covering 20 percent of the code's width (mark inset 12 percent of the plate), so the payload is unchanged and still scans.
@@ -296,7 +296,7 @@ Non-interactive, with a progress line on screen:
   different fingerprint, and without the code (shown only on the real device)
   it cannot decrypt a payload anyway.
 
-## Show Dispatcharr User QR Code
+## Show User QR Code
 
 Phones and tablets show the active profile's Dispatcharr user code as the
 same JSON QR the Dispatcharr web UI emits, so another device's "Scan QR
@@ -304,7 +304,7 @@ code" or "Choose from Photos" accepts it unchanged:
 
 `{"v":1,"type":"user_api_key","api_key":"<key>","base_url":"<playlist url>","username":"<username>","first_name":"","last_name":"","email":""}`
 
-- The button "Show Dispatcharr User QR Code" sits after the other code
+- The button "Show User QR Code" sits after the other code
   buttons (Scan QR code, Choose from Photos, Import file) wherever they
   appear together: the Set up another device screen, Add Playlist, the
   Dispatcharr connect form, and Add Profile. The profile roster also
@@ -314,7 +314,7 @@ code" or "Choose from Photos" accepts it unchanged:
 - Gate: when a Device Admin PIN or that profile's PIN exists, either one
   must be entered first ("Enter the PIN to show this code"); with no PIN
   set, the code shows directly.
-- Screen "Dispatcharr User QR Code": the code is blurred until tapped
+- Screen "User QR Code": the code is blurred until tapped
   ("Tap to show"), hides again after 60 seconds or when the app leaves the
   foreground, and carries the caption "Anyone who scans this code can sign
   in as <username>. It hides after 60 seconds." Done closes it.
@@ -329,6 +329,6 @@ code" or "Choose from Photos" accepts it unchanged:
 | Platform | Receiver | Sender |
 |----------|----------|--------|
 | Android TV | Done (`kind` = `tv`) | n/a |
-| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link; Show Dispatcharr User QR Code) |
+| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |
 | Apple TV | Done (`kind` = `tv`) | n/a |
-| iPhone and iPad | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show Dispatcharr User QR Code) |
+| iPhone and iPad | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |

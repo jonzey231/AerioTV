@@ -21,7 +21,7 @@
 - The sender first asks "Copy entire setup from this device" (default) or
   "Import this user only". After a setup arrives, the receiver continues to
   the Add Profiles step so other users can be added as in onboarding.
-- Show Dispatcharr User QR Code: next to Scan QR Code and Choose from
+- Show User QR Code: next to Scan QR Code and Choose from
   Photos, shows the profile's Dispatcharr user code so another device can
   scan it. A Device Admin PIN or profile PIN is asked first when set; the
   code stays blurred until tapped, hides after 60 seconds or in the
@@ -39,7 +39,7 @@
 
 ### Server paths
 
-- Set up another device and Show Dispatcharr User QR Code add no server
+- Set up another device and Show User QR Code add no server
   paths; both work on the local network or on the device only.
 - New: `GET /api/epg/programs/search/` (`airing_at`, `fields`, `page_size`,
   `page`), covered by the existing `/api/*` rule.

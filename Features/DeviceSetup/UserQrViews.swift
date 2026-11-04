@@ -1,7 +1,7 @@
 //  UserQrViews.swift
 //  Aerio
 //
-//  "Show Dispatcharr User QR Code" (iPhone and iPad): renders a profile's
+//  "Show User QR Code" (iPhone and iPad): renders a profile's
 //  Dispatcharr sign-in as the same JSON QR the Dispatcharr web UI emits
 //  (type=user_api_key, docs/DeviceSetupHandoff.md), so another device's
 //  Scan QR code or Choose from Photos accepts it unchanged.
@@ -117,7 +117,7 @@ private struct UserQrCard: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("Dispatcharr User QR Code")
+            Text("User QR Code")
                 .scaledFont(.headlineMedium)
                 .foregroundColor(.textPrimary)
             ZStack {
@@ -154,7 +154,7 @@ private struct UserQrCard: View {
                 revealToken += 1
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(revealed ? "Dispatcharr user QR code" : "Tap to show")
+            .accessibilityLabel(revealed ? "User QR code" : "Tap to show")
             .accessibilityAddTraits(.isButton)
             if let code {
                 Text("Anyone who scans this code can sign in as \(code.username). It hides after 60 seconds.")

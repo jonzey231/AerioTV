@@ -271,7 +271,7 @@ struct QrScanActions: View {
     /// Picker the camera screen asked for (true Photos, false file); opened
     /// from this form once the camera cover is gone.
     @State private var pickerAfterScanner: Bool?
-    /// "Show Dispatcharr User QR Code": the active profile, when it has a key saved here.
+    /// "Show User QR Code": the active profile, when it has a key saved here.
     @State private var userQrTarget: UserQrTarget?
     @State private var showingUserQr: UserQrTarget?
 
@@ -291,7 +291,7 @@ struct QrScanActions: View {
                 }
                 actionButton("Import file", icon: "doc.badge.arrow.up") { error = nil; showFile = true }
                 if let t = userQrTarget {
-                    actionButton("Show Dispatcharr User QR Code", icon: "qrcode") { error = nil; showingUserQr = t }
+                    actionButton("Show User QR Code", icon: "qrcode") { error = nil; showingUserQr = t }
                         .fullScreenCover(item: $showingUserQr) { t in
                             UserQrCover(playlistId: t.playlistId, profileId: t.profileId) { showingUserQr = nil }
                         }

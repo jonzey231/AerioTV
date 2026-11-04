@@ -24,7 +24,7 @@ enum ProfileRoute: Equatable {
     case role(DispatcharrProfile)
     case channelProfiles(DispatcharrProfile)
     case switchTo(DispatcharrProfile)
-    /// iPhone and iPad: "Show Dispatcharr User QR Code" (own profile, or any profile for an Admin).
+    /// iPhone and iPad: "Show User QR Code" (own profile, or any profile for an Admin).
     case userQr(DispatcharrProfile)
     case add
     case deviceSet
@@ -174,7 +174,7 @@ struct ProfileActionsSheet: View {
             }
             #if os(iOS)
             if (isActive || g.isRoleAdmin) && UserQrPayload.code(playlistId: playlistId, profileId: p.id) != nil {
-                ProfileChoiceRow(label: "Show Dispatcharr User QR Code") { model.route = .userQr(p) }
+                ProfileChoiceRow(label: "Show User QR Code") { model.route = .userQr(p) }
             }
             #endif
             if g.isAdmin && !p.isDefault {
