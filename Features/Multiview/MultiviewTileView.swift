@@ -1031,6 +1031,7 @@ struct MultiviewTileView: View {
                 MultiviewVideoRect(tileID: tile.id) {
                     ZStack {
                 labelStrip
+                formatPill
                 centerAudioIcon
                 audioFocusStrokeOverlay
                 // Accent border marking the focused tile during D-pad
@@ -1406,6 +1407,7 @@ struct MultiviewTileView: View {
                         } else {
                             labelStrip
                         }
+                        formatPill
                     }
                 }
             }
@@ -1656,6 +1658,31 @@ struct MultiviewTileView: View {
         }
     }
     #endif
+
+    // MARK: - Format pill
+
+    /// Resolution / frame rate pill (bottom-right), the same readout and
+    /// capsule the single player shows, fading with the tile chrome. Only
+    /// drawn with 2+ tiles: a sole tile runs the full player chrome, which
+    /// carries its own pill (Logan 2026-11-04: tiles showed none). Android
+    /// Tile parity.
+    private var formatPill: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                #if os(tvOS)
+                TVVideoFormatBadge(progress: progressStore, fontSize: 14)
+                #else
+                TVVideoFormatBadge(progress: progressStore,
+                                   fontSize: UIDevice.current.userInterfaceIdiom == .pad ? 12 : 10)
+                #endif
+            }
+            .padding(8)
+        }
+        .allowsHitTesting(false)
+        .opacity(chromeState.isVisible ? 1 : 0)
+    }
 
     // MARK: - Label strip
 
