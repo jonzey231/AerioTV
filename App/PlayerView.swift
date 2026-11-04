@@ -8206,9 +8206,17 @@ struct NativeHLSPlayerScreen: View {
         guard !didFallback, liveStopNotice == nil else { return }
         let firstEnd = cleanEndPolicy.isFirstEnd
         let sessionStartedAt = liveSessionStartedAt
-        let delay = cleanEndPolicy.nextDelay()
+        let sessionBytes = remuxer?.bytesIngested ?? 0
+        let delay = cleanEndPolicy.nextDelay(delivered: sessionBytes >= LiveCleanEndPolicy.emptySessionBytes)
+        if cleanEndPolicy.emptyEndsExhausted {
+            DebugLogger.shared.log(
+                "[RECONNECT] upstream closed the live stream after \(sessionBytes) B; \(cleanEndPolicy.emptyEnds) empty sessions in a row, stopping reconnects",
+                category: "Playback", level: .warning)
+            stopForLiveNotice(.streamEnded, reason: "\(cleanEndPolicy.emptyEnds) consecutive empty sessions")
+            return
+        }
         DebugLogger.shared.log(
-            "[RECONNECT] upstream closed the live stream; reconnect attempt \(cleanEndPolicy.attempts) in \(Int(delay))s",
+            "[RECONNECT] upstream closed the live stream; reconnect attempt \(cleanEndPolicy.attempts) in \(Int(delay))s (session \(sessionBytes) B, empty in a row \(cleanEndPolicy.emptyEnds))",
             category: "Playback", level: .warning)
         statusText = Self.reconnectingStatus
         if !firstEnd {

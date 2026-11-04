@@ -556,15 +556,31 @@ struct LiveCleanEndPolicy {
     /// Healthy playback this long makes the next clean end a fresh first.
     static let healthyResetSeconds: TimeInterval = 60
 
+    /// Consecutive clean ends whose session delivered (almost) nothing,
+    /// past which the reconnects stop with a notice instead of cycling
+    /// the ladder forever (device 2026-11-03 17:42:44 to 17:53:38: 34
+    /// closes after 188 B each, the ladder restarting every 2 minutes).
+    static let emptyEndsLimit = 6
+    /// A session below this many bytes counts as empty.
+    static let emptySessionBytes: Int64 = 256 * 1024
+
     private(set) var attempts = 0
+    private(set) var emptyEnds = 0
     private var lastReconnectAt: Date?
 
     /// Delay for the reconnect this clean end earns, escalating. Resets
     /// itself when the previous reconnect has been playing healthily for
-    /// `healthyResetSeconds`.
-    mutating func nextDelay(now: Date = Date()) -> Double {
-        if let at = lastReconnectAt, now.timeIntervalSince(at) >= Self.healthyResetSeconds {
-            attempts = 0
+    /// `healthyResetSeconds`. `delivered` false (the session that just
+    /// ended carried no real data) counts toward `emptyEndsLimit` and
+    /// never resets the ladder: time alone is not healthy playback.
+    mutating func nextDelay(now: Date = Date(), delivered: Bool = true) -> Double {
+        if delivered {
+            emptyEnds = 0
+            if let at = lastReconnectAt, now.timeIntervalSince(at) >= Self.healthyResetSeconds {
+                attempts = 0
+            }
+        } else {
+            emptyEnds += 1
         }
         let delay = attempts < Self.delays.count ? Self.delays[attempts] : Self.steadyDelay
         attempts += 1
@@ -580,8 +596,12 @@ struct LiveCleanEndPolicy {
     /// whose end we are judging), for the verifier's "newer session" test.
     var lastReconnectStartedAt: Date? { lastReconnectAt }
 
+    /// True once `emptyEndsLimit` empty sessions ended in a row.
+    var emptyEndsExhausted: Bool { emptyEnds >= Self.emptyEndsLimit }
+
     mutating func reset() {
         attempts = 0
+        emptyEnds = 0
         lastReconnectAt = nil
     }
 }

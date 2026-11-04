@@ -6486,9 +6486,17 @@ struct AVPlayerMultiviewTile: View {
         guard tileError == nil, !tileStopped, progressStore.liveStopNotice == nil else { return }
         let firstEnd = cleanEndPolicy.isFirstEnd
         let sessionStartedAt = liveSessionStartedAt
-        let delay = cleanEndPolicy.nextDelay()
+        let sessionBytes = remuxer?.bytesIngested ?? 0
+        let delivered = sessionBytes >= LiveCleanEndPolicy.emptySessionBytes
+        let delay = cleanEndPolicy.nextDelay(delivered: delivered)
+        if cleanEndPolicy.emptyEndsExhausted {
+            debugLog("[RECONNECT] upstream closed the live stream after \(sessionBytes) B; "
+                + "\(cleanEndPolicy.emptyEnds) empty sessions in a row, stopping reconnects channel=\(channelName)")
+            showLiveStopNotice(.streamEnded, reason: "\(cleanEndPolicy.emptyEnds) consecutive empty sessions")
+            return
+        }
         debugLog("[RECONNECT] upstream closed the live stream; attempt \(cleanEndPolicy.attempts) "
-            + "in \(Int(delay))s channel=\(channelName)")
+            + "in \(Int(delay))s (session \(sessionBytes) B, empty in a row \(cleanEndPolicy.emptyEnds)) channel=\(channelName)")
         // Never hand the dead remuxer to channel retention: start() would
         // adopt it back and sit on a closed ingest. stop() cancels it; the
         // fresh ingest's startIngest waits for that cancel to land
