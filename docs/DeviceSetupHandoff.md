@@ -83,6 +83,8 @@ of them). Where these buttons appear they come in this order: Scan QR code,
 Choose from Photos, Import file, Show Dispatcharr User QR Code (see below). Import is manual only: AerioTV is not a share target and never
 reads the clipboard.
 
+The display draws the code at error correction level H with the AerioTV mark centered on a rounded white plate covering 20 percent of the code's width (mark inset 12 percent of the plate), so the payload is unchanged and still scans.
+
 1. Camera: the in-app scanner ("Scan QR code").
 2. Photos: a QR code image from the system photo picker ("Choose from
    Photos").

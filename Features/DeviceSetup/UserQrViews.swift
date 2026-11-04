@@ -130,7 +130,7 @@ private struct UserQrCard: View {
                         .padding(20)
                 } else if let image {
                     Image(uiImage: image)
-                        .interpolation(.none)
+                        .interpolation(.high)
                         .resizable()
                         .scaledToFit()
                         .padding(14)
@@ -171,7 +171,7 @@ private struct UserQrCard: View {
         .padding(16)
         .onAppear {
             code = UserQrPayload.code(playlistId: playlistId, profileId: profileId)
-            image = code.flatMap { SetupQR.image($0.json) }
+            image = code.flatMap { SetupQR.imageWithLogo($0.json) }
             if code == nil { onClose() }
         }
         .task(id: revealToken) {

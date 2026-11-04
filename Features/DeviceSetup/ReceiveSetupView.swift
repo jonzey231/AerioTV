@@ -311,4 +311,36 @@ enum SetupQR {
         guard let cg = CIContext(options: nil).createCGImage(scaled, from: scaled.extent) else { return nil }
         return UIImage(cgImage: cg)
     }
+
+    /// Share of the QR image's width the white logo plate covers. Level H restores up to
+    /// 30 percent of codewords, so a 20 percent plate leaves ample margin. Android matches.
+    static let logoPlateFraction: CGFloat = 0.20
+    /// Logo inset inside the plate, as a share of the plate side.
+    static let logoMarginFraction: CGFloat = 0.12
+
+    /// [image] with the AerioTV mark centered on a rounded white plate. Same payload, same
+    /// level H code; the plate masks the modules under it so the mark reads cleanly.
+    static func imageWithLogo(_ text: String, scale: CGFloat = 10) -> UIImage? {
+        guard let qr = image(text, scale: scale)?.cgImage else { return nil }
+        guard let logo = UIImage(named: "AerioLogo")?.cgImage else { return UIImage(cgImage: qr) }
+        return composite(qr: qr, logo: logo).map { UIImage(cgImage: $0) } ?? UIImage(cgImage: qr)
+    }
+
+    /// Pure CoreGraphics so a script can render and decode the exact same image.
+    static func composite(qr: CGImage, logo: CGImage) -> CGImage? {
+        let w = qr.width, h = qr.height
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .none
+        ctx.draw(qr, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let side = (CGFloat(min(w, h)) * logoPlateFraction).rounded()
+        let plate = CGRect(x: (CGFloat(w) - side) / 2, y: (CGFloat(h) - side) / 2, width: side, height: side)
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.addPath(CGPath(roundedRect: plate, cornerWidth: side * 0.22, cornerHeight: side * 0.22, transform: nil))
+        ctx.fillPath()
+        ctx.interpolationQuality = .high
+        ctx.draw(logo, in: plate.insetBy(dx: side * logoMarginFraction, dy: side * logoMarginFraction))
+        return ctx.makeImage()
+    }
 }
