@@ -1666,17 +1666,36 @@ struct MultiviewTileView: View {
     /// drawn with 2+ tiles: a sole tile runs the full player chrome, which
     /// carries its own pill (Logan 2026-11-04: tiles showed none). Android
     /// Tile parity.
+    private var formatPillSize: CGFloat {
+        #if os(tvOS)
+        14
+        #else
+        UIDevice.current.userInterfaceIdiom == .pad ? 12 : 10
+        #endif
+    }
+
     private var formatPill: some View {
         VStack {
             Spacer()
-            HStack {
+            HStack(spacing: 6) {
                 Spacer()
-                #if os(tvOS)
-                TVVideoFormatBadge(progress: progressStore, fontSize: 14)
-                #else
-                TVVideoFormatBadge(progress: progressStore,
-                                   fontSize: UIDevice.current.userInterfaceIdiom == .pad ? 12 : 10)
-                #endif
+                // Pipeline pill ("AVPlayer · Remux TS"), the same wording and
+                // capsule as the single player's left readout, gated on the
+                // same AVPlayer engine flags (Logan 2026-11-04: tiles showed
+                // only the format pill).
+                if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+                   let engine = store.tileEngines[tile.id] {
+                    Text(engine)
+                        .scaledFont(.system(size: formatPillSize, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, formatPillSize * 16 / 18)
+                        .padding(.vertical, formatPillSize * 10 / 18)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .accessibilityLabel("Playback pipeline \(engine)")
+                }
+                TVVideoFormatBadge(progress: progressStore, fontSize: formatPillSize)
             }
             .padding(8)
         }
