@@ -6268,7 +6268,7 @@ struct AVPlayerMultiviewTile: View {
         // something, and say nothing about a cause when it did not. The
         // old line claimed "Too many connections" for every 503, which
         // Dispatcharr never states.
-        statusText = serverReason.map { Self.serverStatus($0, "Reconnecting...") } ?? "Reconnecting..."
+        showStatus(serverReason: serverReason, tail: "Reconnecting...")
         let token = teardownToken
         debugLog("[AVP-MV] standing retry #\(standingRetries) in \(delay)s (\(reason)) channel=\(channelName)")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
@@ -6756,12 +6756,17 @@ struct AVPlayerMultiviewTile: View {
     private func stepFailover(server: ServerConnection, channelPK: Int, channelUUID: String,
                               serverReason: String? = nil,
                               restartPipeline: Bool = false) async {
-        guard let api = SwitchStreamFlow.makeAPI(server: server) else { return }
+        guard let api = SwitchStreamFlow.makeAPI(server: server) else {
+            debugLog("[FAILOVER] channel=\(channelName) no Dispatcharr API; staying on the retry path")
+            if restartPipeline { scheduleStandingRetry(firstByteDeadlineText, serverReason: serverReason) }
+            return
+        }
+        let walkToken = teardownToken
         // Every status line in the walk quotes the server's reason when we
         // have one (the 503 entry point) and says nothing about a cause
         // when we do not (the silent-stream entry point).
         let say: (String) -> Void = { tail in
-            statusText = serverReason.map { Self.serverStatus($0, tail) } ?? tail
+            showStatus(serverReason: serverReason, tail: tail)
         }
         var ids: [Int]
         if let cached = LiveFailoverStreamCache.cached(channelPK) {
@@ -6769,16 +6774,31 @@ struct AVPlayerMultiviewTile: View {
         } else {
             guard let fetched = try? await api.getChannelStreams(channelID: channelPK) else {
                 debugLog("[FAILOVER] channel=\(channelName) stream list unavailable; staying on the retry path")
+                if restartPipeline, walkToken == teardownToken {
+                    scheduleStandingRetry(firstByteDeadlineText, serverReason: serverReason)
+                    return
+                }
                 say("Reconnecting...")
                 return
             }
             ids = fetched.map(\.id)
             LiveFailoverStreamCache.store(ids, for: channelPK)
         }
-        guard tileError == nil, !tileStopped, !firstByteSeen else { return }
+        // The 503 entry point (restartPipeline) stopped the pipeline on
+        // purpose before walking, so tileStopped is expected there. The
+        // old guard treated it as "tile gone" and returned without a log,
+        // leaving the tile on "Trying another stream..." with nothing
+        // scheduled (device 2026-11-04 10:39:23 to 10:52, no change_stream
+        // ever sent). The token is the real "tile gone or channel changed"
+        // signal.
+        guard walkStillWanted(token: walkToken, restartPipeline: restartPipeline, at: "stream list") else { return }
         guard ids.count >= 2 else {
-            say("Reconnecting...")
             debugLog("[FAILOVER] channel=\(channelName) single stream; staying on the retry path")
+            if restartPipeline {
+                scheduleStandingRetry(firstByteDeadlineText, serverReason: serverReason)
+                return
+            }
+            say("Reconnecting...")
             return
         }
         // Seed "where are we" once. /status.url is the trustworthy field
@@ -6814,10 +6834,14 @@ struct AVPlayerMultiviewTile: View {
         } catch {
             debugLog("[FAILOVER] channel=\(channelName) change_stream to id=\(target) failed: "
                 + error.localizedDescription)
+            if restartPipeline, walkToken == teardownToken {
+                scheduleStandingRetry(firstByteDeadlineText, serverReason: serverReason)
+                return
+            }
             say("Reconnecting...")
             return
         }
-        guard tileError == nil, !tileStopped, !firstByteSeen else { return }
+        guard walkStillWanted(token: walkToken, restartPipeline: restartPipeline, at: "change_stream") else { return }
         failoverCurrentStreamID = target
         say("Trying another stream...")
         // No owner= field here: change_stream already logs the server's
@@ -6879,6 +6903,32 @@ struct AVPlayerMultiviewTile: View {
 
     /// The server's sentence, quoted verbatim apart from its first letter
     /// and a trailing period, then what the tile is doing about it.
+    /// Sets the tile status line. A line that quotes the server is
+    /// logged verbatim as [STATUS], so a report of on-screen text can be
+    /// matched to the log.
+    private func showStatus(serverReason: String?, tail: String) {
+        let text = serverReason.map { Self.serverStatus($0, tail) } ?? tail
+        if serverReason != nil, statusText != text {
+            debugLog("[STATUS] tile shows \"\(text)\" channel=\(channelName)")
+        }
+        statusText = text
+    }
+
+    /// The failover walk is still the tile's business: same teardown
+    /// generation, no error card, no first byte yet, and (outside the
+    /// 503 entry point, which stops the pipeline itself) not stopped.
+    /// Every early exit is logged.
+    private func walkStillWanted(token: UUID, restartPipeline: Bool, at step: String) -> Bool {
+        var why: String?
+        if token != teardownToken { why = "tile gone or channel changed" }
+        else if tileError != nil { why = "tile shows an error" }
+        else if firstByteSeen { why = "bytes arrived" }
+        else if tileStopped, !restartPipeline { why = "tile stopped" }
+        guard let why else { return true }
+        debugLog("[FAILOVER] channel=\(channelName) walk ended at \(step): \(why)")
+        return false
+    }
+
     private static func serverStatus(_ serverReason: String, _ tail: String) -> String {
         var text = serverReason.trimmingCharacters(in: .whitespacesAndNewlines)
         while text.hasSuffix(".") { text = String(text.dropLast()) }
@@ -6906,7 +6956,7 @@ struct AVPlayerMultiviewTile: View {
         failoverInFlight = true
         if failoverStartedAt == nil { failoverStartedAt = Date() }
         stop()
-        statusText = Self.serverStatus(serverReason, "Trying another stream...")
+        showStatus(serverReason: serverReason, tail: "Trying another stream...")
         Task { @MainActor in
             defer { failoverInFlight = false }
             await stepFailover(server: server, channelPK: pk, channelUUID: uuid,
