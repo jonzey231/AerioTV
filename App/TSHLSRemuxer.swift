@@ -766,6 +766,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     fileprivate var ingestTap: ((Data) -> Void)?
     /// Set by live consumers before start(); see onIngestSilence.
     var reportsIngestStall = false
+    /// Live ingest request (idle) timeout override, set before start().
+    /// A tile that can walk the channel's streams keeps its ingest open
+    /// while Dispatcharr swaps the upstream behind it, so URLSession's
+    /// 30 s no-bytes timeout must not end that connection mid-walk; the
+    /// tile's own silent-start deadline owns the silence instead.
+    var ingestRequestTimeout: TimeInterval?
     /// Seconds of dead air that count as a stall (Android parity: the
     /// Android player shows its "Reconnecting" line at 2 s).
     static let ingestSilenceThreshold: Double = 2
@@ -1300,7 +1306,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // "Preparing" then an error while Dispatcharr Stats showed the
         // stream. Honour the Network Timeout setting with a 30 s floor.
         let userTimeout = UserDefaults.standard.double(forKey: "networkTimeout")
-        config.timeoutIntervalForRequest = max(30, userTimeout > 0 ? userTimeout : 15)
+        config.timeoutIntervalForRequest = max(30, userTimeout > 0 ? userTimeout : 15, ingestRequestTimeout ?? 0)
         // A live stream never "completes"; rely on data flow.
         config.timeoutIntervalForResource = .infinity
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
@@ -6376,6 +6382,14 @@ struct AVPlayerMultiviewTile: View {
     private func attachLiveStallHandlers(_ mux: TSHLSRemuxer) {
         guard !isVOD, !isDVR, catchup == nil else { return }
         mux.reportsIngestStall = true
+        // Walk-capable tile: the 28 s first-tune budget plus up to eight
+        // 12 s walk steps must fit inside one open ingest (device
+        // 2026-11-04 11:14:45: the 30 s timeout of the ingest opened at
+        // 11:14:17 ended it 2 s into walk step 1, and again at 11:15:32
+        // 2 s into step 2, so streams 3 to 6 were never tried).
+        if failoverServer() != nil {
+            mux.ingestRequestTimeout = Self.firstTuneFirstByteDeadline + 8 * Self.stepFirstByteDeadline + 10
+        }
         mux.onIngestSilence = { silent in handleIngestSilence(silent) }
         mux.onIngestClosed = { handleUpstreamClosed() }
         mux.onVideoAppearedAfterAudioOnly = { restartAsVideoProgram("video appeared after audio-only start") }
