@@ -276,20 +276,40 @@ final class LiveConnectionRegistry: @unchecked Sendable {
     /// Blocks the CALLING queue (never main) until every CLOSING connection
     /// to `url` has unregistered, up to `timeout`.
     func waitForClosing(_ url: URL, timeout: TimeInterval) {
+        waitForRelease(url, timeout: timeout, includeOpen: false)
+    }
+
+    /// Blocks the CALLING queue (never main) until NO connection to `url`
+    /// is registered, open or closing, up to `timeout`. The overlap guard:
+    /// a second ingest to a channel the app already holds waits for the
+    /// first to go instead of opening beside it (device 2026-11-03
+    /// 18:03:20 and 18:03:22, Multiview rebuilt its tiles and each new
+    /// tile opened while the old tile's ingest was still registered open).
+    /// Returns true when the channel is free.
+    @discardableResult
+    func waitForRelease(_ url: URL, timeout: TimeInterval, includeOpen: Bool = true) -> Bool {
         let key = Self.key(for: url)
         let deadline = Date().addingTimeInterval(timeout)
+        let held: () -> Bool = { [unowned self] in
+            entries.values.contains { $0.key == key && (includeOpen || $0.entry.closing) }
+        }
+        let started = Date()
         cond.lock()
         var waited = false
-        while entries.values.contains(where: { $0.key == key && $0.entry.closing }) {
+        while held() {
             waited = true
             if !cond.wait(until: deadline) { break }
         }
-        let stillClosing = entries.values.contains { $0.key == key && $0.entry.closing }
+        let still = entries.values.filter { $0.key == key && (includeOpen || $0.entry.closing) }
+            .map { "\($0.entry.owner)\($0.entry.closing ? "(closing)" : "(open)")" }
         cond.unlock()
         if waited {
-            debugLog("[SINGLE-CONN] waited for previous connection to close before opening "
-                + "\(URL(string: key)?.path ?? key)\(stillClosing ? " (timed out, still closing)" : "")")
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            debugLog("[SINGLE-CONN] waited \(ms) ms for the previous connection to "
+                + "\(URL(string: key)?.path ?? key) to go"
+                + (still.isEmpty ? "" : " (timed out, still registered: \(still.joined(separator: ", ")))"))
         }
+        return still.isEmpty
     }
 
     /// Register a new connection; logs an overlap when another connection

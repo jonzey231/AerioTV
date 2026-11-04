@@ -1288,7 +1288,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // Single-connection invariant: a previous ingest to this channel
         // that is being cancelled (warm prewarm dropped, re-tune after an
         // upstream close) must be gone before this one opens.
-        LiveConnectionRegistry.shared.waitForClosing(sourceURL, timeout: 3)
+        // Open ones too: a second ingest to a channel the app already
+        // holds waits for the first to go ([SINGLE-CONN] overlap guard).
+        LiveConnectionRegistry.shared.waitForRelease(sourceURL, timeout: 3)
         connLock.lock(); let abandoned = stopRequested; connLock.unlock()
         guard !stopped, !abandoned else { return }
         let config = URLSessionConfiguration.default
