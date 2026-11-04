@@ -5730,6 +5730,13 @@ struct AVPlayerMultiviewTile: View {
     /// DispatcharrSessionLimitVerifier). Cleared with the failover walk
     /// (teardown / user tune) and by Retry.
     @State private var cleanEndPolicy = LiveCleanEndPolicy()
+    /// When this tile itself let go of the channel's previous session
+    /// (direct HLS fallback to TS, or a re-tune after the server closed
+    /// the stream). A "Channel is stopping" answer right after that is the
+    /// server draining OUR session, so it is waited out on the same URL
+    /// and never escalated into the stream walk (device 2026-11-03
+    /// 17:42:26 and 2026-11-04 10:39:02).
+    @State private var selfReleasedAt: Date?
     /// When the session that is playing now was opened, for the verifier's
     /// "a newer session took our slot" test.
     @State private var liveSessionStartedAt = Date()
@@ -6107,6 +6114,7 @@ struct AVPlayerMultiviewTile: View {
             channelStoppingRetries = 0
             channelStoppingWaited = 0
             standingRetries = 0
+            selfReleasedAt = nil
             teardownToken = UUID()
             // The failed-channel id stays for stop()'s Kept Live check (it
             // names the outgoing channel); only the display comes down.
@@ -6483,6 +6491,7 @@ struct AVPlayerMultiviewTile: View {
         // adopt it back and sit on a closed ingest. stop() cancels it; the
         // fresh ingest's startIngest waits for that cancel to land
         // (LiveConnectionRegistry), so the re-tune cannot overlap it.
+        selfReleasedAt = Date()
         stop(allowRetain: false)
         statusText = Self.reconnectingStatus
         let token = teardownToken
@@ -6877,6 +6886,11 @@ struct AVPlayerMultiviewTile: View {
     /// ladder is 1, 2, 4, 8 s, then 8 s, until about 20 s have been spent.
     private static let channelStoppingBackoff: [Double] = [1, 2, 4, 8]
     private static let channelStoppingBudget: Double = 20
+    /// "Channel is stopping" right after this tile released the channel
+    /// itself: the server took 18 s (2026-11-03) and over 22 s
+    /// (2026-11-04) to drain, so the same-URL wait runs longer.
+    private static let selfReleaseStoppingBudget: Double = 45
+    private static let selfReleaseWindow: TimeInterval = 90
     /// Cap on the server's Retry-After, so a generous header cannot park
     /// a live tile on a spinner.
     private static let channelStoppingMaxDelay: Double = 3
@@ -7170,14 +7184,16 @@ struct AVPlayerMultiviewTile: View {
                     let step = Self.channelStoppingBackoff[min(channelStoppingRetries, Self.channelStoppingBackoff.count - 1)]
                     let serverFloor = min(max(info.retryAfter ?? 1, 1), Self.channelStoppingMaxDelay)
                     // The last wait is trimmed to what is left of the budget.
-                    let remaining = Self.channelStoppingBudget - channelStoppingWaited
+                    let drainingOurs = selfReleasedAt.map { Date().timeIntervalSince($0) < Self.selfReleaseWindow } ?? false
+                    let budget = drainingOurs ? Self.selfReleaseStoppingBudget : Self.channelStoppingBudget
+                    let remaining = budget - channelStoppingWaited
                     let delay = max(min(max(step, serverFloor), remaining), serverFloor)
                     if remaining >= serverFloor {
                         channelStoppingRetries += 1
                         channelStoppingWaited += delay
                         debugLog("[AVP-MV] 503 reason=\"\(serverReason)\"; same-URL retry "
                             + "\(channelStoppingRetries) in \(delay)s (backoff, server retryAfter=\(info.retryAfter.map { "\($0)" } ?? "-"), "
-                            + "waited \(channelStoppingWaited)s of \(Self.channelStoppingBudget)s) "
+                            + "waited \(channelStoppingWaited)s of \(budget)s\(drainingOurs ? ", draining this tile's own previous session" : "")) "
                             + "channel=\(channelName)")
                         stop()
                         statusText = "Reconnecting..."
@@ -7193,7 +7209,16 @@ struct AVPlayerMultiviewTile: View {
                     }
                     // Waited out the whole budget and the previous session
                     // is still there: treat it as an unavailable channel
-                    // and go looking for another stream.
+                    // and go looking for another stream. Not when the
+                    // session draining is this tile's own: another stream
+                    // cannot help while the server tears ours down, so the
+                    // tile keeps its slow same-URL retry instead.
+                    if drainingOurs {
+                        debugLog("[AVP-MV] 503 reason=\"\(serverReason)\" after this tile's own release; "
+                            + "no stream walk, standing retry channel=\(channelName)")
+                        scheduleStandingRetry(reason)
+                        return
+                    }
                 }
                 handle503Unavailable(reason: reason, serverReason: serverReason)
                 return
@@ -7341,6 +7366,7 @@ struct AVPlayerMultiviewTile: View {
             }
             debugLog("[AVP-MV] direct HLS failed (\(reason)); re-tuning via TS remux channel=\(channelName)")
             directHLSFallbackURL = plain
+            selfReleasedAt = Date()
             stop()
             statusText = "Retrying..."
             let token = teardownToken
