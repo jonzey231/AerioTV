@@ -151,6 +151,293 @@ final class HLSResourceLoaderRegistry: NSObject, AVAssetResourceLoaderDelegate, 
                         didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
 }
 
+/// Direct-play MP4 / M4V / MOV whose HEVC sample entry is tagged 'hev1'.
+/// AVFoundation only decodes HEVC from MP4 when the sample entry is
+/// 'hvc1': a 'hev1' file reaches .readyToPlay with its video track listed
+/// but presentationSize 0x0, so the watchdog called it "ready but no
+/// renderable video" (iPhone 2026-11-04 15:42:36, Continue Watching
+/// resume: [AVP-HDR] codec=hev1, 1566 MB non-Matroska VOD). The two tags
+/// differ only in whether parameter sets may also travel in-band; when
+/// the hvcC box already carries VPS/SPS/PPS (checked by `probe`), the
+/// 'hvc1' reading of the same bytes is valid. This loader serves the file
+/// through a resource loader with byte ranges passed straight through and
+/// only those four fourcc bytes per sample entry rewritten to 'hvc1'.
+/// Files that already say 'hvc1', or whose hvcC has no parameter sets,
+/// never take this path.
+final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
+    static let scheme = "aeriomp4hvc"
+    static let secureScheme = "aeriomp4hvcs"
+
+    struct Probe: Sendable {
+        let contentLength: Int64
+        /// Absolute file offsets of each 'hev1' sample entry fourcc.
+        let patchOffsets: [Int64]
+    }
+
+    // MARK: Probe registry (probe runs before the player opens)
+
+    private static let registryLock = NSLock()
+    nonisolated(unsafe) private static var registry: [URL: Probe] = [:]
+
+    static func register(_ probe: Probe, for url: URL) {
+        registryLock.lock(); registry[url] = probe; registryLock.unlock()
+    }
+
+    static func take(for url: URL) -> Probe? {
+        registryLock.lock(); defer { registryLock.unlock() }
+        return registry.removeValue(forKey: url)
+    }
+
+    static func customURL(for url: URL) -> URL? {
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
+        switch c.scheme?.lowercased() {
+        case "http": c.scheme = scheme
+        case "https": c.scheme = secureScheme
+        default: return nil
+        }
+        return c.url
+    }
+
+    // MARK: Probe
+
+    private static func fetch(_ url: URL, headers: [String: String],
+                              from start: Int64, to end: Int64) async -> (Data, Int64?)? {
+        var req = URLRequest(url: url)
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+        req.timeoutInterval = 15
+        // bytes(for:) so a server that ignores Range (200 with the whole
+        // file) is cut off at the headers instead of downloaded.
+        guard let (stream, resp) = try? await URLSession.shared.bytes(for: req) else { return nil }
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 206 else {
+            stream.task.cancel()
+            return nil
+        }
+        var data = Data()
+        data.reserveCapacity(Int(end - start + 1))
+        do {
+            for try await byte in stream { data.append(byte) }
+        } catch { return nil }
+        var total: Int64?
+        if let cr = http.value(forHTTPHeaderField: "Content-Range"),
+           let slash = cr.lastIndex(of: "/") {
+            total = Int64(cr[cr.index(after: slash)...])
+        }
+        return (data, total)
+    }
+
+    private static func u32(_ d: Data, _ i: Int) -> UInt32 {
+        guard i >= 0, i + 4 <= d.count else { return 0 }
+        let b = d.startIndex + i
+        return UInt32(d[b]) << 24 | UInt32(d[b + 1]) << 16 | UInt32(d[b + 2]) << 8 | UInt32(d[b + 3])
+    }
+
+    private static func u64(_ d: Data, _ i: Int) -> UInt64 {
+        UInt64(u32(d, i)) << 32 | UInt64(u32(d, i + 4))
+    }
+
+    private static func fourcc(_ d: Data, _ i: Int) -> String {
+        guard i >= 0, i + 4 <= d.count else { return "" }
+        let b = d.startIndex + i
+        return String(bytes: d[b..<(b + 4)], encoding: .ascii) ?? ""
+    }
+
+    /// Returns the patch plan when the file is MP4-family with at least one
+    /// 'hev1' sample entry whose hvcC carries parameter sets; nil otherwise
+    /// (including any server without byte-range support).
+    static func probe(url: URL, headers: [String: String]) async -> Probe? {
+        guard let (head, totalOpt) = await fetch(url, headers: headers, from: 0, to: 65_535),
+              let total = totalOpt, total > 16 else { return nil }
+        guard fourcc(head, 4) == "ftyp" else { return nil }
+        // Walk the top-level boxes to find moov (front or back of file).
+        var offset: Int64 = 0
+        var moov: (Data, Int64)?
+        for _ in 0..<64 where offset + 8 <= total {
+            var hdr: Data
+            if offset + 16 <= Int64(head.count) {
+                hdr = head.subdata(in: Int(offset)..<Int(offset + 16))
+            } else {
+                guard let (d, _) = await fetch(url, headers: headers, from: offset,
+                                                to: min(offset + 15, total - 1)) else { return nil }
+                hdr = d
+            }
+            var size = Int64(u32(hdr, 0))
+            let type = fourcc(hdr, 4)
+            if size == 1 { size = Int64(u64(hdr, 8)) }
+            if size == 0 { size = total - offset }
+            guard size >= 8 else { return nil }
+            if type == "moov" {
+                guard size <= 64 * 1024 * 1024 else { return nil }
+                if offset + size <= Int64(head.count) {
+                    moov = (head.subdata(in: Int(offset)..<Int(offset + size)), offset)
+                } else {
+                    guard let (d, _) = await fetch(url, headers: headers, from: offset,
+                                                    to: offset + size - 1),
+                          Int64(d.count) == size else { return nil }
+                    moov = (d, offset)
+                }
+                break
+            }
+            offset += size
+        }
+        guard let (moovData, moovOffset) = moov else { return nil }
+        var patches: [Int64] = []
+        var unusable = false
+        let containers: Set<String> = ["moov", "trak", "mdia", "minf", "stbl"]
+        func walk(_ start: Int, _ end: Int) {
+            var i = start
+            while i + 8 <= end {
+                var size = Int(u32(moovData, i))
+                var hdrLen = 8
+                if size == 1 { size = Int(u64(moovData, i + 8)); hdrLen = 16 }
+                if size == 0 { size = end - i }
+                guard size >= hdrLen, i + size <= end else { return }
+                let type = fourcc(moovData, i + 4)
+                if containers.contains(type) {
+                    walk(i + hdrLen, i + size)
+                } else if type == "stsd" {
+                    let count = Int(u32(moovData, i + hdrLen + 4))
+                    var e = i + hdrLen + 8
+                    for _ in 0..<min(count, 16) where e + 8 <= i + size {
+                        let eSize = Int(u32(moovData, e))
+                        guard eSize >= 8, e + eSize <= i + size else { break }
+                        if fourcc(moovData, e + 4) == "hev1" {
+                            // VisualSampleEntry fields end 86 bytes in; the
+                            // child boxes (hvcC, colr, pasp...) follow.
+                            var c = e + 86
+                            var hasParams = false
+                            while c + 8 <= e + eSize {
+                                let cSize = Int(u32(moovData, c))
+                                guard cSize >= 8, c + cSize <= e + eSize else { break }
+                                if fourcc(moovData, c + 4) == "hvcC", cSize > 8 + 22 {
+                                    let b = moovData.startIndex + c + 8 + 22
+                                    hasParams = moovData[b] > 0
+                                }
+                                c += cSize
+                            }
+                            if hasParams {
+                                patches.append(moovOffset + Int64(e + 4))
+                            } else {
+                                unusable = true
+                            }
+                        }
+                        e += eSize
+                    }
+                }
+                i += size
+            }
+        }
+        walk(8, moovData.count)
+        guard !unusable, !patches.isEmpty else { return nil }
+        return Probe(contentLength: total, patchOffsets: patches)
+    }
+
+    // MARK: Loader
+
+    let queue = DispatchQueue(label: "com.aerio.mp4-hvc-loader")
+    private let realURL: URL
+    private let headers: [String: String]
+    private let probeResult: Probe
+    private var session: URLSession!
+    /// taskIdentifier -> (loading request, next absolute file offset)
+    private var active: [Int: (AVAssetResourceLoadingRequest, Int64)] = [:]
+    private static let hvc1 = Array("hvc1".utf8)
+
+    init(realURL: URL, headers: [String: String], probe: Probe) {
+        self.realURL = realURL
+        self.headers = headers
+        self.probeResult = probe
+        super.init()
+        let opQueue = OperationQueue()
+        opQueue.underlyingQueue = queue
+        opQueue.maxConcurrentOperationCount = 1
+        session = URLSession(configuration: .default,
+                             delegate: MP4HEVCTagSessionDelegate(owner: self),
+                             delegateQueue: opQueue)
+    }
+
+    deinit { session.invalidateAndCancel() }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        if let info = loadingRequest.contentInformationRequest {
+            info.contentType = UTType.mpeg4Movie.identifier
+            info.contentLength = probeResult.contentLength
+            info.isByteRangeAccessSupported = true
+        }
+        guard let dr = loadingRequest.dataRequest else {
+            loadingRequest.finishLoading()
+            return true
+        }
+        let start = dr.currentOffset != 0 ? dr.currentOffset : dr.requestedOffset
+        let end: Int64 = dr.requestsAllDataToEndOfResource
+            ? probeResult.contentLength - 1
+            : min(dr.requestedOffset + Int64(dr.requestedLength), probeResult.contentLength) - 1
+        guard end >= start else { loadingRequest.finishLoading(); return true }
+        var req = URLRequest(url: realURL)
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+        let task = session.dataTask(with: req)
+        active[task.taskIdentifier] = (loadingRequest, start)
+        task.resume()
+        return true
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {
+        session.getAllTasks { [weak self] tasks in
+            self?.queue.async {
+                guard let self else { return }
+                for t in tasks where self.active[t.taskIdentifier]?.0 === loadingRequest {
+                    self.active[t.taskIdentifier] = nil
+                    t.cancel()
+                }
+            }
+        }
+    }
+
+    fileprivate func received(_ data: Data, task: URLSessionDataTask) {
+        guard let (request, offset) = active[task.taskIdentifier],
+              let dr = request.dataRequest else { return }
+        var chunk = data
+        let chunkEnd = offset + Int64(data.count)
+        for p in probeResult.patchOffsets where p + 4 > offset && p < chunkEnd {
+            for k in 0..<4 {
+                let abs = p + Int64(k)
+                if abs >= offset && abs < chunkEnd {
+                    chunk[chunk.startIndex + Int(abs - offset)] = Self.hvc1[k]
+                }
+            }
+        }
+        dr.respond(with: chunk)
+        active[task.taskIdentifier] = (request, chunkEnd)
+    }
+
+    fileprivate func completed(task: URLSessionTask, error: Error?) {
+        guard let (request, _) = active.removeValue(forKey: task.taskIdentifier) else { return }
+        if let error, (error as NSError).code != NSURLErrorCancelled {
+            request.finishLoading(with: error)
+        } else if error == nil {
+            request.finishLoading()
+        }
+    }
+}
+
+/// Weak bridge so the URLSession (which retains its delegate) never keeps
+/// the loader alive; the loader invalidates the session in deinit.
+private final class MP4HEVCTagSessionDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    weak var owner: MP4HEVCTagLoader?
+    init(owner: MP4HEVCTagLoader) { self.owner = owner }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        owner?.received(data, task: dataTask)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        owner?.completed(task: task, error: error)
+    }
+}
+
 /// GH #93: in-progress server recordings (Dispatcharr DVR HLS) through a
 /// locally rewritten media playlist. Device 2026-10-12 (f1729e2): Watch
 /// from Beginning ran audio from media time 0 while the video output
@@ -312,6 +599,7 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
 }
 
 nonisolated(unsafe) private var dvrPlaylistLoaderKey: UInt8 = 0
+nonisolated(unsafe) private var mp4HEVCTagLoaderKey: UInt8 = 0
 
 /// Thread-safe scalar slot.
 /// Mutable flag with reference semantics for SwiftUI views (see
@@ -8278,7 +8566,7 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         if ["mp4", "m4v", "mov"].contains(ext) {
-            startPlayer(url: streamURL, requestHeaders: headers)
+            startDirectVODPlayer(url: streamURL, requestHeaders: headers)
             // Truthful badge: the generic session label says "Remux TS",
             // which is a live-arm name; VOD is direct-play or MKV remux
             // and the dev badge should say which (field ask, 2026-08-25).
@@ -8314,7 +8602,7 @@ struct AVPlayerMultiviewTile: View {
                 // Hell - the provider had rotated the 'MKV' copies to
                 // MP4s, making direct the common path for that title).
                 statusText = nil
-                startPlayer(url: streamURL, requestHeaders: headers)
+                startDirectVODPlayer(url: streamURL, requestHeaders: headers)
             } else {
                 // failOrFallback owns the one-shot auto-retry for the
                 // transient mismatch/wedge classes.
@@ -8364,6 +8652,22 @@ struct AVPlayerMultiviewTile: View {
         #endif
     }
 
+    /// Direct-play VOD (MP4 family): probe the sample entries first so a
+    /// 'hev1'-tagged HEVC file plays through MP4HEVCTagLoader instead of
+    /// rendering no video. Any probe miss plays the URL as before.
+    private func startDirectVODPlayer(url: URL, requestHeaders: [String: String]) {
+        let token = teardownToken
+        Task { @MainActor in
+            let probe = await MP4HEVCTagLoader.probe(url: url, headers: requestHeaders)
+            guard token == teardownToken else { return }
+            if let probe {
+                MP4HEVCTagLoader.register(probe, for: url)
+                debugLog("[AVP-MV] VOD sample entry hev1 (\(probe.patchOffsets.count) entr\(probe.patchOffsets.count == 1 ? "y" : "ies")); serving as hvc1 title=\(channelName)")
+            }
+            startPlayer(url: url, requestHeaders: requestHeaders)
+        }
+    }
+
     private func startPlayer(url: URL, requestHeaders: [String: String], adoptedPlayer: AVPlayer? = nil) {
         // Segments exist by now, so the remuxer has already decided
         // whether this program is audio-only (GH #90).
@@ -8405,7 +8709,17 @@ struct AVPlayerMultiviewTile: View {
         } else if isDVR {
             debugLog("[AVP-DVR] playlist rewrite off (\(DVRPlaylistRewriteLoader.disabled ? "developer switch" : "not a server HLS URL")) title=\(channelName)")
         }
+        var hvcLoader: MP4HEVCTagLoader?
+        if adoptedPlayer == nil, dvrLoader == nil, let probe = MP4HEVCTagLoader.take(for: url),
+           let custom = MP4HEVCTagLoader.customURL(for: url) {
+            assetURL = custom
+            hvcLoader = MP4HEVCTagLoader(realURL: url, headers: requestHeaders, probe: probe)
+        }
         let asset = AVURLAsset(url: assetURL, options: options)
+        if let hvcLoader {
+            asset.resourceLoader.setDelegate(hvcLoader, queue: hvcLoader.queue)
+            objc_setAssociatedObject(asset, &mp4HEVCTagLoaderKey, hvcLoader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
         if let dvrLoader {
             asset.resourceLoader.setDelegate(dvrLoader, queue: dvrLoader.queue)
             // resourceLoader holds its delegate weakly; the asset owns it.
