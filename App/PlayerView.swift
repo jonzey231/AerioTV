@@ -6498,22 +6498,32 @@ final class AVPlayerProgressDriver {
     /// below real time is not bursty, and no wait fills a buffer the provider
     /// is not filling, so the gate is skipped entirely there.
     ///
-    /// On the SECOND stall within 60 s the gate is not armed at all: see
-    /// `attemptRepeatStallRejoin`, which moves the playhead back into the
-    /// local window instead of waiting at the edge.
+    /// On the SECOND stall within 60 s the gate holds deeper, to the
+    /// learned hold-back, and still never moves the playhead backward.
     private func armStallResumeGate() {
         guard isLive, !externalRenderSuspended else { return }
         let now = Date()
         let repeated = lastStallAt.map { now.timeIntervalSince($0) < 60 } ?? false
         lastStallAt = now
-        if repeated, attemptRepeatStallRejoin() {
-            // Reset the repeat window so a third stall goes through the gate
-            // again rather than chaining rejoins.
+        let gap = TSHLSRemuxer.feedRateWindow.worstGap()
+        if repeated, isRepeatStallHoldAllowed() {
+            // Second stall inside a minute (device 2026-11-04 10:29:37):
+            // the old rejoin seeked 9 s BACKWARD and replayed video the
+            // viewer had already watched. Hold at the playhead instead,
+            // until the learned hold-back is buffered, then resume
+            // forward. Reset the repeat window so a third stall goes
+            // through the normal gate.
             lastStallAt = nil
-            stallGateSince = nil
+            lastRejoinAt = now
+            let target = min(18.0, max(learnedHoldback(), gap * 1.5 + 2.0))
+            stallGateTarget = target
+            stallGateSince = now
+            debugLog(String(format:
+                "[AVP-NUDGE] repeat stall: holding at the playhead until %.1f s buffered "
+                + "(no backward seek), timeout %.0f s",
+                target, AVPlayerProgressDriver.stallGateTimeout))
             return
         }
-        let gap = TSHLSRemuxer.feedRateWindow.worstGap()
         if let rate = TSHLSRemuxer.feedRateWindow.rateRatio(), rate < 0.9 {
             stallGateSince = nil
             debugLog(String(format: "[AVP-NUDGE] gate skipped: upstream rate %.2f", rate))
@@ -6527,43 +6537,13 @@ final class AVPlayerProgressDriver {
             target, gap, AVPlayerProgressDriver.stallGateTimeout))
     }
 
-    /// Repeat-stall rejoin. Seeks the playhead BACKWARD into the part of the
-    /// local remux window that is already buffered, by the hold-back this
-    /// channel has learned, and resumes immediately. Deliberately backward:
-    /// the single-stall rule (never move the playhead back) still holds, this
-    /// runs only when the same channel has emptied the buffer twice inside a
-    /// minute and the window behind the playhead is genuinely there.
-    /// At most one rejoin per 3 minutes so it cannot loop.
-    /// Returns true when it seeked.
-    @discardableResult
-    private func attemptRepeatStallRejoin() -> Bool {
-        guard isLive, let item = player.currentItem else { return false }
-        // Moving back into the window across a source switch replays the
-        // OLD source; the switch watch returns to live instead.
+    /// Repeat-stall hold: at most one per 3 minutes, and never across a
+    /// fresh source switch (the switch watch returns to live instead).
+    private func isRepeatStallHoldAllowed() -> Bool {
+        guard isLive, player.currentItem != nil else { return false }
         if let sinceSwitch = TSHLSRemuxer.lastSourceSwitch.secondsSince(),
            sinceSwitch < Self.sourceSwitchLearningQuiet { return false }
         if let last = lastRejoinAt, Date().timeIntervalSince(last) < 180 { return false }
-        // What is ACTUALLY available behind the playhead, from the item's own
-        // seekable range (the remuxer's sliding window as AVPlayer sees it).
-        guard let range = item.seekableTimeRanges.last?.timeRangeValue else { return false }
-        let now = item.currentTime()
-        let behind = (now - range.start).seconds
-        guard behind.isFinite, behind > 0 else { return false }
-        let learned = learnedHoldback()
-        let cap = min(learned, behind - 1.0, 18.0)
-        // Not enough window to be worth a backward move.
-        guard cap >= 8.0 else { return false }
-        let back = max(8.0, cap)
-        let target = now - CMTime(seconds: back, preferredTimescale: 600)
-        guard target >= range.start else { return false }
-        lastRejoinAt = Date()
-        debugLog(String(format:
-            "[AVP-NUDGE] rejoin: seeking back %.0f s into the local window (learned %.0f s, window %.0f s)",
-            back, learned, behind))
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: CMTime(seconds: 0.5, preferredTimescale: 600)) { [weak self] _ in
-            guard let self, self.autoPlayAllowed("rejoin") else { return }
-            self.player.playImmediately(atRate: 1.0)
-        }
         return true
     }
 
