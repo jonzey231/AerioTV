@@ -35,6 +35,13 @@ struct AppearanceSettingsView: View {
     /// evaluation), and it feeds a layout CHOICE rather than a sibling's
     /// padding, so there is no measure-then-resize loop.
     @State private var pageWidth: CGFloat = 0
+    /// Where the Custom Accent Color toggle sat in the visible list, as a
+    /// fraction of the list height. The List is re-keyed when the accent
+    /// changes (see the `.id` below), which rebuilt it scrolled to the top
+    /// (Logan 2026-11-04: toggling the accent jumped the page up); the
+    /// rebuilt list scrolls the toggle back to this spot.
+    @State private var accentToggleFraction: CGFloat = 0.5
+    @State private var listGlobalFrame: CGRect = .zero
     /// Below this the theme tiles cannot hold their longest name.
     private static let themeGridMinWidth: CGFloat = 500
     private var useThemeTileGrid: Bool {
@@ -412,6 +419,7 @@ struct AppearanceSettingsView: View {
     // MARK: - iOS Body
     #if os(iOS)
     private var iOSBody: some View {
+        ScrollViewReader { proxy in
         List {
                 // MARK: Color Theme
                 Section {
@@ -607,7 +615,22 @@ struct AppearanceSettingsView: View {
             // The hex is keyed only once committed (six digits), so typing in the
             // Hex Color field no longer rebuilds the list on every keystroke,
             // which dropped focus and characters mid-entry.
-            .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+            .id(listIdentity)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { listGlobalFrame = $0 }
+            .onChange(of: theme.useCustomAccent) { _, _ in
+                // The re-keyed List lays out on the next pass; scroll then.
+                let anchor = UnitPoint(x: 0.5, y: min(max(accentToggleFraction, 0), 1))
+                DispatchQueue.main.async {
+                    proxy.scrollTo(Self.accentToggleID, anchor: anchor)
+                }
+            }
+        }
+    }
+
+    private static let accentToggleID = "appearance-accent-toggle"
+
+    private var listIdentity: String {
+        "appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")"
     }
 
     /// Leading inset for the dividers in the Color Theme and Accent
@@ -678,6 +701,13 @@ struct AppearanceSettingsView: View {
         .alignmentGuide(.listRowSeparatorLeading) { _ in
             Self.themeRowSeparatorInset
         }
+        #if os(iOS)
+        .id(Self.accentToggleID)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).midY } action: { midY in
+            guard listGlobalFrame.height > 0 else { return }
+            accentToggleFraction = (midY - listGlobalFrame.minY) / listGlobalFrame.height
+        }
+        #endif
 
         if theme.useCustomAccent {
             // Native system color picker, tap the swatch to open the full picker
