@@ -5969,7 +5969,7 @@ struct AVPlayerMultiviewTile: View {
             }
             // Cancels any standing slow retry in flight.
             teardownToken = UUID()
-            stop(keepForceHLS: true)
+            stop(keepForceHLS: true, releaseDisplay: true)
             progressStore.liveStopNotice = nil
             progressStore.liveStopRetryAction = nil
             progressStore.liveFailureRetryAction = nil
@@ -9083,7 +9083,13 @@ struct AVPlayerMultiviewTile: View {
 
     /// `keepForceHLS`: the tile is going away or flipping (not an internal
     /// retry), so a healthy Force HLS channel may be Kept Live.
-    private func stop(allowRetain: Bool = true, keepForceHLS: Bool = false) {
+    /// `releaseDisplay`: only the tile going away hands the panel back to
+    /// its default mode. Every internal retry (reconnect ladder, 503 waits,
+    /// fallbacks, failover) keeps the display criteria, so a reconnect does
+    /// not cost two HDMI re-handshakes (device 2026-11-04: cleared at
+    /// 10:37:39, re-applied 10:38:25, cleared again 10:39:05, all on one
+    /// reconnecting tile while four others played).
+    private func stop(allowRetain: Bool = true, keepForceHLS: Bool = false, releaseDisplay: Bool = false) {
         let stopT0 = CACurrentMediaTime()
         defer { MainActor.assumeIsolated { RadioStopTrace.log("tile stop total", since: stopT0) } }
         let firstFrameSeenAtStop = firstFrameSeen
@@ -9232,8 +9238,13 @@ struct AVPlayerMultiviewTile: View {
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
         #if os(tvOS)
         if let dm = appliedDisplayManager {
-            appliedDisplayManager = nil
-            DispatchQueue.main.async { DisplayCriteriaCoordinator.scheduleClear(dm) }
+            if releaseDisplay {
+                appliedDisplayManager = nil
+                DispatchQueue.main.async { DisplayCriteriaCoordinator.scheduleClear(dm) }
+            } else {
+                debugLog("[AVP-DISPLAY] display criteria kept across tile retry "
+                    + "(\(DisplayCriteriaCoordinator.lastAppliedSignature ?? "none")) channel=\(channelName)")
+            }
         }
         #endif
     }
