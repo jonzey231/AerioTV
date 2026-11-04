@@ -94,6 +94,13 @@ struct ChannelListView: View {
     /// the "why it matched" line per program-only match, by channel id.
     @State private var searchMatchLines: [String: String] = [:]
     @State private var liveSearchTask: Task<Void, Never>?
+    /// Live TV search "Programs" section (both platforms, Logan 2026-11-04):
+    /// title matches across the whole loaded guide, now forward.
+    @State private var programHits: [LiveProgramHit] = []
+    @State private var programHitsTruncated = false
+    @State private var programHitsPending = false
+    @State private var programChannelsByID: [String: ChannelDisplayItem] = [:]
+    @State private var searchProgramInfo: ProgramInfoTarget?
     @State private var searchText: String = ""
     @State private var selectedGroup: String = "All"
     @State private var prefetchTask: Task<Void, Never>? = nil
@@ -780,6 +787,7 @@ struct ChannelListView: View {
                     }
                 }
                 .environment(\.liveSearchMatchLines, searchMatchLines)
+                .sheet(item: $searchProgramInfo) { ProgramInfoView(target: $0) }
                 #endif
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
@@ -2227,9 +2235,13 @@ struct ChannelListView: View {
                     // GH #72: an empty group is a legitimate state (a provider
                     // group the upstream has not populated yet), not an error,
                     // so it gets a notice with a way out rather than a blank list.
-                    if filteredChannels.isEmpty {
+                    let searching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if filteredChannels.isEmpty && !(searching && (!programHits.isEmpty || programHitsPending)) {
                         emptyGroupNotice
                             .frame(minHeight: 320)
+                    } else if searching && !filteredChannels.isEmpty {
+                        LiveSearchSectionHeader(title: LiveSearchCopy.channelsHeader)
+                            .padding(.horizontal, sizeClass == .regular ? 24 : 16)
                     }
                     // Key rows by the unique stream URL, not the channel id,
                     // so a provider that reuses one tvg-id across distinct
@@ -2243,6 +2255,15 @@ struct ChannelListView: View {
                         .padding(.vertical, sizeClass == .regular ? 5 : 3)
                         .padding(.horizontal, sizeClass == .regular ? 24 : 16)
                         .id(item.id)
+                    }
+                    if searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending) {
+                        LiveProgramSearchSection(
+                            hits: programHits,
+                            truncated: programHitsTruncated,
+                            pending: programHitsPending,
+                            channelsByID: programChannelsByID,
+                            horizontalPadding: sizeClass == .regular ? 24 : 16,
+                            onTap: openProgramHit)
                     }
                     // GH #20 follow-up: with the list frame extended under the
                     // floating tab bar (ignoresSafeArea below), this spacer is
@@ -3148,6 +3169,9 @@ struct ChannelListView: View {
             return
         }
         if !searchMatchLines.isEmpty { searchMatchLines = [:] }
+        if !programHits.isEmpty { programHits = [] }
+        programHitsTruncated = false
+        programHitsPending = false
         #endif
         filteredChannels = result
         prefetchEPGForVisibleChannels(result)
@@ -3169,13 +3193,21 @@ struct ChannelListView: View {
               }
             : nil
         let generation = LiveSearchIndexCache.generation
+        // Programs section: every channel in the active playlist, in store
+        // order, regardless of the selected group.
+        let allChannels = channelStore.channels
+        let channelOrder = Dictionary(allChannels.enumerated().map { ($0.element.id, $0.offset) },
+                                      uniquingKeysWith: { a, _ in a })
+        programHitsPending = true
         liveSearchTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(LiveSearchMatcher.debounceMilliseconds))
             guard !Task.isCancelled else { return }
             let t0 = Date()
-            let (index, result) = await Task.detached(priority: .userInitiated) {
+            let (index, result, hits) = await Task.detached(priority: .userInitiated) {
                 let index = cached ?? LiveProgramIndex(programs: programs ?? [:])
-                return (index, LiveSearchMatcher.search(channels, query: query, index: index, now: Date()))
+                let now = Date()
+                return (index, LiveSearchMatcher.search(channels, query: query, index: index, now: now),
+                        index.programHits(query: query, now: now, channelOrder: channelOrder))
             }.value
             guard !Task.isCancelled,
                   searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
@@ -3192,10 +3224,27 @@ struct ChannelListView: View {
             let ms = Int(Date().timeIntervalSince(t0) * 1000)
             // Query length only, never the text.
             DebugLogger.shared.log(
-                "[SEARCH] live filter q=\(query.count) channels=\(result.channelCount) programs=\(result.programMatches.count) ms=\(ms)",
+                "[SEARCH] live filter q=\(query.count) channels=\(result.channelCount) programs=\(result.programMatches.count) hits=\(hits.hits.count) ms=\(ms)",
                 category: "Search", level: .info)
+            programChannelsByID = Dictionary(allChannels.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            programHits = hits.hits
+            programHitsTruncated = hits.truncated
+            programHitsPending = false
             filteredChannels = rows
             prefetchEPGForVisibleChannels(rows)
+        }
+    }
+
+    /// Programs section tap: an airing program plays its channel through the
+    /// normal channel tap; a later one opens Program Info (reminder, record).
+    private func openProgramHit(_ hit: LiveProgramHit) {
+        guard let ch = programChannelsByID[hit.channelID] else { return }
+        if hit.isAiring(at: Date()) {
+            debugLog("[SEARCH] program hit: play channel")
+            pickChannel(ch)
+        } else {
+            debugLog("[SEARCH] program hit: program info")
+            searchProgramInfo = hit.infoTarget(channelName: ch.name)
         }
     }
     #endif

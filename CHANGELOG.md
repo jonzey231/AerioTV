@@ -4,6 +4,14 @@
 
 ### Added
 
+- Live TV search finds programs across the whole loaded guide, not only
+  what airs now. Below the channel results, a "Programs" section lists every
+  program whose title matches, from now forward and in start order, with
+  the channel logo and name, the day and start time, and a live badge while
+  it airs. Tapping a live program plays its channel; a later one opens
+  Program Info to set a reminder or record. Up to 200 rows show, with a
+  "Showing the first 200 matches" footer past that. On Apple TV the
+  in-place Search screen shows the same "Channels" and "Programs" sections.
 - Set up another device: every AerioTV device can now receive a setup, not
   only TVs. iPhone, iPad, and Apple TV gain "Set up from another device" on
   Welcome (and in Add Playlist on iPhone and iPad), so a playlist and its
@@ -18,6 +26,7 @@
   scan it. A Device Admin PIN or profile PIN is asked first when set; the
   code stays blurred until tapped, hides after 60 seconds or in the
   background, and blanks while the screen is recorded or shared.
+  The code carries the AerioTV mark in its center and scans as before.
 
 ### Changed
 

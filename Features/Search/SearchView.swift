@@ -105,6 +105,26 @@ struct SearchView: View {
 
     private static var rangeTimeFmt: DateFormatter { ClockFormat.short() }
 
+    /// tvOS Live TV search (Logan 2026-11-04, Android TV parity): the
+    /// in-place Search screen shows a "Channels" section (name, number, or a
+    /// program title, the phone Live TV filter) and a "Programs" section
+    /// (title matches across the whole loaded guide, now forward) in place
+    /// of the old capped EPG rows, then the VOD rows.
+    @State private var liveChannelHits: [ChannelDisplayItem] = []
+    @State private var liveChannelLines: [String: String] = [:]
+    @State private var liveProgramHits: [LiveProgramHit] = []
+    @State private var liveProgramTruncated = false
+    @State private var liveSearchProgramInfo: ProgramInfoTarget?
+
+    /// True when this pass renders the Live TV sections.
+    private var showsLiveSections: Bool {
+        #if os(tvOS)
+        return embedsInTabChrome && (scope == .all || scope == .epg)
+        #else
+        return false
+        #endif
+    }
+
     /// Shared middle of both layouts: scope chips + the four-way content.
     @ViewBuilder private var searchContent: some View {
         VStack(spacing: 0) {
@@ -120,6 +140,8 @@ struct SearchView: View {
                 searchPrompt
             } else if isSearching {
                 LoadingView(message: "Searching...")
+            } else if showsLiveSections {
+                liveSectionsList
             } else if results.isEmpty {
                 noResults
             } else {
@@ -537,7 +559,14 @@ struct SearchView: View {
         // first keystroke of any large playlist (ATV repro 2026-08-12). The
         // predicate + fetchLimit push the match into SQLite: only the
         // handful of hits ever become model objects.
-        if scope == .all || scope == .epg {
+        if showsLiveSections {
+            let pass = await liveSections(q)
+            liveChannelHits = pass.channels
+            liveChannelLines = pass.lines
+            liveProgramHits = pass.hits
+            liveProgramTruncated = pass.truncated
+            programCount = pass.hits.count
+        } else if scope == .all || scope == .epg {
             channelsByID = Dictionary(
                 ChannelStore.shared.channels.map { ($0.id, $0) },
                 uniquingKeysWith: { a, _ in a }
@@ -617,6 +646,89 @@ struct SearchView: View {
         isSearching = false
     }
 
+    /// Channels plus Programs for the tvOS Live TV sections, matched off the
+    /// main actor over the shared guide index (the phone Live TV filter).
+    @MainActor
+    private func liveSections(_ q: String) async
+        -> (channels: [ChannelDisplayItem], lines: [String: String], hits: [LiveProgramHit], truncated: Bool) {
+        let all = ChannelStore.shared.channels
+        channelsByID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rows = all.map { LiveSearchChannel(id: $0.id, name: $0.name, number: $0.number) }
+        let order = Dictionary(all.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        // Built per pass from the guide map (no cross-screen cache), so a
+        // guide refresh is always reflected.
+        let guide = GuideStore.shared.programs
+        let (result, hits) = await Task.detached(priority: .userInitiated) {
+            let index = LiveProgramIndex(programs: guide.mapValues { list in
+                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end) }
+            })
+            let now = Date()
+            return (LiveSearchMatcher.search(rows, query: query, index: index, now: now),
+                    index.programHits(query: query, now: now, channelOrder: order))
+        }.value
+        let now = Date()
+        let fmt = ClockFormat.short()
+        let lines = result.programMatches.mapValues {
+            LiveSearchMatcher.matchLine($0, now: now, time: { fmt.string(from: $0) })
+        }
+        return (result.orderedIDs.compactMap { channelsByID[$0] }, lines, hits.hits, hits.truncated)
+    }
+
+    /// Programs section tap: airing now plays the channel (Search stays up
+    /// underneath, as for the other live rows); later opens Program Info.
+    private func openLiveProgramHit(_ hit: LiveProgramHit) {
+        guard let ch = channelsByID[hit.channelID] else { return }
+        lastOpenedID = "hit-\(hit.id)"
+        if hit.isAiring(at: Date()) {
+            debugLog("[SEARCH] program hit: play channel")
+            NotificationCenter.default.post(name: .aerioOpenChannel, object: nil,
+                                            userInfo: ["channelID": ch.id])
+        } else {
+            debugLog("[SEARCH] program hit: program info")
+            liveSearchProgramInfo = hit.infoTarget(channelName: ch.name)
+        }
+    }
+
+    /// tvOS Live TV sections: Channels, Programs, then any VOD rows.
+    private var liveSectionsList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                if !liveChannelHits.isEmpty {
+                    LiveSearchSectionHeader(title: LiveSearchCopy.channelsHeader)
+                        .padding(.horizontal, 40)
+                    ForEach(liveChannelHits) { ch in
+                        LiveChannelHitRow(channel: ch, line: liveChannelLines[ch.id]) {
+                            lastOpenedID = "ch-\(ch.id)"
+                            debugLog("[SEARCH] channel hit: play channel")
+                            NotificationCenter.default.post(name: .aerioOpenChannel, object: nil,
+                                                            userInfo: ["channelID": ch.id])
+                        }
+                        .padding(.horizontal, 40)
+                    }
+                }
+                LiveProgramSearchSection(
+                    hits: liveProgramHits,
+                    truncated: liveProgramTruncated,
+                    pending: false,
+                    channelsByID: channelsByID,
+                    horizontalPadding: 40,
+                    onTap: openLiveProgramHit)
+                if !results.isEmpty {
+                    LiveSearchSectionHeader(title: "Movies and TV Shows")
+                        .padding(.horizontal, 40)
+                    ForEach(results) { result in
+                        resultRow(result)
+                            .padding(.horizontal, 40)
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .background(Color.appBackground)
+        .sheet(item: $liveSearchProgramInfo) { ProgramInfoView(target: $0) }
+    }
+
     /// Tapping an EPG search result jumps to that program in the Live
     /// TV guide. We stash the target (channel id + start time) in
     /// UserDefaults so the guide can consume it even if it isn't
@@ -676,5 +788,206 @@ private struct SearchProgramThumb: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+}
+
+// MARK: - Live TV search: Programs section
+
+extension LiveProgramHit {
+    /// Program Info target for this row, from the full guide entry when the
+    /// guide store still holds it (badges, art, program id), else the bare
+    /// title and times the index carried.
+    @MainActor
+    func infoTarget(channelName: String) -> ProgramInfoTarget {
+        if let g = GuideStore.shared.programs[channelID]?.first(where: {
+            $0.start == program.start && $0.title == program.title
+        }) {
+            return ProgramInfoTarget(
+                channelName: channelName, title: g.title, start: g.start, end: g.end,
+                description: g.description, category: g.category, programID: g.programID,
+                posterURLString: g.posterURL,
+                subTitle: g.subTitle, season: g.season, episode: g.episode,
+                isNew: g.isNew, isLiveBroadcast: g.isLiveBroadcast,
+                isPremiere: g.isPremiere, isFinale: g.isFinale, isRepeat: g.isRepeat)
+        }
+        return ProgramInfoTarget(channelName: channelName, title: program.title,
+                                 start: program.start, end: program.end,
+                                 description: "", category: "", subTitle: program.subTitle)
+    }
+}
+
+/// Section header for the Live TV search sections ("Channels", "Programs"),
+/// identical wording on Android.
+struct LiveSearchSectionHeader: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let title: String
+    var body: some View {
+        Text(title)
+            .scaledFont(.labelMedium)
+            .foregroundColor(Color.contrastText(.textSecondary))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 14)
+            .padding(.bottom, 6)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The "Programs" section of Live TV search (Android LiveProgramSearchSection):
+/// every guide program whose title matches, now forward, by start time,
+/// capped at `LiveProgramHit.cap` with a footer. Emits its rows directly so a
+/// surrounding LazyVStack stays lazy.
+struct LiveProgramSearchSection: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let hits: [LiveProgramHit]
+    let truncated: Bool
+    /// True while the first scan for the current query has not landed yet.
+    let pending: Bool
+    let channelsByID: [String: ChannelDisplayItem]
+    var horizontalPadding: CGFloat = 16
+    let onTap: (LiveProgramHit) -> Void
+
+    var body: some View {
+        LiveSearchSectionHeader(title: LiveSearchCopy.programsHeader)
+            .padding(.horizontal, horizontalPadding)
+        if hits.isEmpty {
+            if !pending {
+                Text(LiveSearchCopy.noPrograms)
+                    .scaledFont(.bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, 8)
+            }
+        } else {
+            ForEach(hits) { hit in
+                LiveProgramHitRow(hit: hit, channel: channelsByID[hit.channelID]) { onTap(hit) }
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, 3)
+            }
+            if truncated {
+                Text(LiveSearchCopy.capFooter)
+                    .scaledFont(.labelSmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, 10)
+            }
+        }
+    }
+}
+
+/// One program row: title, channel logo and name, day and start time, and
+/// the live badge while it airs.
+private struct LiveProgramHitRow: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let hit: LiveProgramHit
+    let channel: ChannelDisplayItem?
+    let onTap: () -> Void
+
+    #if os(tvOS)
+    private let logoSize: CGFloat = 72
+    #else
+    private let logoSize: CGFloat = 40
+    #endif
+
+    var body: some View {
+        let now = Date()
+        let fmt = ClockFormat.short()
+        let when = LiveProgramHit.whenText(hit.program, now: now, time: { fmt.string(from: $0) })
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.elevatedBackground)
+                    .frame(width: logoSize, height: logoSize)
+                    .overlay {
+                        if let url = channel?.logoURL {
+                            AsyncImage(url: url) { phase in
+                                if case .success(let img) = phase {
+                                    img.resizable().aspectRatio(contentMode: .fit).padding(4)
+                                } else {
+                                    Image(systemName: "tv").foregroundColor(.textTertiary)
+                                }
+                            }
+                        } else {
+                            Image(systemName: "tv").foregroundColor(.textTertiary)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(hit.program.title)
+                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        .lineLimit(2)
+                    Text([channel?.name, when].compactMap { $0 }.joined(separator: " \u{00B7} "))
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
+                        .lineLimit(1)
+                    if hit.isAiring(at: now) { LiveBadge() }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .background(Color.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
+        .buttonStyle(.plain)
+        #endif
+    }
+}
+
+/// Channels section row of the tvOS Live TV search: logo, name, number, and
+/// the "why it matched" line for a program-only match.
+private struct LiveChannelHitRow: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let channel: ChannelDisplayItem
+    let line: String?
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.elevatedBackground)
+                    .frame(width: 72, height: 72)
+                    .overlay {
+                        if let url = channel.logoURL {
+                            AsyncImage(url: url) { phase in
+                                if case .success(let img) = phase {
+                                    img.resizable().aspectRatio(contentMode: .fit).padding(4)
+                                } else {
+                                    Image(systemName: "tv").foregroundColor(.textTertiary)
+                                }
+                            }
+                        } else {
+                            Image(systemName: "tv").foregroundColor(.textTertiary)
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(channel.name)
+                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                    Text([channel.number.isEmpty ? nil : channel.number, line].compactMap { $0 }
+                        .joined(separator: " \u{00B7} "))
+                        .scaledFont(.labelSmall.subtext())
+                        .foregroundColor(Color.contrastText(.textSecondary))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .background(Color.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
+        .buttonStyle(.plain)
+        #endif
     }
 }

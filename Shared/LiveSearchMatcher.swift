@@ -39,6 +39,7 @@ struct LiveSearchChannel: Sendable, Equatable {
 final class LiveProgramIndex: @unchecked Sendable {
     private struct Entry {
         let text: String
+        let title: String
         let program: LiveSearchProgram
     }
     private let byChannel: [String: [Entry]]
@@ -53,7 +54,7 @@ final class LiveProgramIndex: @unchecked Sendable {
                 .map { p -> Entry in
                     let sub = p.subTitle.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                     let text = sub.map { p.title.lowercased() + "\n" + $0.lowercased() } ?? p.title.lowercased()
-                    return Entry(text: text, program: p)
+                    return Entry(text: text, title: p.title.lowercased(), program: p)
                 }
             if !entries.isEmpty { out[key] = entries }
         }
@@ -71,6 +72,67 @@ final class LiveProgramIndex: @unchecked Sendable {
         }
         return nil
     }
+
+    /// Live TV "Programs" section: every program on a channel in
+    /// `channelOrder` (channel id to display position) whose TITLE contains
+    /// `query`, from now forward (not ended by `now`), by start time then
+    /// channel position, one row per channel and start, capped at `cap`.
+    /// `truncated` is true when more matched than the cap.
+    func programHits(query rawQuery: String, now: Date, channelOrder: [String: Int],
+                     cap: Int = LiveProgramHit.cap) -> (hits: [LiveProgramHit], truncated: Bool) {
+        let q = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty, cap > 0 else { return ([], false) }
+        var found: [(order: Int, hit: LiveProgramHit)] = []
+        for (key, entries) in byChannel {
+            guard let order = channelOrder[key] else { continue }
+            var lastStart: Date?
+            for e in entries {
+                if e.program.end <= now { continue }
+                if !e.title.contains(q) { continue }
+                if e.program.start == lastStart { continue }
+                lastStart = e.program.start
+                found.append((order, LiveProgramHit(channelID: key, program: e.program)))
+            }
+        }
+        found.sort { a, b in
+            if a.hit.program.start != b.hit.program.start { return a.hit.program.start < b.hit.program.start }
+            return a.order < b.order
+        }
+        return (found.prefix(cap).map(\.hit), found.count > cap)
+    }
+}
+
+/// One row of the Live TV search "Programs" section.
+struct LiveProgramHit: Sendable, Equatable, Identifiable {
+    /// Rows shown at most; the footer says so when more matched.
+    static let cap = 200
+
+    let channelID: String
+    let program: LiveSearchProgram
+    var id: String { "\(channelID)|\(program.start.timeIntervalSince1970)" }
+
+    func isAiring(at now: Date) -> Bool { program.start <= now && now < program.end }
+
+    /// "8:20 PM" today, "Sat 9:00 PM" on any later day (Android
+    /// programHitWhen). `time` formats the clock part.
+    static func whenText(_ p: LiveSearchProgram, now: Date, calendar: Calendar = .current,
+                         locale: Locale = .current, time: (Date) -> String) -> String {
+        if calendar.isDate(p.start, inSameDayAs: now) || p.start < now { return time(p.start) }
+        let f = DateFormatter()
+        f.locale = locale
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.dateFormat = "EEE"
+        return "\(f.string(from: p.start)) \(time(p.start))"
+    }
+}
+
+/// Fixed copy for the Live TV search sections (identical on Android).
+enum LiveSearchCopy {
+    static let channelsHeader = "Channels"
+    static let programsHeader = "Programs"
+    static let noPrograms = "No programs match"
+    static let capFooter = "Showing the first 200 matches"
 }
 
 enum LiveSearchMatcher {

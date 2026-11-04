@@ -113,5 +113,29 @@ do {
     eq(GlobalSearchRanking.movieCap + GlobalSearchRanking.seriesCap, 50, "25 movies plus 25 series")
 }
 
+// MARK: - Programs section (whole loaded guide, title only, cap)
+do {
+    let idx = LiveProgramIndex(programs: [
+        "a": [prog("Late Match", -3, -1), prog("Match Night", -0.5, 1), prog("Recap", sub: "Match", 2, 3),
+              prog("Match Night", 26, 27)],
+        "b": [prog("Big Match", 1, 2), prog("Big Match", 1, 2)],
+        "z": [prog("Match Hidden", 1, 2)],
+    ])
+    let order = ["a": 0, "b": 1]
+    let r = idx.programHits(query: " MATCH ", now: now, channelOrder: order)
+    eq(r.hits.map(\.channelID), ["a", "b", "a"], "now forward, start order, playlist only, deduped")
+    eq(r.truncated, false, "not truncated")
+    eq(r.hits[0].isAiring(at: now), true, "airing now")
+    eq(LiveProgramHit.whenText(r.hits[1].program, now: now, calendar: cal, locale: en, time: time),
+       "7:00 PM", "today: time only")
+    eq(LiveProgramHit.whenText(r.hits[2].program, now: now, calendar: cal, locale: en, time: time),
+       "Fri 8:00 PM", "later day: weekday and time")
+    let many = LiveProgramIndex(programs: ["a": (0..<250).map { prog("Show", Double($0), Double($0) + 0.5) }])
+    let c = many.programHits(query: "show", now: now, channelOrder: ["a": 0])
+    eq(c.hits.count, 200, "cap 200")
+    eq(c.truncated, true, "truncated")
+    eq(idx.programHits(query: "  ", now: now, channelOrder: order).hits.count, 0, "blank query")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
