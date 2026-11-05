@@ -54,6 +54,10 @@
 
 ### Changed
 
+- Apple TV: the Leave Multiview prompt uses the theme colors like the other
+  menus, narrow guide cells no longer show clipped badges or one-letter
+  titles, and Multiview tile format pills sit above broadcast tickers and
+  lower thirds (on Android too).
 - Apple TV Settings: Left from a page returns to that page's entry in the
   sidebar instead of Playlists.
 - Apple TV Search: Up from the field returns to the Search button, Down

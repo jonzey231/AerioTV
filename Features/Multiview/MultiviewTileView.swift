@@ -1688,6 +1688,7 @@ struct MultiviewTileView: View {
     }
 
     private var formatPill: some View {
+        GeometryReader { geo in
         VStack {
             Spacer()
             HStack(spacing: 6) {
@@ -1710,7 +1711,12 @@ struct MultiviewTileView: View {
                 }
                 TVVideoFormatBadge(progress: progressStore, fontSize: formatPillSize)
             }
-            .padding(8)
+            .padding(.horizontal, 8)
+            // Above the picture's bottom inset: broadcast tickers and lower thirds fill the
+            // lowest ~20% of the frame, and the pill sat on ESPN2's ticker
+            // (tvOS review 2026-11-05). Same proportion on every tile size.
+            .padding(.bottom, max(8, geo.size.height * 0.22))
+        }
         }
         .allowsHitTesting(false)
         .opacity(formatPillVisible ? 1 : 0)

@@ -1494,6 +1494,11 @@ struct MultiviewContainerView: View {
         } message: {
             Text(exitConfirmationMessage)
         }
+        // Theme accent for the dialog buttons, as the guide's menus get
+        // from the tab view: the container mounts outside it, so the
+        // Leave Multiview prompt drew in plain system styling (tvOS
+        // review 2026-11-05).
+        .tint(Color.accentPrimary)
         .onChange(of: showExitConfirmation) { _, shown in
             if shown {
                 DebugLogger.shared.log("[MV-Cmd] exit dialog presented (source=\(exitDialogSource))",

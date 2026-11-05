@@ -9214,7 +9214,15 @@ private struct GuideProgramButton: View {
     ///
     /// 44pt: below roughly two glyphs plus padding there is nothing legible to
     /// show at any of the guide's font sizes.
+    #if os(tvOS)
+    /// Apple TV: the narrow cell of a program that ends just inside the
+    /// window showed "H…" and clipped "L N" badges (review 2026-11-05).
+    private var minWidthForText: CGFloat { 96 }
+    #else
     private var minWidthForText: CGFloat { 44 }
+    #endif
+    /// Feed badges need room for at least one whole badge plus the title.
+    private var minWidthForBadges: CGFloat { 160 }
 
     /// Live-cell census (Logan 2026-09-12): counts cells that EXIST, which is
     /// the render-server load, as opposed to the [TAB] body counter which
@@ -9276,7 +9284,7 @@ private struct GuideProgramButton: View {
                         .foregroundColor(Color.contrastText(.textSecondary))
                         .lineLimit(1)
                 }
-                if showEpgBadges {
+                if showEpgBadges && width >= minWidthForBadges {
                     EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
                                 isPremiere: prog.isPremiere, isFinale: prog.isFinale,
                                 isRepeat: prog.isRepeat, compact: true)
@@ -9313,7 +9321,7 @@ private struct GuideProgramButton: View {
                 Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                     .scaledFont(.system(size: 17))
                     .foregroundColor(isFocused ? .white.opacity(0.6) : Color.contrastText(.textTertiary))
-                if showEpgBadges {
+                if showEpgBadges && width >= minWidthForBadges {
                     SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
                     EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
                                 isPremiere: prog.isPremiere, isFinale: prog.isFinale,
