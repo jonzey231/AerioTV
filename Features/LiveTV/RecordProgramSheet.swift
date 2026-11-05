@@ -283,7 +283,7 @@ struct RecordProgramSheet: View {
                             .foregroundColor(Color.contrastText(.textSecondary))
                             .padding(.horizontal, 20)
                     } else {
-                        bufferChips(selection: preRoll, options: [0, 5, 10, 15, 30],
+                        bufferChips(selection: preRoll, options: [0, 5, 10, 15, 30, 60],
                                     select: { preRoll = $0 }) {
                             customValue = preRoll > 0 ? preRoll : 5
                             showCustomPreRoll = true
@@ -316,11 +316,11 @@ struct RecordProgramSheet: View {
                 if isDispatcharr && canRecordToServer && !isSeriesRule {
                     Toggle(isOn: $comskip) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Remove Commercials (Comskip)")
+                            Text("Remove Commercials")
                                 .scaledFont(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(destination == .local
-                                 ? "Comskip is only available when recording to a Dispatcharr server via a Dispatcharr API playlist."
+                                 ? "Removing commercials is only available when recording to a Dispatcharr server via a Dispatcharr API playlist."
                                  : "Detect and remove ad breaks after recording. Processed server-side.")
                                 .scaledFont(.labelSmall.subtext())
                                 .foregroundColor(Color.contrastText(.textSecondary))
@@ -651,7 +651,7 @@ struct RecordProgramSheet: View {
                 if !isLive && !isSeriesRule {
                     optionRow(
                         title: "Start Early",
-                        options: [0, 5, 10, 15, 30],
+                        options: [0, 5, 10, 15, 30, 60],
                         selection: $preRoll,
                         label: { $0 == 0 ? "None" : "\($0) min" },
                         onCustom: {
@@ -866,7 +866,7 @@ struct RecordProgramSheet: View {
     private var comskipRow: some View {
         let isDisabled = destination == .local
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Remove Commercials (Comskip)")
+            Text("Remove Commercials")
                 .scaledFont(.system(size: 24, weight: .semibold))
                 .foregroundColor(isDisabled ? Color.contrastText(.textTertiary) : .textPrimary)
                 .padding(.leading, 4)
@@ -890,8 +890,8 @@ struct RecordProgramSheet: View {
             .focusSection()
             Text(
                 isDisabled
-                    ? "Comskip runs server-side. Switch the destination to Dispatcharr server to enable."
-                    : "Server-side: detects and removes commercial breaks after the recording completes, when Comskip is configured on the Dispatcharr server."
+                    ? "Removing commercials runs server-side. Switch the destination to Dispatcharr server to enable."
+                    : "Server-side: detects and removes commercial breaks after the recording completes, when commercial detection is configured on the Dispatcharr server."
             )
                 .scaledFont(.system(size: 18).subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))

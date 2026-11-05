@@ -54,6 +54,8 @@
 
 ### Changed
 
+- Record sheet: Start Early offers 60 min like End Late, and the commercial
+  toggle reads "Remove Commercials" on every platform.
 - Appearance > Mode is now one choice: System, Light, Dark, or True Black.
   The True Black Background toggle is gone; True Black is the fourth Mode.
   Dark with True Black on becomes True Black, and System or Light with True
