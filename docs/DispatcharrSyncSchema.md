@@ -368,7 +368,7 @@ Values (Apple maps to exactly these strings and numbers). On read, an unknown va
 wrong type is ignored and the local setting is left unchanged:
 | Schema name | Values |
 |---|---|
-| selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"`, `"Custom"` (Android AppTheme enum names, case sensitive) |
+| selectedTheme | `"Aerio"`, `"Midnight"`, `"Sunset"`, `"Forest"`, `"Lavender"`, `"Monochrome"`, `"Light"`, `"Custom"` (Android AppTheme enum names, case sensitive). Since 2026-11-05 the UI shows `"Light"` as Slate; the wire value stays `"Light"` |
 | appearanceMode | `"dark"` (default), `"light"`, `"system"` |
 | defaultTab | `"LiveTV"`, `"DVR"`, `"Movies"`, `"TVShows"`, `"Settings"` (Android AppTab enum names); absent or `""` = Live TV |
 | timeFormat | `"system"` (default), `"12"`, `"24"` |

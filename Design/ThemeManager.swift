@@ -23,7 +23,7 @@ enum AppTheme: String, CaseIterable, Codable {
         case .forest:      return "Forest"
         case .lavender:    return "Lavender"
         case .monochrome:  return "Monochrome"
-        case .light:       return "Light"
+        case .light:       return "Slate"
         case .custom:      return "Custom"
         }
     }
