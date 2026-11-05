@@ -3199,6 +3199,9 @@ struct ChannelListView: View {
         let allChannels = channelStore.channels
         let channelOrder = Dictionary(allChannels.enumerated().map { ($0.element.id, $0.offset) },
                                       uniquingKeysWith: { a, _ in a })
+        let channelTitles = Dictionary(allChannels.map {
+            ($0.id, LiveSearchMatcher.channelTitleKeys(name: $0.name, tvgID: $0.tvgID))
+        }, uniquingKeysWith: { a, _ in a })
         programHitsPending = true
         liveSearchTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(LiveSearchMatcher.debounceMilliseconds))
@@ -3208,7 +3211,8 @@ struct ChannelListView: View {
                 let index = cached ?? LiveProgramIndex(programs: programs ?? [:])
                 let now = Date()
                 return (index, LiveSearchMatcher.search(channels, query: query, index: nil, now: now),
-                        index.programHits(query: query, now: now, channelOrder: channelOrder))
+                        index.programHits(query: query, now: now, channelOrder: channelOrder,
+                                         channelTitles: channelTitles))
             }.value
             guard !Task.isCancelled,
                   searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }

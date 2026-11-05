@@ -137,5 +137,22 @@ do {
     eq(idx.programHits(query: "  ", now: now, channelOrder: order).hits.count, 0, "blank query")
 }
 
+// MARK: - Channel-name filler is not a program (tvOS review 2026-11-05)
+do {
+    let keys = LiveSearchMatcher.channelTitleKeys(name: "ESPN2", tvgID: "ESPN2HD.us")
+    eq(keys, ["espn2", "espn2hd"], "name and call sign keys")
+    eq(LiveSearchMatcher.channelTitleKeys(name: " ", tvgID: nil), [], "no keys")
+    check(LiveSearchMatcher.isChannelTitle(" espn2 ", keys: keys), "name match ignores case and spaces")
+    check(!LiveSearchMatcher.isChannelTitle("ESPN2 College Football", keys: keys), "real title kept")
+    let filler = LiveProgramIndex(programs: [
+        "x": [prog("ESPN2", 0, 1), prog("SportsCenter on ESPN2", 1, 2), prog("espn2hd", 2, 3)],
+        "y": [prog("ESPN2", 0, 1)],
+    ])
+    let r = filler.programHits(query: "espn2", now: now, channelOrder: ["x": 0, "y": 1],
+                               channelTitles: ["x": keys])
+    eq(r.hits.map(\.program.title), ["ESPN2", "SportsCenter on ESPN2"],
+       "filler dropped only on its own channel")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

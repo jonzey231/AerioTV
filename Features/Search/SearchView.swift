@@ -6,7 +6,7 @@ enum SearchScope: String, CaseIterable {
     case all     = "All"
     case movies  = "Movies"
     case tv      = "TV Shows"
-    case epg     = "EPG"
+    case epg     = "Programs"
 }
 
 // MARK: - Search Result
@@ -34,7 +34,7 @@ enum SearchResult: Identifiable {
         switch self {
         case .vod(let item):
             switch item.type {
-            case .movie:  return "Movie · \(item.releaseYear)"
+            case .movie:  return item.releaseYear.trimmingCharacters(in: .whitespaces).isEmpty ? "Movie" : "Movie · \(item.releaseYear)"
             case .series: return "TV Show"
             case .episode: return "Episode"
             }
@@ -335,20 +335,35 @@ struct SearchView: View {
     // MARK: - Results List
     private var resultsList: some View {
         ScrollViewReader { proxy in
+            Group {
+            #if os(tvOS)
+            // Same stack, inset, and card rows as the Channels and Programs
+            // sections, so the Movies and TV Shows chips do not switch to a
+            // wider List style (tvOS review 2026-11-05).
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(results) { result in
+                        resultRow(result)
+                            .id(result.id)
+                            .focused($focusedRowID, equals: result.id)
+                            .padding(.horizontal, 40)
+                    }
+                }
+                .padding(.vertical, 8)
+            }
+            .background(Color.appBackground)
+            #else
             List(results) { result in
                 resultRow(result)
                     .id(result.id)
-                    #if os(tvOS)
-                    .focused($focusedRowID, equals: result.id)
-                    #endif
                     .listRowBackground(Color.cardBackground)
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
-                    #if os(iOS)
                     .listRowSeparator(.hidden)
-                    #endif
             }
             .listStyle(.plain)
             .background(Color.appBackground)
+            #endif
+            }
             #if os(iOS)
             .scrollContentBackground(.hidden)
             #endif
@@ -463,6 +478,15 @@ struct SearchView: View {
         jumpToGuide(prog)
     }
 
+    /// Poster box. tvOS matches the Channels and Programs cards (no
+    /// chevron, the channel card's height) so every chip lists the same
+    /// row style (tvOS review 2026-11-05).
+    #if os(tvOS)
+    private static let posterSize = CGSize(width: 72, height: 100)
+    #else
+    private static let posterSize = CGSize(width: 50, height: 70)
+    #endif
+
     private func resultRow(_ result: SearchResult) -> some View {
         Button {
             lastOpenedID = result.id
@@ -478,12 +502,12 @@ struct SearchView: View {
                     AsyncImage(url: validatedPosterURL(result)) { phase in
                         if case .success(let img) = phase {
                             img.resizable().aspectRatio(contentMode: .fill)
-                                .frame(width: 50, height: 70)
+                                .frame(width: Self.posterSize.width, height: Self.posterSize.height)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         } else {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(Color.elevatedBackground)
-                                .frame(width: 50, height: 70)
+                                .frame(width: Self.posterSize.width, height: Self.posterSize.height)
                                 .overlay(Image(systemName: result.iconName)
                                             .foregroundColor(.textTertiary))
                         }
@@ -513,11 +537,13 @@ struct SearchView: View {
                     }
                 }
 
-                Spacer()
+                Spacer(minLength: 0)
 
+                #if !os(tvOS)
                 Image(systemName: "chevron.right")
                     .scaledFont(.system(size: 12))
                     .foregroundColor(Color.contrastText(.textTertiary))
+                #endif
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
@@ -537,7 +563,7 @@ struct SearchView: View {
             Spacer()
             Image(systemName: "magnifyingglass")
                 .scaledFont(.system(size: 48)).foregroundColor(Color.contrastText(.textTertiary))
-            Text("Search for movies, shows,\nor EPG programs")
+            Text("Search for movies, shows,\nor programs")
                 .scaledFont(.bodyMedium.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
             Spacer()
@@ -619,7 +645,14 @@ struct SearchView: View {
                 sortBy: [SortDescriptor(\.startTime)]
             )
             descriptor.fetchLimit = 200
-            let epgMatches = (try? modelContext.fetch(descriptor)) ?? []
+            // Guide filler titled with the channel's own name or call sign
+            // is not a program (tvOS review 2026-11-05: "ESPN" listed every
+            // hour of the week and pushed Movies and TV Shows out of reach).
+            let epgMatches = ((try? modelContext.fetch(descriptor)) ?? []).filter { p in
+                guard let ch = channelsByID[p.channelID] else { return true }
+                return !LiveSearchMatcher.isChannelTitle(
+                    p.title, keys: LiveSearchMatcher.channelTitleKeys(name: ch.name, tvgID: ch.tvgID))
+            }
             let epgResults = GlobalSearchRanking.rankPrograms(
                 epgMatches, now: now,
                 start: { $0.startTime }, end: { $0.endTime },
@@ -687,6 +720,8 @@ struct SearchView: View {
         let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
         let rows = all.map { LiveSearchChannel(id: $0.id, name: $0.name, number: $0.number) }
         let order = Dictionary(all.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        let titles = Dictionary(all.map { ($0.id, LiveSearchMatcher.channelTitleKeys(name: $0.name, tvgID: $0.tvgID)) },
+                                uniquingKeysWith: { a, _ in a })
         // Built per pass from the guide map (no cross-screen cache), so a
         // guide refresh is always reflected.
         let guide = GuideStore.shared.programs
@@ -696,7 +731,7 @@ struct SearchView: View {
             })
             let now = Date()
             return (LiveSearchMatcher.search(rows, query: query, index: nil, now: now),
-                    index.programHits(query: query, now: now, channelOrder: order))
+                    index.programHits(query: query, now: now, channelOrder: order, channelTitles: titles))
         }.value
         let now = Date()
         let fmt = ClockFormat.short()

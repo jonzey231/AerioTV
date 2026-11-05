@@ -81,17 +81,23 @@ final class LiveProgramIndex: @unchecked Sendable {
     /// `query`, from now forward (not ended by `now`), by start time then
     /// channel position, one row per channel and start, capped at `cap`.
     /// `truncated` is true when more matched than the cap.
+    /// `channelTitles` (channel id to lowercased channel name and call
+    /// sign, see `LiveSearchMatcher.channelTitleKeys`) drops guide filler
+    /// whose title is just the channel's own name.
     func programHits(query rawQuery: String, now: Date, channelOrder: [String: Int],
+                     channelTitles: [String: Set<String>] = [:],
                      cap: Int = LiveProgramHit.cap) -> (hits: [LiveProgramHit], truncated: Bool) {
         let q = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty, cap > 0 else { return ([], false) }
         var found: [(order: Int, hit: LiveProgramHit)] = []
         for (key, entries) in byChannel {
             guard let order = channelOrder[key] else { continue }
+            let own = channelTitles[key] ?? []
             var lastStart: Date?
             for e in entries {
                 if e.program.end <= now { continue }
                 if !e.title.contains(q) { continue }
+                if own.contains(e.title.trimmingCharacters(in: .whitespaces)) { continue }
                 if e.program.start == lastStart { continue }
                 lastStart = e.program.start
                 found.append((order, LiveProgramHit(channelID: key, program: e.program)))
@@ -139,6 +145,27 @@ enum LiveSearchCopy {
 }
 
 enum LiveSearchMatcher {
+    /// Lowercased titles that only repeat the channel's identity: the
+    /// channel name and its call sign (the tvg-id before the first dot,
+    /// "ESPN2.us" gives "espn2"). Guides fill unlisted hours with entries
+    /// titled like that, and a channel-name query would otherwise list
+    /// them for every hour of the week (tvOS review 2026-11-05).
+    static func channelTitleKeys(name: String, tvgID: String?) -> Set<String> {
+        var out = Set<String>()
+        let n = name.trimmingCharacters(in: .whitespaces).lowercased()
+        if !n.isEmpty { out.insert(n) }
+        if let t = tvgID?.trimmingCharacters(in: .whitespaces), !t.isEmpty {
+            let sign = String(t.split(separator: ".", maxSplits: 1).first ?? "").lowercased()
+            if !sign.isEmpty { out.insert(sign) }
+        }
+        return out
+    }
+
+    /// True when `title` is only the channel's name or call sign.
+    static func isChannelTitle(_ title: String, keys: Set<String>) -> Bool {
+        keys.contains(title.trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
     /// Debounce before a Live TV filter pass (Android LIVE_SEARCH_DEBOUNCE_MS).
     static let debounceMilliseconds = 120
 

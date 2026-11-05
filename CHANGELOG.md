@@ -54,6 +54,12 @@
 
 ### Changed
 
+- Search: a channel-name query no longer fills Programs with guide filler
+  titled with the channel name or call sign. The "EPG" chip is now
+  "Programs", the empty screen reads "Search for movies, shows, or
+  programs", and on Apple TV the Movies and TV Shows chips use the same card
+  rows as Channels and Programs, with no dangling dot when a movie has no
+  year.
 - Record sheet: Start Early offers 60 min like End Late, and the commercial
   toggle reads "Remove Commercials" on every platform.
 - Appearance > Mode is now one choice: System, Light, Dark, or True Black.
