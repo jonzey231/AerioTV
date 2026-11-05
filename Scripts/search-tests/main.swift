@@ -127,7 +127,7 @@ do {
     eq(r.truncated, false, "not truncated")
     eq(r.hits[0].isAiring(at: now), true, "airing now")
     eq(LiveProgramHit.whenText(r.hits[1].program, now: now, calendar: cal, locale: en, time: time),
-       "7:00 PM", "today: time only")
+       "Today 7:00 PM", "today: Today and time")
     eq(LiveProgramHit.whenText(r.hits[2].program, now: now, calendar: cal, locale: en, time: time),
        "Fri 8:00 PM", "later day: weekday and time")
     let many = LiveProgramIndex(programs: ["a": (0..<250).map { prog("Show", Double($0), Double($0) + 0.5) }])

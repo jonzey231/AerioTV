@@ -661,10 +661,10 @@ struct SearchView: View {
         let guide = GuideStore.shared.programs
         let (result, hits) = await Task.detached(priority: .userInitiated) {
             let index = LiveProgramIndex(programs: guide.mapValues { list in
-                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end) }
+                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end, posterURL: $0.posterURL) }
             })
             let now = Date()
-            return (LiveSearchMatcher.search(rows, query: query, index: index, now: now),
+            return (LiveSearchMatcher.search(rows, query: query, index: nil, now: now),
                     index.programHits(query: query, now: now, channelOrder: order))
         }.value
         let now = Date()
@@ -808,11 +808,14 @@ extension LiveProgramHit {
                 posterURLString: g.posterURL,
                 subTitle: g.subTitle, season: g.season, episode: g.episode,
                 isNew: g.isNew, isLiveBroadcast: g.isLiveBroadcast,
-                isPremiere: g.isPremiere, isFinale: g.isFinale, isRepeat: g.isRepeat)
+                isPremiere: g.isPremiere, isFinale: g.isFinale, isRepeat: g.isRepeat,
+                channelID: channelID)
         }
         return ProgramInfoTarget(channelName: channelName, title: program.title,
                                  start: program.start, end: program.end,
-                                 description: "", category: "", subTitle: program.subTitle)
+                                 description: "", category: "",
+                                 posterURLString: program.posterURL, subTitle: program.subTitle,
+                                 channelID: channelID)
     }
 }
 
@@ -876,59 +879,135 @@ struct LiveProgramSearchSection: View {
     }
 }
 
-/// One program row: title, channel logo and name, day and start time, and
-/// the live badge while it airs.
+/// One program card, the size and chrome of a List view channel card
+/// (Logan 2026-11-05, identical on Android): program art on the left (feed
+/// icon, then art the guide banner already resolved, then the channel logo),
+/// title, day and start time, the channel logo with name and number, and
+/// the LIVE badge while it airs.
 private struct LiveProgramHitRow: View {
     @ObservedObject private var themeLive = ThemeManager.shared
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let hit: LiveProgramHit
     let channel: ChannelDisplayItem?
     let onTap: () -> Void
+    @State private var artFailed = false
 
     #if os(tvOS)
-    private let logoSize: CGFloat = 72
+    private var cardHeight: CGFloat { 132 }
+    private var titleSize: CGFloat { 26 }
+    private var lineSize: CGFloat { 20 }
+    private var thumb: CGFloat { 30 }
     #else
-    private let logoSize: CGFloat = 40
+    private var isWide: Bool { sizeClass == .regular }
+    private var cardHeight: CGFloat { isWide ? 104 : 88 }
+    private var titleSize: CGFloat { isWide ? 17 : 15 }
+    private var lineSize: CGFloat { isWide ? 14 : 12 }
+    private var thumb: CGFloat { isWide ? 20 : 16 }
     #endif
+
+    private var feedArt: URL? {
+        guard let raw = hit.program.posterURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        if let direct = URL(string: raw), direct.scheme != nil {
+            // Same rule as Program Info: an absolute feed icon is used as is.
+            return direct
+        }
+        guard let base = ChannelStore.shared.activeServer?.effectiveBaseURL, !base.isEmpty else { return nil }
+        return VODService.resolveImageURL(raw, base: base, size: "w500")
+    }
+
+    private var artURL: URL? {
+        if let feedArt { return feedArt }
+        #if os(tvOS)
+        if let held = GuidePreviewArtCache.shared.cachedArt(title: hit.program.title, programID: nil) {
+            return held
+        }
+        #endif
+        return nil
+    }
 
     var body: some View {
         let now = Date()
         let fmt = ClockFormat.short()
         let when = LiveProgramHit.whenText(hit.program, now: now, time: { fmt.string(from: $0) })
+        let art = artFailed ? nil : artURL
+        let artWidth = cardHeight * 1.4
         Button(action: onTap) {
             HStack(spacing: 12) {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.elevatedBackground)
-                    .frame(width: logoSize, height: logoSize)
+                    .frame(width: artWidth, height: cardHeight - 20)
                     .overlay {
-                        if let url = channel?.logoURL {
+                        if let url = art ?? channel?.logoURL {
                             AsyncImage(url: url) { phase in
-                                if case .success(let img) = phase {
-                                    img.resizable().aspectRatio(contentMode: .fit).padding(4)
-                                } else {
+                                switch phase {
+                                case .success(let img):
+                                    img.resizable().aspectRatio(contentMode: .fit)
+                                        .padding(art == nil ? 10 : 0)
+                                case .failure:
                                     Image(systemName: "tv").foregroundColor(.textTertiary)
+                                        .onAppear { if art != nil { artFailed = true } }
+                                default:
+                                    Color.clear
                                 }
                             }
+                            .id(url)
                         } else {
                             Image(systemName: "tv").foregroundColor(.textTertiary)
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(hit.program.title)
-                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        .lineLimit(2)
-                    Text([channel?.name, when].compactMap { $0 }.joined(separator: " \u{00B7} "))
-                        .scaledFont(.labelSmall.subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
+                        .scaledFont(.system(size: titleSize, weight: .medium))
+                        .foregroundColor(.textPrimary)
                         .lineLimit(1)
-                    if hit.isAiring(at: now) { LiveBadge() }
+                    HStack(spacing: 8) {
+                        Text(when)
+                            .scaledFont(.system(size: lineSize, weight: .medium))
+                            .foregroundColor(.contrastText(.accentPrimary))
+                            .lineLimit(1)
+                        if hit.isAiring(at: now) { LiveBadge() }
+                    }
+                    HStack(spacing: 6) {
+                        if let logo = channel?.logoURL {
+                            AsyncImage(url: logo) { phase in
+                                if case .success(let img) = phase {
+                                    img.resizable().aspectRatio(contentMode: .fit)
+                                } else {
+                                    Color.clear
+                                }
+                            }
+                            .frame(width: thumb, height: thumb)
+                        }
+                        Text([channel?.name, channel.flatMap { $0.number.isEmpty ? nil : $0.number }]
+                                .compactMap { $0 }.joined(separator: " \u{00B7} "))
+                            .scaledFont(.system(size: lineSize).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                            .lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
             }
-            .padding(.vertical, 6)
             .padding(.horizontal, 12)
-            .background(Color.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(minHeight: cardHeight)
+            .background {
+                #if os(tvOS)
+                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.cardBackground)
+                #else
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.accentPrimary.opacity(0.04))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
+                    }
+                #endif
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
         }
         #if os(tvOS)

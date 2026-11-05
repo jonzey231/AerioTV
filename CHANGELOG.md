@@ -18,6 +18,14 @@
   Program Info to set a reminder or record. Up to 200 rows show, with a
   "Showing the first 200 matches" footer past that. On Apple TV the
   in-place Search screen shows the same "Channels" and "Programs" sections.
+- Live TV search: channel results match only a channel name or number; a
+  program title match lists only under "Programs". Program results are
+  full channel-card size with the program art, title, day and time, and
+  the channel logo, name, and number.
+- Program Info has a Record button that opens the standard record sheet,
+  on iPhone, iPad, and Apple TV.
+- Leaving a channel opened from Live TV search returns to the same search
+  field, query, and results.
 - Set up another device: every AerioTV device can now receive a setup, not
   only TVs. iPhone, iPad, and Apple TV gain "Set up from another device" on
   Welcome (and in Add Playlist on iPhone and iPad), so a playlist and its

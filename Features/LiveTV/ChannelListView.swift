@@ -767,9 +767,10 @@ struct ChannelListView: View {
                     )
                 )
                 #endif
-                // Leaving this tab, or entering the fullscreen player,
-                // cancels and closes search (Logan 2026-09-16).
-                .onDismissSearch {
+                // Leaving this tab cancels and closes search (Logan
+                // 2026-09-16). Opening a player keeps it (Logan 2026-11-05):
+                // leaving the channel returns to the same results.
+                .onDismissSearch(keepOnPlayer: true) {
                     #if os(iOS)
                     if phoneSearchPresented { phoneSearchPresented = false }
                     if iPadSearchPresented { iPadSearchPresented = false }
@@ -3189,7 +3190,7 @@ struct ChannelListView: View {
         let cached = LiveSearchIndexCache.index
         let programs: [String: [LiveSearchProgram]]? = cached == nil
             ? GuideStore.shared.programs.mapValues { list in
-                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end) }
+                list.map { LiveSearchProgram(title: $0.title, subTitle: $0.subTitle, start: $0.start, end: $0.end, posterURL: $0.posterURL) }
               }
             : nil
         let generation = LiveSearchIndexCache.generation
@@ -3206,7 +3207,7 @@ struct ChannelListView: View {
             let (index, result, hits) = await Task.detached(priority: .userInitiated) {
                 let index = cached ?? LiveProgramIndex(programs: programs ?? [:])
                 let now = Date()
-                return (index, LiveSearchMatcher.search(channels, query: query, index: index, now: now),
+                return (index, LiveSearchMatcher.search(channels, query: query, index: nil, now: now),
                         index.programHits(query: query, now: now, channelOrder: channelOrder))
             }.value
             guard !Task.isCancelled,

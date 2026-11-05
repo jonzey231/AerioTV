@@ -3905,11 +3905,11 @@ final class NowPlayingManager: ObservableObject {
             // Entering the fullscreen player cancels and closes any open
             // search (Logan 2026-09-16). See SearchDismissCenter.
             if playingItem != nil, oldValue == nil {
-                SearchDismissCenter.dismissAll(reason: "fullscreen player")
+                SearchDismissCenter.dismissAll(reason: "fullscreen player", forPlayer: true)
             } else if let item = playingItem, item.id != oldValue?.id, !isMinimized {
                 // A retune while the fullscreen player is up (or about to
                 // be): no nil transition, so close search here too.
-                SearchDismissCenter.dismissAll(reason: "fullscreen retune")
+                SearchDismissCenter.dismissAll(reason: "fullscreen retune", forPlayer: true)
             }
         }
     }
@@ -3931,7 +3931,7 @@ final class NowPlayingManager: ObservableObject {
             // stayed over the player. Same rule as Android, which closes
             // search on every entry into a player route.
             if !newValue, playingItem != nil {
-                SearchDismissCenter.dismissAll(reason: "expand to fullscreen")
+                SearchDismissCenter.dismissAll(reason: "expand to fullscreen", forPlayer: true)
             }
         }
     }
@@ -4236,7 +4236,7 @@ final class NowPlayingManager: ObservableObject {
             // The PiP hop tears the host down and rebuilds the tab beneath
             // it; resign once more here so nothing under it can claim the
             // keyboard on the way through.
-            SearchDismissCenter.dismissAll(reason: "minimize to PiP")
+            SearchDismissCenter.dismissAll(reason: "minimize to PiP", forPlayer: true)
             ForegroundPiPBridge.shared.request()
             return
         }

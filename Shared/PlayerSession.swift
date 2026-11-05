@@ -29,9 +29,10 @@ extension Notification.Name {
 /// re-summoned as views are torn down and rebuilt around PiP.
 enum SearchDismissCenter {
     @MainActor
-    static func dismissAll(reason: String) {
-        debugLog("[SEARCH] dismiss all (\(reason))")
-        NotificationCenter.default.post(name: .aerioDismissSearch, object: nil)
+    static func dismissAll(reason: String, forPlayer: Bool = false) {
+        debugLog("[SEARCH] dismiss all (\(reason)) player=\(forPlayer)")
+        NotificationCenter.default.post(name: .aerioDismissSearch, object: nil,
+                                        userInfo: ["forPlayer": forPlayer])
         resignKeyboard()
     }
 
@@ -48,8 +49,13 @@ enum SearchDismissCenter {
 
 extension View {
     /// Run `action` when any part of the app asks open searches to close.
-    func onDismissSearch(_ action: @escaping () -> Void) -> some View {
-        onReceive(NotificationCenter.default.publisher(for: .aerioDismissSearch)) { _ in
+    /// `keepOnPlayer`: Live TV keeps its search open (field, query, and
+    /// results) when the close comes from opening a player, so leaving the
+    /// channel lands back on the results (Logan 2026-11-05). The keyboard
+    /// is still resigned by `dismissAll`.
+    func onDismissSearch(keepOnPlayer: Bool = false, _ action: @escaping () -> Void) -> some View {
+        onReceive(NotificationCenter.default.publisher(for: .aerioDismissSearch)) { note in
+            if keepOnPlayer, (note.userInfo?["forPlayer"] as? Bool) == true { return }
             action()
         }
     }

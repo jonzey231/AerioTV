@@ -11,12 +11,15 @@ struct LiveSearchProgram: Sendable, Equatable {
     let subTitle: String?
     let start: Date
     let end: Date
+    /// Program art from the EPG feed (raw icon string), when it has one.
+    let posterURL: String?
 
-    init(title: String, subTitle: String?, start: Date, end: Date) {
+    init(title: String, subTitle: String?, start: Date, end: Date, posterURL: String? = nil) {
         self.title = title
         self.subTitle = subTitle
         self.start = start
         self.end = end
+        self.posterURL = posterURL
     }
 }
 
@@ -113,11 +116,11 @@ struct LiveProgramHit: Sendable, Equatable, Identifiable {
 
     func isAiring(at now: Date) -> Bool { program.start <= now && now < program.end }
 
-    /// "8:20 PM" today, "Sat 9:00 PM" on any later day (Android
-    /// programHitWhen). `time` formats the clock part.
+    /// "Today 8:20 PM" today (or airing now), "Sat 9:00 PM" on any later day
+    /// (Android programHitWhen). `time` formats the clock part.
     static func whenText(_ p: LiveSearchProgram, now: Date, calendar: Calendar = .current,
                          locale: Locale = .current, time: (Date) -> String) -> String {
-        if calendar.isDate(p.start, inSameDayAs: now) || p.start < now { return time(p.start) }
+        if calendar.isDate(p.start, inSameDayAs: now) || p.start < now { return "Today \(time(p.start))" }
         let f = DateFormatter()
         f.locale = locale
         f.calendar = calendar

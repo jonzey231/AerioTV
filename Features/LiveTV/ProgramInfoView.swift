@@ -137,6 +137,10 @@ struct ProgramInfoTarget: Identifiable, Equatable {
     let isFinale: Bool
     let isRepeat: Bool
     let recording: RecordingFacts?
+    /// The channel's id (ChannelDisplayItem.id) when the caller knows it,
+    /// so the Record button resolves the exact channel; otherwise it falls
+    /// back to the channel name.
+    let channelID: String?
 
     var id: String {
         "\(title)-\(start.timeIntervalSinceReferenceDate)-\(end.timeIntervalSinceReferenceDate)"
@@ -148,7 +152,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
          subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
          isNew: Bool = false, isLiveBroadcast: Bool = false,
          isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false,
-         recording: RecordingFacts? = nil) {
+         recording: RecordingFacts? = nil, channelID: String? = nil) {
         self.channelName = channelName
         self.title = title
         self.start = start
@@ -166,6 +170,7 @@ struct ProgramInfoTarget: Identifiable, Equatable {
         self.isFinale = isFinale
         self.isRepeat = isRepeat
         self.recording = recording
+        self.channelID = channelID
     }
 }
 
@@ -230,6 +235,49 @@ struct ProgramInfoView: View {
     /// TMDB is allowed only after detail answered with no art (or no
     /// Dispatcharr detail exists for this program at all).
     @State private var detailAllowsTMDB = false
+    /// Record button (Logan 2026-11-05): opens the standard record sheet,
+    /// the one the long-press Record action opens.
+    @State private var showRecordSheet = false
+
+    /// The channel this program airs on, for the record sheet.
+    private var recordChannel: ChannelDisplayItem? {
+        let all = ChannelStore.shared.channels
+        if let id = target.channelID, let ch = all.first(where: { $0.id == id }) { return ch }
+        return all.first(where: { $0.name == target.channelName })
+    }
+
+    /// Not for a recording's own info, an ended program, or an unknown channel.
+    private var canRecord: Bool {
+        target.recording == nil && target.end > Date() && recordChannel != nil
+    }
+
+    @ViewBuilder
+    private var recordSheet: some View {
+        if let ch = recordChannel {
+            RecordProgramSheet(
+                programTitle: target.title,
+                programDescription: target.description,
+                channelID: ch.id,
+                channelName: ch.name,
+                scheduledStart: target.start,
+                scheduledEnd: target.end,
+                isLive: target.start <= Date(),
+                dispatcharrChannelID: ch.dispatcharrChannelID,
+                streamURL: ch.streamURL,
+                channelLogoURL: ch.logoURL,
+                channelTVGID: ch.tvgID
+            )
+        }
+    }
+
+    private var recordButton: some View {
+        Button {
+            debugLog("[SEARCH] program info: record")
+            showRecordSheet = true
+        } label: {
+            Label("Record", systemImage: "record.circle")
+        }
+    }
     // The loaded bitmap's aspect no longer drives the layout: art goes into
     // the height-locked ProgramArtSlot shared with the guide preview
     // banner, so nothing is cropped and nothing resizes as art lands
@@ -416,7 +464,11 @@ struct ProgramInfoView: View {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") { dismiss() }
                         }
+                        if canRecord {
+                            ToolbarItem(placement: .topBarLeading) { recordButton }
+                        }
                     }
+                    .sheet(isPresented: $showRecordSheet) { recordSheet }
             }
             .task(id: target.id) {
                 seedFeedPosterIfNeeded()
@@ -440,7 +492,11 @@ struct ProgramInfoView: View {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Done") { dismiss() }
                     }
+                    if canRecord {
+                        ToolbarItem(placement: .topBarLeading) { recordButton }
+                    }
                 }
+                .sheet(isPresented: $showRecordSheet) { recordSheet }
                 .toolbarBackground(Color.appBackground, for: .navigationBar)
                 .toolbarBackground(.visible, for: .navigationBar)
         }
@@ -906,9 +962,17 @@ struct ProgramInfoView: View {
     @ViewBuilder
     private var tvBody: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            tvCard
+            VStack(alignment: .leading, spacing: 0) {
+                if canRecord {
+                    recordButton
+                        .padding(.horizontal, 48)
+                        .padding(.top, 32)
+                }
+                tvCard
+            }
         }
         .frame(width: 1400, height: 780)
+        .sheet(isPresented: $showRecordSheet) { recordSheet }
         .onExitCommand { dismiss() }
     }
 
