@@ -54,6 +54,13 @@
 
 ### Changed
 
+- Apple TV profiles: "Who is watching?" centers the avatars under the title,
+  and the onboarding "Who watches on this TV?" step is one centered column
+  with Continue and the profile count under the roster, so Continue is
+  reachable with the remote.
+- The Color Theme preset "Light" is now named "Slate" on every
+  platform, so it no longer reads like the Light Mode choice. The stored
+  and synced value is unchanged, so synced settings keep working.
 - Search: a channel-name query no longer fills Programs with guide filler
   titled with the channel name or call sign. The "EPG" chip is now
   "Programs", the empty screen reads "Search for movies, shows, or

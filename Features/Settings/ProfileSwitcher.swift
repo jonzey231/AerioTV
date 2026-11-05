@@ -298,30 +298,12 @@ struct WhoIsWatchingView: View {
                     Text("Who is watching?")
                         .scaledFont(.system(size: ProfileUI.s(28, 52), weight: .semibold))
                         .foregroundColor(.textPrimary)
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: ProfileUI.s(28, 48)) {
-                            ForEach(profiles) { p in
-                                let isCurrent = p.id == currentId
-                                WhoIsWatchingTile(profile: p, locked: manager.hasPin(p.id), current: mode == .switcher && isCurrent) {
-                                    picked(p, current: isCurrent)
-                                }
-                                .focused($focus, equals: p.id)
-                                #if os(iOS)
-                                .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in openMove(p) })
-                                #endif
-                            }
-                            if RoleRules.canSeeSwitcher(manager.activeRoleNow) {
-                                PickerActionTile(icon: "plus", label: "Add Profile", action: startAdd)
-                                if mode == .switcher {
-                                    PickerActionTile(icon: "person.2.badge.gearshape", label: "Manage Profiles") {
-                                        onClose()
-                                        openManageProfiles()
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.horizontal, ProfileUI.s(24, 80))
-                        .padding(.vertical, ProfileUI.s(12, 40))
+                    // Centered under the title when the row fits; scrolls
+                    // only when it does not (tvOS review 2026-11-05: the
+                    // avatars sat left-aligned under a centered title).
+                    ViewThatFits(in: .horizontal) {
+                        profileRow(profiles, currentId)
+                        ScrollView(.horizontal, showsIndicators: false) { profileRow(profiles, currentId) }
                     }
                     .frame(maxWidth: .infinity)
                     #if os(tvOS)
@@ -351,6 +333,31 @@ struct WhoIsWatchingView: View {
                 #endif
             }
         }
+    }
+    @ViewBuilder private func profileRow(_ profiles: [DispatcharrProfile], _ currentId: String?) -> some View {
+                    HStack(spacing: ProfileUI.s(28, 48)) {
+                        ForEach(profiles) { p in
+                            let isCurrent = p.id == currentId
+                            WhoIsWatchingTile(profile: p, locked: manager.hasPin(p.id), current: mode == .switcher && isCurrent) {
+                                picked(p, current: isCurrent)
+                            }
+                            .focused($focus, equals: p.id)
+                            #if os(iOS)
+                            .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in openMove(p) })
+                            #endif
+                        }
+                        if RoleRules.canSeeSwitcher(manager.activeRoleNow) {
+                            PickerActionTile(icon: "plus", label: "Add Profile", action: startAdd)
+                            if mode == .switcher {
+                                PickerActionTile(icon: "person.2.badge.gearshape", label: "Manage Profiles") {
+                                    onClose()
+                                    openManageProfiles()
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, ProfileUI.s(24, 80))
+                    .padding(.vertical, ProfileUI.s(12, 40))
     }
 }
 

@@ -562,26 +562,26 @@ struct AddProfilesStepView: View {
     @ViewBuilder
     private func pickBody(_ users: [DispatcharrUserSummary]) -> some View {
         if stepIsTV {
-            // TV: the list on the left, the actions on the right (Android TV layout).
-            VStack(spacing: 24) {
-                header.frame(maxWidth: 1100)
-                HStack(alignment: .top, spacing: 48) {
-                    // Bottom fade: the list scrolls (Android d57ef3d0).
-                    ScrollView { userList(users).padding(.vertical, 8).padding(.bottom, 40) }
-                        .frame(maxWidth: .infinity)
-                        .mask {
-                            VStack(spacing: 0) {
-                                Color.black
-                                LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                                    .frame(height: 60)
-                            }
-                        }
-                    ScrollView { pickControls(users) }
-                        .frame(width: 560)
+            // TV: one centered column, the roster at full width with
+            // Continue and the count line under it. The old two-column
+            // layout put Continue in its own scroll view to the right, and
+            // no D-pad move reached it from "Add from Dispatcharr" (tvOS
+            // review 2026-11-05: Right, Up, and Down all stayed put).
+            ScrollView {
+                VStack(spacing: 24) {
+                    header
+                    userList(users)
+                    pickControls(users)
+                        .frame(maxWidth: 640)
+                        #if os(tvOS)
+                        .focusSection()
+                        #endif
                 }
+                .frame(maxWidth: 1100)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 80)
+                .padding(.vertical, 48)
             }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 48)
         } else {
             VStack(spacing: 12) {
                 ScrollView {
