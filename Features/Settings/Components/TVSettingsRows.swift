@@ -11,6 +11,8 @@ import SwiftData
 
 #if os(tvOS)  // Phase 1 split: re-opened, block spanned the extraction cut
 struct TVSettingsNavRow<Destination: View, Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let destination: Destination
     let content: Content
     /// [SETTINGS] trace name for this row.
@@ -46,6 +48,8 @@ struct TVSettingsNavRow<Destination: View, Content: View>: View {
 /// Button-based nav row that pushes onto a NavigationPath instead of using NavigationLink.
 /// This ensures the TabView's .onExitCommand can properly manage back navigation.
 struct TVSettingsNavButton: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let label: String
     let icon: String
     let iconColor: Color
@@ -78,6 +82,8 @@ struct TVSettingsNavButton: View {
 /// a NavigationLink: same card, same accent 2pt focus ring, same 1.02
 /// focus scale as `TVSettingsNavRow`, with caller-supplied content.
 struct TVSettingsCardButtonRow<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let action: () -> Void
     /// [SETTINGS] trace name for this row.
     var logTitle: String? = nil
@@ -224,6 +230,8 @@ struct TVSettingsTileActionRow: View {
 /// to go, which scrolls the block into view, without adding a focus stop
 /// per line. Select does nothing.
 struct TVSettingsReadOnlyCard<Content: View>: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     @ViewBuilder let content: Content
     @FocusState private var isFocused: Bool
 
@@ -333,6 +341,8 @@ extension TVSettingsSelectionRow where Leading == AnyView {
 /// Toggle row for tvOS, renders as a Button that flips a Bool on select,
 /// showing an "On / Off" indicator. Consistent with TVGroupToggleRow in ManageGroupsSheet.
 struct TVSettingsToggleRow: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     let iconColor: Color
     let title: String
