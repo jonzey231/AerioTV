@@ -358,7 +358,8 @@ unchanged and no server path is used; everything stays on the LAN.
   browses for up to 3 seconds ("Looking for the device showing this
   code") for `role`=`source` with a matching `uq`. Not found (a
   screenshot, the Dispatcharr web UI code, or another network) imports
-  the user as before. Found: "Copy from {name}" with "Copy entire setup
+  the user as before. Found: "Copy from {name}", subtitle "Copy every playlist and profile
+  from {name}, or add just the user in this code.", with "Copy entire setup
   from this device" (default) or "Import this user only". Entire setup
   starts the normal receiver without an advert, posts its link with the
   proof (150 second timeout), shows "Waiting for {name}", then applies the

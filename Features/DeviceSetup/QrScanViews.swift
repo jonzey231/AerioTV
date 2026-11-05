@@ -618,32 +618,42 @@ struct UserQrScopeSheet: View {
     let onCancel: () -> Void
     @State private var userOnly = false
 
-    /// Same layout as Set up another device (SetUpTvView): top-aligned scroll, 560 pt column, default sheet height.
+    /// Measured content height: the sheet ends just below Cancel on iPhone and iPad.
+    @State private var contentHeight: CGFloat = 360
+
+    /// Headline, card, and buttons as in Set up another device (SetUpTvView, 12 pt spacing,
+    /// 560 pt column); the sheet is sized to its content.
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Copy from \(request.device.name)")
-                        .scaledFont(.headlineLarge)
-                        .foregroundColor(.textPrimary)
-                    VStack(spacing: 4) {
-                        ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
-                        ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
-                    }
-                    .padding(8)
-                    .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    PrimaryButton("Continue") { onContinue(!userOnly) }
-                    HStack(spacing: 12) {
-                        SecondaryButton("Cancel") { onCancel() }
-                    }
-                }
-                .frame(maxWidth: 560, alignment: .leading)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 20)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Copy from \(request.device.name)")
+                .scaledFont(.headlineLarge)
+                .foregroundColor(.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Copy every playlist and profile from \(request.device.name), or add just the user in this code.")
+                .scaledFont(.bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
+                .fixedSize(horizontal: false, vertical: true)
+            VStack(spacing: 4) {
+                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
+                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
             }
-            .background(Color.appBackground.ignoresSafeArea())
+            .padding(8)
+            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            PrimaryButton("Continue") { onContinue(!userOnly) }
+            SecondaryButton("Cancel") { onCancel() }
         }
+        .frame(maxWidth: 560, alignment: .leading)
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 16)
+        .padding(.top, 24)
+        .padding(.bottom, 20)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+            if abs(h - contentHeight) > 0.5 { contentHeight = h }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color.appBackground.ignoresSafeArea())
+        .presentationDetents([.height(contentHeight)])
+        .presentationSizing(.form.fitted(horizontal: false, vertical: true))
     }
 }
 #endif
