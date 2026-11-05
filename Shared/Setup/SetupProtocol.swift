@@ -569,13 +569,20 @@ enum CodeTextImport {
 
 /// Restore offer after a QR sign-in: does the App Data list
 /// (GET /api/accounts/users/me/app-data/, {"apps":[{"key":...,"bytes":...}]})
-/// hold AerioTV's main Dispatcharr Sync key?
+/// hold AerioTV's main Dispatcharr Sync key? That is `<user>.aeriotv`
+/// (DsyncKeyName), or the legacy `app.molinete.aerio` a not yet migrated
+/// record still uses. Runs before the username is read, so any user name counts.
 enum DsyncRestoreProbe {
-    static let mainKey = "app.molinete.aerio"
+    static let legacyKey = "app.molinete.aerio"
+    static let suffix = ".aeriotv"
+
+    static func isMainKey(_ key: String) -> Bool {
+        key == legacyKey || (key.hasSuffix(suffix) && key.count > suffix.count)
+    }
 
     static func listsMainKey(_ body: Data?) -> Bool {
         guard let body, let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
               let apps = root["apps"] as? [Any] else { return false }
-        return apps.contains { (($0 as? [String: Any])?["key"] as? String) == mainKey }
+        return apps.contains { ((($0 as? [String: Any])?["key"] as? String)).map(isMainKey) ?? false }
     }
 }

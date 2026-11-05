@@ -65,6 +65,12 @@
 - Guide category tints for what is airing now come from one programs search
   request instead of one detail request per program (about 280 on a cold
   launch). Servers without the search fall back to the per-program request.
+- Dispatcharr Sync stores its data in Dispatcharr under a key named for the
+  signed-in Dispatcharr user, `<username>.aeriotv`, instead of
+  `app.molinete.aerio`. The first device on this version moves the existing
+  record once (read the old key, save it under the new one, then remove the
+  old one), so every device keeps the same favorites, progress, and
+  settings. Same change in AerioTV for Android.
 
 ### Server paths
 
@@ -72,6 +78,9 @@
   paths; both work on the local network or on the device only.
 - New: `GET /api/epg/programs/search/` (`airing_at`, `fields`, `page_size`,
   `page`), covered by the existing `/api/*` rule.
+- Dispatcharr Sync adds no server paths: the same
+  `/api/accounts/users/me/app-data/` endpoints and the existing
+  `/api/accounts/users/me/` read; only the key in the path changes.
 
 ## v1.8.44 - 2026-10-16
 

@@ -9,7 +9,8 @@
 //    GET    /api/accounts/users/me/app-data/<key>/  one stored value (404 key_not_found)
 //    PUT    /api/accounts/users/me/app-data/<key>/  full replace (413 value_too_large /
 //                                                    total_too_large, 409 max_apps)
-//    DELETE /api/accounts/users/me/app-data/<key>/  the v1 to v3 migration only
+//    DELETE /api/accounts/users/me/app-data/<key>/  the key migrations only
+//    GET    /api/accounts/users/me/                 the signed-in username, which names the key
 //  Auth is the DispatcharrAPI the app already builds for Direct Connect
 //  (same headers, same 401 recovery via dataWithJWTRetry, which also covers
 //  Android's "take the current credential and try once more").
@@ -50,6 +51,14 @@ struct DispatcharrAppDataClient {
 
     /// DELETE /api/accounts/users/me/app-data/<key>/.
     func appDataDelete(_ key: String) async -> AppDataResult? { await send("DELETE", Self.keyPath(key), body: nil) }
+
+    /// GET /api/accounts/users/me/: the username the App Data key is named for
+    /// (DsyncKeyName). Nil on any failure; the caller retries on the next pull.
+    func username() async -> String? {
+        guard let r = await send("GET", "/api/accounts/users/me/", body: nil), r.ok else { return nil }
+        let name = r.body.flatMap(DsyncJSONParser.parse)?.asObject?["username"]?.asStr ?? ""
+        return name.isEmpty ? nil : name
+    }
 
     private func send(_ method: String, _ path: String, body: Data?) async -> AppDataResult? {
         guard let url = try? api.appDataURL(path: path) else { return nil }
@@ -109,28 +118,28 @@ struct DispatcharrAppDataClient {
         case got(DsyncV2.Bucket, bytes: Int)
     }
 
-    func fetchBucket(_ b: DsyncBucket) async -> Fetched {
-        let r = await appDataGet(b.wire)
+    func fetchBucket(_ wire: String) async -> Fetched {
+        let r = await appDataGet(wire)
         guard let r, r.status < 500 else {
-            debugLog("[DSYNC] get \(b.wire) status=\(r.map { String($0.status) } ?? "network")")
+            debugLog("[DSYNC] get \(wire) status=\(r.map { String($0.status) } ?? "network")")
             return .failed
         }
         if r.status == 404 { return .absent }
         guard r.ok else {
-            debugLog("[DSYNC] get \(b.wire) status=\(r.status) code=\(r.code ?? "null")")
+            debugLog("[DSYNC] get \(wire) status=\(r.status) code=\(r.code ?? "null")")
             return .failed
         }
         guard let raw = r.body.flatMap(DsyncJSONParser.parse)?.asObject else {
-            debugLog("[DSYNC] malformed \(b.wire)")
+            debugLog("[DSYNC] malformed \(wire)")
             return .malformed
         }
         switch DsyncV2.decode(raw) {
         case .ok(let bucket): return .got(bucket, bytes: r.body?.count ?? 0)
         case .tooNew(let v):
-            debugLog("[DSYNC] skip \(b.wire) v\(v) > v\(DsyncV2.SCHEMA)")
+            debugLog("[DSYNC] skip \(wire) v\(v) > v\(DsyncV2.SCHEMA)")
             return .tooNew(v)
         case .malformed:
-            debugLog("[DSYNC] malformed \(b.wire)")
+            debugLog("[DSYNC] malformed \(wire)")
             return .malformed
         }
     }
@@ -140,11 +149,11 @@ struct DispatcharrAppDataClient {
     enum PutStatus: Sendable { case ok, retry, tooLarge, full, auth, rejected }
 
     /// One PUT of [value] for the category [key]; the status line names both.
-    func put(_ b: DsyncBucket, key: DsyncKey, value: DsyncObject) async -> (PutStatus, AppDataResult?) {
+    func put(_ wire: String, key: DsyncKey, value: DsyncObject) async -> (PutStatus, AppDataResult?) {
         let body = DsyncJSONEncoder.encode(value)
         let bytes = body.utf8.count
-        let r = await appDataPut(b.wire, body: body)
-        debugLog("[DSYNC] put \(b.wire) (\(key.suffix)) bytes=\(bytes) status=\(r.map { String($0.status) } ?? "network")\(r?.code.map { " code=\($0)" } ?? "")")
+        let r = await appDataPut(wire, body: body)
+        debugLog("[DSYNC] put \(wire) (\(key.suffix)) bytes=\(bytes) status=\(r.map { String($0.status) } ?? "network")\(r?.code.map { " code=\($0)" } ?? "")")
         guard let r, r.status < 500 else { return (.retry, r) }
         if r.ok { return (.ok, r) }
         switch r.status {
@@ -172,14 +181,14 @@ struct DispatcharrAppDataClient {
 
     /// PUT with the 413 trim loop: returns the final status and the value
     /// the server accepted (or the last one tried).
-    func putTrimming(_ b: DsyncBucket, key: DsyncKey, value: DsyncObject) async -> (PutStatus, DsyncObject) {
+    func putTrimming(_ wire: String, key: DsyncKey, value: DsyncObject) async -> (PutStatus, DsyncObject) {
         var v = value
         var step = 0
         while true {
-            let (s, _) = await put(b, key: key, value: v)
+            let (s, _) = await put(wire, key: key, value: v)
             guard s == .tooLarge else { return (s, v) }
             guard let next = Self.nextTrim(v, from: step) else {
-                debugLog("[DSYNC] \(b.wire) still too large after every trim; stopped until the next change")
+                debugLog("[DSYNC] \(wire) still too large after every trim; stopped until the next change")
                 return (.tooLarge, v)
             }
             v = next.0

@@ -442,7 +442,42 @@ do {
     eq(DsyncV2.applyTrim(big, 2), nil, "absent category trim skipped")
     eq(DsyncLimits.KEY_BYTES, 131_072, "128 KiB per key (Dispatcharr APP_DATA_MAX_VALUE_BYTES)")
     eq(DsyncLimits.TOTAL_BYTES, 1_048_576, "1 MiB per user (APP_DATA_MAX_TOTAL_BYTES)")
-    check(DsyncKey.isValidKeyName(DsyncBucket.main.wire), "bucket key matches the server key pattern")
+    check(DsyncKey.isValidKeyName(DsyncBucket.main.wire("logan.aeriotv")), "bucket key matches the server key pattern")
+
+    // Key derivation vectors (identical in the Android DsyncV2Test).
+    let vectors: [(String, String?)] = [
+        ("Logan", "logan.aeriotv"),
+        ("john.doe-1_x", "john.doe-1_x.aeriotv"),
+        ("a@b.com", "a-40b.com.aeriotv"),
+        ("first+tag", "first-2btag.aeriotv"),
+        ("_admin", "u_admin.aeriotv"),
+        ("Jos\u{E9}", "jos-c3-a9.aeriotv"),
+        ("ADMIN", "admin.aeriotv"),
+        ("", nil),
+        (String(repeating: "a", count: 60), String(repeating: "a", count: 46) + ".aeriotv"),
+    ]
+    for (u, want) in vectors {
+        eq(DsyncKeyName.main(u), want, "key for \(u.prefix(12))")
+        if let w = want { check(DsyncKey.isValidKeyName(w + ".favorites"), "suffixed key valid for \(u.prefix(12))") }
+    }
+    eq(DsyncKeyName.v2Wires("logan.aeriotv"), ["logan.aeriotv", "logan.aeriotv.favorites", "logan.aeriotv.progress"], "v2 wires under the new name")
+    check(DsyncKeyName.isLegacy("app.molinete.aerio") && DsyncKeyName.isLegacy("app.molinete.aerio.favorites"), "legacy keys")
+    check(!DsyncKeyName.isLegacy("app.molinete.aeriotv") && !DsyncKeyName.isLegacy("logan.aeriotv"), "not legacy")
+    check(DsyncKeyName.isMain("logan.aeriotv") && !DsyncKeyName.isMain(".aeriotv"), "main key shape")
+
+    // Rename plan and value.
+    eq(DsyncKeyName.renamePlan(listed: ["other", "app.molinete.aerio.progress", "app.molinete.aerio"], main: "logan.aeriotv"),
+       ["app.molinete.aerio", "app.molinete.aerio.progress"], "absent new key: every legacy key, sorted")
+    eq(DsyncKeyName.renamePlan(listed: ["logan.aeriotv", "app.molinete.aerio"], main: "logan.aeriotv"), [], "new key present: no migration")
+    eq(DsyncKeyName.renamePlan(listed: ["other"], main: "logan.aeriotv"), [], "nothing legacy: no migration")
+    let legacyV3 = DsyncV2.encodeBucket(nil, deviceId: "old", appVersion: "1", updatedAt: nowS,
+                                        replace: [(.favorites, DsyncV2.encodeCategory(nil, deviceId: "old", updatedAt: nowS, data: DsyncPayloads.encodeFavorites(nil, [4, 5])))])
+    let renamed = DsyncKeyName.renameValue([("app.molinete.aerio", legacyV3)], deviceId: "me", appVersion: "2", now: nowS)
+    eq(renamed, legacyV3, "legacy v3 alone moves unchanged")
+    let v1Newer = DsyncEnvelopeCodec.encode(key: .favorites, previous: nil, deviceId: "z", appVersion: "1", updatedAt: nowS + 100, data: DsyncPayloads.encodeFavorites(nil, [9]))
+    let merged = DsyncKeyName.renameValue([("app.molinete.aerio", legacyV3), ("app.molinete.aerio.favorites", v1Newer)], deviceId: "me", appVersion: "2", now: nowS)!
+    eq(DsyncPayloads.decodeFavorites(DsyncV2.category(DsyncV2.decode(merged).bucket!, .favorites)!.envelope!.data), [9], "newer legacy v1 wins the rename")
+    eq(DsyncKeyName.renameValue([("app.molinete.aerio", obj(#"{"x":1}"#))], deviceId: "me", appVersion: "2", now: nowS), nil, "undecodable legacy value: nothing to put")
     check(!DsyncKey.isValidKeyName("short"), "short key rejected")
 
     let v1fav = DsyncEnvelope(schemaVersion: 1, deviceId: "z", platform: "ios", appVersion: "1", updatedAt: nowS + 100,

@@ -223,6 +223,8 @@ do {
     // MARK: DsyncRestoreProbe
     check(DsyncRestoreProbe.listsMainKey(Data(#"{"apps":[{"key":"other","bytes":2},{"key":"app.molinete.aerio","bytes":10}]}"#.utf8)), "main key listed")
     check(!DsyncRestoreProbe.listsMainKey(Data(#"{"apps":[{"key":"app.molinete.aerio.p.x","bytes":10}]}"#.utf8)), "profile key only")
+    check(DsyncRestoreProbe.listsMainKey(Data(#"{"apps":[{"key":"logan.aeriotv","bytes":10}]}"#.utf8)), "user key listed")
+    check(!DsyncRestoreProbe.listsMainKey(Data(#"{"apps":[{"key":".aeriotv","bytes":10},{"key":"logan.aeriotv.favorites","bytes":1}]}"#.utf8)), "bare suffix and v2 key only")
     check(!DsyncRestoreProbe.listsMainKey(Data("nope".utf8)), "bad body")
     check(!DsyncRestoreProbe.listsMainKey(nil), "nil body")
 }

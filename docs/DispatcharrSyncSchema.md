@@ -17,6 +17,9 @@ v3 note (2026-10-29): new category `syncProviders` (section 10b): which sync pro
 owner runs. A new category inside the key is not breaking (writers re-emit unknown categories, section
 3), so `schemaVersion` stays 3; bumping it would make every older reader skip the whole key (reader
 rule 2).
+v3 note (2026-11-05): the key is named for the signed-in Dispatcharr user, `<user>.aeriotv`
+(section 2.1), instead of `app.molinete.aerio`. The value is unchanged, so `schemaVersion` stays 3.
+The first device on the new release moves the record once (section 6.5).
 
 ## 1. What it is
 
@@ -45,10 +48,42 @@ see the same favorites, progress, and reminders.
 
 ## 2. Keys
 
-ONE App Data key, `app.molinete.aerio`, holds every category as a sub-object (section 3): settings,
+ONE App Data key, `<user>.aeriotv` (section 2.1), holds every category as a sub-object (section 3): settings,
 profiles, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder, collections, remoteMap,
 radioDefault, favorites, recents, progress, and syncProviders (section 10b). It is written with the profile's own token to
-`users/me/app-data/app.molinete.aerio/`.
+`users/me/app-data/<user>.aeriotv/`. Before 2026-11-05 the key was `app.molinete.aerio` (the
+legacy key, moved by section 6.5); the v1 and v2 key names below keep that legacy prefix.
+
+### 2.1 Key name
+`<user>` comes from the signed-in Dispatcharr username, read once per sync session with
+`GET /api/accounts/users/me/` using the same credential as the App Data calls (the base user's or
+the active profile's own key). The rule, identical on both platforms:
+
+1. Take the username's UTF-8 bytes.
+2. ASCII `A` to `Z` become lowercase. `a` to `z`, `0` to `9`, `_`, `.`, and `-` stay.
+3. Every other byte becomes `-` plus two lowercase hex digits (percent-encoding with `-` in place of
+   `%`, because the server key pattern `^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$` rejects `%`).
+4. If the result does not start with a letter or digit, prefix `u`.
+5. Cut to 46 characters, so `<user>.aeriotv.favorites` fits the 64 the server allows.
+6. Append `.aeriotv`. An empty username has no key; sync waits for the next attempt.
+
+Two usernames that map to one name cannot mix data: App Data is stored per user. The v2 three-key
+layout under the new name would be `<user>.aeriotv`, `<user>.aeriotv.favorites`, and
+`<user>.aeriotv.progress`; v3 writes only `<user>.aeriotv`.
+
+Test vectors (Apple `Scripts/dsync-tests`, Android `DsyncV2Test.userKeyDerivation`):
+
+| Username | Key |
+|---|---|
+| `Logan` | `logan.aeriotv` |
+| `ADMIN` | `admin.aeriotv` |
+| `john.doe-1_x` | `john.doe-1_x.aeriotv` |
+| `a@b.com` | `a-40b.com.aeriotv` |
+| `first+tag` | `first-2btag.aeriotv` |
+| `_admin` | `u_admin.aeriotv` |
+| `José` | `jos-c3-a9.aeriotv` |
+| 60 x `a` | 46 x `a` then `.aeriotv` |
+| empty | none |
 
 Categories (the "Key" column below is the v1 key name; in v2 the category name is the part after
 `app.molinete.aerio.`, for example `hiddenTitles`):
@@ -538,7 +573,22 @@ holds a v2 value, the app reads all of them and merges PER CATEGORY by `updatedA
 `deviceId`) into the single key; each category keeps its `updatedAt`, `deviceId`, `data`, and
 `extra`. It PUTs the single key, then DELETEs every other `app.molinete.aerio.*` key. Log
 `[DSYNC] migrated to the single key (N keys removed)`. If the PUT fails, the old keys stay and
-migration runs again on the next pull.
+migration runs again on the next pull. Since 2026-11-05 this merge is part of the key rename
+(section 6.5) and writes `<user>.aeriotv`.
+
+### 6.5 Key rename to `<user>.aeriotv` (2026-11-05)
+After the list call, if `<user>.aeriotv` is not listed and any legacy key is (`app.molinete.aerio`
+or any `app.molinete.aerio.*`), the app GETs every legacy key, merges them as in section 6.4 (a
+legacy v3 value alone moves unchanged), PUTs the result to `<user>.aeriotv` (413 walks the section 8
+trims), then DELETEs every legacy key (404 counts as gone). Log
+`[DSYNC] migrated key (R read, D of N old keys removed)`, never a value, key, token, or URL. A
+5xx or network failure stops the pull and the rename runs again next time; a PUT refused for
+another reason keeps the old keys. Once `<user>.aeriotv` is listed the rename never runs again,
+so whichever device syncs first moves the record once and every other device reads the new key.
+Every write goes to `<user>.aeriotv`. The setup probe reads `<user>.aeriotv` and falls back to the
+legacy key while it is absent; the QR restore offer counts either key as present. The API calls
+are unchanged: the same `users/me/app-data/` endpoints, plus the `users/me/` read the app already
+makes; only the key in the path differs.
 
 ### 6.3 Removals
 Removal is absence from the array. There are no tombstones in v1. Android's local `removedAt` and
@@ -546,7 +596,7 @@ Removal is absence from the array. There are no tombstones in v1. Android's loca
 
 ## 7. Cadence and errors
 
-1. Pull all enabled categories: on launch, on profile switch, on return to foreground after 5 minutes or more, and every 15 minutes while foregrounded. One `GET users/me/app-data/` lists sizes first; then one GET of `app.molinete.aerio` when present. A category absent from the key counts as read (empty).
+1. Pull all enabled categories: on launch, on profile switch, on return to foreground after 5 minutes or more, and every 15 minutes while foregrounded. One `GET users/me/app-data/` lists sizes first; then one GET of `<user>.aeriotv` when present. A category absent from the key counts as read (empty).
 2. Never write a key not read since launch (or since profile switch). A 404 `key_not_found` counts as read (empty).
 3. Debounce writes: 5 s after the last local change per key; flush pending writes on background.
 4. Skip a PUT whose compact JSON equals the last pushed body.
@@ -565,7 +615,7 @@ category sub-object (13 x 90 B = 1.2 KB).
 
 | Key | Contents | Total |
 |---|---|---|
-| `app.molinete.aerio` | every category below plus sub-objects | about 60 KB (worst case about 63 KB) |
+| `<user>.aeriotv` | every category below plus sub-objects | about 60 KB (worst case about 63 KB) |
 
 The server's per-key limit is 128 KiB (1 MiB per user) since Dispatcharr dev c1920131, so the heavy
 user above fits with room to spare. On an older server (32 KiB per key, 128 KiB per user) a large value
@@ -1153,4 +1203,4 @@ Pangolin rules table: already covered by the existing `/api/accounts/*` prefix r
 | Path | Why AerioTV calls it |
 |---|---|
 | `/api/accounts/users/me/app-data/` | Lists AerioTV's synced data keys and sizes for the signed-in profile (Dispatcharr Sync) |
-| `/api/accounts/users/me/app-data/<key>/` | Reads, saves, and clears one Dispatcharr Sync category (keys start with `app.molinete.aerio.`) |
+| `/api/accounts/users/me/app-data/<key>/` | Reads, saves, and clears one Dispatcharr Sync category (the key is `<username>.aeriotv`; older releases used `app.molinete.aerio`, moved once) |

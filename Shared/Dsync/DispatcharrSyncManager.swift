@@ -88,6 +88,8 @@ final class DsyncSession {
     var channelsRepulled = false
     /// The server users for the `profiles` key, once read.
     var users: [DispatcharrUserSummary]?
+    /// This session's App Data key, `<user>.aeriotv` (DsyncKeyName), once /me/ answered.
+    var userKey: String?
 
     init(playlistId: String, profileKey: String, token: String) {
         self.playlistId = playlistId
@@ -526,7 +528,13 @@ final class DispatcharrSyncManager: ObservableObject {
     /// Nil when the server could not be read; an absent key reads as an empty summary.
     func serverSummary(_ playlistId: String) async -> SetupSourceChoice.Summary? {
         guard let server = DsyncLocal.server(playlistId), let c = DsyncLocal.client(server) else { return nil }
-        guard let r = await c.appDataGet(DsyncBucket.main.wire) else { return nil }
+        guard let name = await c.username(), let main = DsyncKeyName.main(name) else { return nil }
+        guard var r = await c.appDataGet(main) else { return nil }
+        // Before the first sync of this release the record is still under the legacy key.
+        if r.status == 404 {
+            guard let old = await c.appDataGet(DsyncKeyName.LEGACY_MAIN) else { return nil }
+            r = old
+        }
         if r.status == 404 { return .EMPTY }
         guard r.ok else {
             debugLog("[DSYNC] setup probe status=\(r.status)")
@@ -790,6 +798,20 @@ final class DispatcharrSyncManager: ObservableObject {
         if session === s, ui.message != msg { ui.message = msg }
     }
 
+    /// Reads the signed-in username once per session (GET users/me/) and names the key from it.
+    private func ensureUserKey(_ s: DsyncSession, _ c: DispatcharrAppDataClient) async -> Bool {
+        if s.userKey != nil { return true }
+        guard let name = await c.username(), let main = DsyncKeyName.main(name) else {
+            debugLog("[DSYNC] username not read; sync waits for the next attempt")
+            return false
+        }
+        s.userKey = main
+        return true
+    }
+
+    /// The server key for [b] in this session; empty before /me/ answered (every caller checks userKey first).
+    private func wire(_ s: DsyncSession, _ b: DsyncBucket) -> String { b.wire(s.userKey ?? "") }
+
     private func bucketRaw(_ s: DsyncSession, _ b: DsyncBucket) -> DsyncObject? { state.object(k("braw", s) + "|" + b.rawValue) }
     private func saveBucketRaw(_ s: DsyncSession, _ b: DsyncBucket, _ raw: DsyncObject) {
         state.setObject(k("braw", s) + "|" + b.rawValue, raw)
@@ -929,8 +951,9 @@ final class DispatcharrSyncManager: ObservableObject {
             debugLog("[DSYNC] profiles: picker-open pull not applied (reason=\(reason), profile cannot write profiles)")
             return false
         }
+        guard await ensureUserKey(s, c) else { return false }
         var ok = false
-        switch await c.fetchBucket(DsyncBucket.of(.profiles)) {
+        switch await c.fetchBucket(wire(s, .main)) {
         case .got(let bucket, let bytes):
             switch DsyncV2.category(bucket, .profiles) {
             case nil:
@@ -1137,6 +1160,7 @@ final class DispatcharrSyncManager: ObservableObject {
             ui.running = false
             refreshMessage(s)
         }
+        guard await ensureUserKey(s, c) else { return }
         switch await c.list(reason: reason) {
         case .failed, .rejected: return
         case .paused:
@@ -1148,7 +1172,7 @@ final class DispatcharrSyncManager: ObservableObject {
             s.listOk = true
             s.serverBytes = sizes
         }
-        guard await migrateV1(s, c) else { return }
+        guard await migrateKey(s, c) else { return }
         for b in DsyncBucket.allCases {
             guard session === s else { return }
             let keys = b.keys.filter { pulled($0, s) }
@@ -1171,23 +1195,23 @@ final class DispatcharrSyncManager: ObservableObject {
     }
 
     private func pullBucket(_ s: DsyncSession, _ c: DispatcharrAppDataClient, _ b: DsyncBucket, _ keys: [DsyncKey]) async {
-        guard s.serverBytes[b.wire] != nil else {
+        guard s.serverBytes[wire(s, b)] != nil else {
             for key in keys { s.present.remove(key); s.read.insert(key) }
             return
         }
-        let listed = s.serverBytes[b.wire]
+        let listed = s.serverBytes[wire(s, b)]
         if !s.forceApply && DsyncPullRules.shouldSkipBucketGet(lastPullAt: s.lastPullAt, now: Self.nowMs(),
-                                                               fetchedBytes: s.fetchedBytes[b.wire], listedBytes: listed) {
+                                                               fetchedBytes: s.fetchedBytes[wire(s, b)], listedBytes: listed) {
             return
         }
-        switch await c.fetchBucket(b) {
+        switch await c.fetchBucket(wire(s, b)) {
         case .absent: for key in keys { s.present.remove(key); s.read.insert(key) }
         case .failed, .malformed: s.bucketFailed = true
         case .tooNew:
             s.bucketFailed = true
             s.blocked.formUnion(keys)
         case .got(let bucket, let bytes):
-            if let listed { s.fetchedBytes[b.wire] = listed }
+            if let listed { s.fetchedBytes[wire(s, b)] = listed }
             saveBucketRaw(s, b, bucket.raw)
             for key in keys {
                 switch DsyncV2.category(bucket, key) {
@@ -1198,51 +1222,32 @@ final class DispatcharrSyncManager: ObservableObject {
                     s.present.insert(key)
                     await processCategory(s, key, env, bytes)
                 default:
-                    debugLog("[DSYNC] malformed \(b.wire) category \(key.suffix)")
+                    debugLog("[DSYNC] malformed \(wire(s, b)) category \(key.suffix)")
                 }
             }
         }
     }
 
-    /// Migration to schema v3 (one key). False = the server could not be reached.
-    private func migrateV1(_ s: DsyncSession, _ c: DispatcharrAppDataClient) async -> Bool {
-        let main = DsyncBucket.main.wire
-        let others = s.serverBytes.keys.filter { $0.hasPrefix(main + ".") }.sorted()
-        var mainRaw: DsyncObject?
-        var mainIsOld = false
-        if s.serverBytes[main] != nil && !state.bool(k("v3seen", s)) {
-            guard let r = await c.appDataGet(main), r.status < 500 else { return false }
-            let got = r.ok ? r.body.flatMap(DsyncJSONParser.parse)?.asObject : nil
-            mainRaw = got
-            mainIsOld = got != nil && DsyncV2.decode(got!).bucket == nil
-            if !mainIsOld { state.set(k("v3seen", s), true) }
-        }
-        if others.isEmpty && !mainIsOld { return true }
-        if mainRaw == nil && s.serverBytes[main] != nil {
-            guard let r = await c.appDataGet(main), r.status < 500 else { return false }
-            mainRaw = r.ok ? r.body.flatMap(DsyncJSONParser.parse)?.asObject : nil
-        }
-        var v1: [(DsyncKey, DsyncEnvelope)] = []
-        var v2: [DsyncV2.Bucket] = []
-        var v3: DsyncObject?
-        if let raw = mainRaw, let b = DsyncV2.decode(raw, min: DsyncV2.MIN_SUBOBJECT_SCHEMA).bucket {
-            if b.schemaVersion >= DsyncV2.SCHEMA { v3 = raw } else { v2.append(b) }
-        }
-        for name in others {
+    /// Key rename (schema section 11, 2026-11-05): when `<user>.aeriotv` is absent and any
+    /// legacy `app.molinete.aerio*` key exists (v1, v2, or v3), read them all, PUT the merged
+    /// value under the new key, then DELETE every legacy key. Runs once: after it the new key is
+    /// listed and the plan is empty. False = the server could not be reached.
+    private func migrateKey(_ s: DsyncSession, _ c: DispatcharrAppDataClient) async -> Bool {
+        guard let main = s.userKey else { return false }
+        let legacy = DsyncKeyName.renamePlan(listed: Array(s.serverBytes.keys), main: main)
+        if legacy.isEmpty { return true }
+        var values: [(String, DsyncObject)] = []
+        for name in legacy {
             guard let r = await c.appDataGet(name), r.status < 500 else { return false }
             guard r.ok, let raw = r.body.flatMap(DsyncJSONParser.parse)?.asObject else { continue }
-            if let k1 = DsyncKey.fromWire(name), let e = DsyncEnvelopeCodec.decode(raw, knownVersion: 1).envelope {
-                v1.append((k1, e))
-                continue
-            }
-            if let b = DsyncV2.decode(raw, min: DsyncV2.MIN_SUBOBJECT_SCHEMA).bucket { v2.append(b) }
+            values.append((name, raw))
         }
-        if let value = DsyncV2.migrate(v1: v1, v2: v2, v3: v3, deviceId: deviceId, appVersion: appVersion, now: Self.nowS()) {
+        if let value = DsyncKeyName.renameValue(values, deviceId: deviceId, appVersion: appVersion, now: Self.nowS()) {
             var body = value
             var step = 0
             while true {
                 let r = await c.appDataPut(main, body: DsyncJSONEncoder.encode(body))
-                debugLog("[DSYNC] migration put \(main) bytes=\(DsyncEnvelopeCodec.byteSize(body)) status=\(r.map { String($0.status) } ?? "network")")
+                debugLog("[DSYNC] migration put bytes=\(DsyncEnvelopeCodec.byteSize(body)) status=\(r.map { String($0.status) } ?? "network")")
                 guard let r, r.status < 500 else { return false }
                 if r.ok { break }
                 if r.status != 413 { return true }
@@ -1256,14 +1261,13 @@ final class DispatcharrSyncManager: ObservableObject {
             s.serverBytes[main] = Int64(DsyncEnvelopeCodec.byteSize(body))
         }
         var removed = 0
-        for name in others {
+        for name in legacy {
             if let r = await c.appDataDelete(name), r.ok || r.status == 404 {
                 removed += 1
                 s.serverBytes.removeValue(forKey: name)
             }
         }
-        state.set(k("v3seen", s), true)
-        debugLog("[DSYNC] migrated to the single key (\(removed) keys removed)")
+        debugLog("[DSYNC] migrated key (\(values.count) read, \(removed) of \(legacy.count) old keys removed)")
         return true
     }
 
@@ -1461,6 +1465,10 @@ final class DispatcharrSyncManager: ObservableObject {
             return
         }
         guard !s.blocked.contains(key), enabled(key, s), let c = s.client else { return }
+        guard await ensureUserKey(s, c) else {
+            retryLater(s, key)
+            return
+        }
         let b = DsyncBucket.of(key)
         if s.resend.contains(key) { debugLog("[DSYNC] retry \(key.suffix) after offline") }
         let force = isForced(s, key)
@@ -1489,7 +1497,7 @@ final class DispatcharrSyncManager: ObservableObject {
         // Compare with the server copy refreshBeforePut just fetched, not the last copy saved.
         if DsyncPushRules.unchanged(built: data, serverData: serverDataOf(s, b, key), lastData: lastDataOf(s, key), present: s.present.contains(key)) {
             if DsyncPushRules.logsUnchanged(force: force, dirty: isDirty(s, key), key: key) {
-                debugLog("[DSYNC] put \(b.wire) (\(key.suffix)) status=unchanged rows=\(DsyncCoexistence.rowCount(key, data)) (server already holds this copy)")
+                debugLog("[DSYNC] put \(wire(s, b)) (\(key.suffix)) status=unchanged rows=\(DsyncCoexistence.rowCount(key, data)) (server already holds this copy)")
             }
             if force { clearForced(s, key) }
             markSent(s, key)
@@ -1497,7 +1505,7 @@ final class DispatcharrSyncManager: ObservableObject {
             if key == .profiles { profilesAcked(s, data) }
             return
         }
-        if s.serverFull && s.serverBytes[b.wire] == nil {
+        if s.serverFull && s.serverBytes[wire(s, b)] == nil {
             refreshMessage(s)
             return
         }
@@ -1506,14 +1514,14 @@ final class DispatcharrSyncManager: ObservableObject {
         var value = withProviders(s, DsyncV2.encodeBucket(bucketRaw(s, b), deviceId: deviceId, appVersion: appVersion, updatedAt: now, replace: [(key, sub)]))
         var step = 0
         while true {
-            let (status, _) = await c.put(b, key: key, value: value)
+            let (status, _) = await c.put(wire(s, b), key: key, value: value)
             switch status {
             case .ok:
                 saveBucketRaw(s, b, value)
                 let sent = value[DsyncV2.CATEGORIES]?.asObject?[key.suffix]?.asObject ?? DsyncObject()
                 let at = sent["updatedAt"]?.asStr.flatMap(DsyncEnvelopeCodec.parseIso) ?? Self.nowS()
                 saveAfter(s, key, raw: sent, at: at, dev: deviceId, data: data)
-                s.serverBytes[b.wire] = Int64(DsyncEnvelopeCodec.byteSize(value))
+                s.serverBytes[wire(s, b)] = Int64(DsyncEnvelopeCodec.byteSize(value))
                 s.present.insert(key)
                 stampLast(s)
                 s.resend.remove(key)
@@ -1530,7 +1538,7 @@ final class DispatcharrSyncManager: ObservableObject {
                     continue
                 }
                 s.tooLarge.insert(key)
-                debugLog("[DSYNC] \(b.wire) still too large after every trim; stopped until the next change")
+                debugLog("[DSYNC] \(wire(s, b)) still too large after every trim; stopped until the next change")
             case .full: s.serverFull = true
             case .auth: s.paused = true
             case .retry: retryLater(s, key)
@@ -1547,7 +1555,7 @@ final class DispatcharrSyncManager: ObservableObject {
     /// category is re-emitted at its current server value.
     private func refreshBeforePut(_ s: DsyncSession, _ c: DispatcharrAppDataClient, _ b: DsyncBucket, _ key: DsyncKey, force: Bool) async -> Refresh {
         let got: (DsyncV2.Bucket, Int)
-        switch await c.fetchBucket(b) {
+        switch await c.fetchBucket(wire(s, b)) {
         case .failed: return .unreachable
         case .absent, .malformed: return .ok
         case .tooNew:
@@ -1556,7 +1564,7 @@ final class DispatcharrSyncManager: ObservableObject {
         case .got(let bucket, let bytes): got = (bucket, bytes)
         }
         saveBucketRaw(s, b, got.0.raw)
-        s.serverBytes[b.wire] = Int64(got.1)
+        s.serverBytes[wire(s, b)] = Int64(got.1)
         guard let env = DsyncV2.category(got.0, key)?.envelope else { return .ok }
         s.present.insert(key)
         if force { return .ok }
