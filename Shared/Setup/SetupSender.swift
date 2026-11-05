@@ -520,7 +520,19 @@ final class UserQrSource: ObservableObject {
         l.service = NWListener.Service(name: SetupReceiver.deviceName, type: SetupProtocol.serviceType, domain: nil, txtRecord: txt)
         l.newConnectionHandler = { [weak self] c in Task { @MainActor in self?.accept(c) } }
         l.stateUpdateHandler = { state in
-            if case .failed(let e) = state { Task { @MainActor in debugLog("[SETUP] user QR source failed \(e.errorCode)") } }
+            switch state {
+            case .ready: Task { @MainActor in debugLog("[SETUP] user QR source: listener ready") }
+            case .waiting(let e): Task { @MainActor in debugLog("[SETUP] user QR source: listener waiting \(e.errorCode)") }
+            case .failed(let e): Task { @MainActor in debugLog("[SETUP] user QR source failed \(e.errorCode)") }
+            default: break
+            }
+        }
+        l.serviceRegistrationUpdateHandler = { change in
+            switch change {
+            case .add: Task { @MainActor in debugLog("[SETUP] user QR source: advert registered") }
+            case .remove: Task { @MainActor in debugLog("[SETUP] user QR source: advert removed") }
+            @unknown default: break
+            }
         }
         listener = l
         l.start(queue: queue)
@@ -653,50 +665,77 @@ enum UserQrRequest {
         let params = NWParameters.tcp
         params.includePeerToPeer = false
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
+        let stats = FindStats()
         let found: UserQrSourceDevice? = await withCheckedContinuation { cont in
             let once = FindOnce(cont)
+            browser.stateUpdateHandler = { state in
+                switch state {
+                case .failed(let e): stats.note("browser failed \(e.errorCode)")
+                case .waiting(let e): stats.note("browser waiting \(e.errorCode)")
+                default: break
+                }
+            }
             browser.browseResultsChangedHandler = { results, _ in
+                stats.adverts = results.count
                 for r in results {
-                    guard case .bonjour(let txt) = r.metadata,
-                          txt[UserQrCrypto.txtRole] == UserQrCrypto.roleSource,
-                          txt[UserQrCrypto.txtUq] == want,
-                          txt[SetupProtocol.txtVersion] == String(SetupProtocol.version) else { continue }
+                    guard case .bonjour(let txt) = r.metadata, txt[UserQrCrypto.txtRole] == UserQrCrypto.roleSource else { continue }
+                    stats.sources += 1
+                    guard txt[UserQrCrypto.txtUq] == want, txt[SetupProtocol.txtVersion] == String(SetupProtocol.version) else {
+                        stats.mismatched += 1
+                        continue
+                    }
                     var named = txt[SetupProtocol.txtName] ?? ""
                     if named.isEmpty, case let .service(n, _, _, _) = r.endpoint { named = n }
-                    let shown = named
-                    let tcp = NWParameters.tcp
-                    if let ip = tcp.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
-                    let c = NWConnection(to: r.endpoint, using: tcp)
-                    c.stateUpdateHandler = { [weak c] state in
-                        switch state {
-                        case .ready:
-                            let remote = c?.currentPath?.remoteEndpoint
-                            c?.cancel()
-                            guard case let .hostPort(host, port)? = remote else { return }
-                            var h: String
-                            switch host {
-                            case .ipv4(let a): h = "\(a)"
-                            case .ipv6(let a): h = "\(a)"
-                            case .name(let n, _): h = n
-                            @unknown default: return
-                            }
-                            h = h.split(separator: "%").first.map(String.init) ?? h
-                            once.finish(UserQrSourceDevice(name: shown.isEmpty ? "AerioTV" : shown, host: h, port: Int(port.rawValue)))
-                        case .failed, .waiting:
-                            c?.cancel()
-                        default: break
-                        }
-                    }
-                    c.start(queue: queue)
-                    return
+                    resolve(r.endpoint, name: named.isEmpty ? "AerioTV" : named, v4Only: true, queue: queue, once: once, stats: stats)
                 }
             }
             browser.start(queue: queue)
             queue.asyncAfter(deadline: .now() + seconds) { once.finish(nil) }
         }
         browser.cancel()
-        debugLog(found == nil ? "[SETUP] user QR: no source on the LAN" : "[SETUP] user QR: source found")
+        // Counts only: never the key, the uq, or an address.
+        debugLog(found == nil
+                 ? "[SETUP] user QR: no source on the LAN (adverts=\(stats.adverts) sources=\(stats.sources) other codes=\(stats.mismatched) resolves=\(stats.resolves) \(stats.notes))"
+                 : "[SETUP] user QR: source found (resolves=\(stats.resolves))")
         return found
+    }
+
+    /// Endpoint to host and port through a short connection. A refused or waiting
+    /// attempt (the advert can lead the listener, or IPv4 is not up yet) retries
+    /// every 250 ms, alternating IPv4 only and any family, until the probe ends.
+    nonisolated private static func resolve(_ endpoint: NWEndpoint, name: String, v4Only: Bool, queue: DispatchQueue,
+                                            once: FindOnce, stats: FindStats) {
+        guard !once.isDone else { return }
+        stats.resolves += 1
+        let tcp = NWParameters.tcp
+        if v4Only, let ip = tcp.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
+        let c = NWConnection(to: endpoint, using: tcp)
+        c.stateUpdateHandler = { [weak c] state in
+            switch state {
+            case .ready:
+                let remote = c?.currentPath?.remoteEndpoint
+                c?.cancel()
+                guard case let .hostPort(host, port)? = remote else { return }
+                var h: String
+                switch host {
+                case .ipv4(let a): h = "\(a)"
+                case .ipv6(let a): h = "\(a)"
+                case .name(let n, _): h = n
+                @unknown default: return
+                }
+                h = h.split(separator: "%").first.map(String.init) ?? h
+                once.finish(UserQrSourceDevice(name: name, host: h, port: Int(port.rawValue)))
+            case .failed(let e), .waiting(let e):
+                c?.stateUpdateHandler = nil
+                c?.cancel()
+                stats.note("resolve \(e.errorCode)")
+                queue.asyncAfter(deadline: .now() + 0.25) {
+                    resolve(endpoint, name: name, v4Only: !v4Only, queue: queue, once: once, stats: stats)
+                }
+            default: break
+            }
+        }
+        c.start(queue: queue)
     }
 
     /// POST the receiver link with proof; waits for Send or Don't send on the other device.
@@ -726,10 +765,18 @@ enum UserQrRequest {
     }
 }
 
+/// Probe counters for the log (touched only on the probe's serial queue).
+private final class FindStats: @unchecked Sendable {
+    var adverts = 0, sources = 0, mismatched = 0, resolves = 0
+    private(set) var notes = ""
+    func note(_ s: String) { if !notes.contains(s) { notes += (notes.isEmpty ? "" : ", ") + s } }
+}
+
 private final class FindOnce: @unchecked Sendable {
     private let lock = NSLock()
     private var cont: CheckedContinuation<UserQrSourceDevice?, Never>?
     init(_ c: CheckedContinuation<UserQrSourceDevice?, Never>) { cont = c }
+    var isDone: Bool { lock.lock(); defer { lock.unlock() }; return cont == nil }
     func finish(_ v: UserQrSourceDevice?) {
         lock.lock(); let c = cont; cont = nil; lock.unlock()
         c?.resume(returning: v)
