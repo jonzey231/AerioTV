@@ -318,7 +318,7 @@ struct AddServerView: View {
         VStack(alignment: .leading, spacing: isTV ? 20 : 14) {
             // Header centered in the card, as on Android (ConnectServerParts DispatcharrHeroCard).
             VStack(alignment: .center, spacing: 4) {
-                Text("Dispatcharr")
+                Text("Dispatcharr Direct Connect")
                     .scaledFont(isTV ? .system(size: 32, weight: .bold) : .headlineMedium)
                     .foregroundColor(.textPrimary)
                 Text("Your own server, and everything AerioTV can do.")
