@@ -9634,7 +9634,9 @@ private struct GuideProgramButton: View {
                 // any other mapped action runs through the shared
                 // dispatcher, and Do Nothing suppresses the press entirely.
                 let action = RemoteControlStore.shared.effectiveGuideAction(.okLong)
-                debugLog("[PRESS] guide SELECT-HOLD action=\(action.wire) prog=\(prog.id)")
+                // The default hold mapping (programInfo) opens the program
+                // menu below, so the trace names what actually shows.
+                debugLog("[PRESS] guide SELECT-HOLD action=\(action == .programInfo ? "programMenu" : action.wire) prog=\(prog.id)")
                 runCellAction(action)
             }
             // Mapped cell actions from arrow keys reach ONLY the focused
@@ -9659,9 +9661,10 @@ private struct GuideProgramButton: View {
                     Button("Watch") {
                         onWatchCatchup(channelItem, prog)
                     }
-                } else if prog.isLive, RadioModeSession.opensInRadioMode(channelItem) {
-                    // Declared radio channel: Select opens Radio Mode, so
-                    // Watch is the way into the full-screen player.
+                } else if prog.isLive {
+                    // Watch always leads a live program's menu (2026-10-14
+                    // decision, iPhone parity); on a radio channel it is
+                    // the way into the full-screen player.
                     Button("Watch") {
                         RadioModeSession.noteWatchVideo(channelItem)
                         onSelect(channelItem)

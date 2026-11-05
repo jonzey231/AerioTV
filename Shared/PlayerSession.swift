@@ -2306,7 +2306,10 @@ final class RadioModeSession: ObservableObject {
     static func menuTitle(for item: ChannelDisplayItem) -> String? {
         guard item.streamURL != nil else { return nil }
         if shared.isRadioChannel(item.id) { return "Exit Radio Mode" }
-        return isAvailable ? "Radio Mode" : nil
+        // 2026-10-14 decision: Radio Mode is offered only on channels the
+        // server flags is_radio (tvOS review 2026-11-05: ESPN2 led its
+        // menu with Radio Mode and had no Watch).
+        return isAvailable && item.isRadio ? "Radio Mode" : nil
     }
     static func menuAction(for item: ChannelDisplayItem) {
         if shared.isRadioChannel(item.id) {

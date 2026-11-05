@@ -54,6 +54,8 @@
 
 ### Changed
 
+- Channel long-press menus: Watch leads a live program, and Radio Mode is
+  offered only on channels the server marks as radio, on every platform.
 - Apple TV Hex Color: the keyboard title reads "Hex Color", and typing six
   hex digits saves the color and closes the keyboard; Menu still cancels.
 - Apple TV: Settings > Add Playlist opens as a full-screen page with focus
