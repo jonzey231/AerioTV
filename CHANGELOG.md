@@ -54,6 +54,9 @@
 
 ### Changed
 
+- Apple TV: Settings > Add Playlist opens as a full-screen page with focus
+  on Continue with Dispatcharr, every action reachable, and the "Set up from
+  another device" row as on iPhone.
 - Apple TV profiles: "Who is watching?" centers the avatars under the title,
   and the onboarding "Who watches on this TV?" step is one centered column
   with Continue and the profile count under the roster, so Continue is

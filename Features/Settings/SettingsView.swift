@@ -692,6 +692,15 @@ struct SettingsView: View {
                 SetUpTvView { showSetUpTv = false }
             }
             #endif
+            #if os(tvOS)
+            // Full-screen page on Apple TV: the phone sheet (grabber,
+            // narrow column) opened with focus nil and its buttons below
+            // the fold (tvOS review 2026-11-05).
+            .fullScreenCover(isPresented: $showAddServer) {
+                NavigationStack { AddServerView(onSave: { _ in }) }
+                    .settingsSheetLog("Add Playlist")
+            }
+            #else
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
                     .settingsSheetLog("Add Playlist")
@@ -705,6 +714,7 @@ struct SettingsView: View {
                             .allowsHitTesting(false)
                     }
             }
+            #endif
             .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
                 Button("Delete", role: .destructive) {
                     if let server = serverToDelete {

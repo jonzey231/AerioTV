@@ -31,6 +31,12 @@ struct AddServerView: View {
     /// (Android QrAutoScan.request()).
     @State private var autoScanOnForm = false
     @State private var formScanTrigger = 0
+    /// "Set up from another device" from Settings > Add Playlist.
+    @State private var showReceiveSetup = false
+    #if os(tvOS)
+    /// Apple TV: first focus on Continue with Dispatcharr.
+    @FocusState private var heroFocused: Bool
+    #endif
     /// "Other source types" expands in place on every platform.
     @State private var otherTypesExpanded = false
 
@@ -65,8 +71,6 @@ struct AddServerView: View {
     @State private var showScanDetails = false
     /// Settings > Add Playlist from a user QR: the restore offer over the sync screen.
     @State private var qrRestoreSignIn: QrImportBus.SignIn?
-    /// "Set up from another device" from Settings > Add Playlist.
-    @State private var showReceiveSetup = false
     #if os(iOS)
     /// User QR scan: looking for the device showing the code (up to 3 s), then the scope step.
     @State private var probingSource = false
@@ -140,7 +144,7 @@ struct AddServerView: View {
                 typeChosen = true
             }
         }
-        .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? configureTitle : (isOnboarding ? "" : "Add Playlist")))
+        .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? configureTitle : (isOnboarding || isTV ? "" : "Add Playlist")))
         .navigationBarBackButtonHidden(typeChosen || addProfilesFor != nil)
         #if os(iOS)
         // Add Playlist (the type picker): centered over the centered content, as on Android.
@@ -276,8 +280,8 @@ struct AddServerView: View {
 
             otherSourceTypes
 
-            #if os(iOS)
-            // Settings > Add Playlist: receive from another device (Welcome has its own card).
+            // Settings > Add Playlist: receive from another device (Welcome
+            // has its own card). Every platform, Apple TV included.
             if !isOnboarding {
                 OnboardingActionCard(
                     icon: "iphone.radiowaves.left.and.right",
@@ -295,7 +299,6 @@ struct AddServerView: View {
                                      })
                 }
             }
-            #endif
 
             if isOnboarding && isTV {
                 tvFooter
@@ -369,6 +372,16 @@ struct AddServerView: View {
                                      filled: true, fullWidth: true) {
                     choose(.dispatcharrAPI)
                 }
+                #if os(tvOS)
+                .focused($heroFocused)
+                .onAppear {
+                    guard !isOnboarding else { return }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(150))
+                        heroFocused = true
+                    }
+                }
+                #endif
             } else {
                 // Android ConnectServerParts: Scan QR code + Enter details.
                 HStack(spacing: 10) {
