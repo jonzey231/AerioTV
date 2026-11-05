@@ -5966,7 +5966,11 @@ struct MainTabView: View {
                     // Down from the circles: the guide's entry point (banner
                     // description or first channel), not the Live TV pill
                     // beside them (Logan 2026-09-05).
-                    if selectedTab == .liveTV && tvTabBarSeen
+                    // Not while Search is up: the guide is disabled under
+                    // it, so the catcher held focus invisibly and Down from
+                    // the Search circle took two presses to reach the field
+                    // (Apple TV 2026-11-05, @233,110 140x10).
+                    if selectedTab == .liveTV && tvTabBarSeen && !showSearch
                         && (navCirclesFocused || liveTVEntryCatcherFocused) {
                         Color.clear
                             .frame(width: 140, height: 10)

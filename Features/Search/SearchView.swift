@@ -233,6 +233,14 @@ struct SearchView: View {
                         )
                 }
                 .padding(.horizontal, 40)
+                #if os(tvOS)
+                // Full-width focus region: the field starts right of the
+                // magnifier, so nothing sat straight above the All chip and
+                // Up from it skipped the field to the tab bar (simulator
+                // trace 2026-11-05: @96,282 -> UITabBarButton).
+                .frame(maxWidth: .infinity)
+                .focusSection()
+                #endif
 
                 searchContent
             }
