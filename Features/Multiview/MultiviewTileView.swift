@@ -1674,6 +1674,19 @@ struct MultiviewTileView: View {
         #endif
     }
 
+    /// tvOS: a D-pad move wakes only the focus indicator, never the full
+    /// chrome (the transport stays away while focus moves between tiles),
+    /// so the pills follow the focus indicator there, which is also awake
+    /// whenever the chrome is (Apple TV 2026-11-05: D-pad presses showed
+    /// no pills). iPhone and iPad keep the tap-driven chrome.
+    private var formatPillVisible: Bool {
+        #if os(tvOS)
+        chromeState.isVisible || chromeState.focusIndicatorVisible
+        #else
+        chromeState.isVisible
+        #endif
+    }
+
     private var formatPill: some View {
         VStack {
             Spacer()
@@ -1700,7 +1713,7 @@ struct MultiviewTileView: View {
             .padding(8)
         }
         .allowsHitTesting(false)
-        .opacity(chromeState.isVisible ? 1 : 0)
+        .opacity(formatPillVisible ? 1 : 0)
     }
 
     // MARK: - Label strip
