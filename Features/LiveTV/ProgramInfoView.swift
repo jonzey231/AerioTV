@@ -275,15 +275,10 @@ struct ProgramInfoView: View {
             debugLog("[SEARCH] program info: record")
             showRecordSheet = true
         } label: {
-            // Explicit glyph plus text: a toolbar collapses a Label to its
-            // icon, and the header must read "Record" (Logan 2026-11-05).
-            HStack(spacing: 6) {
-                Image(systemName: "record.circle")
-                Text("Record")
-            }
+            // Text only, matching Done (Logan 2026-11-05).
+            Text("Record")
             #if os(iOS)
-            // Same weight as the Done button opposite it.
-            .fontWeight(.semibold)
+                .fontWeight(.semibold)
             #endif
             .fixedSize()
         }
