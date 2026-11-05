@@ -46,6 +46,7 @@ final class SetupReceiver: ObservableObject {
     private var ip: String?
     private var port = 0
     private let queue = DispatchQueue(label: "aerio.setup.receiver")
+    private var advertise = true
 
     /// This device's form factor for the TXT `kind` key.
     static var deviceKind: SetupProtocol.Kind {
@@ -60,7 +61,8 @@ final class SetupReceiver: ObservableObject {
     static var deviceName: String { String(DeviceInfo.deviceNickname.prefix(60)) }
 
     /// Returns false when the device has no LAN address or the bind failed.
-    func start() async -> Bool {
+    /// `advertise` false skips the Bonjour advert (a User QR request hands the link over directly).
+    func start(advertise: Bool = true) async -> Bool {
         guard listener == nil else { return true }
         guard let lan = Self.lanIPv4() else {
             debugLog("[SETUP] receiver: no LAN IPv4; cannot offer setup")
@@ -74,7 +76,8 @@ final class SetupReceiver: ObservableObject {
             debugLog("[SETUP] receiver: listener create failed")
             return false
         }
-        l.service = service()
+        self.advertise = advertise
+        if advertise { l.service = service() }
         l.newConnectionHandler = { [weak self] c in
             Task { @MainActor in self?.accept(c) }
         }
@@ -115,7 +118,7 @@ final class SetupReceiver: ObservableObject {
         code = SetupCrypto.newCode()
         failures = 0
         used = false
-        listener?.service = service()
+        if advertise { listener?.service = service() }
         publish()
         debugLog("[SETUP] receiver: new code and key")
     }
@@ -178,10 +181,10 @@ final class SetupReceiver: ObservableObject {
         var tooLarge = false
     }
 
-    private static let headerEnd = Data("\r\n\r\n".utf8)
+    nonisolated static let headerEnd = Data("\r\n\r\n".utf8)
 
     /// Reads headers, then Content-Length bytes of body (capped at 256 KB).
-    nonisolated private static func readRequest(_ c: NWConnection, buffer: Data, done: @escaping (Request?) -> Void) {
+    nonisolated static func readRequest(_ c: NWConnection, buffer: Data, done: @escaping (Request?) -> Void) {
         c.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { data, _, complete, error in
             var buf = buffer
             if let data { buf.append(data) }
@@ -204,7 +207,7 @@ final class SetupReceiver: ObservableObject {
         }
     }
 
-    nonisolated private static func parseHead(_ d: Data) -> Request? {
+    nonisolated static func parseHead(_ d: Data) -> Request? {
         guard let text = String(data: d, encoding: .utf8) else { return nil }
         let lines = text.components(separatedBy: "\r\n")
         let parts = lines.first?.split(separator: " ") ?? []

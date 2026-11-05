@@ -22,6 +22,10 @@ struct AddServerView: View {
     var initialType: ServerType? = nil
     /// Onboarding shows the step indicator and the TV footer hints.
     var isOnboarding: Bool = false
+    /// Onboarding: "Copy entire setup from this device" after a User QR scan runs in Welcome's receive stage.
+    var onReceiveFromSource: ((UserQrSourceRequest) -> Void)? = nil
+    /// A scanned user to apply on appear (the whole-setup request failed).
+    var pendingUserKey: ScannedCode.UserKey? = nil
     @State private var appliedInitialType = false
     /// Connect a Server "Scan QR code": open the camera once the details form appears
     /// (Android QrAutoScan.request()).
@@ -63,6 +67,12 @@ struct AddServerView: View {
     @State private var qrRestoreSignIn: QrImportBus.SignIn?
     /// "Set up from another device" from Settings > Add Playlist.
     @State private var showReceiveSetup = false
+    #if os(iOS)
+    /// User QR scan: looking for the device showing the code (up to 3 s), then the scope step.
+    @State private var probingSource = false
+    @State private var scopeFor: UserQrSourceRequest?
+    @State private var entireFrom: UserQrSourceRequest?
+    #endif
     #endif
 
     enum XMLTVTestState: Equatable {
@@ -546,12 +556,13 @@ struct AddServerView: View {
                 // QR fills the server and key in one step.
                 QrScanActions(enabled: !viewModel.isVerifying, scanTrigger: formScanTrigger) { r in
                     switch r {
-                    case .userKey(let k): applyUserKey(k)
+                    case .userKey(let k): findSourceThenApply(k)
                     case .setupLink(let l): scannedSetupLink = .init(link: l)
                     case .invalid: break
                     }
                 }
                 .onAppear {
+                    if let k = pendingUserKey, scannedUser == nil { applyUserKey(k) }
                     // Bump after the form is on screen so QrScanActions sees a change;
                     // cancelling the camera leaves the user on this form.
                     guard autoScanOnForm else { return }
@@ -560,6 +571,26 @@ struct AddServerView: View {
                 }
                 .sheet(item: $scannedSetupLink) { box in
                     SetUpTvView(link: box.link) { scannedSetupLink = nil }
+                }
+                .sheet(item: $scopeFor) { r in
+                    UserQrScopeSheet(request: r, onContinue: { scopeChosen(r, entire: $0) }, onCancel: { scopeFor = nil })
+                }
+                .fullScreenCover(item: $entireFrom) { r in
+                    ReceiveSetupView(request: r,
+                                     onUserOnly: { entireFrom = nil; applyUserKey(r.userKey) },
+                                     onCancel: { entireFrom = nil },
+                                     onDone: {
+                                         entireFrom = nil
+                                         if let d = DsyncLocal.activeDispatcharrPlaylist() { addProfilesFor = d.id.uuidString } else { dismiss() }
+                                     })
+                }
+                if probingSource {
+                    HStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for the device showing this code")
+                            .scaledFont(.bodySmall)
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                    }
                 }
                 if let scannedUser {
                     Text("Signed in as \(scannedUser)")
@@ -1139,6 +1170,24 @@ struct AddServerView: View {
     }
 
     #if os(iOS)
+    /// The device showing this code, when it is on the LAN, offers its whole setup;
+    /// otherwise (a screenshot, the server's web UI, another network) import this user only.
+    private func findSourceThenApply(_ k: ScannedCode.UserKey) {
+        probingSource = true
+        Task { @MainActor in
+            let found = await UserQrRequest.find(apiKey: k.apiKey)
+            probingSource = false
+            if let found { scopeFor = UserQrSourceRequest(device: found, apiKey: k.apiKey, userKey: k) } else { applyUserKey(k) }
+        }
+    }
+
+    private func scopeChosen(_ r: UserQrSourceRequest, entire: Bool) {
+        scopeFor = nil
+        guard entire else { applyUserKey(r.userKey); return }
+        debugLog("[SETUP-QR] copy entire setup from the device showing the code")
+        if let cb = onReceiveFromSource { cb(r) } else { entireFrom = r }
+    }
+
     private func applyUserKey(_ k: ScannedCode.UserKey) {
         viewModel.dispatcharrCredentialType = .apiKey
         if let base = k.baseUrl { viewModel.baseURL = base }

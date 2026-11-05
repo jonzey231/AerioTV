@@ -23,6 +23,9 @@ final class SetupApplyModel: ObservableObject {
         case applying(String)
         case failed(String)
         case done
+        /// User QR request: waiting for Send on the device showing the code.
+        case requesting(String)
+        case requestFailed(String)
     }
 
     @Published private(set) var phase: Phase = .starting
@@ -31,20 +34,24 @@ final class SetupApplyModel: ObservableObject {
     private var pending: SetupProtocol.Payload?
     private var offerSink: Task<Void, Never>?
     var modelContext: ModelContext?
+    /// Set for "Copy entire setup from this device" after a User QR scan.
+    var request: UserQrSourceRequest?
+    private var asked = false
 
     private var isOfferish: Bool {
-        switch phase { case .starting, .offering: return true; default: return false }
+        switch phase { case .starting, .offering, .requesting: return true; default: return false }
     }
 
     func start() {
         receiver.onPayload = { [weak self] p in Task { @MainActor in await self?.apply(p) } }
         Task {
-            guard await receiver.start() else { phase = .noNetwork; return }
+            guard await receiver.start(advertise: request == nil) else { phase = .noNetwork; return }
             offerSink?.cancel()
             offerSink = Task { [weak self] in
                 guard let self else { return }
                 for await o in self.receiver.$offer.values {
-                    if let o, self.isOfferish { self.phase = .offering(o) }
+                    guard let o, self.isOfferish else { continue }
+                    if let r = self.request { self.ask(r, link: o.link) } else { self.phase = .offering(o) }
                 }
             }
         }
@@ -57,8 +64,23 @@ final class SetupApplyModel: ObservableObject {
         }
     }
 
+    /// Sends this receiver's link to the device showing the User QR Code, once.
+    private func ask(_ r: UserQrSourceRequest, link: String) {
+        if case .requesting = phase { return }
+        guard !asked else { return }
+        asked = true
+        phase = .requesting(r.device.name)
+        Task { [weak self] in
+            let out = await UserQrRequest.ask(r.device, link: link, apiKey: r.apiKey)
+            guard let self, out != .ok, case .requesting = self.phase else { return }
+            self.stop()
+            self.phase = .requestFailed(out == .network ? UserQrRequest.unreachableMessage : "\(r.device.name) did not send its setup.")
+        }
+    }
+
     func restart() {
         stop()
+        asked = false
         phase = .starting
         start()
     }
@@ -176,6 +198,9 @@ struct ReceiveSetupView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = SetupApplyModel()
+    var request: UserQrSourceRequest? = nil
+    /// "Import this user only" after a failed User QR request.
+    var onUserOnly: (() -> Void)? = nil
     let onCancel: () -> Void
     let onDone: () -> Void
 
@@ -202,6 +227,7 @@ struct ReceiveSetupView: View {
         }
         .onAppear {
             model.modelContext = modelContext
+            model.request = request
             model.start()
         }
         .onDisappear { model.stop() }
@@ -238,6 +264,25 @@ struct ReceiveSetupView: View {
             }
         case .failed(let msg):
             message(title: "Setup did not finish", body: msg, primary: ("Retry", { model.retry() }))
+        case .requesting(let name):
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Waiting for \(name)")
+                    .scaledFont(isTV ? .system(size: 40, weight: .bold) : .headlineLarge)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                Text("Tap Send on \(name) to copy its setup to this device.")
+                    .scaledFont(isTV ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                OnboardingPillButton(title: "Cancel", filled: false) { cancel() }
+                    .padding(.top, 12)
+            }
+            .frame(maxWidth: 640)
+        case .requestFailed(let msg):
+            message(title: "Setup did not finish", body: msg,
+                    primary: ("Import this user only", { model.stop(); onUserOnly?() }))
         }
     }
 

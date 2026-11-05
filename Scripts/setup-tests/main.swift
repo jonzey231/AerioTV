@@ -273,5 +273,14 @@ do {
     eq(back?.profiles.count, 3, "three profiles decoded")
 }
 
+// User QR source: vectors shared with Android UserQrCryptoTest.
+do {
+    let link = "aeriotv://setup?v=1&ip=192.168.1.20&port=5000&code=123456&pk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&name=iPad"
+    eq(UserQrCrypto.uq(apiKey: "test-key-123"), "d66eadb6a1fff42c", "user QR uq vector")
+    eq(UserQrCrypto.proof(apiKey: "test-key-123", link: link), "WjHdnpPuNCR8MJeEQP4quCIAynNokhPPygG2+VGcyNk=", "user QR proof vector")
+    check(UserQrCrypto.verify(apiKey: "test-key-123", link: link, proof: UserQrCrypto.proof(apiKey: "test-key-123", link: link)), "proof verifies")
+    check(!UserQrCrypto.verify(apiKey: "other", link: link, proof: UserQrCrypto.proof(apiKey: "test-key-123", link: link)), "wrong key fails")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

@@ -605,3 +605,36 @@ struct QrRestoreOfferModifier: ViewModifier {
     }
 }
 #endif
+
+#if os(iOS)
+/// After a User QR scan finds the device showing the code: the same scope
+/// step as Set up another device. "Copy entire setup from this device" asks
+/// that device to send its setup; "Import this user only" signs in as today.
+struct UserQrScopeSheet: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let request: UserQrSourceRequest
+    let onContinue: (_ entireSetup: Bool) -> Void
+    let onCancel: () -> Void
+    @State private var userOnly = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Copy from \(request.device.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
+            VStack(spacing: 4) {
+                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
+                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+            }
+            .padding(8)
+            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            PrimaryButton("Continue") { onContinue(!userOnly) }
+            SecondaryButton("Cancel") { onCancel() }
+        }
+        .padding(24)
+        .frame(maxWidth: 560)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.appBackground.ignoresSafeArea())
+        .presentationDetents([.medium, .large])
+    }
+}
+#endif

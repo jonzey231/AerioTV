@@ -363,6 +363,43 @@ enum SetupProtocol {
     }
 }
 
+// MARK: - User QR source (copy a setup from the device showing a User QR Code)
+
+/// The device showing a User QR Code advertises `_aeriotv-setup._tcp` with
+/// `role=source` and `uq` (no `pk`, so setup senders never list it). A device
+/// that scans the code finds it by `uq` and asks it, with `proof`, to send its
+/// setup to the scanner's own one-time receiver link. The QR payload is unchanged.
+enum UserQrCrypto {
+    static let txtRole = "role"
+    static let roleSource = "source"
+    static let txtUq = "uq"
+    static let path = "/user-qr"
+    static let maxBodyBytes = 8 * 1024
+
+    /// Lowercase hex of the first 8 bytes of SHA-256("aeriotv-userqr-v1:" + apiKey).
+    static func uq(apiKey: String) -> String {
+        SHA256.hash(data: Data(("aeriotv-userqr-v1:" + apiKey).utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Standard base64 of HMAC-SHA256(key = apiKey, message = link).
+    static func proof(apiKey: String, link: String) -> String {
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(link.utf8), using: SymmetricKey(data: Data(apiKey.utf8)))
+        return Data(mac).base64EncodedString()
+    }
+
+    /// Constant-time check of a received proof.
+    static func verify(apiKey: String, link: String, proof: String) -> Bool {
+        guard let got = Data(base64Encoded: proof) else { return false }
+        return HMAC<SHA256>.isValidAuthenticationCode(got, authenticating: Data(link.utf8), using: SymmetricKey(data: Data(apiKey.utf8)))
+    }
+
+    struct Request: Codable, Sendable {
+        var v: Int = 1
+        let link: String
+        let proof: String
+    }
+}
+
 // MARK: - Sender profile rules
 
 /// The contract's profile rules for the sender (docs/DeviceSetupHandoff.md,

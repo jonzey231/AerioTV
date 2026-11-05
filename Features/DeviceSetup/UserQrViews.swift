@@ -20,6 +20,7 @@ enum UserQrPayload {
     struct Code: Equatable {
         let json: String
         let username: String
+        let apiKey: String
     }
 
     /// JSON in the web UI's field order. Encoded per value so any character escapes correctly.
@@ -45,7 +46,7 @@ enum UserQrPayload {
         let text = json(apiKey: key, baseUrl: base, username: user)
         // Must read back exactly as a scan on another device would.
         guard let back = ScannedCode.parseUserKey(text), back.apiKey == key else { return nil }
-        return Code(json: text, username: user)
+        return Code(json: text, username: user, apiKey: key)
     }
 
     /// The active Dispatcharr playlist's active profile, when it has a key here.
@@ -114,6 +115,8 @@ private struct UserQrCard: View {
     @State private var revealToken = 0
     @State private var code: UserQrPayload.Code?
     @State private var image: UIImage?
+    /// Advertises this device while the code is up, so a device that scans it can copy the whole setup.
+    @StateObject private var source = UserQrSource()
 
     var body: some View {
         VStack(spacing: 16) {
@@ -163,6 +166,7 @@ private struct UserQrCard: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            sourceCard
             SecondaryButton("Done") { close() }
         }
         .padding(24)
@@ -172,7 +176,7 @@ private struct UserQrCard: View {
         .onAppear {
             code = UserQrPayload.code(playlistId: playlistId, profileId: profileId)
             image = code.flatMap { SetupQR.imageWithLogo($0.json) }
-            if code == nil { onClose() }
+            if let code { source.start(apiKey: code.apiKey, playlistId: playlistId) } else { onClose() }
         }
         .task(id: revealToken) {
             guard revealed else { return }
@@ -187,7 +191,40 @@ private struct UserQrCard: View {
         .onDisappear { close(dismiss: false) }
     }
 
+    /// A device that scanned this code asks for the whole setup.
+    @ViewBuilder
+    private var sourceCard: some View {
+        switch source.phase {
+        case .idle:
+            EmptyView()
+        case .confirm(let name):
+            VStack(spacing: 10) {
+                Text("Send setup to \(name)?")
+                    .scaledFont(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                Text("This copies this device's playlist, profiles, and preferences to \(name).")
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                PrimaryButton("Send") { source.send() }
+                SecondaryButton("Don't send") { source.decline() }
+            }
+        case .sending(let name):
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                Text("Sending setup to \(name)").scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+            }
+        case .sent(let name):
+            Text("Setup sent to \(name).").scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+        case .failed(let msg):
+            Text(msg).scaledFont(.bodySmall).foregroundColor(.statusLive).multilineTextAlignment(.center)
+        }
+    }
+
     private func close(dismiss: Bool = true) {
+        source.stop()
         revealed = false
         image = nil
         code = nil

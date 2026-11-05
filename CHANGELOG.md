@@ -45,6 +45,12 @@
   code stays blurred until tapped, hides after 60 seconds or in the
   background, and blanks while the screen is recorded or shared.
   The code carries the AerioTV mark in its center and scans as before.
+- Scanning a User QR Code while the device showing it is on the same
+  network now offers "Copy entire setup from this device" (default) or
+  "Import this user only", the same choice as Set up another device. The
+  showing device asks before it sends, and the whole setup continues to
+  Add Profiles. A code from a screenshot, the server's web UI, or another
+  network imports that user only, as before. No new server paths.
 
 ### Changed
 

@@ -11,8 +11,8 @@
 //  fingerprint, counts, HTTP status, and error kinds.
 
 import Foundation
-#if os(iOS)
 import Network
+#if os(iOS)
 import Combine
 import SwiftData
 
@@ -87,7 +87,8 @@ final class SetupDiscovery: ObservableObject {
             let snapshot = results.compactMap { r -> (String, Data, String, NWEndpoint)? in
                 guard case let .service(name, _, _, _) = r.endpoint,
                       case let .bonjour(txt) = r.metadata else { return nil }
-                guard txt[SetupProtocol.txtVersion] == String(SetupProtocol.version),
+                guard txt[UserQrCrypto.txtRole] != UserQrCrypto.roleSource,
+                      txt[SetupProtocol.txtVersion] == String(SetupProtocol.version),
                       let pk = txt[SetupProtocol.txtPk].flatMap(SetupCrypto.unb64), pk.count == 32 else { return nil }
                 let shown = txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name
                 let kind = SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind])
@@ -473,7 +474,267 @@ enum SetupSender {
     }
 }
 
+// MARK: - User QR source (the device showing a User QR Code)
+
+/// While "Show User QR Code" is on screen this device advertises itself as a
+/// setup source (`role=source`, `uq`) and answers `POST /user-qr` from a device
+/// that scanned the code. The request holds open until the user taps Send or
+/// Don't send here (120 s limit); Send runs the normal setup send to the
+/// scanner's one-time link. docs/DeviceSetupHandoff.md.
+@MainActor
+final class UserQrSource: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case confirm(String)
+        case sending(String)
+        case sent(String)
+        case failed(String)
+    }
+
+    @Published private(set) var phase: Phase = .idle
+
+    private var apiKey = ""
+    private var playlistId = ""
+    private var listener: NWListener?
+    private var pending: (conn: NWConnection, link: SetupProtocol.Link)?
+    private var timeout: Task<Void, Never>?
+    private let queue = DispatchQueue(label: "aerio.userqr.source")
+
+    func start(apiKey: String, playlistId: String) {
+        guard listener == nil, !apiKey.isEmpty else { return }
+        self.apiKey = apiKey
+        self.playlistId = playlistId
+        let params = NWParameters.tcp
+        params.includePeerToPeer = false
+        params.allowLocalEndpointReuse = true
+        guard let l = try? NWListener(using: params, on: .any) else {
+            debugLog("[SETUP] user QR source: listener create failed")
+            return
+        }
+        var txt = NWTXTRecord()
+        txt[SetupProtocol.txtVersion] = String(SetupProtocol.version)
+        txt[SetupProtocol.txtName] = SetupReceiver.deviceName
+        txt[SetupProtocol.txtKind] = SetupReceiver.deviceKind.rawValue
+        txt[UserQrCrypto.txtRole] = UserQrCrypto.roleSource
+        txt[UserQrCrypto.txtUq] = UserQrCrypto.uq(apiKey: apiKey)
+        l.service = NWListener.Service(name: SetupReceiver.deviceName, type: SetupProtocol.serviceType, domain: nil, txtRecord: txt)
+        l.newConnectionHandler = { [weak self] c in Task { @MainActor in self?.accept(c) } }
+        l.stateUpdateHandler = { state in
+            if case .failed(let e) = state { Task { @MainActor in debugLog("[SETUP] user QR source failed \(e.errorCode)") } }
+        }
+        listener = l
+        l.start(queue: queue)
+        debugLog("[SETUP] user QR source: advertising")
+    }
+
+    func stop() {
+        decline()
+        listener?.cancel()
+        listener = nil
+        apiKey = ""
+        phase = .idle
+    }
+
+    /// Don't send (or the screen closed, or 120 s passed).
+    func decline() {
+        timeout?.cancel()
+        if let p = pending {
+            pending = nil
+            debugLog("[SETUP] user QR source: declined")
+            Self.reply(p.conn, 403, "declined")
+        }
+        if case .confirm = phase { phase = .idle }
+    }
+
+    func send() {
+        guard let p = pending, case .confirm(let name) = phase else { return }
+        timeout?.cancel()
+        phase = .sending(name)
+        Task {
+            let result: SetupSender.SendResult
+            if let server = DsyncLocal.server(playlistId) {
+                let source = SetupSender.source(server)
+                let ids = Set(source.choices.filter { !$0.isDefault && $0.credentialLabel != nil }.map(\.id))
+                let payload = SetupSender.buildPayload(server, profileIds: ids, turnOnSync: source.syncOnHere)
+                result = await SetupSender.send(SetupTarget.fromLink(p.link), code: p.link.code, payload: payload)
+            } else {
+                result = .failed("This playlist could not be read.")
+            }
+            guard pending?.conn === p.conn else { return }
+            pending = nil
+            switch result {
+            case .ok:
+                Self.reply(p.conn, 200, nil)
+                phase = .sent(name)
+            case .wrongCode:
+                Self.reply(p.conn, 502, "send_failed")
+                phase = .failed("The device did not accept that code. Check the code on the device and try again.")
+            case .refused:
+                Self.reply(p.conn, 502, "send_failed")
+                phase = .failed("The device is no longer waiting for setup. Start setup on the other device again.")
+            case .failed(let m):
+                Self.reply(p.conn, 502, "send_failed")
+                phase = .failed(m)
+            }
+        }
+    }
+
+    private func accept(_ c: NWConnection) {
+        c.start(queue: queue)
+        SetupReceiver.readRequest(c, buffer: Data()) { [weak self] req in
+            Task { @MainActor in self?.handle(c, req) }
+        }
+    }
+
+    private func handle(_ c: NWConnection, _ req: SetupReceiver.Request?) {
+        guard let req else { Self.reply(c, 400, "bad_request"); return }
+        guard req.method == "POST", req.path.split(separator: "?").first.map(String.init) == UserQrCrypto.path else {
+            Self.reply(c, 404, "bad_request"); return
+        }
+        if req.headers["origin"] != nil { Self.reply(c, 403, "forbidden"); return }
+        if req.tooLarge || req.body.count > UserQrCrypto.maxBodyBytes { Self.reply(c, 413, "too_large"); return }
+        guard let r = try? JSONDecoder().decode(UserQrCrypto.Request.self, from: req.body), r.v == 1,
+              let link = SetupProtocol.parseLink(r.link) else { Self.reply(c, 400, "bad_request"); return }
+        guard !apiKey.isEmpty, UserQrCrypto.verify(apiKey: apiKey, link: r.link, proof: r.proof) else {
+            debugLog("[SETUP] user QR source: proof rejected")
+            Self.reply(c, 403, "forbidden"); return
+        }
+        if pending != nil { Self.reply(c, 409, "busy"); return }
+        guard SetupGate.canSetUpTv(DsyncLocal.server(playlistId)) else { Self.reply(c, 403, "not_allowed"); return }
+        let name = link.name.isEmpty ? "AerioTV" : link.name
+        pending = (c, link)
+        phase = .confirm(name)
+        debugLog("[SETUP] user QR source: request waiting for Send key=\(SetupCrypto.keyFingerprint(link.pk))")
+        timeout?.cancel()
+        timeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000_000)
+            if !Task.isCancelled { self?.decline() }
+        }
+    }
+
+    nonisolated private static func reply(_ c: NWConnection, _ status: Int, _ error: String?) {
+        let body = error.map { "{\"ok\":false,\"error\":\"\($0)\"}" } ?? "{\"ok\":true}"
+        let reason = [200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found", 409: "Conflict",
+                      413: "Payload Too Large", 502: "Bad Gateway"][status] ?? "Error"
+        let head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+        c.send(content: Data((head + body).utf8), completion: .contentProcessed { _ in c.cancel() })
+    }
+}
+
 #endif
+
+// MARK: - User QR request (the device that scanned a User QR Code)
+
+/// The device showing the scanned code, found on the LAN.
+struct UserQrSourceDevice: Equatable, Sendable {
+    let name: String
+    let host: String
+    let port: Int
+}
+
+/// What the scanner hands the receive screen for "Copy entire setup from this device".
+struct UserQrSourceRequest: Identifiable, Equatable {
+    let id = UUID()
+    let device: UserQrSourceDevice
+    let apiKey: String
+    let userKey: ScannedCode.UserKey
+    static func == (a: Self, b: Self) -> Bool { a.id == b.id }
+}
+
+enum UserQrRequest {
+    static let unreachableMessage = "The device could not be reached. Check that both devices are on the same network."
+    enum Outcome: Equatable { case ok, declined, network }
+
+    /// Browses up to `seconds` for the source advertising this key's `uq`.
+    @MainActor
+    static func find(apiKey: String, seconds: Double = 3) async -> UserQrSourceDevice? {
+        let want = UserQrCrypto.uq(apiKey: apiKey)
+        let queue = DispatchQueue(label: "aerio.userqr.find")
+        let params = NWParameters.tcp
+        params.includePeerToPeer = false
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
+        let found: UserQrSourceDevice? = await withCheckedContinuation { cont in
+            let once = FindOnce(cont)
+            browser.browseResultsChangedHandler = { results, _ in
+                for r in results {
+                    guard case .bonjour(let txt) = r.metadata,
+                          txt[UserQrCrypto.txtRole] == UserQrCrypto.roleSource,
+                          txt[UserQrCrypto.txtUq] == want,
+                          txt[SetupProtocol.txtVersion] == String(SetupProtocol.version) else { continue }
+                    var named = txt[SetupProtocol.txtName] ?? ""
+                    if named.isEmpty, case let .service(n, _, _, _) = r.endpoint { named = n }
+                    let shown = named
+                    let tcp = NWParameters.tcp
+                    if let ip = tcp.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
+                    let c = NWConnection(to: r.endpoint, using: tcp)
+                    c.stateUpdateHandler = { [weak c] state in
+                        switch state {
+                        case .ready:
+                            let remote = c?.currentPath?.remoteEndpoint
+                            c?.cancel()
+                            guard case let .hostPort(host, port)? = remote else { return }
+                            var h: String
+                            switch host {
+                            case .ipv4(let a): h = "\(a)"
+                            case .ipv6(let a): h = "\(a)"
+                            case .name(let n, _): h = n
+                            @unknown default: return
+                            }
+                            h = h.split(separator: "%").first.map(String.init) ?? h
+                            once.finish(UserQrSourceDevice(name: shown.isEmpty ? "AerioTV" : shown, host: h, port: Int(port.rawValue)))
+                        case .failed, .waiting:
+                            c?.cancel()
+                        default: break
+                        }
+                    }
+                    c.start(queue: queue)
+                    return
+                }
+            }
+            browser.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + seconds) { once.finish(nil) }
+        }
+        browser.cancel()
+        debugLog(found == nil ? "[SETUP] user QR: no source on the LAN" : "[SETUP] user QR: source found")
+        return found
+    }
+
+    /// POST the receiver link with proof; waits for Send or Don't send on the other device.
+    static func ask(_ d: UserQrSourceDevice, link: String, apiKey: String) async -> Outcome {
+        let hostPart = d.host.contains(":") ? "[\(d.host)]" : d.host
+        guard let url = URL(string: "http://\(hostPart):\(d.port)\(UserQrCrypto.path)") else { return .network }
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 150)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONEncoder().encode(UserQrCrypto.Request(link: link, proof: UserQrCrypto.proof(apiKey: apiKey, link: link)))
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 150
+        cfg.timeoutIntervalForResource = 160
+        cfg.waitsForConnectivity = false
+        let session = URLSession(configuration: cfg)
+        defer { session.finishTasksAndInvalidate() }
+        do {
+            let (data, resp) = try await session.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            let reply = try? JSONDecoder().decode(SetupProtocol.Reply.self, from: data)
+            debugLog("[SETUP] user QR request -> HTTP \(status) \(reply?.error ?? "")")
+            return status == 200 && reply?.ok == true ? .ok : .declined
+        } catch {
+            debugLog("[SETUP] user QR request failed: \(type(of: error))")
+            return .network
+        }
+    }
+}
+
+private final class FindOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<UserQrSourceDevice?, Never>?
+    init(_ c: CheckedContinuation<UserQrSourceDevice?, Never>) { cont = c }
+    func finish(_ v: UserQrSourceDevice?) {
+        lock.lock(); let c = cont; cont = nil; lock.unlock()
+        c?.resume(returning: v)
+    }
+}
 
 // MARK: - QR sign-in hand-off
 

@@ -51,6 +51,12 @@ struct WelcomeView: View {
     @State private var chainDispatcharr = false
     /// Connect a Server pushed from Welcome (nil type: the picker; Dispatcharr: the sync card).
     @State private var showConnect = false
+    #if os(iOS)
+    /// "Copy entire setup from this device" after a User QR scan on the connect form.
+    @State private var sourceRequest: UserQrSourceRequest?
+    /// "Import this user only" after that request failed: the connect form applies it.
+    @State private var fallbackUserKey: ScannedCode.UserKey?
+    #endif
     @State private var connectType: ServerType?
     /// Dispatcharr Sync on after the connect (the "Sync with Dispatcharr" card).
     @State private var enableAfterConnect = false
@@ -132,7 +138,18 @@ struct WelcomeView: View {
     var body: some View {
         stageView
             .navigationDestination(isPresented: $showConnect) {
+                #if os(iOS)
+                AddServerView(initialType: connectType, isOnboarding: true,
+                              onReceiveFromSource: { r in
+                                  sourceRequest = r
+                                  hold.begin("receive setup from a user QR")
+                                  stage = .receiveSetup
+                                  showConnect = false
+                              },
+                              pendingUserKey: fallbackUserKey)
+                #else
                 AddServerView(initialType: connectType, isOnboarding: true)
+                #endif
             }
             .onChange(of: servers.count) { old, new in
                 // The playlist saved under Connect: cover Welcome before the pop reveals it.
@@ -210,7 +227,10 @@ struct WelcomeView: View {
             }
         case .receiveSetup:
             ReceiveSetupView(
+                request: receiveRequest,
+                onUserOnly: receiveUserOnly,
                 onCancel: {
+                    clearReceiveRequest()
                     hold.end("receive setup cancelled")
                     stage = .welcome
                 },
@@ -239,6 +259,26 @@ struct WelcomeView: View {
 
     /// After the sync step and the iCloud offer: Add Profiles, unless the role
     /// step made this a kid-only device (Android afterDriveOffer).
+    #if os(iOS)
+    private var receiveRequest: UserQrSourceRequest? { sourceRequest }
+    private func clearReceiveRequest() { sourceRequest = nil }
+    /// The request failed: back to the connect form with the scanned user applied.
+    private var receiveUserOnly: (() -> Void)? {
+        guard let r = sourceRequest else { return nil }
+        return {
+            sourceRequest = nil
+            fallbackUserKey = r.userKey
+            stage = .welcome
+            hold.end("receive setup: user only")
+            startConnect(type: .dispatcharrAPI, enableSync: enableAfterConnect)
+        }
+    }
+    #else
+    private var receiveRequest: UserQrSourceRequest? { nil }
+    private func clearReceiveRequest() {}
+    private var receiveUserOnly: (() -> Void)? { nil }
+    #endif
+
     private func toAddProfiles(_ why: String) {
         if !childOnly, let d = DsyncLocal.activeDispatcharrPlaylist() {
             debugLog("[SYNC] chain: Add Profiles (\(why))")
@@ -446,6 +486,7 @@ struct WelcomeView: View {
             detail: "Fastest. On your other device, scan the code on the next screen, tap the banner on the Live TV tab, or navigate to Settings. Your playlist, profiles, and preferences come over in one step.",
             highlighted: isTV
         ) {
+            clearReceiveRequest()
             hold.begin("receive setup")
             stage = .receiveSetup
         }

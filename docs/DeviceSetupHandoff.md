@@ -324,6 +324,47 @@ code" or "Choose from Photos" accepts it unchanged:
 - The payload is never logged, copied to the clipboard, shared, or saved
   to Photos or files. It is built locally; no server path is used.
 
+### Copy a setup from a user QR
+
+When the device showing the code is on the same network, the scanner can
+copy that device's whole setup instead of one user. The QR payload is
+unchanged and no server path is used; everything stays on the LAN.
+
+- Showing device ("source"), only while User QR Code is open with a code:
+  listens on an ephemeral TCP port and advertises `_aeriotv-setup._tcp`
+  (instance name = device name) with TXT `v`=1, `name`, `kind`
+  (phone, tablet, or tv), `role`=`source`, and `uq` = lowercase hex of
+  the first 8 bytes of SHA-256(UTF-8 of `aeriotv-userqr-v1:` + api_key).
+  There is no `pk`, and sender discovery skips `role`=`source`.
+- It serves `POST /user-qr` (HTTP/1.1, one request per connection,
+  `Connection: close`). Body:
+  `{"v":1,"link":"<scanner's aeriotv://setup link>","proof":"<base64 HMAC-SHA256(key = api_key, message = link)>"}`.
+  Replies are `{"ok":true}` or `{"ok":false,"error":"<code>"}`: 413
+  `too_large` (body over 8 KB), 403 `forbidden` (any Origin header, or a
+  proof mismatch, compared in constant time), 404 `bad_request` (other
+  path or method), 400 `bad_request` (unparseable, `v` not 1, or a link
+  that does not parse), 409 `busy` (a request is already pending), 403
+  `not_allowed` (the active profile cannot send a setup, a Child), 403
+  `declined`, 502 `send_failed`, 200 on success.
+- A valid request holds the connection while the showing device asks
+  "Send setup to {name}?" ("This copies this device's playlist, profiles,
+  and preferences to {name}.", Send / Don't send). Don't send, 120 seconds
+  without an answer, or closing the screen replies `declined`. Send builds
+  the same full payload as "Copy entire setup from this device" (every
+  profile with a saved sign-in, sync on when Dispatcharr Sync is on there)
+  and sends it to the link with the normal sealed `POST /setup`. Blur,
+  PIN gate, 60 second hide, and capture blocking are unchanged.
+- Scanning device (phones and tablets): after reading a user code it
+  browses for up to 3 seconds ("Looking for the device showing this
+  code") for `role`=`source` with a matching `uq`. Not found (a
+  screenshot, the Dispatcharr web UI code, or another network) imports
+  the user as before. Found: "Copy from {name}" with "Copy entire setup
+  from this device" (default) or "Import this user only". Entire setup
+  starts the normal receiver without an advert, posts its link with the
+  proof (150 second timeout), shows "Waiting for {name}", then applies the
+  payload and continues to Add Profiles. A failure offers "Import this
+  user only".
+
 ## Platform status
 
 | Platform | Receiver | Sender |
