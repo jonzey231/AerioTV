@@ -843,6 +843,12 @@ struct MultiviewContainerView: View {
         // Menu can summon chrome. The `Task.yield()` lets tvOS's own
         // focus pass complete first so our write lands last.
         .onAppear {
+            // Arm the focus indicator's fade on entry. It starts visible
+            // and only D-pad moves or interactions armed its timer, so a
+            // grid entered from staging Play (chrome hidden, focus placed
+            // programmatically) kept the ring, speaker icon, and name on
+            // the audio tile forever (Apple TV 2026-11-05).
+            chromeState.reportFocusActivity()
             Task { @MainActor in
                 await Task.yield()
                 if let audioID = store.audioTileID {
