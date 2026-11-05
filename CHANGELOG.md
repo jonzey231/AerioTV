@@ -54,6 +54,8 @@
 
 ### Changed
 
+- Apple TV Settings: Left from a page returns to that page's entry in the
+  sidebar instead of Playlists.
 - Apple TV Search: Up from the field returns to the Search button, Down
   lands straight on the selected chip, Up from the first result returns to
   it, Back from a player lands on the row that was opened, the typed text

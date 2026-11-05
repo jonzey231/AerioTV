@@ -98,6 +98,13 @@ struct TVSettingsSplitView<Detail: View>: View {
         .onChange(of: focusedPane) { old, pane in
             SettingsFocusLog.log("pane focus \(String(describing: old)) -> \(String(describing: pane))")
             if pane == .detail { flushPendingSelection() }
+            // Back on the rail from a page: keep the page's own row (the
+            // engine's default can still pick the first row).
+            if old == .detail, pane == .rail,
+               let row = items.first(where: { $0.route == selection })?.id, focusedRow != row {
+                SettingsFocusLog.log("focus set rail: return to the page's row \(row)")
+                focusedRow = row
+            }
             focusInDetail = (pane == .detail)
         }
         .onChange(of: focusedRow) { _, id in
@@ -238,7 +245,9 @@ struct TVSettingsSplitView<Detail: View>: View {
         // detail pane over the onAppear assert loop. defaultFocus makes the
         // rail the engine's own first choice, so the assert loop only has
         // to keep it there.
-        .defaultFocus($focusedRow, items.first?.id)
+        // The CURRENT page's row, so Left from a page returns to its own
+        // entry, not Playlists (tvOS review 2026-11-05).
+        .defaultFocus($focusedRow, items.first(where: { $0.route == selection })?.id ?? items.first?.id)
         .prefersDefaultFocus(in: railFocusNS)
     }
 
