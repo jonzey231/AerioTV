@@ -181,7 +181,9 @@ struct AppearanceSettingsView: View {
                                             }
                                           ),
                                           helper: "Six hex digits, for example 2DD4BF.",
-                                          autocapitalization: .characters)
+                                          autocapitalization: .characters,
+                          tvKeyboardPrompt: "Hex Color",
+                          tvCommitWhen: AppearanceSettingsView.isCompleteHex)
                             .padding(.horizontal, 20)
                     }
                 }
@@ -827,6 +829,11 @@ struct AppearanceSettingsView: View {
 
     #endif
 
+    /// Six hex digits: the tvOS keyboard commits on its own at that point.
+    static func isCompleteHex(_ s: String) -> Bool {
+        s.count == 6 && s.allSatisfy { $0.isHexDigit }
+    }
+
     static let customThemeFootnote = "Build the whole theme from one color. The accent is matched automatically unless you set a custom accent."
 
     /// Hex entry for the Custom theme's base color (iOS and tvOS). Only a
@@ -844,7 +851,9 @@ struct AppearanceSettingsView: View {
                             }
                           ),
                           helper: "Six hex digits, for example 2DD4BF.",
-                          autocapitalization: .characters)
+                          autocapitalization: .characters,
+                          tvKeyboardPrompt: "Hex Color",
+                          tvCommitWhen: AppearanceSettingsView.isCompleteHex)
     }
 
     private func setSubtextScale(_ value: Double) {
@@ -971,7 +980,9 @@ struct HexColorPickerSheet: View {
                                     }
                                   ),
                                   helper: "Six hex digits, for example 2DD4BF.",
-                                  autocapitalization: .characters)
+                                  autocapitalization: .characters,
+                          tvKeyboardPrompt: "Hex Color",
+                          tvCommitWhen: AppearanceSettingsView.isCompleteHex)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
             }

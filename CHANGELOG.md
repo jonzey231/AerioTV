@@ -54,6 +54,8 @@
 
 ### Changed
 
+- Apple TV Hex Color: the keyboard title reads "Hex Color", and typing six
+  hex digits saves the color and closes the keyboard; Menu still cancels.
 - Apple TV: Settings > Add Playlist opens as a full-screen page with focus
   on Continue with Dispatcharr, every action reachable, and the "Set up from
   another device" row as on iPhone.

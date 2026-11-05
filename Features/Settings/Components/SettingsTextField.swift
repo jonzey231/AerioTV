@@ -43,6 +43,8 @@ struct SettingsTextField: View {
     var keyboardType: UIKeyboardType = .default
     var autocapitalization: TextInputAutocapitalization = .never
     var autocorrection: Bool = false
+    var tvKeyboardPrompt: String? = nil
+    var tvCommitWhen: ((String) -> Bool)? = nil
 
     init(_ title: String,
          placeholder: String? = nil,
@@ -51,7 +53,11 @@ struct SettingsTextField: View {
          isSecure: Bool = false,
          keyboardType: UIKeyboardType = .default,
          autocapitalization: TextInputAutocapitalization = .never,
-         autocorrection: Bool = false) {
+         autocorrection: Bool = false,
+         tvKeyboardPrompt: String? = nil,
+         tvCommitWhen: ((String) -> Bool)? = nil) {
+        self.tvKeyboardPrompt = tvKeyboardPrompt
+        self.tvCommitWhen = tvCommitWhen
         self.title = title
         self.placeholder = placeholder
         self._text = text
@@ -71,7 +77,9 @@ struct SettingsTextField: View {
                 keyboardType: keyboardType,
                 isSecure: isSecure,
                 autocapitalization: autocapitalization,
-                autocorrection: autocorrection
+                autocorrection: autocorrection,
+                tvKeyboardPrompt: tvKeyboardPrompt,
+                tvCommitWhen: tvCommitWhen
                 // SECURITY 2026-09-19: no reveal-on-focus. A secure field
                 // stays masked on every platform until the user toggles
                 // the eye, which the Siri Remote can reach.

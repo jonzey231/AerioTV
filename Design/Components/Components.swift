@@ -86,6 +86,15 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
     var horizontalInset: CGFloat = 20
     var verticalInset: CGFloat = 14
     var onFocusChange: ((Bool) -> Void)? = nil
+    /// Title the full-screen keyboard shows while editing. The keyboard
+    /// reads the field's placeholder, so the placeholder swaps to this for
+    /// the edit and back after (Hex Color showed only "2DD4BF", tvOS review
+    /// 2026-11-05).
+    var keyboardPrompt: String? = nil
+    /// When it returns true for the typed text, the edit commits as if Done
+    /// were pressed. tvOS has no public API to move keyboard focus to Done,
+    /// and Menu reverts the edit, so a complete value ends the edit itself.
+    var commitWhen: ((String) -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
@@ -116,6 +125,9 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         uiView.isSecureTextEntry = isSecure
         if uiView.text != text { uiView.text = text }
         uiView.onFocusChange = onFocusChange
+        context.coordinator.placeholder = placeholder
+        context.coordinator.keyboardPrompt = keyboardPrompt
+        context.coordinator.commitWhen = commitWhen
         // Settings > Appearance > Text Size, applied live.
         let scaledSize = fontSize * context.environment.aerioTextScale
         if uiView.font?.pointSize != scaledSize {
@@ -125,8 +137,37 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
 
     final class Coordinator: NSObject, UITextFieldDelegate {
         @Binding var text: String
+        var placeholder = ""
+        var keyboardPrompt: String?
+        var commitWhen: ((String) -> Bool)?
+        var preEdit: String?
         init(text: Binding<String>) { _text = text }
-        @objc func editingChanged(_ tf: UITextField) { text = tf.text ?? "" }
+        @objc func editingChanged(_ tf: UITextField) {
+            let typed = tf.text ?? ""
+            text = typed
+            guard let commitWhen, tf.isFirstResponder else { return }
+            // The tvOS keyboard opens with the current value, so six digits
+            // typed after it count as the new value (simulator: "22C55E" +
+            // "3b82f6" read "22C55Eb82f6" and never committed).
+            let orig = preEdit ?? ""
+            let candidate = (typed.count >= orig.count + 6 && typed.hasPrefix(orig))
+                ? String(typed.suffix(6)) : typed
+            if candidate != orig, commitWhen(candidate) {
+                debugLog("[PRESS] keyboard auto-commit (complete value)")
+                tf.text = candidate
+                text = candidate
+                tf.resignFirstResponder()
+            }
+        }
+        func textFieldShouldBeginEditing(_ textField: UITextField) -> Bool {
+            if let keyboardPrompt { setPlaceholder(textField, keyboardPrompt) }
+            preEdit = textField.text ?? ""
+            return true
+        }
+        private func setPlaceholder(_ tf: UITextField, _ value: String) {
+            tf.attributedPlaceholder = NSAttributedString(
+                string: value, attributes: [.foregroundColor: UIColor(Color.textTertiary)])
+        }
         // tvOS edits text in a separate full-screen keyboard and commits
         // it to the field when editing ends ("done"), which does NOT
         // reliably fire `.editingChanged` per keystroke - especially for
@@ -135,6 +176,8 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         // updates via editingChanged; this end-of-edit sync is a harmless
         // no-op there).
         func textFieldDidEndEditing(_ textField: UITextField) {
+            if keyboardPrompt != nil { setPlaceholder(textField, placeholder) }
+            preEdit = nil
             let committed = textField.text ?? ""
             if committed != text { text = committed }
         }
@@ -572,6 +615,9 @@ struct AppTextField: View {
     var isSecure: Bool = false
     var autocapitalization: TextInputAutocapitalization = .never
     var autocorrection: Bool = false
+    /// tvOS keyboard title and auto-commit (see DarkFocusTextFieldRepresentable).
+    var tvKeyboardPrompt: String? = nil
+    var tvCommitWhen: ((String) -> Bool)? = nil
     // SECURITY, removed 2026-09-19 (Logan's Apple TV review): there used
     // to be a `revealWhenFocused` flag here that unmasked a secure field
     // while the field itself was focused, on the theory that the Siri
@@ -611,10 +657,14 @@ struct AppTextField: View {
          keyboardType: UIKeyboardType = .default,
          isSecure: Bool = false,
          autocapitalization: TextInputAutocapitalization = .never,
-         autocorrection: Bool = false) {
+         autocorrection: Bool = false,
+         tvKeyboardPrompt: String? = nil,
+         tvCommitWhen: ((String) -> Bool)? = nil) {
         self.title = title
         self.placeholder = placeholder
         self._text = text
+        self.tvKeyboardPrompt = tvKeyboardPrompt
+        self.tvCommitWhen = tvCommitWhen
         self.icon = icon
         self.keyboardType = keyboardType
         self.isSecure = isSecure
@@ -651,7 +701,9 @@ struct AppTextField: View {
                     isSecure: isSecure && !passwordVisible,
                     fontSize: 26,
                     horizontalInset: 0,   // the HStack already pads horizontally
-                    onFocusChange: { isFocusedTV = $0 }
+                    onFocusChange: { isFocusedTV = $0 },
+                    keyboardPrompt: tvKeyboardPrompt,
+                    commitWhen: tvCommitWhen
                 )
                 if isSecure {
                     // `.buttonStyle(.plain)` let tvOS drop its white
