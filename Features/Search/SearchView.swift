@@ -95,7 +95,7 @@ struct SearchView: View {
     /// player lands on it again with the query and results intact.
     @State private var lastOpenedID: String?
     /// The inline search field and the scope chips (embedded tvOS layout).
-    enum TVSearchFocus: Hashable { case field, chip(SearchScope) }
+    enum TVSearchFocus: Hashable { case field, chip(SearchScope), upCatcher }
     @FocusState private var tvSearchFocus: TVSearchFocus?
     #if os(tvOS)
     @FocusState private var focusedRowID: String?
@@ -210,6 +210,27 @@ struct SearchView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             VStack(spacing: 12) {
+                #if os(tvOS)
+                // Up from the field lands here (full width, straight above)
+                // and hands focus to the Search circle; the engine picked
+                // Switch Profile at the far right before (review
+                // 2026-11-05: field -> @1551,50). Focusable only while the
+                // field holds focus, so Down from the circle never stops.
+                if tvSearchFocus == .field || tvSearchFocus == .upCatcher {
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 6)
+                        .focusable(true)
+                        .focused($tvSearchFocus, equals: .upCatcher)
+                        .onChange(of: tvSearchFocus) { _, f in
+                            guard f == .upCatcher else { return }
+                            debugLog("[FOCUS] search: Up from field -> Search circle")
+                            NotificationCenter.default.post(name: .aerioSearchFocusCircle, object: nil)
+                        }
+                } else {
+                    Color.clear.frame(height: 6)
+                }
+                #endif
                 // ONE pill: the system tvOS text field already draws its own
                 // rounded field, so the old custom rectangle around it read
                 // as a second box (Apple TV 2026-11-05). The accent ring is
@@ -221,7 +242,11 @@ struct SearchView: View {
                     TextField("Search movies, shows, programs…", text: $query)
                         .textFieldStyle(.plain)
                         .scaledFont(.system(size: 28))
-                        .foregroundColor(.textPrimary)
+                        // tvOS paints a light platter behind the focused
+                        // field; the theme text (and accent tint) read
+                        // nearly invisible on it (review 2026-11-05).
+                        .foregroundColor(tvSearchFocus == .field ? .black : .textPrimary)
+                        .tint(tvSearchFocus == .field ? .black : theme.accent)
                         .focused($tvSearchFocus, equals: .field)
                         .overlay(
                             Capsule(style: .continuous)
@@ -281,6 +306,13 @@ struct SearchView: View {
         }
     }
 
+    #if os(tvOS)
+    private var chipsLocked: Bool {
+        if case .chip? = tvSearchFocus { return false }
+        return tvSearchFocus == .field || focusedRowID != nil
+    }
+    #endif
+
     // MARK: - Scope Picker
     private var scopePicker: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -308,6 +340,12 @@ struct SearchView: View {
                                                           scalesOnFocus: scope == s))
                     .tvFocusRingShape(.capsule)
                     .focused($tvSearchFocus, equals: .chip(s))
+                    // Entering the row from the field or the results lands
+                    // straight on the SELECTED chip: the others take focus
+                    // only once focus is in the row (review 2026-11-05: Down
+                    // visibly passed through a neighbor, Up from the first
+                    // row hit the chip above it). Never the focused chip.
+                    .disabled(chipsLocked && s != scope)
                     #else
                     .buttonStyle(.plain)
                     #endif
@@ -741,6 +779,12 @@ struct SearchView: View {
         return (result.orderedIDs.compactMap { channelsByID[$0] }, lines, hits.hits, hits.truncated)
     }
 
+    #if os(tvOS)
+    private var liveRowFocus: FocusState<String?>.Binding? { $focusedRowID }
+    #else
+    private var liveRowFocus: FocusState<String?>.Binding? { nil }
+    #endif
+
     /// Programs section tap: airing now plays the channel (Search stays up
     /// underneath, as for the other live rows); later opens Program Info.
     private func openLiveProgramHit(_ hit: LiveProgramHit) {
@@ -758,6 +802,7 @@ struct SearchView: View {
 
     /// tvOS Live TV sections: Channels, Programs, then any VOD rows.
     private var liveSectionsList: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
                 if !liveChannelHits.isEmpty {
@@ -770,6 +815,10 @@ struct SearchView: View {
                             NotificationCenter.default.post(name: .aerioOpenChannel, object: nil,
                                                             userInfo: ["channelID": ch.id])
                         }
+                        .id("ch-\(ch.id)")
+                        #if os(tvOS)
+                        .focused($focusedRowID, equals: "ch-\(ch.id)")
+                        #endif
                         .padding(.horizontal, 40)
                     }
                 }
@@ -779,12 +828,17 @@ struct SearchView: View {
                     pending: false,
                     channelsByID: channelsByID,
                     horizontalPadding: 40,
+                    rowFocus: liveRowFocus,
                     onTap: openLiveProgramHit)
                 if !results.isEmpty {
                     LiveSearchSectionHeader(title: "Movies and TV Shows")
                         .padding(.horizontal, 40)
                     ForEach(results) { result in
                         resultRow(result)
+                            .id(result.id)
+                            #if os(tvOS)
+                            .focused($focusedRowID, equals: result.id)
+                            #endif
                             .padding(.horizontal, 40)
                     }
                 }
@@ -792,6 +846,26 @@ struct SearchView: View {
             .padding(.vertical, 8)
         }
         .background(Color.appBackground)
+        #if os(tvOS)
+        // Back from a player opened from a Channels, Programs, or VOD row
+        // lands on that row again (the guide refocus stands down while
+        // Search is up).
+        .onReceive(NotificationCenter.default.publisher(for: .aerioSearchRestoreFocus)) { _ in
+            guard let id = lastOpenedID else { return }
+            let ids = liveChannelHits.map { "ch-\($0.id)" } + liveProgramHits.map { "hit-\($0.id)" } + results.map(\.id)
+            guard ids.contains(id) else {
+                debugLog("[SEARCH] restore skipped: opened row not in live sections")
+                return
+            }
+            debugLog("[SEARCH] restore live row index=\(ids.firstIndex(of: id) ?? -1)")
+            proxy.scrollTo(id, anchor: .center)
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(50))
+                focusedRowID = id
+            }
+        }
+        #endif
+        }
         .sheet(item: $liveSearchProgramInfo) { ProgramInfoView(target: $0) }
     }
 
@@ -815,6 +889,8 @@ extension Notification.Name {
     /// Posted by HomeView when a player opened from Search closes while the
     /// tvOS in-place Search is still up: Search refocuses the opened row.
     static let aerioSearchRestoreFocus = Notification.Name("aerioSearchRestoreFocus")
+    /// Up from the in-place Search field: HomeView focuses the Search circle.
+    static let aerioSearchFocusCircle = Notification.Name("aerioSearchFocusCircle")
 }
 
 /// EPG result thumbnail (Android SearchScreen ResultRow): program art when
@@ -989,6 +1065,8 @@ struct LiveProgramSearchSection: View {
     let pending: Bool
     let channelsByID: [String: ChannelDisplayItem]
     var horizontalPadding: CGFloat = 16
+    /// tvOS Search: row focus, so Back from the player lands on the row.
+    var rowFocus: FocusState<String?>.Binding? = nil
     let onTap: (LiveProgramHit) -> Void
 
     var body: some View {
@@ -1005,7 +1083,15 @@ struct LiveProgramSearchSection: View {
             }
         } else {
             ForEach(hits) { hit in
-                LiveProgramHitRow(hit: hit, channel: channelsByID[hit.channelID]) { onTap(hit) }
+                Group {
+                    if let rowFocus {
+                        LiveProgramHitRow(hit: hit, channel: channelsByID[hit.channelID]) { onTap(hit) }
+                            .focused(rowFocus, equals: "hit-\(hit.id)")
+                    } else {
+                        LiveProgramHitRow(hit: hit, channel: channelsByID[hit.channelID]) { onTap(hit) }
+                    }
+                }
+                    .id("hit-\(hit.id)")
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, 3)
             }

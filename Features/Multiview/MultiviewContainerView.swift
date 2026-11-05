@@ -879,6 +879,19 @@ struct MultiviewContainerView: View {
                 // pulls focus to the tile, then post the guide-focus
                 // claim.
                 focusedTileID = nil
+                #if os(tvOS)
+                // Opened from the in-place Search: Back lands on the
+                // Search row that was opened, not the guide under it
+                // (tvOS review 2026-11-05: the guide refocus stole it).
+                if TVSearchOverlayState.shared.isUp {
+                    DebugLogger.shared.log(
+                        "[MV-Cmd] minimized over Search → restore opened row",
+                        category: "Playback", level: .info
+                    )
+                    NotificationCenter.default.post(name: .aerioSearchRestoreFocus, object: nil)
+                    return
+                }
+                #endif
                 DebugLogger.shared.log(
                     "[MV-Cmd] minimized → forceGuideFocus",
                     category: "Playback", level: .info

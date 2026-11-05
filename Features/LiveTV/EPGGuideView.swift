@@ -6737,6 +6737,13 @@ struct EPGGuideView: View {
                         debugLog("[FOCUS] guide refocus check +\(check)ms (epg): userMoved=\(userMoved) state=\(focusedProgramID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
                         guard stolen else { continue }
                         if NowPlayingManager.shared.isActive && !NowPlayingManager.shared.isMinimized { return }
+                        // Search owns focus while it is up (tvOS review
+                        // 2026-11-05: "re-asserted (epg) ... stolen=true"
+                        // pulled focus off the opened Search row).
+                        if TVSearchOverlayState.shared.isUp {
+                            debugLog("[FOCUS] guide refocus skipped (epg): search up")
+                            return
+                        }
                         for _ in 0..<6 {
                             if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
                             proxy.scrollTo(valid, anchor: .center)

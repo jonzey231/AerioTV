@@ -4764,6 +4764,8 @@ struct MainTabView: View {
     /// Any nav circle focused. The Down catcher below the circles exists
     /// only then, so Up from the guide never finds it (trace 13:09).
     @FocusState private var navCirclesFocused: Bool
+    /// The Search circle itself, for Up from the in-place Search field.
+    @FocusState private var searchCircleFocused: Bool
     #endif
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
@@ -5940,6 +5942,10 @@ struct MainTabView: View {
                                 focusHold: nowPlaying.guideRefocusPending
                             ) {
                                 withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
+                            }
+                            .focused($searchCircleFocused)
+                            .onReceive(NotificationCenter.default.publisher(for: .aerioSearchFocusCircle)) { _ in
+                                searchCircleFocused = true
                             }
                         }
                         // Channel retention status (Logan 2026-08-27): a

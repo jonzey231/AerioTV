@@ -54,6 +54,10 @@
 
 ### Changed
 
+- Apple TV Search: Up from the field returns to the Search button, Down
+  lands straight on the selected chip, Up from the first result returns to
+  it, Back from a player lands on the row that was opened, the typed text
+  stays readable while focused, and the guide hint strip hides under Search.
 - Channel long-press menus: Watch leads a live program, and Radio Mode is
   offered only on channels the server marks as radio, on every platform.
 - Apple TV Hex Color: the keyboard title reads "Hex Color", and typing six

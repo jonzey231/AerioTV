@@ -1635,7 +1635,9 @@ struct ChannelListView: View {
                         // the banner's old -28 pull so it sits
                         // in that band instead of under the tab bar, and it
                         // disappears with the tab bar when that band collapses.
-                        if showRemoteHints && !tabBarScrollState.isHidden {
+                        // Hidden while the in-place Search covers the guide (tvOS
+                        // review 2026-11-05: the strip showed over Search).
+                        if showRemoteHints && !tabBarScrollState.isHidden && !searchOverlay.isUp {
                             RemoteHintStrip(pairs: liveTVHintPairs)
                                 .padding(.horizontal, hintStripSideInset)
                                 .padding(.top, previewMode ? -28 : 0)
@@ -2228,6 +2230,12 @@ struct ChannelListView: View {
                             debugLog("[FOCUS] guide refocus check +\(check)ms (list): userMoved=\(userMoved) state=\(focusedGuideRowID ?? "nil") engine=\(TVFocusTracer.focusedItemDescription()) stolen=\(stolen)")
                             guard stolen else { continue }
                             if nowPlaying.isActive && !nowPlaying.isMinimized { return }
+                            // Search owns focus while it is up; it restores
+                            // the row the player was opened from.
+                            if TVSearchOverlayState.shared.isUp {
+                                debugLog("[FOCUS] guide refocus skipped (list): search up")
+                                return
+                            }
                             for _ in 0..<6 {
                                 if Task.isCancelled || !NowPlayingManager.sceneIsActive { return }
                                 proxy.scrollTo(valid, anchor: .center)
