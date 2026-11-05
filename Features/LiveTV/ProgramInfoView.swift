@@ -275,12 +275,18 @@ struct ProgramInfoView: View {
             debugLog("[SEARCH] program info: record")
             showRecordSheet = true
         } label: {
-            Label("Record", systemImage: "record.circle")
-                .labelStyle(.titleAndIcon)
+            // Explicit glyph plus text: a toolbar collapses a Label to its
+            // icon, and the header must read "Record" (Logan 2026-11-05).
+            HStack(spacing: 6) {
+                Image(systemName: "record.circle")
+                Text("Record")
+            }
+            #if os(iOS)
+            // Same weight as the Done button opposite it.
+            .fontWeight(.semibold)
+            #endif
+            .fixedSize()
         }
-        #if os(iOS)
-        .buttonStyle(.bordered)
-        #endif
     }
     // The loaded bitmap's aspect no longer drives the layout: art goes into
     // the height-locked ProgramArtSlot shared with the guide preview
