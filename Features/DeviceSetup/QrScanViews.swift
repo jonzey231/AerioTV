@@ -618,23 +618,32 @@ struct UserQrScopeSheet: View {
     let onCancel: () -> Void
     @State private var userOnly = false
 
+    /// Same layout as Set up another device (SetUpTvView): top-aligned scroll, 560 pt column, default sheet height.
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Copy from \(request.device.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
-            VStack(spacing: 4) {
-                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
-                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Copy from \(request.device.name)")
+                        .scaledFont(.headlineLarge)
+                        .foregroundColor(.textPrimary)
+                    VStack(spacing: 4) {
+                        ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
+                        ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+                    }
+                    .padding(8)
+                    .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    PrimaryButton("Continue") { onContinue(!userOnly) }
+                    HStack(spacing: 12) {
+                        SecondaryButton("Cancel") { onCancel() }
+                    }
+                }
+                .frame(maxWidth: 560, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 20)
             }
-            .padding(8)
-            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            PrimaryButton("Continue") { onContinue(!userOnly) }
-            SecondaryButton("Cancel") { onCancel() }
+            .background(Color.appBackground.ignoresSafeArea())
         }
-        .padding(24)
-        .frame(maxWidth: 560)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.appBackground.ignoresSafeArea())
-        .presentationDetents([.medium, .large])
     }
 }
 #endif
