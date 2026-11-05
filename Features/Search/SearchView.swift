@@ -265,6 +265,7 @@ struct SearchView: View {
                 // trace 2026-11-05: @96,282 -> UITabBarButton).
                 .frame(maxWidth: .infinity)
                 .focusSection()
+                .tvMiniPlayerClearance()
                 #endif
 
                 searchContent

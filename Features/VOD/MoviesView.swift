@@ -2532,6 +2532,9 @@ struct MoviesView: View {
                     #endif
                 }
                 #if os(tvOS)
+                .tvMiniPlayerClearance()
+                #endif
+                #if os(tvOS)
                 .focusSection()
                 #endif
             }

@@ -4032,6 +4032,12 @@ final class NowPlayingManager: ObservableObject {
     /// Default 0 means "no measurement yet", the consumer treats
     /// that as "no push" so layout stays at natural position until
     /// the geometry observer fires.
+    /// Global minX of the corner mini (0 when not minimized).
+    @Published private var _miniPlayerLeadingAbs: CGFloat = 0
+    var miniPlayerLeadingAbs: CGFloat {
+        get { _miniPlayerLeadingAbs }
+        set { if newValue != _miniPlayerLeadingAbs { _miniPlayerLeadingAbs = newValue } }
+    }
     @Published private var _miniPlayerBottomAbs: CGFloat = 0
     var miniPlayerBottomAbs: CGFloat {
         get { _miniPlayerBottomAbs }
@@ -4371,6 +4377,7 @@ final class NowPlayingManager: ObservableObject {
         // unmounting mini's geometry callback, the 0 landed as one more
         // nowPlaying publish and one more guide pass after a Stop.
         miniPlayerBottomAbs = 0
+        miniPlayerLeadingAbs = 0
         pendingMinimize?.cancel()
         pendingMinimize = nil
         // #42: authoritative reset of the chrome mirror on every playback
@@ -6244,6 +6251,13 @@ struct MainTabView: View {
                             // v1.6.13.x: capture mini's actual
                             // bottom for ChannelListView's chip-row
                             // push-down (tvOS branch).
+                            // Leading edge too, for the tvOS mini clearance
+                            // (TVMiniPlayerClearance).
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                proxy.frame(in: .global).minX
+                            } action: { newValue in
+                                nowPlaying.miniPlayerLeadingAbs = minimized ? newValue : 0
+                            }
                             .onGeometryChange(for: CGFloat.self) { proxy in
                                 proxy.frame(in: .global).maxY
                             } action: { newValue in
@@ -6338,6 +6352,13 @@ struct MainTabView: View {
                         // v1.6.13.x: capture mini's actual bottom
                         // for ChannelListView's chip-row push-down
                         // (tvOS legacy-path branch).
+                        // Leading edge too, for the tvOS mini clearance
+                        // (TVMiniPlayerClearance).
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .global).minX
+                        } action: { newValue in
+                            nowPlaying.miniPlayerLeadingAbs = minimized ? newValue : 0
+                        }
                         .onGeometryChange(for: CGFloat.self) { proxy in
                             proxy.frame(in: .global).maxY
                         } action: { newValue in
@@ -8784,6 +8805,13 @@ struct MainTabView: View {
                         // the TabView's top tab-bar chrome,
                         // shifting the mini's effective frame down
                         // by an unknown amount.
+                        // Leading edge too, for the tvOS mini clearance
+                        // (TVMiniPlayerClearance).
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .global).minX
+                        } action: { newValue in
+                            nowPlaying.miniPlayerLeadingAbs = minimized ? newValue : 0
+                        }
                         .onGeometryChange(for: CGFloat.self) { proxy in
                             proxy.frame(in: .global).maxY
                         } action: { newValue in
@@ -9002,6 +9030,13 @@ struct MainTabView: View {
                     // v1.6.13.x: same dynamic mini-bottom capture
                     // as the unified-path wrapper above. See that
                     // comment for rationale.
+                    // Leading edge too, for the tvOS mini clearance
+                    // (TVMiniPlayerClearance).
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.frame(in: .global).minX
+                    } action: { newValue in
+                        nowPlaying.miniPlayerLeadingAbs = minimized ? newValue : 0
+                    }
                     .onGeometryChange(for: CGFloat.self) { proxy in
                         proxy.frame(in: .global).maxY
                     } action: { newValue in
@@ -10995,8 +11030,13 @@ private extension Comparable {
 /// stashed rather than gone. Playback is untouched; only the offset changes.
 /// Reduce Motion swaps the slide for a quick fade in at the new position.
 struct MiniPlayerSettingsStash: ViewModifier {
-    /// Width of the video left on screen while stashed.
+    /// Width of the video left on screen while stashed. Apple TV stashes it
+    /// fully: the sliver read as a black bar at the edge (review 2026-11-05).
+    #if os(tvOS)
+    static let sliver: CGFloat = 0
+    #else
     static let sliver: CGFloat = 32
+    #endif
 
     let stashed: Bool
     /// Distance to slide right: mini width + trailing inset - sliver.
@@ -11024,6 +11064,32 @@ struct MiniPlayerSettingsStash: ViewModifier {
 
 // MARK: - Tab pill focus (two-step Back)
 #if os(tvOS)
+
+/// Keeps content out from under the tvOS corner mini player: when this
+/// view's top sits above the mini's measured bottom, its trailing edge is
+/// pulled in to the mini's measured leading edge (the measured-frame rule
+/// the phone dock cards use). Review 2026-11-05: the mini covered the
+/// Search field's right end and the TV Shows genre chips and posters.
+struct TVMiniPlayerClearance: ViewModifier {
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    @State private var frame: CGRect = .zero
+    var gap: CGFloat = 24
+
+    func body(content: Content) -> some View {
+        let bottom = nowPlaying.miniPlayerBottomAbs
+        let leading = nowPlaying.miniPlayerLeadingAbs
+        let covered = nowPlaying.isMinimized && bottom > 0 && leading > 0
+            && frame.minY < bottom && frame.maxX > leading - gap
+        content
+            .padding(.trailing, covered ? frame.maxX - (leading - gap) : 0)
+            .animation(.spring(response: 0.35), value: covered)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame = $0 }
+    }
+}
+
+extension View {
+    func tvMiniPlayerClearance() -> some View { modifier(TVMiniPlayerClearance()) }
+}
 
 /// Moves tvOS focus onto a system tab bar pill on request (two-step Back).
 /// Attempt 1: a window-sized UIFocusGuide aimed at the pill, asked for focus.

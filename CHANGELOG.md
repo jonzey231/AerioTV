@@ -54,6 +54,10 @@
 
 ### Changed
 
+- Apple TV mini player: the Search field and the Movies and TV Shows genre
+  chips stop short of the corner mini player instead of running under it,
+  and Settings stashes the mini fully off screen with no black sliver at the
+  edge.
 - Apple TV: the Leave Multiview prompt uses the theme colors like the other
   menus, narrow guide cells no longer show clipped badges or one-letter
   titles, and Multiview tile format pills sit above broadcast tickers and
