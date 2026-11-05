@@ -94,6 +94,9 @@ struct SearchView: View {
     /// Row last opened from the results (Android GH #162): Back from the
     /// player lands on it again with the query and results intact.
     @State private var lastOpenedID: String?
+    /// The inline search field and the scope chips (embedded tvOS layout).
+    enum TVSearchFocus: Hashable { case field, chip(SearchScope) }
+    @FocusState private var tvSearchFocus: TVSearchFocus?
     #if os(tvOS)
     @FocusState private var focusedRowID: String?
     #endif
@@ -207,6 +210,10 @@ struct SearchView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             VStack(spacing: 12) {
+                // ONE pill: the system tvOS text field already draws its own
+                // rounded field, so the old custom rectangle around it read
+                // as a second box (Apple TV 2026-11-05). The accent ring is
+                // the visible focused state, per the tvOS capsule rule.
                 HStack(spacing: 14) {
                     Image(systemName: "magnifyingglass")
                         .scaledFont(.system(size: 26, weight: .medium))
@@ -215,17 +222,25 @@ struct SearchView: View {
                         .textFieldStyle(.plain)
                         .scaledFont(.system(size: 28))
                         .foregroundColor(.textPrimary)
-                }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.elevatedBackground.opacity(0.6))
+                        .focused($tvSearchFocus, equals: .field)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(theme.accent.opacity(0.35), lineWidth: 1)
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.accentPrimary,
+                                              lineWidth: tvSearchFocus == .field ? 3 : 0)
+                                .opacity(tvSearchFocus == .field ? 1 : 0)
+                                .animation(.easeInOut(duration: 0.15), value: tvSearchFocus)
+                                .allowsHitTesting(false)
                         )
-                )
+                        #if os(tvOS)
+                        // Down from the field lands on the SELECTED scope
+                        // chip, not wherever the geometric search picks.
+                        .onMoveCommand { direction in
+                            if direction == .down {
+                                tvSearchFocus = .chip(scope)
+                            }
+                        }
+                        #endif
+                }
                 .padding(.horizontal, 40)
 
                 searchContent
@@ -286,7 +301,14 @@ struct SearchView: View {
                             )
                     }
                     #if os(tvOS)
-                    .buttonStyle(TVNoHighlightButtonStyle())
+                    // Capsule ring per the tvOS chip rule: white on the
+                    // selected (accent-filled) chip, which also grows a
+                    // little so focus reads on the bright fill; accent on
+                    // the others.
+                    .buttonStyle(TVNoHighlightButtonStyle(isSelected: scope == s,
+                                                          scalesOnFocus: scope == s))
+                    .tvFocusRingShape(.capsule)
+                    .focused($tvSearchFocus, equals: .chip(s))
                     #else
                     .buttonStyle(.plain)
                     #endif
