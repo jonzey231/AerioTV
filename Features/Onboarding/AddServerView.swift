@@ -143,7 +143,8 @@ struct AddServerView: View {
         .navigationTitle(addProfilesFor != nil ? "" : (typeChosen ? configureTitle : (isOnboarding ? "" : "Add Playlist")))
         .navigationBarBackButtonHidden(typeChosen || addProfilesFor != nil)
         #if os(iOS)
-        .navigationBarTitleDisplayMode(.large)
+        // Add Playlist (the type picker): centered over the centered content, as on Android.
+        .navigationBarTitleDisplayMode(typeChosen || addProfilesFor != nil ? .large : .inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .toolbar {
