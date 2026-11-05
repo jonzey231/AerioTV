@@ -7671,6 +7671,14 @@ struct MainTabView: View {
         TabView(selection: tabSelection) {
             ChannelListView()
                 .aerioPadHidesSystemTabBar()
+                #if os(tvOS)
+                // The in-place Search covers this tab but the guide stayed
+                // focusable under it, so Down from the search field moved
+                // focus onto a hidden guide element and no ring showed
+                // anywhere (Apple TV 2026-11-05). Out of the focus chain
+                // while Search is up.
+                .disabled(showSearch)
+                #endif
                 .tabItem { Label(AppTab.liveTV.title, systemImage: AppTab.liveTV.icon) }
                 .tag(AppTab.liveTV)
 

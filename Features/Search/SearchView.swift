@@ -231,15 +231,6 @@ struct SearchView: View {
                                 .animation(.easeInOut(duration: 0.15), value: tvSearchFocus)
                                 .allowsHitTesting(false)
                         )
-                        #if os(tvOS)
-                        // Down from the field lands on the SELECTED scope
-                        // chip, not wherever the geometric search picks.
-                        .onMoveCommand { direction in
-                            if direction == .down {
-                                tvSearchFocus = .chip(scope)
-                            }
-                        }
-                        #endif
                 }
                 .padding(.horizontal, 40)
 
@@ -318,8 +309,18 @@ struct SearchView: View {
         }
         #if os(tvOS)
         // Own focus region so Up from the first result lands on a chip even
-        // when no chip sits straight above the focused row.
+        // when no chip sits straight above the focused row. Entering the
+        // row (Down from the field) lands on the SELECTED chip.
         .focusSection()
+        // Entering the row from the field lands on the SELECTED chip. The
+        // engine picks the chip nearest the field geometrically (EPG in the
+        // simulator trace), and defaultFocus on the section did not steer
+        // it, so the move is redirected when it arrives from the field.
+        .onChange(of: tvSearchFocus) { old, new in
+            if old == .field, case .chip(let c)? = new, c != scope {
+                tvSearchFocus = .chip(scope)
+            }
+        }
         #endif
     }
 
