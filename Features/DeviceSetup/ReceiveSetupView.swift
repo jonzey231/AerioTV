@@ -37,6 +37,7 @@ final class SetupApplyModel: ObservableObject {
     /// Set for "Copy entire setup from this device" after a User QR scan.
     var request: UserQrSourceRequest?
     private var asked = false
+    private static var askedRequests: Set<UUID> = []
 
     private var isOfferish: Bool {
         switch phase { case .starting, .offering, .requesting: return true; default: return false }
@@ -45,7 +46,8 @@ final class SetupApplyModel: ObservableObject {
     func start() {
         receiver.onPayload = { [weak self] p in Task { @MainActor in await self?.apply(p) } }
         Task {
-            guard await receiver.start(advertise: request == nil) else { phase = .noNetwork; return }
+            // Advertised in every mode, as on Welcome, so other devices show the waiting banner.
+            guard await receiver.start() else { phase = .noNetwork; return }
             offerSink?.cancel()
             offerSink = Task { [weak self] in
                 guard let self else { return }
@@ -67,8 +69,10 @@ final class SetupApplyModel: ObservableObject {
     /// Sends this receiver's link to the device showing the User QR Code, once.
     private func ask(_ r: UserQrSourceRequest, link: String) {
         if case .requesting = phase { return }
-        guard !asked else { return }
+        // Once per request, even if the view (and this model) is rebuilt mid-setup.
+        guard !asked, !Self.askedRequests.contains(r.id) else { return }
         asked = true
+        Self.askedRequests.insert(r.id)
         phase = .requesting(r.device.name)
         Task { [weak self] in
             let out = await UserQrRequest.ask(r.device, link: link, apiKey: r.apiKey)

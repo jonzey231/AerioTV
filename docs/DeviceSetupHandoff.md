@@ -361,7 +361,8 @@ unchanged and no server path is used; everything stays on the LAN.
   the user as before. Found: "Copy from {name}", subtitle "Copy every playlist and profile
   from {name}, or add just the user in this code.", with "Copy entire setup
   from this device" (default) or "Import this user only". Entire setup
-  starts the normal receiver without an advert, posts its link with the
+  starts the normal receiver (advertised, as on Welcome, so other
+  devices show the waiting banner), posts its link with the
   proof (150 second timeout), shows "Waiting for {name}", then applies the
   payload and continues to Add Profiles. A failure offers "Import this
   user only".
