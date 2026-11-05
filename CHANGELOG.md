@@ -61,6 +61,11 @@
   and the onboarding "Who watches on this TV?" step is one centered column
   with Continue and the profile count under the roster, so Continue is
   reachable with the remote.
+- Live TV search in the Guide view on iPhone, iPad, and Android phones
+  and tablets now shows the same "Programs" section as the List view,
+  below the matching channels: the same cards, a live program plays its
+  channel, and a later one opens Program Info to record. With no channel
+  matches the section fills the screen.
 - The Color Theme preset "Light" is now named "Slate" on every
   platform, so it no longer reads like the Light Mode choice. The stored
   and synced value is unchanged, so synced settings keep working.

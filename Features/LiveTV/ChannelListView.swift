@@ -1743,13 +1743,36 @@ struct ChannelListView: View {
                         // hold-Left / sidebar receivers), the notice just
                         // covers its empty grid.
                         .overlay {
+                            #if os(iOS)
+                            if filteredChannels.isEmpty && guideProgramsShown {
+                                // No channel matches: the Programs section
+                                // takes the whole area over the mounted grid.
+                                guideProgramsPanel
+                                    .background(Color.appBackground)
+                            } else if filteredChannels.isEmpty {
+                                emptyGroupNotice
+                                    .background(Color.appBackground)
+                            }
+                            #else
                             if filteredChannels.isEmpty {
                                 emptyGroupNotice
                                     .background(Color.appBackground)
                             }
+                            #endif
                         }
                         #if os(tvOS)
                         .focusSection()
+                        #else
+                        // Guide view "Programs" section (Logan 2026-11-05,
+                        // Android parity): with channel matches the grid
+                        // keeps the top and the section sits below it.
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            if guideProgramsShown && !filteredChannels.isEmpty {
+                                guideProgramsPanel
+                                    .containerRelativeFrame(.vertical) { h, _ in h * 0.45 }
+                                    .background(Color.appBackground)
+                            }
+                        }
                         #endif
                     }
                     #if os(tvOS)
@@ -3237,6 +3260,29 @@ struct ChannelListView: View {
             programHitsPending = false
             filteredChannels = rows
             prefetchEPGForVisibleChannels(rows)
+        }
+    }
+
+    /// Guide view search: the List view's Programs section, same rule for
+    /// when it shows (a query, and not zero channels with zero programs).
+    private var guideProgramsShown: Bool {
+        let searching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending)
+    }
+
+    private var guideProgramsPanel: some View {
+        ScrollView(.vertical) {
+            LazyVStack(spacing: 0) {
+                LiveProgramSearchSection(
+                    hits: programHits,
+                    truncated: programHitsTruncated,
+                    pending: programHitsPending,
+                    channelsByID: programChannelsByID,
+                    horizontalPadding: sizeClass == .regular ? 24 : 16,
+                    onTap: openProgramHit)
+                // Clears the floating tab bar, as in the List view.
+                Color.clear.frame(height: 96)
+            }
         }
     }
 
