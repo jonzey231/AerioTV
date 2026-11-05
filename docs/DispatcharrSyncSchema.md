@@ -348,6 +348,7 @@ wrong type is ignored and the local setting is left unchanged:
 | defaultLiveTvView | the Android wire value as stored, up to 20 characters; `""` = the device's form-factor default |
 | customAccentHex, categoryColor.<bucket> | `"RRGGBB"` hex, an optional leading `#` accepted; customAccentHex `""` = the theme's accent |
 | customThemeHex | `"RRGGBB"` hex, an optional leading `#` accepted; the Custom theme's base color (the whole Custom palette and its matching accent derive from it) |
+| appearanceMode, trueBlack | Unchanged on the wire. Since 2026-11-05 the UI shows one Mode choice (System, Light, Dark, True Black): True Black is written as appearanceMode `"dark"` plus trueBlack `true`, and every other choice writes trueBlack `false`. Readers honor trueBlack only with `"dark"`, so a received System or Light with trueBlack `true` renders as plain System or Light |
 | hiddenEpgBadges | one string, badge ids separated by commas (no spaces), up to 1024 characters; `""` = none hidden |
 | customCategories | JSON array string, up to 4 KiB |
 | skipBack, skipForward | int seconds, one of 5, 10, 15, 30, 60 |

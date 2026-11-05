@@ -301,7 +301,8 @@ enum CategoryColor {
     /// flip repaints without a restart. Accent and text colors are
     /// never routed through here.
     static var tintStrength: Double {
-        UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey) ? 0.6 : 1.0
+        (UserDefaults.standard.bool(forKey: ThemeManager.trueBlackKey)
+         && (UserDefaults.standard.string(forKey: "appearanceMode") ?? "dark") == "dark") ? 0.6 : 1.0
     }
 
     /// Category base color at `alpha`, scaled by `tintStrength`.

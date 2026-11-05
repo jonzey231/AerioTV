@@ -10,6 +10,10 @@
   text, and a matching accent. Light and Dark Mode and True Black Background
   apply as they do for the presets, and Custom Accent Color still overrides
   the matched accent. The Theme Color syncs with the Color Theme item.
+- Theme Color and Accent Color open one color sheet: the system color
+  picker (grid, spectrum, and sliders) with a Hex Color field below it. The
+  field fills in with the picked color, and typing six hex digits sets the
+  color. Apple TV keeps the hex field in the list.
 - Live TV search finds programs across the whole loaded guide, not only
   what airs now. Below the channel results, a "Programs" section lists every
   program whose title matches, from now forward and in start order, with
@@ -44,6 +48,11 @@
 
 ### Changed
 
+- Appearance > Mode is now one choice: System, Light, Dark, or True Black.
+  The True Black Background toggle is gone; True Black is the fourth Mode.
+  Dark with True Black on becomes True Black, and System or Light with True
+  Black on becomes plain System or Light. Sync stays compatible with older
+  versions.
 - "Set up a TV" is now "Set up another device", and "Set up from your
   phone" is now "Set up from another device".
 

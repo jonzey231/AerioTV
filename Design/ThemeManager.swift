@@ -158,6 +158,34 @@ enum AppearanceMode: String, CaseIterable, Codable {
     }
 }
 
+// MARK: - Mode picker choice
+// Settings > Appearance > Mode is one one-of-N picker: System, Light, Dark,
+// True Black. Storage and sync stay the two existing fields so older
+// clients keep working: True Black = appearanceMode "dark" plus
+// appearance.trueBlack true. trueBlack is honored only with Dark, so a
+// stored System or Light with trueBlack on reads as plain System or Light.
+enum AppearanceChoice: String, CaseIterable {
+    case system, light, dark, trueBlack
+
+    var displayName: String {
+        switch self {
+        case .system:    return "System"
+        case .light:     return "Light"
+        case .dark:      return "Dark"
+        case .trueBlack: return "True Black"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .system:    return "Follow the system setting"
+        case .light:     return "Light surfaces"
+        case .dark:      return "Dark surfaces (default)"
+        case .trueBlack: return "Dark surfaces at pure black, for OLED screens"
+        }
+    }
+}
+
 // MARK: - Liquid Glass Style
 enum LiquidGlassStyle: String, CaseIterable, Codable {
     case full      = "full"       // Full Liquid Glass (iOS 26+)
@@ -325,6 +353,29 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         storedAppearanceMode = mode.rawValue
     }
 
+    /// True Black applies only with the Dark mode (see AppearanceChoice).
+    var effectiveTrueBlack: Bool { trueBlack && appearanceMode == .dark }
+
+    var appearanceChoice: AppearanceChoice {
+        switch appearanceMode {
+        case .system: return .system
+        case .light:  return .light
+        case .dark:   return trueBlack ? .trueBlack : .dark
+        }
+    }
+
+    func setAppearanceChoice(_ choice: AppearanceChoice) {
+        let black = choice == .trueBlack
+        if black != trueBlack { trueBlack = black }
+        let mode: AppearanceMode
+        switch choice {
+        case .system: mode = .system
+        case .light: mode = .light
+        case .dark, .trueBlack: mode = .dark
+        }
+        if mode != appearanceMode { setAppearanceMode(mode) }
+    }
+
     /// The SwiftUI `ColorScheme?` to feed `.preferredColorScheme(...)`.
     /// `.system` returns nil so the app follows the OS setting.
     var resolvedColorScheme: ColorScheme? {
@@ -395,12 +446,12 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
     /// Dark-rendition page background: the theme's color, or pure black
     /// when True Black Background is On (OLED). Light rendition untouched.
     var darkBackground: Color {
-        trueBlack ? Color(hex: "000000") : selectedTheme.appBackground
+        effectiveTrueBlack ? Color(hex: "000000") : selectedTheme.appBackground
     }
     /// Dark-rendition card / sheet surface: the theme's color, or a very dark
     /// gray (#0A0A0A) under True Black so elevation still reads.
     var darkCard: Color {
-        trueBlack ? Color(hex: "0A0A0A") : selectedTheme.cardBackground
+        effectiveTrueBlack ? Color(hex: "0A0A0A") : selectedTheme.cardBackground
     }
 
     var background: Color {

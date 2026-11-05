@@ -9,6 +9,10 @@ struct AppearanceSettingsView: View {
     @State private var hexDraft: String? = nil
     /// Draft for the Custom theme's Theme Color hex field (same commit rule).
     @State private var themeHexDraft: String? = nil
+    #if os(iOS)
+    /// Which color the color sheet edits (nil = closed).
+    @State private var colorSheet: ColorSheetTarget? = nil
+    #endif
     @ObservedObject private var theme = ThemeManager.shared
     // Phase 1 regroup (2026-09-17): Appearance is now theme, text and
     // clock only. Channel List / Guide Presentation, Category Colors, the
@@ -60,12 +64,15 @@ struct AppearanceSettingsView: View {
 
     private static let timeFormatFootnote = "System follows your device's clock setting. Applies to the Guide, program info, search, and recordings."
 
-    private var appearanceModeChoices: [SettingsChoice<AppearanceMode>] {
-        AppearanceMode.allCases.map { mode in
-            SettingsChoice(mode, mode.displayName,
-                           subtitle: appearanceModeSubtitle(mode),
-                           icon: mode == .dark ? "moon.fill"
-                                 : mode == .light ? "sun.max.fill"
+    /// Mode: System, Light, Dark, True Black (one one-of-N choice; True
+    /// Black is Dark with pure black surfaces, see AppearanceChoice).
+    private var appearanceModeChoices: [SettingsChoice<AppearanceChoice>] {
+        AppearanceChoice.allCases.map { c in
+            SettingsChoice(c, c.displayName,
+                           subtitle: c.subtitle,
+                           icon: c == .dark ? "moon.fill"
+                                 : c == .trueBlack ? "moon.stars.fill"
+                                 : c == .light ? "sun.max.fill"
                                  : "circle.lefthalf.filled")
         }
     }
@@ -73,10 +80,10 @@ struct AppearanceSettingsView: View {
     /// Writes through `ThemeManager` (never a raw property assignment)
     /// and keeps the immediate preference push the segmented control
     /// used to do from `.onChange`.
-    private var appearanceModeSelection: Binding<AppearanceMode> {
+    private var appearanceModeSelection: Binding<AppearanceChoice> {
         Binding(
-            get: { theme.appearanceMode },
-            set: { theme.setAppearanceMode($0) }
+            get: { theme.appearanceChoice },
+            set: { theme.setAppearanceChoice($0) }
         )
     }
 
@@ -194,14 +201,6 @@ struct AppearanceSettingsView: View {
                                          onChange: { _ in
                                              SyncManager.shared.pushPreferencesImmediate()
                                          })
-
-                    // True Black Background (OLED). Applied in ThemeManager.
-                    TVSettingsToggleRow(
-                        icon: "moon.fill", iconColor: theme.accent,
-                        title: "True Black Background",
-                        subtitle: "Use pure black for backgrounds, for OLED screens.",
-                        isOn: $theme.trueBlack
-                    ) { _ in SyncManager.shared.pushPreferencesImmediate() }
                 }
 
                 // Liquid Glass
@@ -489,7 +488,6 @@ struct AppearanceSettingsView: View {
                 // now states what it is, on both idioms.
                 Section {
                     appearanceModeRow
-                    trueBlackRow
                 } header: {
                     Text("Light and Dark Mode").sectionHeaderStyle()
                 } footer: {
@@ -621,6 +619,18 @@ struct AppearanceSettingsView: View {
             // this view's own body, which observes ThemeManager, so headers,
             // tints, and text repaint on an accent change without a rebuild.
             .id(listIdentity)
+            .sheet(item: $colorSheet) { target in
+                switch target {
+                case .theme:
+                    HexColorPickerSheet(title: "Theme Color", hex: theme.customThemeHex) {
+                        theme.setCustomThemeHex($0)
+                    }
+                case .accent:
+                    HexColorPickerSheet(title: "Accent Color", hex: theme.customAccentHex) { hex in
+                        if hex != theme.customAccentHex { theme.customAccentHex = hex }
+                    }
+                }
+            }
     }
 
     private var listIdentity: String {
@@ -651,58 +661,16 @@ struct AppearanceSettingsView: View {
             .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
     }
 
-    /// True Black Background (OLED): pure black page backgrounds and
-    /// #0A0A0A cards / sheets, resolved in ThemeManager. Synced bool
-    /// `appearance.trueBlack`.
-    private var trueBlackRow: some View {
-        Toggle(isOn: Binding(
-            get: { theme.trueBlack },
-            set: { theme.trueBlack = $0; SyncManager.shared.pushPreferencesImmediate() }
-        )) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("True Black Background")
-                    .scaledFont(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                Text("Use pure black for backgrounds, for OLED screens.")
-                    .scaledFont(.labelSmall.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
-            }
-        }
-        .tint(theme.accent)
-        .listRowBackground(Color.cardBackground)
-    }
-
-    /// Custom theme: the Theme Color picker and its hex field, shown under
-    /// the theme rows while Custom is selected. Same look as the accent's.
-    @ViewBuilder
+    /// Custom theme: one Theme Color row (swatch and hex), opening the
+    /// color sheet with the hex field inside it.
     private var customThemeRows: some View {
-        ColorPicker(
-            selection: Binding(
-                get: { Color(hex: theme.customThemeHex) },
-                set: { theme.setCustomThemeHex($0.toHex()) }
-            ),
-            supportsOpacity: false
-        ) {
-            Text("Theme Color")
-                .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-        }
-        .listRowBackground(Color.cardBackground)
-        .alignmentGuide(.listRowSeparatorLeading) { _ in
-            Self.themeRowSeparatorInset
-        }
-
-        customThemeHexField
-            .listRowBackground(Color.cardBackground)
-            .alignmentGuide(.listRowSeparatorLeading) { _ in
-                Self.themeRowSeparatorInset
-            }
+        colorSheetRow(title: "Theme Color", hex: theme.customThemeHex, target: .theme)
     }
 
-    /// Custom accent toggle, system color picker and hex field. Its own
-    /// headed card since Phase 3.
+    /// Custom accent toggle, then (when on) one Accent Color row opening
+    /// the color sheet. Its own headed card since Phase 3.
     @ViewBuilder
     private var accentRows: some View {
-        // Custom accent color toggle
         Toggle(isOn: $theme.useCustomAccent) {
             HStack(spacing: 14) {
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
@@ -723,46 +691,34 @@ struct AppearanceSettingsView: View {
         }
 
         if theme.useCustomAccent {
-            // Native system color picker, tap the swatch to open the full picker
-            #if os(iOS)
-            ColorPicker(
-                selection: Binding(
-                    get: { Color(hex: theme.customAccentHex) },
-                    set: { theme.customAccentHex = $0.toHex() }
-                ),
-                supportsOpacity: false
-            ) {
-                Text("Accent Color")
-                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-            }
-            .listRowBackground(Color.cardBackground)
-            .alignmentGuide(.listRowSeparatorLeading) { _ in
-                Self.themeRowSeparatorInset
-            }
-            #endif
+            colorSheetRow(title: "Accent Color", hex: theme.customAccentHex, target: .accent)
+        }
+    }
 
-            // Hex field for power users who want to paste a specific
-            // value. Phase 3: the shared Settings field; the filtering
-            // and uppercasing binding is unchanged.
-            SettingsTextField("Hex Color",
-                              placeholder: "2DD4BF",
-                              text: Binding(
-                                get: { hexDraft ?? theme.customAccentHex },
-                                set: { newValue in
-                                    let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                                    let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
-                                    hexDraft = cleaned
-                                    if cleaned.count == 6, cleaned != theme.customAccentHex {
-                                        theme.customAccentHex = cleaned
-                                    }
-                                }
-                              ),
-                              helper: "Six hex digits, for example 2DD4BF.",
-                              autocapitalization: .characters)
-                .listRowBackground(Color.cardBackground)
-                .alignmentGuide(.listRowSeparatorLeading) { _ in
-                    Self.themeRowSeparatorInset
-                }
+    /// A color row: title, the hex value, and a swatch. Tap opens the
+    /// color sheet (system picker plus the Hex Color field).
+    private func colorSheetRow(title: String, hex: String, target: ColorSheetTarget) -> some View {
+        Button {
+            colorSheet = target
+        } label: {
+            HStack(spacing: 14) {
+                Text(title)
+                    .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                Spacer()
+                Text("#" + hex.uppercased())
+                    .scaledFont(.labelSmall.monospacedDigit().subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                Circle()
+                    .fill(Color(hex: hex))
+                    .frame(width: 26, height: 26)
+                    .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.cardBackground)
+        .alignmentGuide(.listRowSeparatorLeading) { _ in
+            Self.themeRowSeparatorInset
         }
     }
 
@@ -966,3 +922,114 @@ struct AppearanceSettingsView: View {
         }
     }
 }
+
+#if os(iOS)
+/// Which color the Appearance color sheet edits.
+enum ColorSheetTarget: String, Identifiable {
+    case theme, accent
+    var id: String { rawValue }
+}
+
+/// Color sheet for Theme Color and Accent Color: the system color picker
+/// (grid, spectrum, sliders) embedded as a child, with a Hex Color field
+/// pinned below it. Picking a color fills the field; typing six valid hex
+/// digits sets the picker. Every change commits live through [onChange].
+struct HexColorPickerSheet: View {
+    let title: String
+    let onChange: (String) -> Void
+    @State private var draft: String
+    @State private var pickerColor: UIColor
+    @Environment(\.dismiss) private var dismiss
+
+    init(title: String, hex: String, onChange: @escaping (String) -> Void) {
+        self.title = title
+        self.onChange = onChange
+        _draft = State(initialValue: hex.uppercased())
+        _pickerColor = State(initialValue: UIColor(Color(hex: hex)))
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                EmbeddedColorPicker(color: $pickerColor) { picked in
+                    let hex = HexColorPickerSheet.hex(of: picked)
+                    draft = hex
+                    onChange(hex)
+                }
+                SettingsTextField("Hex Color",
+                                  placeholder: "2DD4BF",
+                                  text: Binding(
+                                    get: { draft },
+                                    set: { newValue in
+                                        let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                                        let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
+                                        draft = cleaned
+                                        if cleaned.count == 6 {
+                                            pickerColor = UIColor(Color(hex: cleaned))
+                                            onChange(cleaned)
+                                        }
+                                    }
+                                  ),
+                                  helper: "Six hex digits, for example 2DD4BF.",
+                                  autocapitalization: .characters)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+            }
+            .background(Color.appBackground.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.large])
+    }
+
+    /// Uppercase RRGGBB, channels clamped to sRGB (the picker can return
+    /// extended-range values).
+    static func hex(of color: UIColor) -> String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: &a)
+        func q(_ v: CGFloat) -> Int { min(255, max(0, Int((v * 255).rounded()))) }
+        return String(format: "%02X%02X%02X", q(r), q(g), q(b))
+    }
+}
+
+/// UIColorPickerViewController as a child view, chrome hidden (the sheet
+/// supplies the title and Done).
+private struct EmbeddedColorPicker: UIViewControllerRepresentable {
+    @Binding var color: UIColor
+    let onPick: (UIColor) -> Void
+
+    func makeUIViewController(context: Context) -> UIColorPickerViewController {
+        let vc = UIColorPickerViewController()
+        vc.supportsAlpha = false
+        vc.selectedColor = color
+        vc.delegate = context.coordinator
+        return vc
+    }
+
+    func updateUIViewController(_ vc: UIColorPickerViewController, context: Context) {
+        context.coordinator.parent = self
+        if HexColorPickerSheet.hex(of: vc.selectedColor) != HexColorPickerSheet.hex(of: color) {
+            vc.selectedColor = color
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    final class Coordinator: NSObject, UIColorPickerViewControllerDelegate {
+        var parent: EmbeddedColorPicker
+        init(parent: EmbeddedColorPicker) { self.parent = parent }
+
+        func colorPickerViewController(_ vc: UIColorPickerViewController,
+                                       didSelect color: UIColor, continuously: Bool) {
+            guard HexColorPickerSheet.hex(of: color) != HexColorPickerSheet.hex(of: parent.color) else { return }
+            parent.color = color
+            parent.onPick(color)
+        }
+    }
+}
+#endif
