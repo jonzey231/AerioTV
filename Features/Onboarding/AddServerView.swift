@@ -316,14 +316,17 @@ struct AddServerView: View {
 
     private var dispatcharrHeroCard: some View {
         VStack(alignment: .leading, spacing: isTV ? 20 : 14) {
-            VStack(alignment: .leading, spacing: 4) {
+            // Header centered in the card, as on Android (ConnectServerParts DispatcharrHeroCard).
+            VStack(alignment: .center, spacing: 4) {
                 Text("Dispatcharr")
                     .scaledFont(isTV ? .system(size: 32, weight: .bold) : .headlineMedium)
                     .foregroundColor(.textPrimary)
                 Text("Your own server, and everything AerioTV can do.")
                     .scaledFont(isTV ? .system(size: 22).subtext() : .bodySmall.subtext())
                     .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
             }
+            .frame(maxWidth: .infinity)
 
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), spacing: isTV ? 14 : (isPad ? 6 : 8), alignment: .top),
