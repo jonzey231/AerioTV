@@ -793,6 +793,82 @@ private struct SearchProgramThumb: View {
 
 // MARK: - Live TV search: Programs section
 
+/// Program art by the same chain and calls Program Info uses (Logan
+/// 2026-11-05: cards showed the channel logo while Program Info showed the
+/// program image): the feed icon, replaced by the Dispatcharr program
+/// detail poster when it has one, then TMDB by title only when neither
+/// gave art and the opt-in is on. Results are memoized per airing.
+@MainActor
+enum ProgramArtResolver {
+    private static var cache: [String: URL?] = [:]
+    private static var inFlight: [String: Task<URL?, Never>] = [:]
+
+    static func resolve(_ target: ProgramInfoTarget) async -> URL? {
+        let key = target.id
+        if let hit = cache[key] { return hit }
+        if let t = inFlight[key] { return await t.value }
+        let t = Task { @MainActor in await load(target) }
+        inFlight[key] = t
+        let url = await t.value
+        inFlight[key] = nil
+        cache[key] = url
+        return url
+    }
+
+    private static func feedArt(_ target: ProgramInfoTarget) -> URL? {
+        guard let raw = target.posterURLString?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        if let direct = URL(string: raw), direct.scheme != nil { return direct }
+        guard let base = ChannelStore.shared.activeServer?.effectiveBaseURL, !base.isEmpty else { return nil }
+        return VODService.resolveImageURL(raw, base: base, size: "w500")
+    }
+
+    private static func load(_ target: ProgramInfoTarget) async -> URL? {
+        let feed = feedArt(target)
+        var allowsTMDB = false
+        detail: do {
+            guard let pid = target.programID,
+                  let server = ChannelStore.shared.activeServer,
+                  server.type == .dispatcharrAPI else { allowsTMDB = true; break detail }
+            let baseURL = server.effectiveBaseURL
+            let apiKey = server.effectiveApiKey
+            guard !baseURL.isEmpty, !apiKey.isEmpty else { break detail }
+            let api = DispatcharrAPI(baseURL: baseURL,
+                                     auth: .apiKey(apiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode,
+                                     serverID: server.id,
+                                     savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                         ? server.username : nil)
+            let channelID = target.channelID
+                ?? ChannelStore.shared.channels.first { $0.name == target.channelName }?.id
+            let outcome = await DispatcharrProgramDetailResolver.load(
+                api: api, programID: pid, start: target.start, channelID: channelID, title: target.title)
+            guard case .found(let loaded, let rawPoster) = outcome else { break detail }
+            if loaded == nil, let raw = rawPoster,
+               let u = VODService.resolveImageURL(raw, base: baseURL, size: "w500") {
+                debugLog("[SEARCH] card art: detail")
+                return u
+            }
+            allowsTMDB = rawPoster == nil
+            if let raw = loaded?.bestPosterString,
+               let u = VODService.resolveImageURL(raw, base: baseURL, size: "w500") {
+                debugLog("[SEARCH] card art: detail")
+                return u
+            }
+        }
+        if let feed {
+            debugLog("[SEARCH] card art: feed")
+            return feed
+        }
+        guard allowsTMDB, TMDBPosters.isEnabled, let key = TMDBPosters.apiKey,
+              !target.title.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let url = await TMDBService.posterURL(forTitle: target.title, apiKey: key)
+        if url != nil { debugLog("[SEARCH] card art: tmdb") }
+        return url
+    }
+}
+
 extension LiveProgramHit {
     /// Program Info target for this row, from the full guide entry when the
     /// guide store still holds it (badges, art, program id), else the bare
@@ -905,32 +981,13 @@ private struct LiveProgramHitRow: View {
     private var thumb: CGFloat { isWide ? 20 : 16 }
     #endif
 
-    private var feedArt: URL? {
-        guard let raw = hit.program.posterURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty else { return nil }
-        if let direct = URL(string: raw), direct.scheme != nil {
-            // Same rule as Program Info: an absolute feed icon is used as is.
-            return direct
-        }
-        guard let base = ChannelStore.shared.activeServer?.effectiveBaseURL, !base.isEmpty else { return nil }
-        return VODService.resolveImageURL(raw, base: base, size: "w500")
-    }
-
-    private var artURL: URL? {
-        if let feedArt { return feedArt }
-        #if os(tvOS)
-        if let held = GuidePreviewArtCache.shared.cachedArt(title: hit.program.title, programID: nil) {
-            return held
-        }
-        #endif
-        return nil
-    }
+    @State private var resolvedArt: URL?
 
     var body: some View {
         let now = Date()
         let fmt = ClockFormat.short()
         let when = LiveProgramHit.whenText(hit.program, now: now, time: { fmt.string(from: $0) })
-        let art = artFailed ? nil : artURL
+        let art = artFailed ? nil : resolvedArt
         let artWidth = cardHeight * 1.4
         Button(action: onTap) {
             HStack(spacing: 12) {
@@ -1009,6 +1066,9 @@ private struct LiveProgramHitRow: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(Rectangle())
+        }
+        .task(id: hit.id) {
+            resolvedArt = await ProgramArtResolver.resolve(hit.infoTarget(channelName: channel?.name ?? ""))
         }
         #if os(tvOS)
         .buttonStyle(TVNoHighlightButtonStyle())

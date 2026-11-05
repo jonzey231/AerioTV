@@ -276,7 +276,11 @@ struct ProgramInfoView: View {
             showRecordSheet = true
         } label: {
             Label("Record", systemImage: "record.circle")
+                .labelStyle(.titleAndIcon)
         }
+        #if os(iOS)
+        .buttonStyle(.bordered)
+        #endif
     }
     // The loaded bitmap's aspect no longer drives the layout: art goes into
     // the height-locked ProgramArtSlot shared with the guide preview
