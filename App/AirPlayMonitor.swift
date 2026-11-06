@@ -409,6 +409,7 @@ final class AirPlayMonitor: ObservableObject {
         debugLog("[AVP-AIRPLAY] headless tune fell back (\(reason)): showing the player on this device")
         NowPlayingManager.shared.expand()
         evaluate()
+        NotificationCenter.default.post(name: .aerioAirPlayHeadlessTuneWentLocal, object: nil)
     }
 
     func togglePlayPause() {
@@ -714,6 +715,7 @@ final class AirPlayMonitor: ObservableObject {
                 // it dropped mid-handoff): the phone was still playing.
                 debugLog("[Cast] card hide (AirPlay route lost before handoff); playback continues on this device")
                 setPhase(.none)
+                NotificationCenter.default.post(name: .aerioAirPlayHeadlessTuneWentLocal, object: nil)
             case .idleRoute:
                 debugLog("[Cast] card hide (AirPlay idle route)")
                 setPhase(.none)
@@ -792,6 +794,11 @@ extension Notification.Name {
     /// The user re-picked an AirPlay route after ending AirPlay (the latch
     /// cleared with no route change): a tile playing locally hands over.
     static let aerioAirPlayRoutePicked = Notification.Name("aerioAirPlayRoutePicked")
+    /// A headless AirPlay tune is now playing on this device (the route
+    /// was lost before the handoff, or the handoff fell back): a tile
+    /// whose remuxer carries HEVC in TS for the receiver retunes, since
+    /// that copy has no picture the phone can render.
+    static let aerioAirPlayHeadlessTuneWentLocal = Notification.Name("aerioAirPlayHeadlessTuneWentLocal")
 }
 
 /// Shared AVRoutePickerView delegate: a closed picker with an AirPlay output

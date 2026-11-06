@@ -757,7 +757,11 @@ final class AirPlayTileDelivery {
                 guard token == myToken else { return .unavailable }
                 if ok {
                     let began = Date()
-                    while remuxer.lanTranscodeReadySegments() < Self.transcodeReadySegments,
+                    // Stage runs from the PMT, so the copies are normally
+                    // done before the publication wait ends; wait only
+                    // for what the playlist would list.
+                    let need = min(Self.transcodeReadySegments, max(1, remuxer.lanPublishedState().segments))
+                    while remuxer.lanTranscodeReadySegments() < need,
                           Date().timeIntervalSince(began) < Self.transcodeReadyTimeout,
                           remuxer.lanTranscodeFailure == nil {
                         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -1359,6 +1363,7 @@ final class AirPlayTileDelivery {
         if state != .idle, logEnd {
             debugLog("[AVP-AIRPLAY] tile \(channelName): AirPlay delivery released with the pipeline")
         }
+        if hevcArm == .h264Transcode { remuxer?.setLANVideoTranscode(false) { _ in } }
         let wasServing = state == .serving
         if state != .idle { teardownLAN() }
         state = .idle

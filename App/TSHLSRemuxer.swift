@@ -2359,6 +2359,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             hevcInTS = true
             airPlayLock.lock(); hevcInTSShared = true; airPlayLock.unlock()
             debugLog("[TS-REMUX] PMT: HEVC video PID \(video.pid) -> TS arm for the AirPlay receiver (\(hevcArm.label))")
+            // The transcode runs from the first segment, in parallel with
+            // the handover's publication wait (iPhone 2026-11-06 16:58:
+            // started after that wait, it fed 12 s of ring at once, the
+            // encoder dropped 168 frames, and the copies added 2 s to a
+            // 9 s handover).
+            if hevcArm == .h264Transcode { startLANTranscodeStage(prefillSegments: 0) }
         } else if video.type != 0x1B {
             fail(.unsupportedCodec("MPEG-2 video"))
             return
@@ -3840,23 +3846,32 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 finish(false)
                 return
             }
-            let q = self.queue
-            let stage = TSLANTranscodeStage(
-                log: { debugLog($0) },
-                factory: { info, spec, keyTicks, sink, deliver in
-                    CastVideoTranscoder(source: info, spec: spec, targetKeyTicks: keyTicks,
-                                        sink: sink, deliver: deliver, log: { debugLog("[TS-REMUX] \($0)") })
-                },
-                deliver: { work in q.async(execute: work) })
-            self.lanTranscodeStage = stage
-            self.hevcArm = .h264Transcode
-            // The receiver restarts at the playlist's default point (three
-            // target durations back): the newest six segments cover it.
-            let tail = self.segments.suffix(6)
-            for seg in tail { stage.ingest(seq: seg.seq, segment: seg.data, videoPID: self.videoPID) }
-            debugLog("[TS-REMUX] LAN transcode: stage up from seg \(tail.first?.seq ?? self.nextSeq), \(tail.count) ring segments queued; LAN playlist lists completed copies only")
+            // Mid-session fallback: the receiver restarts at the playlist's
+            // default point (three target durations back); four segments
+            // (8 s) cover it and stay under the encoder's 11 s backlog cap.
+            self.startLANTranscodeStage(prefillSegments: 4)
             finish(true)
         }
+    }
+
+    /// Runs on `queue`. Builds the transcode stage and feeds it the
+    /// newest `prefillSegments` ring segments (0 at PMT time: nothing is
+    /// closed yet and storeSegment feeds every segment as it closes).
+    private func startLANTranscodeStage(prefillSegments: Int) {
+        guard lanTranscodeStage == nil, videoPID >= 0 else { return }
+        let q = queue
+        let stage = TSLANTranscodeStage(
+            log: { debugLog($0) },
+            factory: { info, spec, keyTicks, sink, deliver in
+                CastVideoTranscoder(source: info, spec: spec, targetKeyTicks: keyTicks,
+                                    sink: sink, deliver: deliver, log: { debugLog("[TS-REMUX] \($0)") })
+            },
+            deliver: { work in q.async(execute: work) })
+        lanTranscodeStage = stage
+        hevcArm = .h264Transcode
+        let tail = segments.suffix(prefillSegments)
+        for seg in tail { stage.ingest(seq: seg.seq, segment: seg.data, videoPID: videoPID) }
+        debugLog("[TS-REMUX] LAN transcode: stage up from seg \(tail.first?.seq ?? nextSeq), \(tail.count) ring segments queued; LAN playlist lists completed copies only")
     }
 
     /// Ring segments the transcode arm can serve right now (0 when off).
@@ -6493,6 +6508,22 @@ struct AVPlayerMultiviewTile: View {
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.willEnterForegroundNotification)) { _ in
             if !resumeFromBackgroundGrace() { resumeFromBackground() }
+        }
+        // The AirPlay tune went local before the receiver took it (iPhone
+        // 2026-11-06 16:52:58): a remuxer carrying HEVC in TS for the
+        // receiver has no picture this device can render, so retune on
+        // the loopback path (the fMP4 arm).
+        .onReceive(NotificationCenter.default.publisher(
+            for: .aerioAirPlayHeadlessTuneWentLocal)) { _ in
+            guard let mux = remuxer, mux.isHEVCInTS, !isVOD, !isDVR else { return }
+            debugLog("[AVP-MV] AirPlay tune went local on the HEVC TS arm; retuning for this device channel=\(channelName)")
+            stop()
+            statusText = "Retrying..."
+            let token = teardownToken
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                guard token == teardownToken else { return }
+                start()
+            }
         }
         // PiP closed while still backgrounded: suspension follows with no
         // further lifecycle callback, so quiesce right here.
