@@ -4058,5 +4058,152 @@ runHDRSignalingChecks()
 
 runMultiviewCompositeChecks()
 
+// MARK: 17. AirPlay HEVC delivery to a non-Apple receiver (2026-11-06)
+//
+// Arm selection (Apple keeps fMP4; a non-Apple receiver takes HEVC in TS
+// first and the H.264 transcode after a rejection, remembered per
+// model), the PMT retype, HEVC access-unit demux out of TS, and one
+// synthetic segment with its HEVC video replaced by H.264 frames.
+
+/// HEVC video 0x100 (PCR), AC-3 0x101.
+func syntheticHEVCPMT() -> [UInt8] {
+    var s: [UInt8] = [0x02, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00]
+    s += [0x24, 0xE1, 0x00, 0xF0, 0x00]
+    s += [0x81, 0xE1, 0x01, 0xF0, 0x00]
+    return psiPacket(pid: 0x1000, section: s)
+}
+
+@MainActor func runHEVCDeliveryChecks() {
+    // Arm selection.
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .apple, remembered: nil).arm, .fmp4, "hevc arm: Apple -> fMP4")
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .apple, remembered: .h264Transcode).arm, .fmp4, "hevc arm: Apple ignores the memory")
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .unknown, remembered: nil).arm, .fmp4, "hevc arm: unknown model -> fMP4")
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .nonApple, remembered: nil).arm, .hevcTS, "hevc arm: non-Apple first try -> HEVC in TS")
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .nonApple, remembered: .hevcTS).arm, .hevcTS, "hevc arm: remembered TS -> TS")
+    expectEq(AirPlayHEVCArmSelection.select(receiver: .nonApple, remembered: .h264Transcode).arm, .h264Transcode, "hevc arm: remembered rejection -> transcode")
+    expectEq(AirPlayHEVCArmSelection.next(after: .hevcTS), .h264Transcode, "hevc arm: TS rejected -> transcode")
+    expectEq(AirPlayHEVCArmSelection.next(after: .h264Transcode), nil, "hevc arm: transcode rejected -> nothing left")
+    expectEq(AirPlayHEVCArmSelection.next(after: .fmp4), nil, "hevc arm: fMP4 has no fallback")
+
+    // PMT retype: 0x24 -> 0x1B, CRC valid, PCR PID untouched.
+    let pmt = syntheticHEVCPMT()
+    guard let retyped = TSLANVideoReplacer.retypeVideo(pmt: pmt, videoPID: 0x100, type: 0x1B),
+          let info = TSLANAudioRewriter.parsePMT(retyped) else {
+        expect(false, "hevc pmt: retype produced a parsable PMT"); return
+    }
+    expectEq(Int(info.videoType), 0x1B, "hevc pmt: video entry retyped to H.264")
+    expectEq(info.videoPID, 0x100, "hevc pmt: video PID kept")
+    expectEq(info.pcrPID, 0x100, "hevc pmt: PCR PID kept")
+    let s = 5, len = (Int(retyped[s + 1] & 0x0F) << 8) | Int(retyped[s + 2]), end = s + 3 + len - 4
+    let crc = TSLANAudioRewriter.crc32MPEG(Array(retyped[s..<end]))
+    let stored = (UInt32(retyped[end]) << 24) | (UInt32(retyped[end + 1]) << 16) | (UInt32(retyped[end + 2]) << 8) | UInt32(retyped[end + 3])
+    expectEq(crc, stored, "hevc pmt: CRC recomputed")
+    expect(TSLANVideoReplacer.retypeVideo(pmt: pmt, videoPID: 0x300, type: 0x1B) == nil, "hevc pmt: unknown PID refused")
+
+    // HEVC access units out of TS: VPS/SPS/PPS harvested, IRAP flagged,
+    // parameter sets and AUD dropped from the sample.
+    let vps: [UInt8] = [0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF]
+    let sps: [UInt8] = [0x42, 0x01, 0x01, 0x01, 0x60, 0x00]
+    let pps: [UInt8] = [0x44, 0x01, 0xC0, 0xF2]
+    let idr: [UInt8] = [0x26, 0x01, 0xAF, 0x10, 0x20, 0x30]     // type 19 IDR_W_RADL
+    let trail: [UInt8] = [0x02, 0x01, 0xD0, 0x11]               // type 1 TRAIL_R
+    let aud: [UInt8] = [0x46, 0x01, 0x50]                       // type 35
+    let sc: [UInt8] = [0, 0, 0, 1]
+    let au0 = sc + aud + sc + vps + sc + sps + sc + pps + sc + idr
+    let au1 = sc + aud + sc + trail
+    // Video PES with the last packet closed by adaptation stuffing, as a
+    // real mux does (the audio fixtures rely on the syncframe length).
+    func videoPackets(pid: Int, pes: [UInt8]) -> [[UInt8]] {
+        var out: [[UInt8]] = []
+        var o = 0
+        var cc: UInt8 = 0
+        while o < pes.count {
+            let remaining = pes.count - o
+            if remaining >= 184 {
+                out.append(tsPacket(pid: pid, pusi: o == 0, cc: cc, payload: Array(pes[o..<(o + 184)])))
+                o += 184
+            } else {
+                let afLen = 184 - remaining - 1
+                var p: [UInt8] = [0x47, UInt8((o == 0 ? 0x40 : 0) | (pid >> 8)), UInt8(pid & 0xFF), 0x30 | cc, UInt8(afLen)]
+                if afLen > 0 { p.append(0x00); p += [UInt8](repeating: 0xFF, count: afLen - 1) }
+                p += pes[o...]
+                precondition(p.count == 188)
+                out.append(p)
+                o = pes.count
+            }
+            cc = (cc + 1) & 0x0F
+        }
+        return out
+    }
+    let v0 = videoPackets(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 90_000, payload: au0))
+    let v1 = videoPackets(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 93_003, payload: au1))
+    let a0 = packetsFor(pid: 0x101, pes: pesBytes(streamID: 0xBD, pts: 91_000, payload: ac3Frame()))
+    var segment: [UInt8] = syntheticPAT() + pmt
+    for p in v0 { segment += p }
+    for p in a0 { segment += p }
+    for p in v1 { segment += p }
+    let demux = TSHEVCAccessUnitDemuxer()
+    var aus = demux.demux(segment, videoPID: 0x100)
+    if let last = demux.finish() { aus.append(last) }
+    expectEq(aus.count, 2, "hevc demux: two access units")
+    expect(demux.hasParameterSets, "hevc demux: VPS/SPS/PPS harvested")
+    expectEq(demux.sps, sps, "hevc demux: SPS bytes")
+    if aus.count == 2 {
+        expect(aus[0].keyframe && !aus[1].keyframe, "hevc demux: IRAP flagged, TRAIL not")
+        expectEq(aus[0].pts33, 90_000, "hevc demux: PTS")
+        expectEq(aus[0].sample, [0, 0, 0, UInt8(idr.count)] + idr, "hevc demux: sample is the slice only, 4-byte length")
+        expectEq(aus[0].parameterSets, [vps, sps, pps], "hevc demux: parameter sets in force")
+    }
+
+    // Video replacement: original HEVC packets gone, PMT says H.264, two
+    // H.264 PES on the video PID with PCR, audio untouched and in order.
+    let h264SPS: [UInt8] = [0x67, 0x64, 0x00, 0x29, 0xAC]
+    let h264PPS: [UInt8] = [0x68, 0xEB, 0xE3, 0xCB]
+    let slice: [UInt8] = [0x65, 0x88, 0x84, 0x00, 0x11]
+    let f0 = TSLANVideoReplacer.Frame(accessUnit: TSLANVideoReplacer.annexB(lengthPrefixed: [0, 0, 0, 5] + slice, keyframe: true, sps: [h264SPS], pps: [h264PPS]), pts: 90_000, keyframe: true)
+    let f1 = TSLANVideoReplacer.Frame(accessUnit: TSLANVideoReplacer.annexB(lengthPrefixed: [0, 0, 0, 5] + slice, keyframe: false, sps: [h264SPS], pps: [h264PPS]), pts: 93_003, keyframe: false)
+    expect(f0.accessUnit.starts(with: [0, 0, 0, 1, 0x09, 0xF0, 0, 0, 0, 1, 0x67]), "hevc replace: keyframe AU opens AUD then SPS")
+    expect(!f1.accessUnit.contains(0x67), "hevc replace: non-keyframe AU carries no SPS")
+    var cc: UInt8 = 0
+    guard let out = TSLANVideoReplacer.replace(segment: segment, videoPID: 0x100, frames: [f1, f0], cc: &cc) else {
+        expect(false, "hevc replace: produced a segment"); return
+    }
+    expectEq(out.count % 188, 0, "hevc replace: whole packets")
+    var videoPES: [Int64] = []
+    var audioPTS: Int64 = -1
+    var videoBeforeAudio = false
+    var pmtOut: [UInt8]?
+    var i = 0
+    while i + 188 <= out.count {
+        let p = Array(out[i..<(i + 188)])
+        let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
+        if pid == 0x1000 { pmtOut = p }
+        if pid == 0x100, p[1] & 0x40 != 0 {
+            if let pts = TSLANAudioRewriter.pesPTS(p) { videoPES.append(pts) }
+            expect(TSCardVideoMuxer.decodePCR(p) != nil, "hevc replace: video PES start carries a PCR")
+            if audioPTS < 0 { videoBeforeAudio = true }
+        }
+        if pid == 0x101, p[1] & 0x40 != 0, let pts = TSLANAudioRewriter.pesPTS(p) { audioPTS = pts }
+        i += 188
+    }
+    expectEq(videoPES, [90_000, 93_003], "hevc replace: two H.264 PES in PTS order")
+    expect(videoBeforeAudio, "hevc replace: the first frame precedes the audio PES it leads")
+    expectEq(audioPTS, 91_000, "hevc replace: audio PES untouched")
+    expectEq(pmtOut.flatMap(TSLANAudioRewriter.parsePMT)?.videoType, 0x1B, "hevc replace: PMT retyped")
+    expect(cc > 0, "hevc replace: continuity counter advanced")
+    expect(!out.contains(where: { _ in false }), "hevc replace: sanity")
+    // The original HEVC slice bytes must be gone.
+    func contains(_ hay: [UInt8], _ needle: [UInt8]) -> Bool {
+        guard hay.count >= needle.count else { return false }
+        for o in 0...(hay.count - needle.count) where Array(hay[o..<(o + needle.count)]) == needle { return true }
+        return false
+    }
+    expect(!contains(out, idr), "hevc replace: original HEVC IDR dropped")
+    expect(contains(out, h264SPS), "hevc replace: H.264 SPS present")
+}
+
+runHEVCDeliveryChecks()
+
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

@@ -1223,6 +1223,16 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var pending = Data()
     private var pmtPID = -1
     private var videoPID = -1
+    /// AirPlay HEVC delivery for this session (set by the tile before the
+    /// PMT; `.fmp4` is the loopback / Apple path). Touched on `queue`
+    /// after `setHEVCArm`.
+    private var hevcArm: AirPlayHEVCArm = .fmp4
+    /// The TS arm carries HEVC (stream_type 0x24) for an AirPlay receiver.
+    private var hevcInTS = false
+    private var hevcInTSShared = false
+    /// H.264 transcode of the LAN copy (AirPlay, non-Apple receiver that
+    /// rejected HEVC in TS). Touched on `queue`.
+    private var lanTranscodeStage: TSLANTranscodeStage?
     private var patPacket: Data?
     private var pmtPacket: Data?
     private var codecGatePassed = false
@@ -1938,7 +1948,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     // source: anything earlier references parameter sets
                     // the decoder has not seen and renders as garbage.
                     let nals = leadingNALTypes(p, limit: 16)
-                    if isKeyframe, nals.contains(7) {
+                    if isKeyframe, nals.contains(hevcInTS ? 33 : 7) {
                         awaitingSwitchKeyframe = false
                         awaitingFirstKeyframe = false
                         setRegatingShared(false)
@@ -2327,7 +2337,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // The codec gate, per Apple's HLS authoring rules. H.264 stays on
         // the TS passthrough below; HEVC switches to the fMP4 arm (rule
         // 1.5); MPEG-2 has no decoder on this platform at all.
-        if video.type == 0x24 {
+        if video.type == 0x24, hevcArm == .fmp4 {
             if nextSeq > 0 {
                 // A TS playlist cannot turn into an fMP4 one mid-stream.
                 // Report it and let the tile's failure handling decide.
@@ -2338,7 +2348,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             startFMP4Pipeline()
             return
         }
-        if video.type != 0x1B {
+        if video.type == 0x24 {
+            // AirPlay to a non-Apple receiver (Logan 2026-11-06): HEVC
+            // stays in muxed TS on this arm. The phone's own AVPlayer
+            // cannot render HEVC from TS segments, but the receiver
+            // fetches the LAN playlist itself and the loopback item only
+            // holds the route; the tile's watchdog knows (isHEVCInTS).
+            // The H.264 transcode arm re-muxes the LAN copy per segment
+            // (TSLANTranscodeStage) from these same TS segments.
+            hevcInTS = true
+            airPlayLock.lock(); hevcInTSShared = true; airPlayLock.unlock()
+            debugLog("[TS-REMUX] PMT: HEVC video PID \(video.pid) -> TS arm for the AirPlay receiver (\(hevcArm.label))")
+        } else if video.type != 0x1B {
             fail(.unsupportedCodec("MPEG-2 video"))
             return
         }
@@ -2353,7 +2374,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         primaryAudioType = firstAudio?.type ?? 0
         setSourceAudioStreamType(audioStreamType)
         let audioDesc = audioTypes.map { String(format: "0x%02X", $0) }.joined(separator: ",")
-        debugLog("[TS-REMUX] PMT: H.264 video PID \(videoPID), audio types [\(audioDesc)] -> codec gate PASSED")
+        debugLog("[TS-REMUX] PMT: \(hevcInTS ? "HEVC" : "H.264") video PID \(videoPID), audio types [\(audioDesc)] -> codec gate PASSED")
     }
 
     // MARK: Audio-only programs (GH #90)
@@ -2632,8 +2653,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 if p[i + 2] == 0x01 { nalStart = i + 3 }
                 else if p[i + 2] == 0x00, i + 3 < end, p[i + 3] == 0x01 { nalStart = i + 4 }
                 if nalStart > 0, nalStart < 188 {
-                    let nalType = p[nalStart] & 0x1F
-                    if nalType == 5 || nalType == 7 { return true }
+                    if hevcInTS {
+                        // IRAP (16...23) or VPS / SPS ahead of one.
+                        let t = (p[nalStart] >> 1) & 0x3F
+                        if (16...23).contains(t) || t == 32 || t == 33 { return true }
+                    } else {
+                        let nalType = p[nalStart] & 0x1F
+                        if nalType == 5 || nalType == 7 { return true }
+                    }
                     i = nalStart
                     continue
                 }
@@ -2801,7 +2828,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 if p[i + 2] == 0x01 { nalStart = i + 3 }
                 else if p[i + 2] == 0x00, i + 3 < end, p[i + 3] == 0x01 { nalStart = i + 4 }
                 if nalStart > 0, nalStart < 188 {
-                    out.append(Int(p[nalStart] & 0x1F))
+                    out.append(hevcInTS ? Int((p[nalStart] >> 1) & 0x3F) : Int(p[nalStart] & 0x1F))
                     i = nalStart
                     continue
                 }
@@ -2882,6 +2909,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
         segments.append((seq: nextSeq, data: data, duration: duration))
+        if let stage = lanTranscodeStage, videoPID >= 0 {
+            stage.ingest(seq: nextSeq, segment: data, videoPID: videoPID)
+        }
         segmentCloseWall[nextSeq] = nowWall
         // Playlist timeline: the EXTINF value as written (3 decimals), summed.
         segmentTimelineStart[nextSeq] = timelineEnd
@@ -3284,11 +3314,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // LAN (AirPlay receiver): no pacing (device log 2026-09-25 17:04:
         // the paced one-segment reservoir left the receiver no runway
         // through a feed gap); the head is the publication-delay edge.
-        let edgeCap: Int? = lan ? lanPublishedEdgeSeq(now: Date())
+        var edgeCap: Int? = lan ? lanPublishedEdgeSeq(now: Date())
             : (pacingApplies ? pacedAdvertisedSeq : nil)
+        // Transcode arm: only segments whose H.264 copy is complete, and
+        // nothing from before the stage started.
+        var floorSeq = -1
+        if lan, let stage = lanTranscodeStage {
+            edgeCap = min(edgeCap ?? Int.max, stage.highestCompleteSeq)
+            floorSeq = stage.startSeq
+        }
         func capped<T>(_ items: [T], _ seq: (T) -> Int) -> [T] {
             guard let cap = edgeCap else { return items }
-            return items.filter { seq($0) <= cap }
+            return items.filter { seq($0) <= cap && seq($0) >= floorSeq }
         }
         let window: [(seq: Int, duration: Double)] = inProcessDelivery
             ? segments.suffix(inlineWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
@@ -3766,6 +3803,76 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         return fmp4ArmShared
     }
 
+    /// True once the PMT put HEVC on the TS arm for an AirPlay receiver:
+    /// the phone's loopback item then has no renderable video, by design.
+    var isHEVCInTS: Bool {
+        airPlayLock.lock(); defer { airPlayLock.unlock() }
+        return hevcInTSShared
+    }
+
+    /// The HEVC arm the session will take at the PMT. Call before the
+    /// ingest reaches its PMT (the tile sets it at creation).
+    func setHEVCArm(_ arm: AirPlayHEVCArm) {
+        queue.async { [weak self] in
+            guard let self, self.videoPID < 0 else { return }
+            self.hevcArm = arm
+        }
+    }
+
+    /// Switch the LAN copy to the H.264 transcode arm (or off). Runs the
+    /// stage over the newest few ring segments so the receiver's next
+    /// playlist already lists complete copies. `completion` runs on main
+    /// with true when the stage is up; false when this session cannot
+    /// (not HEVC in TS, no LAN, or the stage refused).
+    func setLANVideoTranscode(_ on: Bool, completion: @escaping @MainActor (Bool) -> Void) {
+        queue.async { [weak self] in
+            func finish(_ ok: Bool) { DispatchQueue.main.async { MainActor.assumeIsolated { completion(ok) } } }
+            guard let self, !self.stopped else { finish(false); return }
+            guard on else {
+                self.lanTranscodeStage?.release()
+                self.lanTranscodeStage = nil
+                finish(false)
+                return
+            }
+            if self.lanTranscodeStage != nil { finish(true); return }
+            guard self.hevcInTS, self.lanListener != nil, self.videoPID >= 0 else {
+                debugLog("[TS-REMUX] LAN transcode: not HEVC in TS with a LAN listener; refused")
+                finish(false)
+                return
+            }
+            let q = self.queue
+            let stage = TSLANTranscodeStage(
+                log: { debugLog($0) },
+                factory: { info, spec, keyTicks, sink, deliver in
+                    CastVideoTranscoder(source: info, spec: spec, targetKeyTicks: keyTicks,
+                                        sink: sink, deliver: deliver, log: { debugLog("[TS-REMUX] \($0)") })
+                },
+                deliver: { work in q.async(execute: work) })
+            self.lanTranscodeStage = stage
+            self.hevcArm = .h264Transcode
+            // The receiver restarts at the playlist's default point (three
+            // target durations back): the newest six segments cover it.
+            let tail = self.segments.suffix(6)
+            for seg in tail { stage.ingest(seq: seg.seq, segment: seg.data, videoPID: self.videoPID) }
+            debugLog("[TS-REMUX] LAN transcode: stage up from seg \(tail.first?.seq ?? self.nextSeq), \(tail.count) ring segments queued; LAN playlist lists completed copies only")
+            finish(true)
+        }
+    }
+
+    /// Ring segments the transcode arm can serve right now (0 when off).
+    func lanTranscodeReadySegments() -> Int {
+        queue.sync {
+            guard let st = lanTranscodeStage else { return 0 }
+            let top = st.highestCompleteSeq
+            return segments.filter { $0.seq >= st.startSeq && $0.seq <= top }.count
+        }
+    }
+
+    /// The transcode stage's progress line (nil when off).
+    var lanTranscodeStats: String? {
+        queue.sync { lanTranscodeStage.map { "\($0.stats)\($0.failure.map { ", FAILED: \($0)" } ?? "")" } }
+    }
+
     private func setSourceAudioStreamType(_ type: UInt8) {
         airPlayLock.lock(); sourceAudioStreamTypeShared = type; airPlayLock.unlock()
     }
@@ -3885,6 +3992,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanUALogged.removeAll()
         lanPlaylistLogged.removeAll()
         lanAudioStage = nil
+        lanTranscodeStage?.release()
+        lanTranscodeStage = nil
         resetLANCardStage()
         lanCardLogged = false
         lanHoldBackSeconds = 0
@@ -4403,17 +4512,30 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 // Audio-only program: the LAN copy also carries the card
                 // picture as H.264 (after any AAC rewrite).
                 let card = (lan && self.audioOnly) ? self.lanCardStage : nil
-                if lan, let stage = self.lanAudioStage {
-                    // AAC LAN copy, produced off the remux queue so the
+                let video = lan ? self.lanTranscodeStage : nil
+                if lan, let video, !video.isComplete(seq: seq) {
+                    // Not listed by the LAN playlist yet (its edge is capped
+                    // to completed copies); a receiver asking early waits.
+                    r = ServedResource(status: 404, body: Data("transcoding".utf8), contentType: "text/plain", uti: "public.plain-text")
+                    completion(r)
+                    return
+                }
+                if lan, self.lanAudioStage != nil || video != nil {
+                    // AAC LAN copy (and the H.264 video copy on the
+                    // transcode arm), produced off the remux queue so the
                     // transcode never stalls the ingest.
-                    let sources = stage.sourcesNeeded(for: seq).compactMap { s in
+                    let stage = self.lanAudioStage
+                    let sources = (stage?.sourcesNeeded(for: seq) ?? []).compactMap { s in
                         s == seq ? (seq: s, data: data) : self.segmentData(seq: s).map { (seq: s, data: $0) }
                     }
                     let oldest = self.segments.first?.seq ?? seq
                     let discontinuities = self.discontinuitySeqs
                     DispatchQueue.global(qos: .userInitiated).async {
-                        var body = stage.produce(seq: seq, sources: sources, oldestSeq: oldest,
-                                                 discontinuities: discontinuities) ?? data
+                        var body = stage?.produce(seq: seq, sources: sources, oldestSeq: oldest,
+                                                  discontinuities: discontinuities) ?? data
+                        if let video, let replaced = video.produce(seq: seq, source: body, oldestSeq: oldest) {
+                            body = replaced
+                        }
                         if let card { body = card.produce(seq: seq, segment: body, oldestSeq: oldest) ?? body }
                         completion(ServedResource(status: 200, body: body, contentType: "video/mp2t",
                                                   uti: "public.mpeg-2-transport-stream"))
@@ -8403,6 +8525,11 @@ struct AVPlayerMultiviewTile: View {
             LivePrewarm.shared.cancel(reason: "tile started its own ingest")
             let mux = TSHLSRemuxer(sourceURL: sourceURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
+            #if os(iOS)
+            if AirPlayMonitor.shared.willServeReceiver {
+                mux.setHEVCArm(AirPlayTileDelivery.plannedHEVCArm(channelName: channelName))
+            }
+            #endif
             mux.onReady = { url in
                 // @State write only; the fresh-struct onChange handler
                 // does the actual player start (see readyLocalURL doc).
@@ -9326,7 +9453,9 @@ struct AVPlayerMultiviewTile: View {
                 ?? remuxer.map { mux in { [weak mux] in Int64(mux?.closedSegmentCount.get() ?? 0) } },
             onDead: { failOrFallback($0) })
         if let mux = remuxer {
-            watchdog.audioOnlyExpected = { [weak mux] in mux?.isAudioOnlyProgram ?? false }
+            watchdog.audioOnlyExpected = { [weak mux] in
+                (mux?.isAudioOnlyProgram ?? false) || (mux?.isHEVCInTS ?? false)
+            }
         } else if isForceHLSDirect {
             // Direct HLS has no remuxer to call a program audio-only, so an
             // audio-only provider stream (SiriusXM, AAC in TS) reached

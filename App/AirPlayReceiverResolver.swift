@@ -411,3 +411,30 @@ final class AirPlayReceiverResolver {
     }
 }
 #endif
+
+// MARK: - HEVC delivery memory (Logan 2026-11-06)
+
+/// Which LAN arm played an HEVC channel on a receiver model, remembered
+/// across launches so the next session starts on the working arm instead
+/// of re-trying the one the receiver rejected. Keyed by the TXT model
+/// (`3840R`); a receiver without a model is never remembered.
+@MainActor
+enum AirPlayHEVCArmMemory {
+    private static let defaultsKey = "airplayHEVCArm.v1"
+
+    static func remembered(model: String?) -> AirPlayHEVCArm? {
+        guard let model, !model.isEmpty,
+              let raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String],
+              let v = raw[model] else { return nil }
+        return AirPlayHEVCArm(rawValue: v)
+    }
+
+    static func remember(model: String?, arm: AirPlayHEVCArm) {
+        guard let model, !model.isEmpty else { return }
+        var raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        guard raw[model] != arm.rawValue else { return }
+        raw[model] = arm.rawValue
+        UserDefaults.standard.set(raw, forKey: defaultsKey)
+        debugLog("[AVP-AIRPLAY] HEVC delivery remembered for model \(model): \(arm.label)")
+    }
+}

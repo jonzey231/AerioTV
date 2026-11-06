@@ -177,6 +177,96 @@ final class AirPlayTileDelivery {
     /// item (`holdLocalOutputForTake`).
     private var mutedForTake = false
 
+    // MARK: HEVC delivery (Logan 2026-11-06)
+
+    /// The arm the LAN serves an HEVC program on this session; `.fmp4`
+    /// until the remuxer reports HEVC in TS.
+    private var hevcArm: AirPlayHEVCArm = .fmp4
+    /// The arm's outcome was written to the memory this session.
+    private var hevcArmRemembered = false
+    /// Media segments the receiver must fetch before an arm counts as
+    /// working.
+    static let hevcArmProofSegments = 5
+    /// Transcoded copies the reissue waits for (the receiver starts three
+    /// target durations back).
+    static let transcodeReadySegments = 3
+    static let transcodeReadyTimeout: TimeInterval = 25
+
+    /// The HEVC arm a tune opened for the current AirPlay route should
+    /// take, from the receiver class and the per-model memory. Called by
+    /// the tile at remuxer creation (before the PMT) and logged once.
+    static func plannedHEVCArm(channelName: String) -> AirPlayHEVCArm {
+        let receiver = AirPlayMonitor.shared.receiver ?? AirPlayReceiverResolver.shared.resolveNow()
+        let cls: AirPlayReceiverClass
+        if let r = receiver, r.model != nil { cls = r.isApple ? .apple : .nonApple } else { cls = .unknown }
+        let remembered = AirPlayHEVCArmMemory.remembered(model: receiver?.model)
+        let pick = AirPlayHEVCArmSelection.select(receiver: cls, remembered: remembered)
+        debugLog("[AVP-AIRPLAY] HEVC delivery plan for \(receiver?.name ?? "AirPlay") (model \(receiver?.model ?? "unknown")): \(pick.arm.label) (\(pick.reason)) channel=\(channelName)")
+        return pick.arm
+    }
+
+    /// Media segments fetched by peers other than the phone itself.
+    private static func receiverSegments(_ st: TSHLSRemuxer.LANLinkStats) -> Int {
+        st.peerRequests.reduce(0) { sum, e in e.key == st.localIP ? sum : sum + e.value.segment }
+    }
+
+    /// The receiver rejected the HEVC-in-TS copy: move the LAN to the
+    /// H.264 transcode arm, wait for its first complete copies, and
+    /// reissue the item. Ends the session when the stage cannot run.
+    private func fallBackToTranscode(reason: String) {
+        guard state == .serving, let remuxer, let player, let item = player.currentItem,
+              let url = (item.asset as? AVURLAsset)?.url else { return }
+        guard let next = AirPlayHEVCArmSelection.next(after: hevcArm) else {
+            endReceiverSession("receiver rejected \(hevcArm.label) (\(reason)); nothing left to try")
+            return
+        }
+        debugLog("[AVP-AIRPLAY] receiver rejected \(hevcArm.label) (\(reason)): switching the LAN copy to \(next.label)")
+        AirPlayHEVCArmMemory.remember(model: receiver?.model, arm: next)
+        hevcArm = next
+        hevcArmRemembered = true
+        let myToken = token
+        lanReloadUsed = true
+        Task { @MainActor in
+            let ok = await withCheckedContinuation { cont in
+                remuxer.setLANVideoTranscode(true) { cont.resume(returning: $0) }
+            }
+            guard self.token == myToken, self.state == .serving else { return }
+            guard ok else {
+                self.endReceiverSession("H.264 transcode stage could not start (\(remuxer.lanTranscodeStats ?? "no stage"))")
+                return
+            }
+            let began = Date()
+            var ready = remuxer.lanTranscodeReadySegments()
+            while ready < Self.transcodeReadySegments, Date().timeIntervalSince(began) < Self.transcodeReadyTimeout {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard self.token == myToken, self.state == .serving else { return }
+                ready = remuxer.lanTranscodeReadySegments()
+            }
+            debugLog(String(format: "[AVP-AIRPLAY] H.264 transcode: %d copies ready after %.1f s (%@); reissuing the LAN item",
+                            ready, Date().timeIntervalSince(began), remuxer.lanTranscodeStats ?? "-"))
+            guard let player = self.player else { return }
+            remuxer.resetLANReceiverTimeBase()
+            let fresh = self.makeLANItem(url: url, copying: item)
+            player.replaceCurrentItem(with: fresh)
+            self.observeLANItem(fresh)
+            player.play()
+            self.parkLastSegmentAt = Date()
+            let st = remuxer.lanLinkStats
+            self.parkLastSegments = st.servedSegmentRequests
+            self.parkBaselinePlaylists = st.servedPlaylistRequests
+        }
+    }
+
+    /// Writes the arm's outcome once the receiver has fetched enough
+    /// media segments of it.
+    private func noteHEVCArmProof(_ st: TSHLSRemuxer.LANLinkStats) {
+        guard !hevcArmRemembered, hevcArm != .fmp4,
+              Self.receiverSegments(st) >= Self.hevcArmProofSegments else { return }
+        hevcArmRemembered = true
+        debugLog("[AVP-AIRPLAY] receiver fetched \(Self.receiverSegments(st)) segments of \(hevcArm.label): arm proven")
+        AirPlayHEVCArmMemory.remember(model: receiver?.model, arm: hevcArm)
+    }
+
     /// Fresh tune: `play()` on the LAN item renders on this device until
     /// AVPlayer goes external (the fullscreen player is hidden by the
     /// headless tune, but the audio still plays through the current route).
@@ -543,6 +633,10 @@ final class AirPlayTileDelivery {
                     + "(HEVC fMP4 arm: init.mp4 + .m4s; this receiver class plays muxed TS only)")
                 return
             }
+            if hevcArm != .fmp4, receiverSegments < Self.hevcArmProofSegments {
+                fallBackToTranscode(reason: "quit after \(receiverSegments) media segment(s)")
+                return
+            }
         }
         lastUnderrunReissue = now
         let segs = remuxer?.lanLinkStats.reservoirSegments ?? 0
@@ -564,6 +658,10 @@ final class AirPlayTileDelivery {
         // same answer while the phone plays headless (device log 2026-09-26
         // 11:08). Stop now; the phone never carries on alone.
         if state == .serving, let code = receiverRejection {
+            if hevcArm != .fmp4, AirPlayHEVCArmSelection.next(after: hevcArm) != nil {
+                fallBackToTranscode(reason: "AVError -11870, receiver code \(code)")
+                return
+            }
             endReceiverSession("receiver rejected the asset (AVError -11870, receiver code \(code)): \(reason)")
             return
         }
@@ -618,6 +716,13 @@ final class AirPlayTileDelivery {
                 + "LAN serves init.mp4 + .m4s with \(codec == "unknown" ? "source" : codec) audio passthrough "
                 + "(the AAC rewrite is TS only); non-Apple receivers are verified with muxed TS only")
         }
+        hevcArm = .fmp4
+        hevcArmRemembered = false
+        if remuxer.isHEVCInTS {
+            let remembered = AirPlayHEVCArmMemory.remembered(model: receiver.model)
+            hevcArm = remembered == .h264Transcode ? .h264Transcode : .hevcTS
+            debugLog("[AVP-AIRPLAY] HEVC in TS for \(receiver.name): LAN arm \(hevcArm.label), audio plan \(plan == .aacStereo ? "AAC-LC stereo rewrite" : "passthrough (\(codec))")")
+        }
         let aac = await setLANAudio(remuxer: remuxer, aac: plan == .aacStereo)
         guard token == myToken else { return .unavailable }
         if plan == .aacStereo, !aac {
@@ -633,6 +738,28 @@ final class AirPlayTileDelivery {
             lanEndpoint = (ip, port)
             await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
             guard token == myToken else { return .unavailable }
+            if hevcArm == .h264Transcode {
+                // Remembered rejection: the stage is up before the
+                // receiver's first playlist.
+                let ok = await withCheckedContinuation { cont in
+                    remuxer.setLANVideoTranscode(true) { cont.resume(returning: $0) }
+                }
+                guard token == myToken else { return .unavailable }
+                if ok {
+                    let began = Date()
+                    while remuxer.lanTranscodeReadySegments() < Self.transcodeReadySegments,
+                          Date().timeIntervalSince(began) < Self.transcodeReadyTimeout {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        guard token == myToken else { return .unavailable }
+                    }
+                    debugLog(String(format: "[AVP-AIRPLAY] H.264 transcode: %d copies ready after %.1f s before the handover (%@)",
+                                    remuxer.lanTranscodeReadySegments(), Date().timeIntervalSince(began),
+                                    remuxer.lanTranscodeStats ?? "-"))
+                } else {
+                    debugLog("[AVP-AIRPLAY] H.264 transcode stage refused at start; the receiver gets HEVC in TS")
+                    hevcArm = .hevcTS
+                }
+            }
             guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else { return .unavailable }
             lanURL = url
             return .ready(url)
@@ -1069,6 +1196,7 @@ final class AirPlayTileDelivery {
         checkSpliceSeek()
         checkIngestRetry(st)
         guard state == .serving else { return }
+        noteHEVCArmProof(st)
         if checkParked(st) { return }
         guard linkTicks % 10 == 0 else { return }
         let samples = linkIngestKbps
