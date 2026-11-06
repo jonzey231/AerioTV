@@ -964,11 +964,8 @@ struct HexColorPickerSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                EmbeddedColorPicker(color: $pickerColor) { picked in
-                    let hex = HexColorPickerSheet.hex(of: picked)
-                    draft = hex
-                    onChange(hex)
-                }
+                // Hex field first: it is in-process and renders with the
+                // sheet, so there is something to read and type into at once.
                 SettingsTextField("Hex Color",
                                   placeholder: "2DD4BF",
                                   text: Binding(
@@ -989,6 +986,15 @@ struct HexColorPickerSheet: View {
                           tvCommitWhen: AppearanceSettingsView.isCompleteHex)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
+                EmbeddedColorPicker(color: $pickerColor) { picked in
+                    let hex = HexColorPickerSheet.hex(of: picked)
+                    draft = hex
+                    onChange(hex)
+                }
+                // The system picker is an out-of-process view service and
+                // paints about a second after the sheet lands; a spinner
+                // holds its space so the sheet never reads as empty.
+                .background(ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity))
             }
             .background(Color.appBackground.ignoresSafeArea())
             .navigationTitle(title)

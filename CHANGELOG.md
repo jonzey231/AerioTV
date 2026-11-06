@@ -11,7 +11,7 @@
   apply as they do for the presets, and Custom Accent Color still overrides
   the matched accent. The Theme Color syncs with the Color Theme item.
 - Theme Color and Accent Color open one color sheet: the system color
-  picker (grid, spectrum, and sliders) with a Hex Color field below it. The
+  picker (grid, spectrum, and sliders) with a Hex Color field above it. The
   field fills in with the picked color, and typing six hex digits sets the
   color. Apple TV keeps the hex field in the list.
 - Live TV search finds programs across the whole loaded guide, not only
@@ -60,6 +60,9 @@
 - Appearance (iPhone and iPad): the Custom Accent Color swatch shows the
   accent in use, so with the switch off it shows the theme's accent instead
   of the stored custom color.
+- Theme Color and Accent Color sheet: the Hex Color field sits at the top
+  and appears with the sheet, so the sheet no longer opens blank while the
+  system color picker loads.
 - Apple TV mini player: the Search field and the Movies and TV Shows genre
   chips stop short of the corner mini player instead of running under it,
   and Settings stashes the mini fully off screen with no black sliver at the
