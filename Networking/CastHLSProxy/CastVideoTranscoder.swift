@@ -1419,6 +1419,16 @@ final class CastVideoTranscoder: CastVideoTranscoding, @unchecked Sendable {
         return (status, format)
     }
 
+    /// H.264 High level for an output size and rate: 4.1 up to 245760
+    /// macroblocks per second (1080p30, 720p60), 4.2 up to 522240
+    /// (1080p60), the encoder's own choice above that.
+    static func h264Level(width: Int, height: Int, fps: Double?) -> CFString {
+        let mbPerSecond = Double((width + 15) / 16 * ((height + 15) / 16)) * (fps ?? 30)
+        if mbPerSecond <= 245_760 { return kVTProfileLevel_H264_High_4_1 }
+        if mbPerSecond <= 522_240 { return kVTProfileLevel_H264_High_4_2 }
+        return kVTProfileLevel_H264_High_AutoLevel
+    }
+
     private func makeEncoder() -> Bool {
         let encoderSpec: [CFString: Any] = [
             kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
@@ -1448,7 +1458,13 @@ final class CastVideoTranscoder: CastVideoTranscoding, @unchecked Sendable {
                 Self.outputTenBit(source: source, spec: spec)
                     ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel)
         case .h264:
-            set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_4_1)
+            // The level must hold the output's macroblock rate or the
+            // session refuses to prepare (iPhone 2026-11-06 16:51:54,
+            // AirPlay 1080p59.94: kVTParameterErr -12902 at High 4.1,
+            // whose 245760 MB/s tops out at 1080p30). The Cast plans stay
+            // inside 4.1 (720p60, 1080p30); 4.2 carries 1080p60.
+            let level = Self.h264Level(width: spec.width, height: spec.height, fps: spec.outputFPS(source.fps))
+            set(kVTCompressionPropertyKey_ProfileLevel, level)
             set(kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC)
         }
         // Forced IDRs every `targetKeyTicks` set the real cadence (see the

@@ -4209,5 +4209,147 @@ func syntheticHEVCPMT() -> [UInt8] {
 runHEVCDeliveryChecks()
 
 
+// MARK: 18. AirPlay H.264 transcode stage end to end (2026-11-06 16:52)
+//
+// Three synthetic HEVC TS segments through TSLANTranscodeStage with a
+// fake transcoder that answers every access unit with an H.264 frame at
+// the same PTS. The first LAN copy must carry PAT, a PMT retyped 0x1B,
+// video PES opening on AUD + SPS + PPS + IDR with a PCR, monotonic PCRs,
+// continuous video continuity counters across the two copies, the AC-3
+// audio untouched, and no HEVC slice left.
+
+final class FakeH264Transcoder: CastVideoTranscoding {
+    let sink: CastVideoTranscodeSink
+    var sentFormat = false
+    let avcC: [UInt8]
+    init(sink: CastVideoTranscodeSink, avcC: [UInt8]) { self.sink = sink; self.avcC = avcC }
+    func feed(_ sample: [UInt8], pts: Int64, dts: Int64, keyframe: Bool, parameterSets: [[UInt8]]) {
+        if !sentFormat { sentFormat = true; sink.onFormat(.h264, avcC, 1920, 1080) }
+        sink.onSample([0, 0, 0, 5, keyframe ? 0x65 : 0x41, 0x88, 0x84, 0x00, 0x11], pts, keyframe)
+    }
+    func release() {}
+}
+
+@MainActor func runTranscodeStageChecks() {
+    let vps: [UInt8] = [0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF]
+    let sps: [UInt8] = [0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x5D, 0xA0, 0x01, 0xE0, 0x20, 0x02, 0x1C, 0x4D, 0x8D]
+    let pps: [UInt8] = [0x44, 0x01, 0xC0, 0xF2]
+    let idr: [UInt8] = [0x26, 0x01, 0xAF, 0x10, 0x20, 0x30]
+    let trail: [UInt8] = [0x02, 0x01, 0xD0, 0x11]
+    let sc: [UInt8] = [0, 0, 0, 1]
+    func videoPackets(pid: Int, pes: [UInt8], cc: inout UInt8) -> [UInt8] {
+        var out: [UInt8] = []
+        var o = 0
+        while o < pes.count {
+            let remaining = pes.count - o
+            if remaining >= 184 {
+                out += tsPacket(pid: pid, pusi: o == 0, cc: cc, payload: Array(pes[o..<(o + 184)]))
+                o += 184
+            } else {
+                let afLen = 184 - remaining - 1
+                var p: [UInt8] = [0x47, UInt8((o == 0 ? 0x40 : 0) | (pid >> 8)), UInt8(pid & 0xFF), 0x30 | cc, UInt8(afLen)]
+                if afLen > 0 { p.append(0x00); p += [UInt8](repeating: 0xFF, count: afLen - 1) }
+                p += pes[o...]
+                out += p
+                o = pes.count
+            }
+            cc = (cc + 1) & 0x0F
+        }
+        return out
+    }
+    // Segment k: 4 frames at 30 fps from pts 90000 * (k + 1), audio PES every frame.
+    var vcc: UInt8 = 0
+    func segment(_ k: Int) -> [UInt8] {
+        var seg = syntheticPAT() + syntheticHEVCPMT()
+        let base: Int64 = 90_000 * Int64(k + 1)
+        for f in 0..<4 {
+            let pts = base + Int64(f) * 3_000
+            let au = f == 0 ? sc + vps + sc + sps + sc + pps + sc + idr : sc + trail
+            seg += videoPackets(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: pts, payload: au), cc: &vcc)
+            for p in packetsFor(pid: 0x101, pes: pesBytes(streamID: 0xBD, pts: pts + 500, payload: ac3Frame())) { seg += p }
+        }
+        return seg
+    }
+    let h264SPS: [UInt8] = [0x67, 0x64, 0x00, 0x2A, 0xAC, 0x2C]
+    let h264PPS: [UInt8] = [0x68, 0xEB, 0xE3, 0xCB, 0x22, 0xC0]
+    let avcC = [UInt8](CastVideoCodecConfig.avcCPayload(sps: h264SPS, pps: h264PPS))
+    var logs: [String] = []
+    var specSeen: CastVideoOutputSpec?
+    let stage = TSLANTranscodeStage(log: { logs.append($0) },
+                                    factory: { info, spec, _, sink, _ in
+                                        specSeen = spec
+                                        _ = info
+                                        return FakeH264Transcoder(sink: sink, avcC: avcC)
+                                    },
+                                    deliver: { block in block() })
+    let segs = (0..<3).map { segment($0) }
+    for (k, seg) in segs.enumerated() { stage.ingest(seq: k, segment: Data(seg), videoPID: 0x100) }
+    expect(stage.failure == nil, "stage: no failure (\(stage.failure ?? "-"))")
+    expectEq(specSeen?.codec, .h264, "stage: H.264 output requested")
+    expectEq(stage.highestCompleteSeq, 1, "stage: segments 0 and 1 complete once segment 2's frames arrived")
+    expect(stage.isComplete(seq: 0) && !stage.isComplete(seq: 2), "stage: completion per segment")
+    guard let copy0 = stage.produce(seq: 0, source: Data(segs[0]), oldestSeq: 0),
+          let copy1 = stage.produce(seq: 1, source: Data(segs[1]), oldestSeq: 0) else {
+        expect(false, "stage: produced the first two LAN copies"); return
+    }
+    expect(stage.produce(seq: 2, source: Data(segs[2]), oldestSeq: 0) == nil, "stage: an incomplete segment is not produced")
+
+    func inspect(_ data: Data, label: String, lastCC: inout Int) -> (videoPES: Int, pcrs: [Int64]) {
+        let b = [UInt8](data)
+        expectEq(b.count % 188, 0, "\(label): whole packets")
+        var sawPAT = false, pmtType: UInt8 = 0, videoPES = 0, hevcLeft = false
+        var pcrs: [Int64] = []
+        var firstPayload: [UInt8] = []
+        var audioPES = 0
+        var i = 0
+        while i + 188 <= b.count {
+            let p = Array(b[i..<(i + 188)])
+            let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
+            if pid == 0 { sawPAT = true }
+            if pid == 0x1000, let info = TSLANAudioRewriter.parsePMT(p) { pmtType = info.videoType }
+            if pid == 0x100 {
+                let cc = Int(p[3] & 0x0F)
+                if lastCC >= 0, cc != (lastCC + 1) & 0x0F { expect(false, "\(label): video CC continuous (\(lastCC) -> \(cc))") }
+                lastCC = cc
+                if let pcr = TSCardVideoMuxer.decodePCR(p) { pcrs.append(pcr) }
+                if p[1] & 0x40 != 0 {
+                    videoPES += 1
+                    if videoPES == 1, let off = TSLANAudioRewriter.payloadOffset(p) {
+                        let pes = Array(p[off...])
+                        firstPayload = Array(pes[(9 + Int(pes[8]))...])
+                    }
+                }
+                if let payload = TSLANAudioRewriter.payload(p) {
+                    let arr = Array(payload)
+                    if arr.count >= idr.count {
+                        for o in 0...(arr.count - idr.count) where Array(arr[o..<(o + idr.count)]) == idr { hevcLeft = true }
+                    }
+                }
+            }
+            if pid == 0x101, p[1] & 0x40 != 0 { audioPES += 1 }
+            i += 188
+        }
+        expect(sawPAT, "\(label): PAT present")
+        expectEq(Int(pmtType), 0x1B, "\(label): PMT video entry is H.264")
+        expectEq(audioPES, 4, "\(label): four audio PES untouched")
+        expect(!hevcLeft, "\(label): no HEVC slice left")
+        expect(firstPayload.starts(with: sc + [0x09, 0xF0] + sc + h264SPS + sc + h264PPS + sc + [0x65]),
+               "\(label): first PES opens AUD, SPS, PPS, IDR")
+        expect(zip(pcrs, pcrs.dropFirst()).allSatisfy { $0 < $1 }, "\(label): PCR monotonic (\(pcrs.count) PCRs)")
+        return (videoPES, pcrs)
+    }
+    var cc = -1
+    let r0 = inspect(copy0, label: "copy 0", lastCC: &cc)
+    expectEq(r0.videoPES, 4, "copy 0: four H.264 frames")
+    expectEq(r0.pcrs.first, 90_000 - TSCardVideoMuxer.pcrLeadTicks, "copy 0: first PCR leads the first frame")
+    let r1 = inspect(copy1, label: "copy 1", lastCC: &cc)
+    expectEq(r1.videoPES, 4, "copy 1: four H.264 frames")
+    expect((r1.pcrs.first ?? 0) > (r0.pcrs.last ?? 0), "copies: PCR continues across segments")
+    expect(logs.contains { $0.contains("encoder ready 1920x1080") }, "stage: encoder ready logged")
+}
+
+runTranscodeStageChecks()
+
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

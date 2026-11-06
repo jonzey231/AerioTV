@@ -237,10 +237,15 @@ final class AirPlayTileDelivery {
             }
             let began = Date()
             var ready = remuxer.lanTranscodeReadySegments()
-            while ready < Self.transcodeReadySegments, Date().timeIntervalSince(began) < Self.transcodeReadyTimeout {
+            while ready < Self.transcodeReadySegments, Date().timeIntervalSince(began) < Self.transcodeReadyTimeout,
+                  remuxer.lanTranscodeFailure == nil {
                 try? await Task.sleep(nanoseconds: 250_000_000)
                 guard self.token == myToken, self.state == .serving else { return }
                 ready = remuxer.lanTranscodeReadySegments()
+            }
+            if let why = remuxer.lanTranscodeFailure {
+                self.endReceiverSession("H.264 transcode failed (\(why)); nothing left to try")
+                return
             }
             debugLog(String(format: "[AVP-AIRPLAY] H.264 transcode: %d copies ready after %.1f s (%@); reissuing the LAN item",
                             ready, Date().timeIntervalSince(began), remuxer.lanTranscodeStats ?? "-"))
@@ -753,9 +758,17 @@ final class AirPlayTileDelivery {
                 if ok {
                     let began = Date()
                     while remuxer.lanTranscodeReadySegments() < Self.transcodeReadySegments,
-                          Date().timeIntervalSince(began) < Self.transcodeReadyTimeout {
+                          Date().timeIntervalSince(began) < Self.transcodeReadyTimeout,
+                          remuxer.lanTranscodeFailure == nil {
                         try? await Task.sleep(nanoseconds: 250_000_000)
                         guard token == myToken else { return .unavailable }
+                    }
+                    if let why = remuxer.lanTranscodeFailure {
+                        // No copy will ever complete: an empty LAN playlist
+                        // only ends in -12888 at the receiver (16:52:19).
+                        debugLog("[AVP-AIRPLAY] H.264 transcode failed before the handover (\(why)); not handing over")
+                        remuxer.stopLANDelivery()
+                        return .unavailable
                     }
                     debugLog(String(format: "[AVP-AIRPLAY] H.264 transcode: %d copies ready after %.1f s before the handover (%@)",
                                     remuxer.lanTranscodeReadySegments(), Date().timeIntervalSince(began),

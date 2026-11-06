@@ -3868,6 +3868,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Why the transcode stage stopped (nil while off or healthy).
+    var lanTranscodeFailure: String? {
+        queue.sync { lanTranscodeStage?.failure }
+    }
+
     /// The transcode stage's progress line (nil when off).
     var lanTranscodeStats: String? {
         queue.sync { lanTranscodeStage.map { "\($0.stats)\($0.failure.map { ", FAILED: \($0)" } ?? "")" } }
