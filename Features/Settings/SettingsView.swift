@@ -10,7 +10,7 @@ struct SettingsView: View {
     /// radio, so the hint names it. tvOS keeps its own wording because
     /// the TV row is a single focus stop with no tappable circle.
     #if os(tvOS)
-    static let playlistFooterHint = "Select a playlist to open it; Set Active is in its Actions"
+    static let playlistFooterHint = "Select a playlist to open it, then Set Active in its Actions to make it active."
     #else
     static let playlistFooterHint = "Tap a playlist to open it, or its circle to make it active."
     #endif
