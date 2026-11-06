@@ -44,19 +44,36 @@ enum AirPlayReceiverClass: Sendable, Equatable {
 }
 
 enum AirPlayHEVCArmSelection {
+    /// HEVC in muxed TS as the first arm for a non-Apple receiver. Off:
+    /// iPhone 2026-11-06 16:43 (ESPN 2 HD, Roku 3840R) the receiver
+    /// fetched every HEVC TS segment, reported playing at 35 Mbps and
+    /// never an error, and showed audio with no picture. Segment fetches
+    /// are no proof of video on that receiver class and there is no
+    /// presentation signal over AirPlay, so non-Apple receivers go
+    /// straight to the H.264 transcode. Left as an opt-in for a receiver
+    /// class that is verified to decode HEVC from TS.
+    static let hevcTSOptIn = false
+
     /// The arm a fresh session starts on. `remembered` is the last
-    /// outcome for this receiver model (nil = none).
+    /// outcome for this receiver model (nil = none); a remembered HEVC
+    /// in TS counts only under the opt-in.
     static func select(receiver: AirPlayReceiverClass,
-                       remembered: AirPlayHEVCArm?) -> (arm: AirPlayHEVCArm, reason: String) {
+                       remembered: AirPlayHEVCArm?,
+                       hevcTS optIn: Bool = hevcTSOptIn) -> (arm: AirPlayHEVCArm, reason: String) {
         switch receiver {
         case .apple: return (.fmp4, "Apple receiver")
         case .unknown: return (.fmp4, "receiver model unknown, Apple path")
         case .nonApple:
-            switch remembered {
-            case .h264Transcode?: return (.h264Transcode, "remembered: this receiver rejected HEVC in TS")
-            case .hevcTS?: return (.hevcTS, "remembered: this receiver played HEVC in TS")
-            case .fmp4?, nil: return (.hevcTS, "non-Apple receiver, first try")
+            if optIn {
+                switch remembered {
+                case .h264Transcode?: return (.h264Transcode, "remembered: this receiver rejected HEVC in TS")
+                case .hevcTS?: return (.hevcTS, "remembered: this receiver played HEVC in TS")
+                case .fmp4?, nil: return (.hevcTS, "non-Apple receiver, HEVC in TS opt-in, first try")
+                }
             }
+            return (.h264Transcode, remembered == .h264Transcode
+                    ? "remembered: H.264 transcode for this receiver"
+                    : "non-Apple receiver: HEVC from TS shows no picture on this class, H.264 transcode")
         }
     }
 

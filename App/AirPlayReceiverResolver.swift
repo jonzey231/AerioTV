@@ -420,7 +420,9 @@ final class AirPlayReceiverResolver {
 /// (`3840R`); a receiver without a model is never remembered.
 @MainActor
 enum AirPlayHEVCArmMemory {
-    private static let defaultsKey = "airplayHEVCArm.v1"
+    /// v2: v1 entries recorded "HEVC in TS" from segment fetches alone
+    /// (2026-11-06 16:43, no picture); they are not read.
+    private static let defaultsKey = "airplayHEVCArm.v2"
 
     static func remembered(model: String?) -> AirPlayHEVCArm? {
         guard let model, !model.isEmpty,

@@ -258,9 +258,12 @@ final class AirPlayTileDelivery {
     }
 
     /// Writes the arm's outcome once the receiver has fetched enough
-    /// media segments of it.
+    /// media segments of it. Only the H.264 transcode arm is provable
+    /// this way: H.264 in TS is the format every non-Apple session was
+    /// verified on, while HEVC in TS was fetched and "played" with no
+    /// picture (2026-11-06 16:43).
     private func noteHEVCArmProof(_ st: TSHLSRemuxer.LANLinkStats) {
-        guard !hevcArmRemembered, hevcArm != .fmp4,
+        guard !hevcArmRemembered, hevcArm == .h264Transcode,
               Self.receiverSegments(st) >= Self.hevcArmProofSegments else { return }
         hevcArmRemembered = true
         debugLog("[AVP-AIRPLAY] receiver fetched \(Self.receiverSegments(st)) segments of \(hevcArm.label): arm proven")
@@ -720,8 +723,10 @@ final class AirPlayTileDelivery {
         hevcArmRemembered = false
         if remuxer.isHEVCInTS {
             let remembered = AirPlayHEVCArmMemory.remembered(model: receiver.model)
-            hevcArm = remembered == .h264Transcode ? .h264Transcode : .hevcTS
-            debugLog("[AVP-AIRPLAY] HEVC in TS for \(receiver.name): LAN arm \(hevcArm.label), audio plan \(plan == .aacStereo ? "AAC-LC stereo rewrite" : "passthrough (\(codec))")")
+            let pick = AirPlayHEVCArmSelection.select(receiver: receiver.isApple ? .apple : .nonApple,
+                                                      remembered: remembered)
+            hevcArm = pick.arm == .fmp4 ? .hevcTS : pick.arm
+            debugLog("[AVP-AIRPLAY] HEVC in TS for \(receiver.name): LAN arm \(hevcArm.label) (\(pick.reason)), audio plan \(plan == .aacStereo ? "AAC-LC stereo rewrite" : "passthrough (\(codec))")")
         }
         let aac = await setLANAudio(remuxer: remuxer, aac: plan == .aacStereo)
         guard token == myToken else { return .unavailable }
