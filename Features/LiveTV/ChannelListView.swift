@@ -221,6 +221,11 @@ struct ChannelListView: View {
     /// OUTSIDE the iOS-only `#if` because the tvOS Guide branch
     /// also references it for the same dynamic-push behavior.
     @State private var capturedNaturalTop: CGFloat = 0
+    /// Natural height of the guide's time header plus rows, reported by the
+    /// grid; and the host's height, measured on the guide column.
+    @State private var guideRowsNaturalHeight: CGFloat = 0
+    @State private var guideHostHeight: CGFloat = 0
+
 
     /// Cross-platform accessor used by the shared body content. Always
     /// returns `false` on tvOS (compact chrome is iPhone-only) so the
@@ -1723,7 +1728,8 @@ struct ChannelListView: View {
                                 // of a live preview.
                                 guideSidebarOriginalGroup = selectedGroup
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
-                            }
+                            },
+                            onNaturalHeightChange: { guideRowsNaturalHeight = $0 }
                         )
                         #if os(tvOS)
                         // Shift guide: the grid starts where the pane ends. The
@@ -1768,15 +1774,23 @@ struct ChannelListView: View {
                         // Guide view "Programs" section (Logan 2026-11-05,
                         // Android parity): with channel matches the grid
                         // keeps the top and the section sits below it.
-                        .safeAreaInset(edge: .bottom, spacing: 0) {
-                            if guideProgramsShown && !filteredChannels.isEmpty {
-                                guideProgramsPanel
-                                    .containerRelativeFrame(.vertical) { h, _ in h * 0.45 }
-                                    .background(Color.appBackground)
-                            }
+                        // The grid shrinks to its rows (Logan 2026-11-06,
+                        // iPhone "nba": two rows, then a blank area the rest
+                        // of the grid's 55 percent, then Programs), capped at
+                        // 55 percent of the host so a long match list still
+                        // leaves Programs on screen; both halves scroll.
+                        .frame(height: guideSearchGridHeight)
+                        #endif
+                        #if os(iOS)
+                        if guideProgramsShown && !filteredChannels.isEmpty {
+                            guideProgramsPanel
+                                .background(Color.appBackground)
                         }
                         #endif
                     }
+                    #if os(iOS)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { guideHostHeight = $0 }
+                    #endif
                     #if os(tvOS)
                     // While the drawer is open nothing under the scrim takes
                     // focus: Right from a row walked onto the pill row or the
@@ -3276,6 +3290,15 @@ struct ChannelListView: View {
     private var guideProgramsShown: Bool {
         let searching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending)
+    }
+
+    /// Fixed grid height while a search filters the channels and Programs
+    /// shows under it: the rows' natural height, capped at 55 percent of the
+    /// host. Nil (no fixed frame) otherwise.
+    private var guideSearchGridHeight: CGFloat? {
+        guard guideProgramsShown, !filteredChannels.isEmpty,
+              guideRowsNaturalHeight > 0, guideHostHeight > 0 else { return nil }
+        return min(guideRowsNaturalHeight, guideHostHeight * 0.55)
     }
 
     private var guideProgramsPanel: some View {
