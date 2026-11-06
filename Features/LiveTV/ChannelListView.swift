@@ -97,6 +97,9 @@ struct ChannelListView: View {
     /// Live TV search "Programs" section (both platforms, Logan 2026-11-04):
     /// title matches across the whole loaded guide, now forward.
     @State private var programHits: [LiveProgramHit] = []
+    /// The selected group's rows before the search filter, for the Guide
+    /// view's grid under the search results overlay.
+    @State private var searchBaseChannels: [ChannelDisplayItem] = []
     @State private var programHitsTruncated = false
     @State private var programHitsPending = false
     @State private var programChannelsByID: [String: ChannelDisplayItem] = [:]
@@ -221,11 +224,6 @@ struct ChannelListView: View {
     /// OUTSIDE the iOS-only `#if` because the tvOS Guide branch
     /// also references it for the same dynamic-push behavior.
     @State private var capturedNaturalTop: CGFloat = 0
-    /// Natural height of the guide's time header plus rows, reported by the
-    /// grid; and the host's height, measured on the guide column.
-    @State private var guideRowsNaturalHeight: CGFloat = 0
-    @State private var guideHostHeight: CGFloat = 0
-
 
     /// Cross-platform accessor used by the shared body content. Always
     /// returns `false` on tvOS (compact chrome is iPhone-only) so the
@@ -1712,7 +1710,7 @@ struct ChannelListView: View {
                         }
                         #endif
                         EPGGuideView(
-                            channels: filteredChannels,
+                            channels: guideChannels,
                             servers: Array(servers),
                             onSelectChannel: { item in
                                 pickChannel(item)
@@ -1728,8 +1726,7 @@ struct ChannelListView: View {
                                 // of a live preview.
                                 guideSidebarOriginalGroup = selectedGroup
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
-                            },
-                            onNaturalHeightChange: { guideRowsNaturalHeight = $0 }
+                            }
                         )
                         #if os(tvOS)
                         // Shift guide: the grid starts where the pane ends. The
@@ -1752,11 +1749,14 @@ struct ChannelListView: View {
                         // covers its empty grid.
                         .overlay {
                             #if os(iOS)
-                            if filteredChannels.isEmpty && guideProgramsShown {
-                                // No channel matches: the Programs section
-                                // takes the whole area over the mounted grid.
-                                guideProgramsPanel
-                                    .background(Color.appBackground)
+                            if liveSearchActive {
+                                // Guide view search (Logan 2026-11-06): the
+                                // results use the List view layout, channel
+                                // rows then Programs, over the mounted grid.
+                                // The grid keeps its full channel set, scroll
+                                // position and selection under the overlay,
+                                // so clearing the search shows it unchanged.
+                                guideSearchResults
                             } else if filteredChannels.isEmpty {
                                 emptyGroupNotice
                                     .background(Color.appBackground)
@@ -1770,27 +1770,8 @@ struct ChannelListView: View {
                         }
                         #if os(tvOS)
                         .focusSection()
-                        #else
-                        // Guide view "Programs" section (Logan 2026-11-05,
-                        // Android parity): with channel matches the grid
-                        // keeps the top and the section sits below it.
-                        // The grid shrinks to its rows (Logan 2026-11-06,
-                        // iPhone "nba": two rows, then a blank area the rest
-                        // of the grid's 55 percent, then Programs), capped at
-                        // 55 percent of the host so a long match list still
-                        // leaves Programs on screen; both halves scroll.
-                        .frame(height: guideSearchGridHeight)
-                        #endif
-                        #if os(iOS)
-                        if guideProgramsShown && !filteredChannels.isEmpty {
-                            guideProgramsPanel
-                                .background(Color.appBackground)
-                        }
                         #endif
                     }
-                    #if os(iOS)
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { guideHostHeight = $0 }
-                    #endif
                     #if os(tvOS)
                     // While the drawer is open nothing under the scrim takes
                     // focus: Right from a row walked onto the pill row or the
@@ -2273,49 +2254,7 @@ struct ChannelListView: View {
             ScrollViewReader { listProxy in
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
-                    // Re-tap-the-tab anchor (zero height, so it changes
-                    // nothing about the layout): the list has no header row
-                    // that is guaranteed to exist, and the first channel row
-                    // sits below the group chrome.
-                    Color.clear.frame(height: 0).id("list.top")
-                    // GH #72: an empty group is a legitimate state (a provider
-                    // group the upstream has not populated yet), not an error,
-                    // so it gets a notice with a way out rather than a blank list.
-                    let searching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    if filteredChannels.isEmpty && !(searching && (!programHits.isEmpty || programHitsPending)) {
-                        emptyGroupNotice
-                            .frame(minHeight: 320)
-                    } else if searching && !filteredChannels.isEmpty {
-                        LiveSearchSectionHeader(title: LiveSearchCopy.channelsHeader)
-                            .padding(.horizontal, sizeClass == .regular ? 24 : 16)
-                    }
-                    // Key rows by the unique stream URL, not the channel id,
-                    // so a provider that reuses one tvg-id across distinct
-                    // channels can't produce duplicate SwiftUI identities.
-                    ForEach(filteredChannels, id: \.rowKey) { item in
-                        ChannelRow(
-                            item: item,
-                            onTap: { pickChannel(item) },
-                            fetchUpcoming: makeFetchUpcoming(for: item)
-                        )
-                        .padding(.vertical, sizeClass == .regular ? 5 : 3)
-                        .padding(.horizontal, sizeClass == .regular ? 24 : 16)
-                        .id(item.id)
-                    }
-                    if searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending) {
-                        LiveProgramSearchSection(
-                            hits: programHits,
-                            truncated: programHitsTruncated,
-                            pending: programHitsPending,
-                            channelsByID: programChannelsByID,
-                            horizontalPadding: sizeClass == .regular ? 24 : 16,
-                            onTap: openProgramHit)
-                    }
-                    // GH #20 follow-up: with the list frame extended under the
-                    // floating tab bar (ignoresSafeArea below), this spacer is
-                    // the bottom content padding that lets the last channel row
-                    // scroll clear of the bar + home indicator.
-                    Color.clear.frame(height: 96)
+                    listRows
                 }
             }
             .background(Color.appBackground)
@@ -3211,6 +3150,7 @@ struct ChannelListView: View {
         // keep the chosen order and program-only matches follow them.
         liveSearchTask?.cancel()
         if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            searchBaseChannels = result
             runLiveSearch(base: result)
             return
         }
@@ -3285,36 +3225,82 @@ struct ChannelListView: View {
         }
     }
 
-    /// Guide view search: the List view's Programs section, same rule for
-    /// when it shows (a query, and not zero channels with zero programs).
-    private var guideProgramsShown: Bool {
-        let searching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending)
+    /// True while a Live TV search query is set (iPhone and iPad).
+    private var liveSearchActive: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    /// Fixed grid height while a search filters the channels and Programs
-    /// shows under it: the rows' natural height, capped at 55 percent of the
-    /// host. Nil (no fixed frame) otherwise.
-    private var guideSearchGridHeight: CGFloat? {
-        guard guideProgramsShown, !filteredChannels.isEmpty,
-              guideRowsNaturalHeight > 0, guideHostHeight > 0 else { return nil }
-        return min(guideRowsNaturalHeight, guideHostHeight * 0.55)
+    /// The guide grid's channels: the selected group's rows. While a search
+    /// is active the results overlay the grid, which keeps the unfiltered
+    /// group so its scroll position and selection survive the search.
+    private var guideChannels: [ChannelDisplayItem] {
+        liveSearchActive ? searchBaseChannels : filteredChannels
     }
 
-    private var guideProgramsPanel: some View {
+    /// The List view's rows: the empty-group or no-match notice, the
+    /// Channels header while searching, the channel rows, the Programs
+    /// section, and the spacer that clears the floating tab bar. Shared by
+    /// the List view and the Guide view's search results so a search reads
+    /// the same in both views.
+    @ViewBuilder
+    private var listRows: some View {
+        // Re-tap-the-tab anchor (zero height, so it changes nothing about
+        // the layout): the list has no header row that is guaranteed to
+        // exist, and the first channel row sits below the group chrome.
+        Color.clear.frame(height: 0).id("list.top")
+        // GH #72: an empty group is a legitimate state (a provider group the
+        // upstream has not populated yet), not an error, so it gets a notice
+        // with a way out rather than a blank list.
+        let searching = liveSearchActive
+        if filteredChannels.isEmpty && !(searching && (!programHits.isEmpty || programHitsPending)) {
+            emptyGroupNotice
+                .frame(minHeight: 320)
+        } else if searching && !filteredChannels.isEmpty {
+            LiveSearchSectionHeader(title: LiveSearchCopy.channelsHeader)
+                .padding(.horizontal, sizeClass == .regular ? 24 : 16)
+        }
+        // Key rows by the unique stream URL, not the channel id, so a
+        // provider that reuses one tvg-id across distinct channels can't
+        // produce duplicate SwiftUI identities.
+        ForEach(filteredChannels, id: \.rowKey) { item in
+            ChannelRow(
+                item: item,
+                onTap: { pickChannel(item) },
+                fetchUpcoming: makeFetchUpcoming(for: item)
+            )
+            .padding(.vertical, sizeClass == .regular ? 5 : 3)
+            .padding(.horizontal, sizeClass == .regular ? 24 : 16)
+            .id(item.id)
+        }
+        if searching && !(filteredChannels.isEmpty && programHits.isEmpty && !programHitsPending) {
+            LiveProgramSearchSection(
+                hits: programHits,
+                truncated: programHitsTruncated,
+                pending: programHitsPending,
+                channelsByID: programChannelsByID,
+                horizontalPadding: sizeClass == .regular ? 24 : 16,
+                onTap: openProgramHit)
+        }
+        // GH #20 follow-up: with the list frame extended under the floating
+        // tab bar (ignoresSafeArea on the ScrollView), this spacer is the
+        // bottom content padding that lets the last row scroll clear of the
+        // bar + home indicator.
+        Color.clear.frame(height: 96)
+    }
+
+    /// Guide view search results: the List view layout over the grid. Same
+    /// bottom treatment as the List view (the frame runs under the floating
+    /// tab bar and the iOS 26 scroll-edge platter is off), so the rows scroll
+    /// under the bar instead of stopping at a solid band above it.
+    private var guideSearchResults: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
-                LiveProgramSearchSection(
-                    hits: programHits,
-                    truncated: programHitsTruncated,
-                    pending: programHitsPending,
-                    channelsByID: programChannelsByID,
-                    horizontalPadding: sizeClass == .regular ? 24 : 16,
-                    onTap: openProgramHit)
-                // Clears the floating tab bar, as in the List view.
-                Color.clear.frame(height: 96)
+                listRows
             }
         }
+        .background(Color.appBackground)
+        .ignoresSafeArea(.container, edges: .bottom)
+        .aerioContentUnderTabBar()
     }
 
     /// Programs section tap: an airing program plays its channel through the

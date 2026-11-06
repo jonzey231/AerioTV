@@ -5574,16 +5574,7 @@ struct EPGGuideView: View {
             set: { if !$0 { catchupErrorMessage = nil } }
         )
     }
-    /// Guide view search (Logan 2026-11-06): the host shrinks the grid to its
-    /// rows when a search filters the channels, so the Programs section sits
-    /// under the last row instead of under a fixed-height grid. Reports the
-    /// natural height of the time header plus every row, in points.
-    var onNaturalHeightChange: ((CGFloat) -> Void)? = nil
     #if os(iOS)
-    private var naturalContentHeight: CGFloat {
-        timeHeaderHeight + CGFloat(channels.count) * rowHeight
-            + CGFloat(max(0, channels.count - 1)) * rowGap
-    }
     /// GH #20 (Android parity): hide the iPhone tab bar while the guide
     /// scrolls down; any upward scroll reveals it (TabBarScrollTracker).
     /// Same phone gate as ChannelListView; iPad keeps its bar.
@@ -5974,9 +5965,6 @@ struct EPGGuideView: View {
             Color.appBackground.ignoresSafeArea()
             guideContent
             stagingToastOverlay
-        }
-        .onChange(of: naturalContentHeight, initial: true) { _, h in
-            onNaturalHeightChange?(h)
         }
         #endif
     }
