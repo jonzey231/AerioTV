@@ -722,6 +722,87 @@ enum CastVideoCodecConfig {
         }
     }
 
+    /// HDR static metadata and the alternative transfer hint carried in
+    /// HEVC prefix SEI messages (ITU-T H.265 D.2.28, D.2.35, D.2.38).
+    /// Payload bytes are kept verbatim: the ISO 14496-12 12.1.6 'mdcv'
+    /// and 'clli' boxes use the same field order and units as the SEI.
+    struct HEVCHDRMetadata: Equatable {
+        /// mastering_display_colour_volume (payloadType 137): G, B, R
+        /// primaries x/y, white point x/y (u16 each, 0.00002 units),
+        /// max and min display mastering luminance (u32, 0.0001 cd/m2).
+        var masteringDisplay: [UInt8]?
+        /// content_light_level_info (payloadType 144): MaxCLL and
+        /// MaxFALL (u16 each, cd/m2).
+        var contentLightLevel: [UInt8]?
+        /// alternative_transfer_characteristics (payloadType 147):
+        /// broadcasters tag HLG (18) this way inside an SDR-declared VUI.
+        var preferredTransfer: Int?
+
+        var isEmpty: Bool { masteringDisplay == nil && contentLightLevel == nil && preferredTransfer == nil }
+
+        /// Later messages fill what is still missing; a field already
+        /// read stays (the first IDR's values are the ones in the init).
+        mutating func merge(_ other: HEVCHDRMetadata) {
+            if masteringDisplay == nil { masteringDisplay = other.masteringDisplay }
+            if contentLightLevel == nil { contentLightLevel = other.contentLightLevel }
+            if preferredTransfer == nil { preferredTransfer = other.preferredTransfer }
+        }
+
+        /// MaxCLL / MaxFALL in cd/m2 for the logs.
+        var contentLightLevels: (maxCLL: Int, maxFALL: Int)? {
+            guard let c = contentLightLevel, c.count == 4 else { return nil }
+            return ((Int(c[0]) << 8) | Int(c[1]), (Int(c[2]) << 8) | Int(c[3]))
+        }
+
+        /// Max / min mastering luminance in cd/m2 for the logs.
+        var masteringLuminance: (max: Double, min: Double)? {
+            guard let m = masteringDisplay, m.count == 24 else { return nil }
+            func u32(_ o: Int) -> Double {
+                Double((Int(m[o]) << 24) | (Int(m[o + 1]) << 16) | (Int(m[o + 2]) << 8) | Int(m[o + 3]))
+            }
+            return (u32(16) / 10_000, u32(20) / 10_000)
+        }
+    }
+
+    /// Parse one HEVC prefix SEI NAL (type 39, 2-byte header included,
+    /// emulation prevention bytes still in) for the HDR payloads. Any
+    /// other NAL type, or a NAL without those payloads, reads nil. The
+    /// sei_message() walk (7.3.5) is bit-exact: 0xFF-extended type and
+    /// size bytes, then the payload bytes, repeated until the trailing
+    /// bits.
+    static func parseHEVCSEIHDR(_ nal: [UInt8]) -> HEVCHDRMetadata? {
+        guard nal.count > 4, (nal[0] >> 1) & 0x3F == 39 else { return nil }
+        let rbsp = CastFMP4Remuxer.unescapeRBSP(nal, from: 2)
+        var meta = HEVCHDRMetadata()
+        var i = 0
+        // A message needs at least a type byte, a size byte and the
+        // rbsp_trailing_bits byte (0x80) after it.
+        while i + 2 < rbsp.count {
+            var type = 0
+            while i < rbsp.count, rbsp[i] == 0xFF { type += 255; i += 1 }
+            guard i < rbsp.count else { break }
+            type += Int(rbsp[i]); i += 1
+            var size = 0
+            while i < rbsp.count, rbsp[i] == 0xFF { size += 255; i += 1 }
+            guard i < rbsp.count else { break }
+            size += Int(rbsp[i]); i += 1
+            guard i + size <= rbsp.count else { break }
+            let payload = Array(rbsp[i..<(i + size)])
+            i += size
+            switch type {
+            case 137 where size >= 24:
+                if meta.masteringDisplay == nil { meta.masteringDisplay = Array(payload[0..<24]) }
+            case 144 where size >= 4:
+                if meta.contentLightLevel == nil { meta.contentLightLevel = Array(payload[0..<4]) }
+            case 147 where size >= 1:
+                if meta.preferredTransfer == nil { meta.preferredTransfer = Int(payload[0]) }
+            default:
+                break
+            }
+        }
+        return meta.isEmpty ? nil : meta
+    }
+
     /// Frame rate from the VPS timing info (7.3.2.1). Broadcast encoders
     /// often put the timing there and leave the SPS VUI without it.
     static func parseHEVCVPSFrameRate(_ nal: [UInt8]) -> Double? {

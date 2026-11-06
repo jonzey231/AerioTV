@@ -153,6 +153,10 @@ final class LiveFMP4Remuxer {
     /// VUI colour description written into the init segment (primaries,
     /// transfer, matrix), nil when the SPS carried none.
     private(set) var videoColour: (primaries: Int, transfer: Int, matrix: Int)?
+    /// HDR static metadata (SEI 137 / 144) and the alternative transfer
+    /// hint (SEI 147) seen in the prefix SEI NALs before the init was
+    /// built; written as mdcv / clli boxes next to colr.
+    private var hdrMetadata = CastVideoCodecConfig.HEVCHDRMetadata()
     /// Video sample durations accumulated across segments for the cadence
     /// estimate (needs >= 240 access units, see finalizeSegment).
     private var videoDurationSamples: [Int64] = []
@@ -293,6 +297,10 @@ final class LiveFMP4Remuxer {
             case 32: if vps == nil { vps = Array(nal) }
             case 33: if sps == nil { sps = Array(nal) }
             case 34: if pps == nil { pps = Array(nal) }
+            case 39: // prefix SEI: HDR static metadata rides with the IDR
+                if !initSent, let sei = CastVideoCodecConfig.parseHEVCSEIHDR(Array(nal)) {
+                    hdrMetadata.merge(sei)
+                }
             default: break
             }
         }
@@ -656,18 +664,46 @@ final class LiveFMP4Remuxer {
         // track as BT.709 SDR and tone maps a PQ/HLG picture even with the
         // panel in HDR (Apple TV, 2026-11-02). Same parse the Cast
         // transcoder uses; omitted when the SPS carries no colour data.
+        // SEI 147 (alternative transfer characteristics) overrides an
+        // SDR transfer in the VUI: broadcasters tag HLG that way, and
+        // AVFoundation reads colr, not in-band SEI, for the transfer.
         if let vui = CastVideoCodecConfig.parseHEVCSPS(Array(s)),
-           let prim = vui.colourPrimaries, let tf = vui.transferCharacteristics,
+           let prim = vui.colourPrimaries, let vuiTF = vui.transferCharacteristics,
            let mat = vui.matrixCoefficients {
+            var tf = vuiTF
+            if let alt = hdrMetadata.preferredTransfer, alt != vuiTF, vuiTF != 16, vuiTF != 18 {
+                tf = alt
+            }
             var colr = Self.bytes("nclx")
             colr.append(Self.u16(prim)); colr.append(Self.u16(tf)); colr.append(Self.u16(mat))
             colr.append(vui.fullRange ? 0x80 : 0x00)
             entry.append(Self.box("colr", colr))
             videoColour = (prim, tf, mat)
-            log("[FMP4] colr nclx primaries=\(prim) transfer=\(tf) matrix=\(mat) fullRange=\(vui.fullRange)")
+            log("[FMP4] colr nclx primaries=\(prim) transfer=\(tf) matrix=\(mat) fullRange=\(vui.fullRange)"
+                + " (VUI transfer \(vuiTF), SEI 147 \(hdrMetadata.preferredTransfer.map(String.init) ?? "none"))")
         } else {
             log("[FMP4] no VUI colour description in the SPS; init carries no colr")
         }
+        // HDR static metadata: mdcv / clli (ISO 14496-12 12.1.6) are the
+        // SEI 137 / 144 payloads byte for byte. Without them the display
+        // tone maps against its own default mastering assumption.
+        if let mdcv = hdrMetadata.masteringDisplay {
+            entry.append(Self.box("mdcv", Data(mdcv)))
+            let lum = hdrMetadata.masteringLuminance
+            log("[FMP4] mdcv from SEI 137: mastering max \(lum.map { String(format: "%.0f", $0.max) } ?? "?")"
+                + " min \(lum.map { String(format: "%.4f", $0.min) } ?? "?") cd/m2")
+        }
+        if let clli = hdrMetadata.contentLightLevel {
+            entry.append(Self.box("clli", Data(clli)))
+            let l = hdrMetadata.contentLightLevels
+            log("[FMP4] clli from SEI 144: MaxCLL \(l?.maxCLL ?? 0) MaxFALL \(l?.maxFALL ?? 0)")
+        }
+        if hdrMetadata.masteringDisplay == nil, hdrMetadata.contentLightLevel == nil,
+           (videoColour?.transfer == 16 || videoColour?.transfer == 18) {
+            log("[FMP4] no SEI 137/144 before the init; HDR init carries no mdcv/clli")
+        }
+        log("[FMP4] hvcC PTL profile_space=\(info.profileSpace) tier=\(info.tierFlag) profile=\(info.profileIDC)"
+            + " level=\(info.levelIDC) chroma=\(info.chromaFormatIDC) depth=\(info.bitDepthLuma)/\(info.bitDepthChroma)")
         let hvc1 = Self.box("hvc1", entry)
         return Self.trak(trackID: Self.videoTrackID, width: info.width, height: info.height,
                          volume: 0, handler: "vide", handlerName: "VideoHandler",

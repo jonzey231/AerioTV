@@ -3887,6 +3887,175 @@ runCardVideoChecks()
     expectEq(next, floorNow + 1920, "mv audio clock: re-anchored audio follows on the composite clock")
 }
 
+// MARK: HDR signaling: VUI colr, SEI 137/144/147 -> mdcv/clli (LiveFMP4Remuxer)
+
+/// The frame-rate snapper lives in TSHLSRemuxer.swift (app code); the
+/// remuxer only needs its signature here.
+enum VideoRateStandards {
+    static func snap(_ fps: Double, tolerance: Double = 0.01) -> Double { fps }
+}
+
+/// HEVC Main10 3840x2160 SPS, VUI BT.2020 / `transfer` / BT.2020nc, 59.94 fps.
+func hevcSPS4K(transfer: Int) -> [UInt8] {
+    var w = BitWriter()
+    w.put(0, 4); w.put(0, 3); w.put(1, 1)
+    w.put(0, 2); w.put(0, 1); w.put(2, 5) // Main10
+    w.put(0x2000_0000, 32); w.put(0xB0, 8); w.put(0, 40); w.put(153, 8)
+    w.ue(0); w.ue(1); w.ue(3840); w.ue(2160); w.put(0, 1)
+    w.ue(2); w.ue(2) // 10-bit
+    w.ue(4); w.put(0, 1); w.ue(4); w.ue(2); w.ue(0)
+    w.ue(0); w.ue(3); w.ue(0); w.ue(3); w.ue(1); w.ue(1)
+    w.put(0, 1) // scaling lists off
+    w.put(0, 1); w.put(1, 1); w.put(0, 1) // amp, SAO, pcm
+    w.ue(1); w.ue(1); w.ue(0); w.ue(0); w.put(1, 1) // one RPS
+    w.put(0, 1); w.put(1, 1); w.put(1, 1)
+    w.put(1, 1) // vui
+    w.put(0, 1); w.put(0, 1) // aspect, overscan
+    w.put(1, 1); w.put(5, 3); w.put(0, 1); w.put(1, 1); w.put(9, 8); w.put(transfer, 8); w.put(9, 8)
+    w.put(0, 1); w.put(0, 1); w.put(0, 1); w.put(0, 1); w.put(0, 1)
+    w.put(1, 1); w.put(1001, 32); w.put(60000, 32)
+    w.put(0, 1); w.put(0, 1); w.put(0, 1); w.put(0, 1)
+    w.trailing()
+    return [0x42, 0x01] + escapeRBSP(w.bytes)
+}
+
+/// SEI 137 payload: BT.2020 primaries (G, B, R), D65, 1000 / 0.0001 cd/m2.
+let seiMastering: [UInt8] = [
+    0x33, 0xC2, 0x86, 0xC4, // G x 13250 y 34500
+    0x1D, 0x4C, 0x0B, 0xB8, // B x 7500 y 3000
+    0x84, 0xD0, 0x3E, 0x80, // R x 34000 y 16000
+    0x3D, 0x13, 0x40, 0x42, // white x 15635 y 16450
+    0x00, 0x98, 0x96, 0x80, // max 10_000_000 (1000 cd/m2)
+    0x00, 0x00, 0x00, 0x01, // min 1 (0.0001 cd/m2)
+]
+/// SEI 144 payload: MaxCLL 1000, MaxFALL 400.
+let seiLightLevel: [UInt8] = [0x03, 0xE8, 0x01, 0x90]
+
+func seiMessage(type: Int, payload: [UInt8]) -> [UInt8] {
+    var out: [UInt8] = []
+    var t = type; while t >= 255 { out.append(0xFF); t -= 255 }; out.append(UInt8(t))
+    var n = payload.count; while n >= 255 { out.append(0xFF); n -= 255 }; out.append(UInt8(n))
+    return out + payload
+}
+
+/// Prefix SEI NAL (type 39) carrying the given messages.
+func hevcPrefixSEI(_ messages: [[UInt8]]) -> [UInt8] {
+    [0x4E, 0x01] + escapeRBSP(messages.flatMap { $0 } + [0x80])
+}
+
+func findBox(_ b: [UInt8], _ type: String) -> [UInt8]? {
+    let t = Array(type.utf8)
+    var i = 0
+    while i + 8 <= b.count {
+        if Array(b[(i + 4)..<(i + 8)]) == t {
+            let size = Int(be32(b, i))
+            guard size >= 8, i + size <= b.count else { return nil }
+            return Array(b[(i + 8)..<(i + size)])
+        }
+        i += 1
+    }
+    return nil
+}
+
+/// Transport stream: PAT, PMT (HEVC video only), one IDR access unit.
+func hdrFixtureTS(sps: [UInt8], sei: [UInt8]?) -> Data {
+    let pmt = psiPacket(pid: 0x1000, section: [0x02, 0, 0, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE1, 0x00, 0xF0, 0x00,
+                                               0x24, 0xE1, 0x00, 0xF0, 0x00])
+    let start: [UInt8] = [0, 0, 0, 1]
+    let ps = hevcParameterSets()
+    var slice = [UInt8](repeating: 0x10, count: 400)
+    slice[0] = 19 << 1; slice[1] = 0x01
+    var au = start + ps.vps + start + sps + start + ps.pps
+    if let sei { au += start + sei }
+    au += start + slice
+    var ts = Data(syntheticPAT() + pmt)
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 900_000, payload: au)) { ts.append(contentsOf: p) }
+    // A second PES: the assembler flushes an access unit on the next PUSI.
+    var trail = [UInt8](repeating: 0x10, count: 100)
+    trail[0] = 1 << 1; trail[1] = 0x01
+    for p in packetsFor(pid: 0x100, pes: pesBytes(streamID: 0xE0, pts: 901_501, payload: start + trail)) { ts.append(contentsOf: p) }
+    return ts
+}
+
+@MainActor func runHDRSignalingChecks() {
+    // SEI walk, bit-exact: three messages in one NAL, 0xFF-extended size.
+    let sei = hevcPrefixSEI([seiMessage(type: 137, payload: seiMastering),
+                             seiMessage(type: 144, payload: seiLightLevel),
+                             seiMessage(type: 147, payload: [18])])
+    let parsed = CastVideoCodecConfig.parseHEVCSEIHDR(sei)
+    expectEq(parsed?.masteringDisplay, seiMastering, "sei 137: mastering display payload byte for byte")
+    expectEq(parsed?.contentLightLevel, seiLightLevel, "sei 144: content light level payload")
+    expectEq(parsed?.preferredTransfer, 18, "sei 147: alternative transfer HLG")
+    expect(parsed?.masteringLuminance?.max == 1000 && parsed?.masteringLuminance?.min == 0.0001,
+           "sei 137: luminance decoded as 1000 / 0.0001 cd/m2")
+    expect(parsed?.contentLightLevels?.maxCLL == 1000 && parsed?.contentLightLevels?.maxFALL == 400,
+           "sei 144: MaxCLL 1000 MaxFALL 400")
+    let padded = hevcPrefixSEI([seiMessage(type: 5, payload: [UInt8](repeating: 0xAB, count: 300)),
+                                seiMessage(type: 144, payload: seiLightLevel)])
+    expectEq(CastVideoCodecConfig.parseHEVCSEIHDR(padded)?.contentLightLevel, seiLightLevel,
+             "sei walk: 0xFF-extended user data size skipped, 144 still read")
+    expectEq(CastVideoCodecConfig.parseHEVCSEIHDR(hevcPrefixSEI([seiMessage(type: 1, payload: [0, 0])])), nil,
+             "sei walk: no HDR payloads reads nil")
+    expectEq(CastVideoCodecConfig.parseHEVCSEIHDR(hevcParameterSets().sps), nil, "sei walk: SPS NAL is not an SEI")
+
+    // VUI transfer 16 read from the real bits.
+    let spsPQ = hevcSPS4K(transfer: 16)
+    let vui = CastVideoCodecConfig.parseHEVCSPS(spsPQ)
+    expect(vui?.colourPrimaries == 9 && vui?.transferCharacteristics == 16 && vui?.matrixCoefficients == 9,
+           "hevc sps: VUI BT.2020 / PQ / BT.2020nc")
+
+    // End to end: the init segment the Apple TV gets.
+    func initSegment(sps: [UInt8], sei: [UInt8]?) -> [UInt8]? {
+        let mux = LiveFMP4Remuxer(targetSegmentSeconds: 2, rampSegmentSeconds: 1, rampSegments: 2, log: { _ in })
+        var initData: Data?
+        mux.onInitSegment = { initData = $0 }
+        mux.feed(hdrFixtureTS(sps: sps, sei: sei))
+        return initData.map { [UInt8]($0) }
+    }
+    guard let pq = initSegment(sps: spsPQ, sei: sei) else {
+        expect(false, "fmp4 init: PQ fixture produced an init segment"); return
+    }
+    let hvc1 = findBox(pq, "hvc1") ?? []
+    let hvcC = findBox(hvc1, "hvcC") ?? []
+    expect(hvcC.count > 22, "fmp4 init: hvcC present")
+    if hvcC.count > 22 {
+        expectEq(Int(hvcC[1]), 0x02, "fmp4 hvcC: profile_space 0, tier 0, Main10 (profile_idc 2)")
+        expectEq(Int(hvcC[12]), 153, "fmp4 hvcC: level 5.1")
+        expectEq(Int(hvcC[16] & 0x03), 1, "fmp4 hvcC: chroma 4:2:0")
+        expect(hvcC[17] & 0x07 == 2 && hvcC[18] & 0x07 == 2, "fmp4 hvcC: 10-bit luma and chroma")
+    }
+    let colr = findBox(hvc1, "colr") ?? []
+    expectEq(colr, [0x6E, 0x63, 0x6C, 0x78, 0, 9, 0, 16, 0, 9, 0x00], "fmp4 colr: nclx 9/16/9 video range")
+    expectEq(findBox(hvc1, "mdcv"), seiMastering, "fmp4 mdcv: SEI 137 payload byte for byte")
+    expectEq(findBox(hvc1, "clli"), seiLightLevel, "fmp4 clli: SEI 144 payload byte for byte")
+    // PQ in the VUI is never overridden by SEI 147.
+    expectEq(mux_colrTransfer(colr), 16, "fmp4 colr: VUI PQ wins over SEI 147")
+
+    // No SEI: colr only, no mdcv / clli boxes invented.
+    if let bare = initSegment(sps: spsPQ, sei: nil) {
+        let e = findBox(bare, "hvc1") ?? []
+        expect(findBox(e, "colr") != nil && findBox(e, "mdcv") == nil && findBox(e, "clli") == nil,
+               "fmp4 init: no SEI -> colr only, no mdcv/clli")
+    } else { expect(false, "fmp4 init: bare PQ fixture produced an init segment") }
+
+    // SDR-declared VUI (BT.709 transfer 1) with SEI 147 = HLG: colr says HLG.
+    let hlgTagged = initSegment(sps: hevcSPS4K(transfer: 1),
+                                sei: hevcPrefixSEI([seiMessage(type: 147, payload: [18])]))
+    let tagged = hlgTagged.flatMap { findBox(findBox($0, "hvc1") ?? [], "colr") } ?? []
+    expectEq(mux_colrTransfer(tagged), 18, "fmp4 colr: SEI 147 HLG overrides a BT.709 VUI transfer")
+    // HLG in the VUI stays HLG.
+    let hlg = initSegment(sps: hevcSPS4K(transfer: 18), sei: nil)
+    expectEq(mux_colrTransfer(hlg.flatMap { findBox(findBox($0, "hvc1") ?? [], "colr") } ?? []), 18,
+             "fmp4 colr: VUI HLG carried as transfer 18")
+}
+
+func mux_colrTransfer(_ colr: [UInt8]) -> Int? {
+    guard colr.count >= 10 else { return nil }
+    return (Int(colr[6]) << 8) | Int(colr[7])
+}
+
+runHDRSignalingChecks()
+
 runMultiviewCompositeChecks()
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
