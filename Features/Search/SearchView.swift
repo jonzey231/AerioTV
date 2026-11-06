@@ -573,7 +573,9 @@ struct SearchView: View {
                             Text(ch.name)
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                                 .lineLimit(1)
+                            #if !os(tvOS)
                             RadioChannelGlyph(font: .labelSmall.subtext())
+                            #endif
                             Text("\u{00B7} " + Self.timeRange(prog))
                                 .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
                                 .lineLimit(1)
@@ -604,6 +606,11 @@ struct SearchView: View {
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
+            #if os(tvOS)
+            // tvOS: the radio mark is parked in the card's top-trailing
+            // corner, not inline (fixed x for every row).
+            .radioCornerGlyph(resultIsRadio(result), size: 20, top: 8, trailing: 12)
+            #endif
             .background(Color.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
@@ -613,6 +620,13 @@ struct SearchView: View {
         .buttonStyle(.plain)
         #endif
     }
+
+    #if os(tvOS)
+    private func resultIsRadio(_ result: SearchResult) -> Bool {
+        if case .epg(let prog) = result { return channelsByID[prog.channelID]?.isRadio == true }
+        return false
+    }
+    #endif
 
     // MARK: - Placeholder Views
     private var searchPrompt: some View {
@@ -1214,7 +1228,9 @@ private struct LiveProgramHitRow: View {
                                 .scaledFont(.system(size: lineSize).subtext())
                                 .foregroundColor(Color.contrastText(.textSecondary))
                                 .lineLimit(1)
+                            #if !os(tvOS)
                             if channel.isRadio { RadioChannelGlyph(size: lineSize) }
+                            #endif
                             if !channel.number.isEmpty {
                                 Text("\u{00B7} " + channel.number)
                                     .scaledFont(.system(size: lineSize).subtext())
@@ -1228,6 +1244,9 @@ private struct LiveProgramHitRow: View {
             }
             .padding(.horizontal, 12)
             .frame(minHeight: cardHeight)
+            #if os(tvOS)
+            .radioCornerGlyph(channel?.isRadio == true, size: lineSize, top: 12, trailing: 12)
+            #endif
             .background {
                 #if os(tvOS)
                 RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.cardBackground)
@@ -1291,7 +1310,9 @@ private struct LiveChannelHitRow: View {
                         Text(channel.name)
                             .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                             .lineLimit(1)
+                        #if !os(tvOS)
                         if channel.isRadio { RadioChannelGlyph(font: .bodyMedium) }
+                        #endif
                     }
                     Text([channel.number.isEmpty ? nil : channel.number, line].compactMap { $0 }
                         .joined(separator: " \u{00B7} "))
@@ -1303,6 +1324,9 @@ private struct LiveChannelHitRow: View {
             }
             .padding(.vertical, 6)
             .padding(.horizontal, 12)
+            #if os(tvOS)
+            .radioCornerGlyph(channel.isRadio, size: 20, top: 8, trailing: 12)
+            #endif
             .background(Color.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }

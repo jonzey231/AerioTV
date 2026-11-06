@@ -4368,7 +4368,6 @@ struct ChannelRow: View {
                                     .foregroundColor(.textPrimary)
                                     .lineLimit(1)
                             }
-                            if item.isRadio { RadioChannelGlyph(size: 26) }
                             // Catch-up badge (2026-07-20, all-platform
                             // parity): history clock beside the name when
                             // the channel has a replayable archive.
@@ -4429,6 +4428,8 @@ struct ChannelRow: View {
                 .padding(.vertical, 24)
                 .padding(.leading, 8)
                 .padding(.trailing, 4)
+                // Radio mark parked top trailing, level with the name line.
+                .radioCornerGlyph(item.isRadio, size: 16, top: 30, trailing: 16)
             }
             // The card already draws its own focused stroke (12pt, in the
             // row background); the style's 14pt ring nested a SECOND
@@ -6567,18 +6568,54 @@ struct RadioChannelGlyph: View {
     #endif
     /// The name's font; the glyph is drawn at the same size.
     let font: AerioFont
+    /// Inline after a name: secondary text. Parked in a tvOS corner slot:
+    /// the catch-up clock's accent.
+    var color: Color = Color.contrastText(.textSecondary)
 
     /// The name's point size; the glyph is drawn at the same size.
-    init(size: CGFloat) { font = .system(size: size, weight: .medium) }
+    init(size: CGFloat, color: Color = Color.contrastText(.textSecondary)) {
+        font = .system(size: size, weight: .medium)
+        self.color = color
+    }
     init(font: AerioFont) { self.font = font }
 
     var body: some View {
         Image(systemName: "radio")
             .scaledFont(font)
-            .foregroundColor(Color.contrastText(.textSecondary))
+            .foregroundColor(color)
             .accessibilityLabel("Radio")
     }
 }
+
+#if os(tvOS)
+/// tvOS rows (Live TV list, Search): the radio mark is PARKED in the row's
+/// top-trailing corner at a fixed inset, like the guide band's slot, so its
+/// x never depends on the channel name's length (Logan 2026-11-06). Same
+/// size and accent as the row's catch-up clock.
+struct RadioCornerGlyph: ViewModifier {
+    let isRadio: Bool
+    let size: CGFloat
+    let top: CGFloat
+    let trailing: CGFloat
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .topTrailing) {
+            if isRadio {
+                RadioChannelGlyph(size: size, color: .accentPrimary)
+                    .padding(.top, top)
+                    .padding(.trailing, trailing)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+extension View {
+    func radioCornerGlyph(_ isRadio: Bool, size: CGFloat, top: CGFloat, trailing: CGFloat) -> some View {
+        modifier(RadioCornerGlyph(isRadio: isRadio, size: size, top: top, trailing: trailing))
+    }
+}
+#endif
 
 struct ChannelBadge: View {
     let logoURL: URL?
@@ -6764,15 +6801,15 @@ struct ChannelBadge: View {
                                     usesGuideCorners: usesGuideCorners)
                 }
                 // Guide only: the list row keeps the name in its text column.
+                // No radio glyph here on tvOS: the guide draws it in the
+                // band's fixed slot (`GuideGlyphBand`), so `isRadio` is
+                // read by the iPhone / iPad branch only.
                 if showName, nameFontSize > 0 {
-                    HStack(spacing: RadioChannelGlyph.gap) {
-                        Text(name)
-                            .scaledFont(.system(size: nameFontSize, weight: .medium))
-                            .lineLimit(1)
-                            .foregroundColor(.textPrimary)
-                        if isRadio { RadioChannelGlyph(size: nameFontSize) }
-                    }
-                    .padding(.top, showLogo ? lineGap : 0)
+                    Text(name)
+                        .scaledFont(.system(size: nameFontSize, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundColor(.textPrimary)
+                        .padding(.top, showLogo ? lineGap : 0)
                 }
             }
             .frame(width: logoColumnWidth)

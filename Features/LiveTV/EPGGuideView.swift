@@ -8686,10 +8686,18 @@ private struct GuideGlyphBand: ViewModifier {
     let showsNumber: Bool
     let showsFavorite: Bool
     let showsCatchup: Bool
+    let showsRadio: Bool
+
+    /// Width of one trailing glyph slot. The three trailing marks (star,
+    /// radio, catch-up clock) each own a RESERVED slot of this width on
+    /// every row, present or not, so each mark sits at the same x in every
+    /// cell whatever the other two do (Logan 2026-11-06: the radio glyph
+    /// used to follow the name and wandered with its length).
+    private var slotWidth: CGFloat { glyphSize + 6 }
 
     func body(content: Content) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
+            HStack(spacing: 0) {
                 if showsNumber {
                     Text(number)
                         .scaledFont(.system(size: numberSize, weight: .bold, design: .monospaced))
@@ -8699,12 +8707,20 @@ private struct GuideGlyphBand: ViewModifier {
                         .padding(.leading, leadingInset)
                 }
                 Spacer(minLength: 0)
-                if showsFavorite {
+                // Fixed slots, left to right: favorite star, radio, catch-up
+                // clock. The clock keeps the corner it always had.
+                glyphSlot(showsFavorite) {
                     Image(systemName: "star.fill")
                         .scaledFont(.system(size: glyphSize))
                         .foregroundColor(.statusWarning)
                 }
-                if showsCatchup {
+                glyphSlot(showsRadio) {
+                    Image(systemName: "radio")
+                        .scaledFont(.system(size: glyphSize, weight: .semibold))
+                        .foregroundColor(.accentPrimary)
+                        .accessibilityLabel("Radio")
+                }
+                glyphSlot(showsCatchup) {
                     Image(systemName: "clock.arrow.circlepath")
                         .scaledFont(.system(size: glyphSize, weight: .semibold))
                         .foregroundColor(Color.contrastText(.textTertiary))
@@ -8718,6 +8734,16 @@ private struct GuideGlyphBand: ViewModifier {
             .allowsHitTesting(false)
             content
         }
+    }
+
+    /// One reserved trailing slot: the mark when shown, the same width of
+    /// nothing when not, so the slots to its left never shift.
+    @ViewBuilder
+    private func glyphSlot<Mark: View>(_ shown: Bool, @ViewBuilder mark: () -> Mark) -> some View {
+        Group {
+            if shown { mark() } else { Color.clear }
+        }
+        .frame(width: slotWidth, height: glyphSize + 4, alignment: .trailing)
     }
 }
 #endif
@@ -8954,7 +8980,9 @@ private struct GuideChannelButton: View {
                             name: channel.name,
                             showNumber: false,
                             showName: showChannelNames,
-                            isRadio: channel.isRadio,
+                            // The radio mark sits in the band above (fixed
+                            // slot), never after the name on tvOS.
+                            isRadio: false,
                             width: boxWidth,
                             maxHeight: boxHeight,
                             numberFontSize: LogoMetrics.bandNumberSize,
@@ -8987,7 +9015,8 @@ private struct GuideChannelButton: View {
                                  number: channel.number,
                                  showsNumber: showChannelNumbers,
                                  showsFavorite: favoritesStore.isFavorite(channel.id),
-                                 showsCatchup: channel.hasCatchup))
+                                 showsCatchup: channel.hasCatchup,
+                                 showsRadio: channel.isRadio))
         .padding(.vertical, LogoMetrics.inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         #else
