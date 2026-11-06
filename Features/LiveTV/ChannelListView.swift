@@ -4368,6 +4368,7 @@ struct ChannelRow: View {
                                     .foregroundColor(.textPrimary)
                                     .lineLimit(1)
                             }
+                            if item.isRadio { RadioChannelGlyph(size: 26) }
                             // Catch-up badge (2026-07-20, all-platform
                             // parity): history clock beside the name when
                             // the channel has a replayable archive.
@@ -4511,6 +4512,7 @@ struct ChannelRow: View {
                             .foregroundColor(.textPrimary)
                             .lineLimit(1)
                     }
+                    if item.isRadio { RadioChannelGlyph(size: (isWide ? 17 : 15) * s) }
                     // Favorite star, like the guide's channel column
                     // (Logan 2026-09-05).
                     if favoritesStore.isFavorite(item.id) {
@@ -6551,6 +6553,33 @@ enum LiveTVLogoSize {
 // radius and its point sizes; the badge owns everything inside. The logo is
 // always FITTED (never cropped), centered, and clipped to its fitted bounds
 // through the one shared rounding rule in `LogoCorners`.
+/// The radio mark that follows a radio channel's name on every channel
+/// surface (guide column, Live TV list rows, Search channel rows, and the
+/// Programs cards): a pick of such a row opens Radio Mode minimized, so the
+/// row has to say so before the pick (Logan 2026-11-05). Same glyph,
+/// placement, and size on Android (Material "radio").
+struct RadioChannelGlyph: View {
+    /// Gap between the name and the glyph (4 pt on touch, 6 pt on tvOS).
+    #if os(tvOS)
+    static let gap: CGFloat = 6
+    #else
+    static let gap: CGFloat = 4
+    #endif
+    /// The name's font; the glyph is drawn at the same size.
+    let font: AerioFont
+
+    /// The name's point size; the glyph is drawn at the same size.
+    init(size: CGFloat) { font = .system(size: size, weight: .medium) }
+    init(font: AerioFont) { self.font = font }
+
+    var body: some View {
+        Image(systemName: "radio")
+            .scaledFont(font)
+            .foregroundColor(Color.contrastText(.textSecondary))
+            .accessibilityLabel("Radio")
+    }
+}
+
 struct ChannelBadge: View {
     let logoURL: URL?
     let number: String
@@ -6560,6 +6589,9 @@ struct ChannelBadge: View {
     var showNumber: Bool = true
     /// Guide column only. The Live TV list draws the name in its text column.
     var showName: Bool = false
+    /// Radio glyph after the name (Logan 2026-11-05: a radio pick opens
+    /// Radio Mode minimized, so the row has to say it is radio first).
+    var isRadio: Bool = false
 
     /// The slot this surface gives the badge. `width` is exact (the badge
     /// only ever widens it to keep the number on one line); `maxHeight` is
@@ -6733,11 +6765,14 @@ struct ChannelBadge: View {
                 }
                 // Guide only: the list row keeps the name in its text column.
                 if showName, nameFontSize > 0 {
-                    Text(name)
-                        .scaledFont(.system(size: nameFontSize, weight: .medium))
-                        .lineLimit(1)
-                        .foregroundColor(.textPrimary)
-                        .padding(.top, showLogo ? lineGap : 0)
+                    HStack(spacing: RadioChannelGlyph.gap) {
+                        Text(name)
+                            .scaledFont(.system(size: nameFontSize, weight: .medium))
+                            .lineLimit(1)
+                            .foregroundColor(.textPrimary)
+                        if isRadio { RadioChannelGlyph(size: nameFontSize) }
+                    }
+                    .padding(.top, showLogo ? lineGap : 0)
                 }
             }
             .frame(width: logoColumnWidth)
@@ -6760,11 +6795,14 @@ struct ChannelBadge: View {
             // The two blocks cost the same height either way, so only the
             // order and the gap conditions change.
             if showName, nameFontSize > 0 {
-                Text(name)
-                    .scaledFont(.system(size: nameFontSize, weight: .medium))
-                    .lineLimit(1)
-                    .foregroundColor(.textPrimary)
-                    .padding(.top, showLogo ? lineGap : 0)
+                HStack(spacing: RadioChannelGlyph.gap) {
+                    Text(name)
+                        .scaledFont(.system(size: nameFontSize, weight: .medium))
+                        .lineLimit(1)
+                        .foregroundColor(.textPrimary)
+                    if isRadio { RadioChannelGlyph(size: nameFontSize) }
+                }
+                .padding(.top, showLogo ? lineGap : 0)
             }
             if showNumber {
                 Text(number)

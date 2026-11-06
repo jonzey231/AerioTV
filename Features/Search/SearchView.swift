@@ -456,6 +456,10 @@ struct SearchView: View {
     /// Subtitle + detail line, Android SearchScreen parity: EPG rows carry
     /// the channel name and full time range with the programme description
     /// underneath; VOD rows carry the plot.
+    private static func timeRange(_ prog: EPGProgram) -> String {
+        rangeTimeFmt.string(from: prog.startTime) + " \u{2013} " + rangeTimeFmt.string(from: prog.endTime)
+    }
+
     private func rowText(_ result: SearchResult) -> (subtitle: String, detail: String?) {
         switch result {
         case .vod(let item):
@@ -463,8 +467,7 @@ struct SearchView: View {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return (result.subtitle, (detail?.isEmpty ?? true) ? nil : detail)
         case .epg(let prog):
-            let range = Self.rangeTimeFmt.string(from: prog.startTime)
-                + " \u{2013} " + Self.rangeTimeFmt.string(from: prog.endTime)
+            let range = Self.timeRange(prog)
             let parts = [channelsByID[prog.channelID]?.name, range].compactMap { $0 }
             let detail = prog.programDescription.trimmingCharacters(in: .whitespacesAndNewlines)
             return (parts.joined(separator: " \u{00B7} "), detail.isEmpty ? nil : detail)
@@ -562,9 +565,24 @@ struct SearchView: View {
                     Text(result.title)
                         .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(2)
-                    Text(text.subtitle)
-                        .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
-                        .lineLimit(1)
+                    // EPG rows on a radio channel: channel name, radio
+                    // glyph, then the time range (Android parity).
+                    if case .epg(let prog) = result,
+                       let ch = channelsByID[prog.channelID], ch.isRadio {
+                        HStack(spacing: RadioChannelGlyph.gap) {
+                            Text(ch.name)
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
+                                .lineLimit(1)
+                            RadioChannelGlyph(font: .labelSmall.subtext())
+                            Text("\u{00B7} " + Self.timeRange(prog))
+                                .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
+                                .lineLimit(1)
+                        }
+                    } else {
+                        Text(text.subtitle)
+                            .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
+                            .lineLimit(1)
+                    }
                     if let detail = text.detail {
                         Text(detail)
                             .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
@@ -1190,11 +1208,20 @@ private struct LiveProgramHitRow: View {
                             }
                             .frame(width: thumb, height: thumb)
                         }
-                        Text([channel?.name, channel.flatMap { $0.number.isEmpty ? nil : $0.number }]
-                                .compactMap { $0 }.joined(separator: " \u{00B7} "))
-                            .scaledFont(.system(size: lineSize).subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                            .lineLimit(1)
+                        // Name, radio glyph, then the number, as on Android.
+                        if let channel {
+                            Text(channel.name)
+                                .scaledFont(.system(size: lineSize).subtext())
+                                .foregroundColor(Color.contrastText(.textSecondary))
+                                .lineLimit(1)
+                            if channel.isRadio { RadioChannelGlyph(size: lineSize) }
+                            if !channel.number.isEmpty {
+                                Text("\u{00B7} " + channel.number)
+                                    .scaledFont(.system(size: lineSize).subtext())
+                                    .foregroundColor(Color.contrastText(.textSecondary))
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                 }
                 Spacer(minLength: 0)
@@ -1260,9 +1287,12 @@ private struct LiveChannelHitRow: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(channel.name)
-                        .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
-                        .lineLimit(1)
+                    HStack(spacing: RadioChannelGlyph.gap) {
+                        Text(channel.name)
+                            .scaledFont(.bodyMedium).foregroundColor(.textPrimary)
+                            .lineLimit(1)
+                        if channel.isRadio { RadioChannelGlyph(font: .bodyMedium) }
+                    }
                     Text([channel.number.isEmpty ? nil : channel.number, line].compactMap { $0 }
                         .joined(separator: " \u{00B7} "))
                         .scaledFont(.labelSmall.subtext())

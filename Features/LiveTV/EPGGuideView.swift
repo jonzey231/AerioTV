@@ -8916,6 +8916,7 @@ private struct GuideChannelButton: View {
                             name: channel.name,
                             showNumber: false,
                             showName: showChannelNames,
+                            isRadio: channel.isRadio,
                             width: boxWidth,
                             maxHeight: boxHeight,
                             numberFontSize: LogoMetrics.bandNumberSize,
@@ -8965,6 +8966,7 @@ private struct GuideChannelButton: View {
                             name: channel.name,
                             showNumber: showChannelNumbers,
                             showName: showChannelNames,
+                            isRadio: channel.isRadio,
                             width: grown?.width ?? LogoMetrics.stockWidth,
                             maxHeight: grown == nil
                                 ? 0
