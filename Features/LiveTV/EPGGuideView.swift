@@ -8677,6 +8677,16 @@ private struct GuideCornerClock: View {
 /// number lives here, there is no number COLUMN on tvOS any more: the logo
 /// and the name center in the full cell width in every toggle state.
 private struct GuideGlyphBand: ViewModifier {
+    /// Observes the theme itself. Every stored input of this modifier is a
+    /// plain value (sizes, the number, four flags), so when the host cell's
+    /// body re-ran on an accent change SwiftUI compared the new modifier to
+    /// the old one, found it equal, and skipped this body: the clock, the
+    /// radio glyph, and the number kept the accent they were first drawn
+    /// with (tvOS simulator 2026-11-06: Custom Accent Color flipped, the
+    /// time labels recolored, the channel column badges did not, with
+    /// GuideChannelRow bodies logged as evaluated). Reading the object here
+    /// makes the accent one of this body's own dependencies.
+    @ObservedObject private var themeLive = ThemeManager.shared
     let height: CGFloat
     let glyphSize: CGFloat
     let numberSize: CGFloat
