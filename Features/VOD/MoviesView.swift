@@ -2714,26 +2714,27 @@ struct MoviesView: View {
         }
     }
 
+    /// Provider pills: one cached fetch per server (VODProviderNameCache),
+    /// not one per body appearance. The Apple TV main-thread profile
+    /// (2026-11-06 13:37:23) caught this resuming on the main actor with the
+    /// SwiftData reads of effectiveUserAgent inside a 165 ms tab-switch
+    /// turn; the model reads now happen once up front and the fetch plus map
+    /// build run off the main actor. providerNames is written only when it
+    /// changes (an equal @State write still re-renders every reader).
     private func loadProviderNames() async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first,
               server.type == .dispatcharrAPI else {
-            providerNames = [:]
+            if !providerNames.isEmpty { providerNames = [:] }
             return
         }
-        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent,
-                                 authMode: server.dispatcharrHeaderMode)
-        let accounts = (try? await api.getM3UAccounts()) ?? []
-        var map: [Int: String] = [:]
-        for a in accounts {
-            // Skip the locked built-in "custom" account and disabled ones
-            // (Logan 2026-09-04: "custom" showed up as a provider).
-            if a.locked == true || a.isActive == false { continue }
-            if a.name?.lowercased() == "custom" { continue }
-            map[a.id] = (a.name?.isEmpty == false) ? a.name! : "Provider \(a.id)"
-        }
-        providerNames = map
+        let request = VODProviderNameCache.Request(
+            serverID: server.id.uuidString,
+            baseURL: server.effectiveBaseURL,
+            apiKey: server.effectiveApiKey,
+            userAgent: server.effectiveUserAgent,
+            authMode: server.dispatcharrHeaderMode)
+        let map = await VODProviderNameCache.shared.names(for: request)
+        if map != providerNames { providerNames = map }
     }
 
     private var pillSpacing: CGFloat {
@@ -4453,5 +4454,77 @@ struct VODDisplayScale: ViewModifier {
     func body(content: Content) -> some View {
         let clamped = CGFloat(max(0.85, min(1.5, uiScale)))
         content.environment(\.aerioTextScale, textScale * clamped)
+    }
+}
+
+
+/// Dispatcharr M3U account id -> display name for the provider pills,
+/// fetched once per server off the main actor and kept for the process.
+/// Invalidated when the server changes (the key carries the server id and
+/// base URL) and on a sync pull (syncManagerDidReceiveRemoteServers), so a
+/// playlist edited elsewhere refetches. A failed fetch is not cached, so the
+/// next Movies or TV Shows appearance retries.
+@MainActor
+final class VODProviderNameCache {
+    static let shared = VODProviderNameCache()
+
+    struct Request: Hashable {
+        let serverID: String
+        let baseURL: String
+        let apiKey: String
+        let userAgent: String
+        let authMode: DispatcharrAuthHeaderMode
+        var key: String { serverID + "|" + baseURL }
+    }
+
+    private var byServer: [String: [Int: String]] = [:]
+    private var inFlight: [String: Task<[Int: String]?, Never>] = [:]
+    private var syncObserver: NSObjectProtocol?
+
+    private init() {
+        syncObserver = NotificationCenter.default.addObserver(
+            forName: .syncManagerDidReceiveRemoteServers, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.byServer.isEmpty else { return }
+                debugLog("[VOD] provider names: cache cleared (sync pull)")
+                self.byServer.removeAll()
+            }
+        }
+    }
+
+    func invalidateAll() { byServer.removeAll() }
+
+    func names(for request: Request) async -> [Int: String] {
+        let key = request.key
+        if let cached = byServer[key] { return cached }
+        let task: Task<[Int: String]?, Never>
+        if let running = inFlight[key] {
+            task = running
+        } else {
+            task = Task.detached(priority: .utility) {
+                let api = DispatcharrAPI(baseURL: request.baseURL,
+                                         auth: .apiKey(request.apiKey),
+                                         userAgent: request.userAgent,
+                                         authMode: request.authMode)
+                guard let accounts = try? await api.getM3UAccounts() else { return nil }
+                var map: [Int: String] = [:]
+                for a in accounts {
+                    // Skip the locked built-in "custom" account and disabled
+                    // ones (Logan 2026-09-04: "custom" showed up as a provider).
+                    if a.locked == true || a.isActive == false { continue }
+                    if a.name?.lowercased() == "custom" { continue }
+                    map[a.id] = (a.name?.isEmpty == false) ? a.name! : "Provider \(a.id)"
+                }
+                return map
+            }
+            inFlight[key] = task
+        }
+        let result = await task.value
+        inFlight[key] = nil
+        guard let result else { return byServer[key] ?? [:] }
+        byServer[key] = result
+        debugLog("[VOD] provider names: \(result.count) providers cached for server \(request.serverID.prefix(8))")
+        return result
     }
 }
