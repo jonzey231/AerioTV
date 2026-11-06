@@ -78,7 +78,7 @@ struct SettingsRow: View {
     /// the row's original geometry everywhere else it is used.
     var isBusy: Bool? = nil
     /// Observe ThemeManager so the subtitle's `.textSecondary`
-    /// (computed as `theme.accent.opacity(0.65)`) re-evaluates on
+    /// (computed as `theme.themeTint.opacity(0.65)`) re-evaluates on
     /// theme changes. v1.6.8: parent SettingsView observes
     /// ThemeManager too, but SwiftUI's List + UITableView cell
     /// diff skips re-rendering a row's body unless one of its

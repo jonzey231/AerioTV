@@ -425,6 +425,22 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
         useCustomAccent ? Color(hex: customAccentHex).opacity(0.8) : selectedTheme.lightAccentSecondary
     }
 
+    /// Tint for secondary text, tertiary text, dividers, and borders. On the
+    /// Custom theme this is the accent derived from the Theme Color, ignoring
+    /// Custom Accent Color, so a custom accent only recolors interactive
+    /// elements (selection, focus rings, pills, checkmarks, buttons), which
+    /// keep using `accent`. Presets have no separate theme color to preserve,
+    /// so there a custom accent tints text and dividers too, as it always has
+    /// (measured 2026-11-06: Aerio preset plus a purple accent left cyan
+    /// subtitles and footers behind).
+    var darkThemeTint: Color {
+        selectedTheme == .custom ? selectedTheme.accentPrimary : darkAccent
+    }
+    var lightThemeTint: Color {
+        selectedTheme == .custom ? selectedTheme.lightAccentPrimary : lightAccent
+    }
+    var themeTint: Color { ThemeManager.resolve(dark: darkThemeTint, light: lightThemeTint) }
+
     /// Primary text on the dark rendition: the fixed near-white for presets,
     /// a hue-tinted near-white for the Custom theme.
     var darkTextPrimary: Color {
@@ -474,15 +490,15 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
 // 1. Parse the base color "RRGGBB" and convert it to HSL: h in degrees
 //    [0, 360), s and l in [0, 1]. Let cap(x) = min(s, x).
 // 2. Dark rendition:
-//      background   = HSL(h, cap(0.55), 0.07)
-//      card / sheet = HSL(h, cap(0.50), 0.12)
+//      background   = HSL(h, cap(0.55), 0.10)
+//      card / sheet = HSL(h, cap(0.50), 0.15)
 //      text primary = HSL(h, cap(0.30), 0.94)
 // 3. Light rendition:
 //      background   = HSL(h, cap(0.45), 0.965)
 //      card / sheet = #FFFFFF (as every preset)
 //      text ink     = HSL(h, cap(0.40), 0.10)
 //    Secondary text, tertiary text, and dividers keep the preset rules
-//    (accent or ink at the preset opacities), so they follow these values.
+//    (theme tint or ink at the preset opacities), so they follow these values.
 // 4. Matching accent: hue ha = (h - 30) mod 360 (the step from AerioTV's
 //    navy ground to its cyan accent); saturation sa = s when s < 0.08 (a gray
 //    base keeps a gray accent), otherwise clamp(s, 0.65, 0.90).
@@ -498,7 +514,9 @@ final class ThemeManager: ObservableObject, @unchecked Sendable {
 //    floor(v * 255 + 0.5). Contrast is measured on those 8-bit values.
 // Mode (Light, Dark, System) and True Black Background apply on top exactly
 // as for presets (ThemeManager.background / card). Custom Accent Color, when
-// on, replaces the matching accent in both modes.
+// on, replaces the matching accent for interactive elements in both modes;
+// secondary text, tertiary text, dividers, and borders keep the matching
+// accent (ThemeManager.themeTint).
 struct CustomThemePalette: Equatable, Sendable {
     let darkBackground: String
     let darkCard: String
@@ -525,7 +543,7 @@ struct CustomThemePalette: Equatable, Sendable {
         let v = UInt32(clean(hex) ?? defaultHex, radix: 16) ?? 0x0A1628
         let (h, s, _) = rgbToHsl(Int(v >> 16 & 0xFF), Int(v >> 8 & 0xFF), Int(v & 0xFF))
         func cap(_ x: Double) -> Double { min(s, x) }
-        let darkBg = hsl(h, cap(0.55), 0.07)
+        let darkBg = hsl(h, cap(0.55), 0.10)
         let lightBg = hsl(h, cap(0.45), 0.965)
         let ha = h >= 30 ? h - 30 : h + 330
         let sa = s < 0.08 ? s : min(0.90, max(0.65, s))
@@ -541,7 +559,7 @@ struct CustomThemePalette: Equatable, Sendable {
         }
         return CustomThemePalette(
             darkBackground: hexString(darkBg),
-            darkCard: hexString(hsl(h, cap(0.50), 0.12)),
+            darkCard: hexString(hsl(h, cap(0.50), 0.15)),
             darkText: hexString(hsl(h, cap(0.30), 0.94)),
             lightBackground: hexString(lightBg),
             lightInk: hexString(hsl(h, cap(0.40), 0.10)),

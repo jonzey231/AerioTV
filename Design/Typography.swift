@@ -451,16 +451,17 @@ private struct ThemeReactiveSectionHeader<Content: View>: View {
     @ObservedObject private var theme = ThemeManager.shared
     let content: Content
     var body: some View {
-        // Read theme.accent so SwiftUI's dependency tracker registers
-        // the property, opacity is applied here (not via the static
-        // `Color.textSecondary` accessor) so the resulting `Color`
-        // changes structurally on every theme push, ensuring the
-        // .foregroundColor modifier re-applies inside cached cells.
+        // Read theme.themeTint (the theme's own accent, never the custom
+        // accent override, matching `Color.textSecondary`) so SwiftUI's
+        // dependency tracker registers the property, opacity is applied
+        // here (not via the static `Color.textSecondary` accessor) so the
+        // resulting `Color` changes structurally on every theme push,
+        // ensuring the .foregroundColor modifier re-applies inside cached cells.
         let derived: Color = {
             #if os(tvOS)
-            return theme.accent.opacity(0.75)
+            return theme.themeTint.opacity(0.75)
             #else
-            return theme.accent.opacity(0.65)
+            return theme.themeTint.opacity(0.65)
             #endif
         }()
         // Text Contrast blends the accent header toward white / black.

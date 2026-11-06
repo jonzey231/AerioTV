@@ -8723,7 +8723,7 @@ private struct GuideGlyphBand: ViewModifier {
                 glyphSlot(showsCatchup) {
                     Image(systemName: "clock.arrow.circlepath")
                         .scaledFont(.system(size: glyphSize, weight: .semibold))
-                        .foregroundColor(Color.contrastText(.textTertiary))
+                        .foregroundColor(.accentPrimary)
                 }
             }
             .padding(.trailing, trailingInset)
@@ -9058,7 +9058,7 @@ private struct GuideChannelButton: View {
             if channel.hasCatchup {
                 Image(systemName: "clock.arrow.circlepath")
                     .scaledFont(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .foregroundColor(.accentPrimary)
                     .padding(.top, 3)
                     .padding(.trailing, 3)
             }

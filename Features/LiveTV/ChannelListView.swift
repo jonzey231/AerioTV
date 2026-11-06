@@ -4374,7 +4374,7 @@ struct ChannelRow: View {
                             if item.hasCatchup {
                                 Image(systemName: "clock.arrow.circlepath")
                                     .scaledFont(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(Color.contrastText(.textTertiary))
+                                    .foregroundColor(.accentPrimary)
                             }
                         }
 
@@ -4525,7 +4525,7 @@ struct ChannelRow: View {
                     if item.hasCatchup {
                         Image(systemName: "clock.arrow.circlepath")
                             .scaledFont(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
-                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .foregroundColor(.accentPrimary)
                     }
                     KeptChannelBadge(channelID: item.id, compact: !isWide)
                 }

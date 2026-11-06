@@ -37,28 +37,29 @@ extension Color {
     static var textPrimary: Color {
         ThemeManager.resolve(dark: ThemeManager.shared.darkTextPrimary, light: lightInk)
     }
-    /// Secondary text, accent-tinted on dark; darker, higher-alpha ink on
+    /// Secondary text, theme-tinted on dark (the theme's own accent, never the
+    /// custom accent override); darker, higher-alpha ink on
     /// light (accent-alpha greys wash out on white).
     #if os(tvOS)
     static var textSecondary: Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.75),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.75),
                              light: lightInk.opacity(0.64))
     }
     #else
     static var textSecondary: Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.65),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.65),
                              light: lightInk.opacity(0.60))
     }
     #endif
-    /// Tertiary text, accent-tinted at low opacity on dark; ink for hints on light.
+    /// Tertiary text, theme-tinted at low opacity on dark; ink for hints on light.
     #if os(tvOS)
     static var textTertiary:  Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.45),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.45),
                              light: lightInk.opacity(0.46))
     }
     #else
     static var textTertiary:  Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.28),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.28),
                              light: lightInk.opacity(0.42))
     }
     #endif
@@ -96,14 +97,14 @@ extension Color {
         #endif
     }
 
-    // Borders, accent-tinted on dark; on light, blend toward ink at a higher
+    // Borders, theme-tinted on dark (never the custom accent); on light, blend toward ink at a higher
     // alpha so dividers stay visible on white without the accent washing out.
     static var borderSubtle: Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.10),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.10),
                              light: lightInk.opacity(0.12))
     }
     static var borderMedium: Color {
-        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.18),
+        ThemeManager.resolve(dark: ThemeManager.shared.darkThemeTint.opacity(0.18),
                              light: lightInk.opacity(0.20))
     }
 
