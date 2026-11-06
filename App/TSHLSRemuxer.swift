@@ -4956,21 +4956,80 @@ enum DisplayCriteriaCoordinator {
     /// than stalling the tune across an HDMI mode change that changes
     /// nothing (review 2026-09-11 section 1 proposal 6).
     private(set) static var lastAppliedSignature: String?
+    /// Bumped on every apply. A debounced clear scheduled before an apply
+    /// carries the older generation and is dropped when it fires, so a
+    /// clear from a tile that went away can never nil criteria a newer
+    /// tile just set (the cancel() alone covered only the case where the
+    /// apply ran on the same coordinator instance before the 3 s).
+    private static var generation = 0
+    private static var switchObservation: NSKeyValueObservation?
+    private static var switchWatchEnd: DispatchWorkItem?
 
     static func apply(_ criteria: AVDisplayCriteria, to dm: AVDisplayManager,
                       signature: String? = nil) {
         pendingClear?.cancel()
         pendingClear = nil
+        generation += 1
+        let gen = generation
+        let before = dm.preferredDisplayCriteria
+        // Apple TV 2026-11-06 12:06, 12:08, 12:16: three HDR requests in a
+        // row with identical "set" lines and no HDR on the panel, each in
+        // a process whose predecessor was killed by an install while it
+        // still held bt.2020/PQ criteria. The first apply in a process
+        // writes nil first so tvOS sees a fresh request rather than one
+        // it may consider already satisfied by the dead process.
+        if lastAppliedSignature == nil {
+            dm.preferredDisplayCriteria = nil
+        }
         dm.preferredDisplayCriteria = criteria
         lastAppliedSignature = signature
+        debugLog("[AVP-DISPLAY] apply gen=\(gen) sig=\(signature ?? "none") "
+            + "previousCriteria=\(before == nil ? "nil" : "set") "
+            + "readback=\(dm.preferredDisplayCriteria == nil ? "nil" : "set") "
+            + "switchInProgress=\(dm.isDisplayModeSwitchInProgress) "
+            + "matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled)")
+        watchSwitch(dm, generation: gen)
+    }
+
+    /// Logs every isDisplayModeSwitchInProgress transition for 10 s after
+    /// an apply, plus a final read-back, so the log shows whether tvOS
+    /// started an HDMI mode change at all.
+    private static func watchSwitch(_ dm: AVDisplayManager, generation gen: Int) {
+        switchWatchEnd?.cancel()
+        switchObservation = dm.observe(\.isDisplayModeSwitchInProgress, options: [.new]) { dm, _ in
+            let inProgress = dm.isDisplayModeSwitchInProgress
+            DispatchQueue.main.async {
+                debugLog("[AVP-DISPLAY] gen=\(gen) isDisplayModeSwitchInProgress -> \(inProgress)")
+            }
+        }
+        let end = DispatchWorkItem {
+            switchObservation = nil
+            let readback = dm.preferredDisplayCriteria
+            debugLog("[AVP-DISPLAY] gen=\(gen) watch ended 10s after apply: "
+                + "switchInProgress=\(dm.isDisplayModeSwitchInProgress) "
+                + "readback=\(readback == nil ? "nil" : "set") "
+                + "matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled)")
+            if readback == nil, lastAppliedSignature != nil {
+                debugLog("[AVP-DISPLAY] gen=\(gen) preferredDisplayCriteria read back nil after being set "
+                    + "(\(lastAppliedSignature ?? "none"))")
+            }
+        }
+        switchWatchEnd = end
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: end)
     }
 
     static func scheduleClear(_ dm: AVDisplayManager) {
         pendingClear?.cancel()
+        let gen = generation
         let work = DispatchWorkItem {
+            guard gen == generation else {
+                debugLog("[AVP-DISPLAY] debounced clear from gen=\(gen) dropped; gen=\(generation) applied since")
+                return
+            }
             dm.preferredDisplayCriteria = nil
             lastAppliedSignature = nil
-            debugLog("[AVP-DISPLAY] display criteria cleared (debounced; panel returns to default mode)")
+            debugLog("[AVP-DISPLAY] display criteria cleared (debounced; panel returns to default mode) "
+                + "gen=\(gen) switchInProgress=\(dm.isDisplayModeSwitchInProgress)")
         }
         pendingClear = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
@@ -9630,14 +9689,17 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-DISPLAY] display criteria deferred until first frame (\(signature))")
             return
         }
-        let window: UIWindow? = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first(where: { $0.activationState == .foregroundActive })?
-            .keyWindow
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = scenes.first(where: { $0.activationState == .foregroundActive })
+        let window: UIWindow? = activeScene?.keyWindow
         guard let window else {
-            debugLog("[AVP-DISPLAY] display criteria skipped: no window available")
+            debugLog("[AVP-DISPLAY] display criteria skipped: no window available "
+                + "(scenes=\(scenes.count) states=\(scenes.map { "\($0.activationState.rawValue)" }))")
             return
         }
+        debugLog("[AVP-DISPLAY] window for criteria: \(Unmanaged.passUnretained(window).toOpaque()) "
+            + "isKeyWindow=\(window.isKeyWindow) sceneWindows=\(activeScene?.windows.count ?? 0) "
+            + "scenes=\(scenes.count) firstFrameSeen=\(firstFrameSeen) force=\(force)")
         // Nothing applied yet this session and the panel already runs at
         // the requested SDR rate: the switch would be a no-op that costs
         // seconds of ingest (row 8 of the review's table).
