@@ -127,16 +127,29 @@ struct AddServerView: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }
-                    Spacer(minLength: 40)
+                    // Apple TV type picker: no tail spacer or vertical
+                    // padding, so title through the Set up from another
+                    // device card fits the 960 pt safe area and the initial
+                    // focus does not drag the page down (Logan, tvOS
+                    // review 2026-11-06).
+                    if !tvTypePickerFitsPage {
+                        Spacer(minLength: 40)
+                    }
                 }
                 // Apple TV: the details form takes the Edit Playlist
                 // column (1200 pt), not the full 1920; the type picker
                 // inside caps itself tighter (tvColumnWidth).
                 .onboardingPadWidth(560, other: isTV ? SettingsMetrics.tvReadingColumnWidth : nil)
                 .padding(.horizontal, isPad ? 40 : 20)
-                .padding(.vertical, 20)
+                .padding(.vertical, tvTypePickerFitsPage ? 0 : 20)
             }
             .onboardingPadCentered()
+            #if os(tvOS)
+            // First focus lands on Continue with Dispatcharr (mid-page), not
+            // on the bottom card the focus engine picked on its own, which
+            // scrolled the page to fit the card.
+            .defaultFocus($heroFocused, true)
+            #endif
             }
         }
         .onAppear {
@@ -230,6 +243,10 @@ struct AddServerView: View {
         return false
         #endif
     }
+
+    /// Apple TV Connect a Server (type picker): the page is laid out to fit
+    /// the safe area without scrolling.
+    private var tvTypePickerFitsPage: Bool { isTV && !typeChosen }
 
     private var showScanDetailsOnThisPlatform: Bool {
         #if os(iOS)
