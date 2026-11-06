@@ -51,6 +51,10 @@
   showing device asks before it sends, and the whole setup continues to
   Add Profiles. A code from a screenshot, the server's web UI, or another
   network imports that user only, as before. No new server paths.
+- Radio channels carry a small radio glyph after the channel name in the
+  guide channel column, the Live TV list, and Search (channel rows and
+  Programs cards), so a pick that opens Radio Mode minimized is marked
+  before the pick. Same glyph and placement in AerioTV for Android.
 
 ### Changed
 
@@ -121,6 +125,19 @@
   record once (read the old key, save it under the new one, then remove the
   old one), so every device keeps the same favorites, progress, and
   settings. Same change in AerioTV for Android.
+
+### Fixed
+
+- Apple TV: the DVR, Movies, and TV Shows tabs appear as soon as their
+  content arrives while the Settings tab is on its root or Playlists page,
+  including right after Add Playlist finishes; before, they waited for a
+  tab change. The Settings tab rebuilds at that moment, so AerioTV puts the
+  rail and focus back on the page the flow left. A pushed Settings page
+  (Appearance, a Playlist Detail) still defers the change until it closes.
+- Apple TV: after a radio channel is picked from a Search row (Radio Mode
+  starts minimized), the first Menu press returns focus to that row; the
+  next Menu press closes Search as before. The first press used to close
+  Search and leave focus on the Search circle.
 
 ### Server paths
 

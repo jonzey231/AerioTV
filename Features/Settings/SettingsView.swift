@@ -80,6 +80,7 @@ struct SettingsView: View {
     @AppStorage(DispatcharrSyncManager.enabledKey) private var dispatcharrSyncEnabled = false
     #if os(tvOS)
     @State private var navPath = NavigationPath()
+    @ObservedObject private var tvNavState = TVSettingsNavState.shared
     /// Tracks classic-`NavigationLink` pushes that bypass `navPath`
     /// (ServerDetailView, MyRecordingsView). Combined with `navPath`
     /// to compute `isSubviewPushed`.
@@ -276,6 +277,17 @@ struct SettingsView: View {
                 performOnePop()
                 popRequested = false
             }
+            // One key for everything MainTabView's tab latch needs to know
+            // about this tab (Logan 2026-11-05, "just add the tabs when done
+            // adding the playlist"): a tab inserted while Settings is up
+            // rebuilds this view, so the latch only inserts on the root or
+            // the Playlists page with no flow presented, and this view puts
+            // the rail and focus back on its next mount.
+            .onChange(of: tvNavStateKey, initial: true) { _, _ in
+                publishTVNavState()
+                applyPendingTVRestore("insert under a live Settings view", onMount: false)
+            }
+            .onAppear { applyPendingTVRestore("Settings view mounted", onMount: true) }
         #else
         // Phase 4 (plan A2): explicit idiom fork rather than trusting
         // NavigationSplitView's collapse heuristics, so the iPhone view
@@ -317,6 +329,34 @@ struct SettingsView: View {
     }
 
     #if os(tvOS)
+    private var tvNavStateKey: String {
+        "\(tvSelection)|\(showAddServer)|\(navPath.count)|\(dismissStack.depth)|\(tvFocusInDetail)|\(tvNavState.restoreToken)"
+    }
+
+    /// Puts the rail and focus back after MainTabView inserted a tab while
+    /// this tab was selected (measured on the tvOS simulator 2026-11-05: the
+    /// insert dropped focus from the Playlists page row to the rail's
+    /// Playlists row about 100 ms later, with or without a rebuild). The
+    /// focus assert waits past that re-entry so it is the last word.
+    private func applyPendingTVRestore(_ reason: String, onMount: Bool) {
+        guard let restore = TVSettingsNavState.shared.takeRestore(onMount: onMount) else { return }
+        SettingsFocusLog.log("restore (\(reason)): \(restore.selection) panes=\(restore.focusInPanes) detail=\(restore.focusInDetail)")
+        tvSelection = restore.selection
+        guard restore.focusInPanes else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            if restore.focusInDetail { tvDetailFocusToken += 1 } else { railReturnToken += 1 }
+        }
+    }
+
+    private func publishTVNavState() {
+        TVSettingsNavState.shared.update(
+            selection: tvSelection,
+            isPushed: !navPath.isEmpty || dismissStack.depth > 0,
+            isPresentingFlow: showAddServer,
+            focusInDetail: tvFocusInDetail)
+    }
+
     /// Computes `isSubviewPushed` from both navPath and the classic
     /// dismiss stack and writes it through the binding only when the
     /// value actually changes (avoids invalidating MainTabView on
@@ -1264,6 +1304,76 @@ struct SettingsView: View {
 /// Internal (not private) so DVR / Developer / Appearance settings pages
 /// can reuse the same focus treatment for uniform tvOS UI.
 #endif  // Phase 1 split: closes a block that spanned the extraction cut
+
+#if os(tvOS)
+/// What MainTabView's tab latch needs to know about the Settings tab
+/// (Logan 2026-11-05, "just add the tabs when done adding the playlist").
+/// Inserting a DVR / Movies / TV Shows tab rebuilds SettingsView (measured
+/// on the tvOS simulator: the rail resets to Playlists and a pushed page
+/// pops about 1 s later, Tab.hidden is unavailable on tvOS). The latch
+/// therefore inserts only while the tab is `isShallow` (root rail or the
+/// Playlists page, nothing pushed, no Add Playlist flow up), arms a restore
+/// first, and the rebuilt SettingsView consumes it on its first mount so
+/// the user lands where the flow left them with focus on a real row.
+@MainActor
+final class TVSettingsNavState: ObservableObject {
+    static let shared = TVSettingsNavState()
+
+    struct Restore {
+        let selection: SettingsRoute
+        let focusInPanes: Bool
+        let focusInDetail: Bool
+        /// Only a freshly mounted SettingsView may consume it (the TabView
+        /// remount case); the view that is about to be torn down must not.
+        let mountOnly: Bool
+    }
+
+    /// Root rail or the Playlists page, nothing pushed, no flow presented.
+    @Published private(set) var isShallow = true
+    /// Bumped with every armed restore so a SettingsView that survives the
+    /// insert applies it too (a rebuilt one applies it on mount).
+    @Published private(set) var restoreToken = 0
+    private(set) var selection: SettingsRoute = .category(.playlists)
+    private(set) var focusInDetail = false
+    /// Focus is inside the rail or the detail pane (not on the tab bar).
+    /// Written by TVSettingsSplitView from its pane focus.
+    var focusInPanes = false
+    private var pending: Restore?
+
+    func update(selection: SettingsRoute, isPushed: Bool, isPresentingFlow: Bool, focusInDetail: Bool) {
+        self.selection = selection
+        self.focusInDetail = focusInDetail
+        let shallow = !isPushed && !isPresentingFlow && selection == .category(.playlists)
+        if shallow != isShallow {
+            SettingsFocusLog.log("nav state shallow=\(shallow) (selection \(selection) pushed=\(isPushed) flow=\(isPresentingFlow))")
+            isShallow = shallow
+        }
+    }
+
+    /// Called by the latch right before it inserts a tab while Settings is
+    /// selected. Dropped if no rebuild consumes it within 2 s.
+    func armRestore(mountOnly: Bool = false) {
+        let restore = Restore(selection: selection, focusInPanes: focusInPanes,
+                              focusInDetail: focusInDetail, mountOnly: mountOnly)
+        pending = restore
+        SettingsFocusLog.log("restore armed: \(restore.selection) panes=\(restore.focusInPanes) detail=\(restore.focusInDetail) mountOnly=\(mountOnly)")
+        if !mountOnly { restoreToken += 1 }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            if pending != nil {
+                SettingsFocusLog.log("restore dropped: no rebuild consumed it")
+                pending = nil
+            }
+        }
+    }
+
+    func takeRestore(onMount: Bool) -> Restore? {
+        guard let restore = pending, onMount || !restore.mountOnly else { return nil }
+        pending = nil
+        return restore
+    }
+}
+#endif
 
 #if os(iOS)
 /// Presents Edit Playlist through SettingsView's root `serverToEdit` sheet.

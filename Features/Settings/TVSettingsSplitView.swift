@@ -106,6 +106,7 @@ struct TVSettingsSplitView<Detail: View>: View {
                 focusedRow = row
             }
             focusInDetail = (pane == .detail)
+            TVSettingsNavState.shared.focusInPanes = (pane != nil)
         }
         .onChange(of: focusedRow) { _, id in
             // Belt-and-braces: a focused rail row always means "not detail",

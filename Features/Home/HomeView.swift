@@ -4805,6 +4805,13 @@ struct MainTabView: View {
     @State private var tabShowRecordings = false
     @State private var tabShowMovies = false
     @State private var tabShowSeries = false
+    /// Whether the Settings tab is at its root or Playlists page with no
+    /// flow up (tab insertions are allowed there, see syncTabVisibility).
+    @ObservedObject private var settingsNav = TVSettingsNavState.shared
+    /// A radio row picked in the in-place Search starts Radio Mode
+    /// minimized with no player over Search, so the first Menu restores the
+    /// opened row instead of closing Search (Logan 2026-11-05).
+    @State private var searchRadioRestoreArmed = false
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
@@ -7455,7 +7462,7 @@ struct MainTabView: View {
     /// into one keeps the tabContentView modifier chain short enough for the
     /// Swift type-checker (three chained .onChange modifiers tipped it over).
     private var tabNavStateKey: String {
-        "\(isSettingsSubviewPushed)|\(isVODDetailPushed)|\(selectedTab.rawValue)"
+        "\(isSettingsSubviewPushed)|\(isVODDetailPushed)|\(selectedTab.rawValue)|\(settingsNav.isShallow)"
     }
     #endif
 
@@ -7506,33 +7513,88 @@ struct MainTabView: View {
     /// No-op on iOS.
     private func syncTabVisibility() {
         #if os(tvOS)
+        // ADDITIONS land as soon as their content arrives, the Settings tab
+        // included (Logan 2026-11-05: "just add the tabs when done adding
+        // the playlist"; the Living Room Apple TV sat on the Settings root
+        // with live[rec mov ser]=true and latched false, and the bar never
+        // filled in). A tab inserted under Settings rebuilds that tab
+        // (measured on the tvOS simulator: the rail resets to Playlists and
+        // a pushed page pops about 1 s later, Tab.hidden is unavailable on
+        // tvOS), so they land there only while Settings is shallow (root
+        // rail or the Playlists page, nothing pushed, no Add Playlist flow
+        // up) and a restore is armed first so the rebuilt SettingsView puts
+        // the rail and focus back. A different sub-page (Appearance, a
+        // Playlist Detail) or a VOD detail keeps today's deferral; the
+        // insert lands on the pop via tabNavStateKey.
+        let addsPending = (!tabShowRecordings && hasRecordings)
+            || (!tabShowMovies && hasMovies)
+            || (!tabShowSeries && hasSeries)
+        let addsAllowed = !isVODDetailPushed
+            && (selectedTab == .settings ? settingsNav.isShallow : !isSettingsSubviewPushed)
+        if addsPending {
+            if addsAllowed {
+                if selectedTab == .settings { settingsNav.armRestore() }
+                debugLog("🔶 syncTabVisibility ADDING tabs (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) settingsShallow=\(settingsNav.isShallow)): rec \(tabShowRecordings)→\(tabShowRecordings || hasRecordings) mov \(tabShowMovies)→\(tabShowMovies || hasMovies) ser \(tabShowSeries)→\(tabShowSeries || hasSeries)")
+                if hasRecordings { tabShowRecordings = true }
+                if hasMovies { tabShowMovies = true }
+                if hasSeries { tabShowSeries = true }
+                if selectedTab == .settings {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { repaintTabBarAfterInsert() }
+                }
+            } else {
+                debugLog("🔶 syncTabVisibility DEFER adds (settingsPushed=\(isSettingsSubviewPushed) settingsShallow=\(settingsNav.isShallow) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) mov=\(hasMovies) ser=\(hasSeries)] latched[rec=\(tabShowRecordings) mov=\(tabShowMovies) ser=\(tabShowSeries)]")
+            }
+        }
+        // REMOVALS stay deferred while Settings or a VOD detail is open:
+        // retiring a sibling under an active Settings navigation is the
+        // blank-then-dead Settings case 338cfc7 latched against.
         guard !isSettingsSubviewPushed, !isVODDetailPushed, selectedTab != .settings else {
             // Diagnostic for the sticky blank-Settings bug: confirm the latch is
             // deferring while in Settings/nav. If a blank ever coincides with a
             // DEFER-less tab-set mutation below, this + the APPLYING line pinpoint it.
-            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) mov=\(hasMovies) ser=\(hasSeries)] latched[rec=\(tabShowRecordings) mov=\(tabShowMovies) ser=\(tabShowSeries)]")
+            if tabShowRecordings != hasRecordings || tabShowMovies != hasMovies || tabShowSeries != hasSeries {
+                debugLog("🔶 syncTabVisibility DEFER removals (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[rec=\(hasRecordings) mov=\(hasMovies) ser=\(hasSeries)] latched[rec=\(tabShowRecordings) mov=\(tabShowMovies) ser=\(tabShowSeries)]")
+            }
             return
         }
-        let recChange = tabShowRecordings != hasRecordings
-        let movChange = tabShowMovies != hasMovies
-        let serChange = tabShowSeries != hasSeries
-        let vodChange = movChange || serChange
-        if recChange || vodChange {
-            // A tab APPEARING/DISAPPEARING mutates the TabView child set, the
-            // exact action that can tear down a fragile Settings NavigationStack.
-            // If the blank recurs, the last such line before it (with tab context)
-            // is the culprit trigger.
-            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): rec \(tabShowRecordings)→\(hasRecordings) mov \(tabShowMovies)→\(hasMovies) ser \(tabShowSeries)→\(hasSeries)")
+        let recChange = tabShowRecordings && !hasRecordings
+        let movChange = tabShowMovies && !hasMovies
+        let serChange = tabShowSeries && !hasSeries
+        if recChange || movChange || serChange {
+            // A tab DISAPPEARING mutates the TabView child set, the exact
+            // action that can tear down a fragile Settings NavigationStack.
+            // If the blank recurs, the last such line before it (with tab
+            // context) is the culprit trigger.
+            debugLog("🔶 syncTabVisibility REMOVING tabs (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): rec \(tabShowRecordings)→\(hasRecordings) mov \(tabShowMovies)→\(hasMovies) ser \(tabShowSeries)→\(hasSeries)")
         }
-        if recChange { tabShowRecordings = hasRecordings }
-        if movChange { tabShowMovies = hasMovies }
-        if serChange { tabShowSeries = hasSeries }
+        if recChange { tabShowRecordings = false }
+        if movChange { tabShowMovies = false }
+        if serChange { tabShowSeries = false }
         // A latch that just retired the selected tab must move the selection
         // too; the TabView keeps a tag that no longer has a child otherwise
         // and tvOS lands on a blank pane.
         redirectIfSelectedTabHidden()
         #endif
     }
+
+    #if os(tvOS)
+    /// After a tab is inserted while focus sits in the Settings content, the
+    /// unfocused tvOS tab bar kept painting its old pill set, then lit the
+    /// pill at the Settings INDEX (now DVR) until focus came back to the
+    /// bar (simulator screenshots 2026-11-05 22:45, 22:48, and 22:56). The
+    /// UIKit bar already held the five items with Settings selected, and
+    /// setNeedsLayout did not move the highlight; writing selectedItem on a
+    /// controller-managed bar raises (crash 23:00:04). So the bar is
+    /// remounted the way the parked-bar heal does (tvBarHealToken), with a
+    /// restore armed first so the rebuilt SettingsView puts the rail and
+    /// focus back.
+    private func repaintTabBarAfterInsert() {
+        guard selectedTab == .settings else { return }
+        debugLog("[TABBAR-INSERT] remounting TabView after an insert under Settings (token \(tvBarHealToken) -> \(tvBarHealToken + 1))")
+        settingsNav.armRestore(mountOnly: true)
+        tvBarHealToken += 1
+    }
+    #endif
 
     /// Move the selection somewhere valid when the tab the user is on has
     /// just been retired (a capability flipped to denied, the library
@@ -8191,6 +8253,7 @@ struct MainTabView: View {
         // recognizers can disarm while search is up.
         .onChange(of: showSearch) { _, isUp in
             TVSearchOverlayState.shared.isUp = isUp
+            if !isUp { searchRadioRestoreArmed = false }
         }
         // Full exit from a fullscreen player (double Back, catch-up exit,
         // multiview exit) unmounts the container without a minimize, so
@@ -8255,9 +8318,17 @@ struct MainTabView: View {
         }
         // Top Shelf deep link for a channel → switch to Live TV tab.
         // ChannelListView itself handles starting playback once channels are loaded.
-        .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { notif in
             debugLog("🔗 MainTabView: aerioOpenChannel → switch to Live TV tab")
             withAnimation { selectedTab = .liveTV }
+            // A radio pick from a Search row: Radio Mode starts minimized and
+            // no player comes up over Search, so the first Menu restores the
+            // row (handleMenuPress) instead of closing Search.
+            if showSearch, let id = notif.userInfo?["channelID"] as? String,
+               ChannelStore.shared.channels.first(where: { $0.id == id })?.isRadio == true {
+                searchRadioRestoreArmed = true
+                debugLog("[FOCUS] search: radio row picked, first Menu restores the row")
+            }
         }
         // Top Shelf deep link for a VOD item → switch to the matching tab.
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
@@ -9207,6 +9278,16 @@ struct MainTabView: View {
         // A fullscreen player opened from Search sits above it: Back belongs
         // to the player first.
         if showSearch && !(nowPlaying.isActive && !nowPlaying.isMinimized) {
+            // Radio Mode started from a Search row (Logan 2026-11-05): no
+            // player opened, so nothing restored the row. The first Menu
+            // restores it, the same path a closing player uses; the next
+            // Menu closes Search as below.
+            if searchRadioRestoreArmed && radio.isActive {
+                searchRadioRestoreArmed = false
+                debugLog("\u{1F3AE} [HMP]   \u{2192} branch: Radio Mode from a Search row \u{2192} restore the opened row")
+                NotificationCenter.default.post(name: .aerioSearchRestoreFocus, object: nil)
+                return
+            }
             debugLog("\u{1F3AE} [HMP]   \u{2192} branch: in-place search up \u{2192} closing it")
             withAnimation(.easeOut(duration: 0.2)) { showSearch = false }
             return
