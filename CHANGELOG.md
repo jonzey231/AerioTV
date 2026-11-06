@@ -134,6 +134,9 @@
 
 ### Fixed
 
+- Apple TV Settings: Left from a page lands on that page's own sidebar
+  entry in one move. It used to land on the nearest entry first and jump
+  to the right one a moment later.
 - Apple TV: the DVR, Movies, and TV Shows tabs appear as soon as their
   content arrives while the Settings tab is on its root or Playlists page,
   including right after Add Playlist finishes; before, they waited for a

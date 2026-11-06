@@ -70,6 +70,27 @@ struct TVSettingsSplitView<Detail: View>: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .focusSection()
                 .focused($focusedPane, equals: .detail)
+                // Left from a page: the engine's own search lands on the
+                // geometrically nearest rail row and the onChange below
+                // then moves focus to the page's row, a visible two-step
+                // flash (simulator trace 2026-11-06 14:34:06: "@623,808 ->
+                // @60,799 Remote Control", then "Live TV" 63 ms later).
+                // This strip at the pane's leading edge is the nearest
+                // thing to the left of every detail row, so the engine
+                // takes it first, and the strip redirects to the page's
+                // own row in that same move. Mounted only while focus is
+                // in the detail pane (SwiftUI registers a UIKit item's
+                // focusability at insertion, so toggling it later is not
+                // seen), which also keeps Right from the rail untouched.
+                // Outside the pane's `.focused` so the strip never counts
+                // as detail focus.
+                .overlay(alignment: .leading) {
+                    if focusedPane == .detail {
+                        TVRailReturnGuide { assertRailFocus() }
+                        .frame(width: 24)
+                        .frame(maxHeight: .infinity)
+                    }
+                }
                 // Entry catcher: mounted only while focus is outside both
                 // panes (tab bar). Down from the far-right Settings pill
                 // otherwise lands on the first detail row and bounces to
@@ -309,6 +330,73 @@ struct TVSettingsSplitView<Detail: View>: View {
         case .category(let dest):    return "cat-\(dest.rawValue)"
         case .server(let id):        return "srv-\(id.uuidString)"
         case .editServer(let id):    return "edit-\(id.uuidString)"
+        }
+    }
+}
+
+/// The Left-from-detail catcher. A UIFocusGuide cannot do this job here:
+/// SwiftUI's hosting view never enumerates a non-focusable UIKit subview
+/// as a focus item container, so a guide inside it is invisible to the
+/// engine (simulator 2026-11-06 14:41: enabled, in the window, frame
+/// 510,157 24x863, `focusItems(in:)` never queried). A focusable UIKit
+/// view IS found (the PressCatcherView precedent): the strip is the
+/// engine's pick for Left from any detail row, it cancels that update in
+/// `shouldUpdateFocus` (nothing moves, no flash), and `redirect` writes
+/// the page's row through the host's FocusState, which the engine applies
+/// as one move from the detail row to that row (trace: a single
+/// "[FOCUS] none: @623,808 -> @60,283"). The strip is never focused;
+/// `didUpdateFocus` is the belt-and-braces path if it ever were.
+private struct TVRailReturnGuide: UIViewRepresentable {
+    let redirect: () -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        // Own container so a focus replicant, if one is ever made, lands
+        // in a legitimate UIKit hierarchy (TVPressOverlay precedent). User
+        // interaction stays on: UIKit never focuses a view under a
+        // non-interactive ancestor.
+        let container = UIView()
+        let catcher = CatcherView(frame: .zero)
+        catcher.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(catcher)
+        NSLayoutConstraint.activate([
+            catcher.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            catcher.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            catcher.topAnchor.constraint(equalTo: container.topAnchor),
+            catcher.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        catcher.redirect = redirect
+        return container
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        view.subviews.compactMap({ $0 as? CatcherView }).first?.redirect = redirect
+    }
+
+    final class CatcherView: UIView {
+        var redirect: (() -> Void)?
+        /// The engine re-asks up to five times after a veto (simulator
+        /// trace 2026-11-06 14:52); one redirect per press is enough.
+        private var lastRedirect = Date.distantPast
+
+        override var canBecomeFocused: Bool { true }
+
+        override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+            guard context.nextFocusedItem === self else { return super.shouldUpdateFocus(in: context) }
+            if Date().timeIntervalSince(lastRedirect) > 0.25 {
+                lastRedirect = Date()
+                SettingsFocusLog.log("rail guide: Left from the detail pane cancelled, redirecting to the page's row")
+                DispatchQueue.main.async { [weak self] in self?.redirect?() }
+            }
+            return false
+        }
+
+        override func didUpdateFocus(in context: UIFocusUpdateContext,
+                                     with coordinator: UIFocusAnimationCoordinator) {
+            super.didUpdateFocus(in: context, with: coordinator)
+            if context.nextFocusedItem === self {
+                SettingsFocusLog.log("rail guide: strip took focus, redirecting to the page's row")
+                redirect?()
+            }
         }
     }
 }
