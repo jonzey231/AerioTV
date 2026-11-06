@@ -129,7 +129,10 @@ struct AddServerView: View {
                     }
                     Spacer(minLength: 40)
                 }
-                .onboardingPadWidth(560)
+                // Apple TV: the details form takes the Edit Playlist
+                // column (1200 pt), not the full 1920; the type picker
+                // inside caps itself tighter (tvColumnWidth).
+                .onboardingPadWidth(560, other: isTV ? SettingsMetrics.tvReadingColumnWidth : nil)
                 .padding(.horizontal, isPad ? 40 : 20)
                 .padding(.vertical, 20)
             }
@@ -304,9 +307,16 @@ struct AddServerView: View {
                 tvFooter
             }
         }
-        .onboardingPadWidth(560, other: isTV ? 1200 : 640)
+        // Apple TV: one centered 960 pt column for everything on the page
+        // (title, hero card, Continue, Other source types, the Set up from
+        // another device card). The 1200 pt card read as too wide (Logan,
+        // tvOS review 2026-11-06); Android TV follows at 480 dp.
+        .onboardingPadWidth(560, other: isTV ? Self.tvColumnWidth : 640)
         .frame(maxWidth: .infinity)
     }
+
+    /// Apple TV column for Connect a Server, in points at 1920 wide.
+    static let tvColumnWidth: CGFloat = 960
 
     private static let dispatcharrFeatures: [(icon: String, title: String)] = [
         ("clock.arrow.circlepath", "Catch-up from the server"),
@@ -331,9 +341,11 @@ struct AddServerView: View {
             }
             .frame(maxWidth: .infinity)
 
+            // Two columns everywhere: three across no longer fit the
+            // narrower Apple TV card.
             LazyVGrid(
                 columns: Array(repeating: GridItem(.flexible(), spacing: isTV ? 14 : (isPad ? 6 : 8), alignment: .top),
-                               count: isTV ? 3 : 2),
+                               count: 2),
                 alignment: .leading,
                 spacing: isTV ? 14 : (isPad ? 6 : 8)
             ) {
@@ -368,10 +380,13 @@ struct AddServerView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if isTV {
+                // Sized to its label (36 pt side padding), centered; the
+                // full-card pill was the widest thing on the page.
                 OnboardingPillButton(title: "Continue with Dispatcharr",
-                                     filled: true, fullWidth: true) {
+                                     filled: true, fullWidth: false) {
                     choose(.dispatcharrAPI)
                 }
+                .frame(maxWidth: .infinity, alignment: .center)
                 #if os(tvOS)
                 .focused($heroFocused)
                 .onAppear {

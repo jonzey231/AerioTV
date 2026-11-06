@@ -58,6 +58,12 @@
 
 ### Changed
 
+- Apple TV: Connect a Server (onboarding and Settings > Add Playlist) is one
+  centered 960 pt column: title, the Dispatcharr card with its features in
+  two columns, a Continue with Dispatcharr button sized to its label, Other
+  source types, and the Set up from another device card at the same width.
+  The details form behind it takes the 1200 pt Edit Playlist column instead
+  of the full screen. Same copy as before.
 - Apple TV Settings > Playlists: the hint under the list now reads "Select a
   playlist to open it, then Set Active in its Actions to make it active.",
   the same sentence shape as iPhone and iPad.
