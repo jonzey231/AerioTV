@@ -4802,6 +4802,12 @@ final class AVPStallWatchdog {
     func start() { schedule() }
     func cancel() { cancelled = true }
 
+    /// An out-of-band verdict request: the tile saw evidence the next
+    /// scheduled poll would act on (a direct HLS item ready with no video
+    /// track) and does not want to wait out the interval. The regular
+    /// schedule keeps running; `fired` keeps the verdict one-shot.
+    func pollNow() { poll() }
+
     /// AirPlay (2026-09-21 rebuild): while an external receiver plays, the
     /// local clock and presentation size are not a render this phone can
     /// judge, so polls pass without verdicts. Re-arming resets every
@@ -8103,7 +8109,7 @@ struct AVPlayerMultiviewTile: View {
         #endif
         if KeptLiveChannels.shared.ids.contains(channelID) { return "Kept Live needs the TS remuxer" }
         if ForceHLSNotHLSMemory.contains(streamURL, channelID: channelID) {
-            return "entry proved not HLS earlier this session"
+            return "entry proved not HLS within the last day"
         }
         return nil
     }
@@ -8977,6 +8983,22 @@ struct AVPlayerMultiviewTile: View {
                 let videoTracks = item.tracks.filter { $0.assetTrack?.mediaType == .video }
                 if videoTracks.isEmpty {
                     debugLog("[AVP-HDR] ready with no video track (tracks=\(item.tracks.count))")
+                    // Direct HLS on an HEVC channel (iPhone 2026-11-06
+                    // 16:05:01, ESPN UHD; Apple TV the same path): AVPlayer
+                    // drops HEVC carried in TS segments, reaches readyToPlay
+                    // with audio only, and play() was already called, so
+                    // about a second of audio played before the watchdog's
+                    // next poll handed the tune to the TS remuxer. Mute this
+                    // player now (the fallback builds a fresh one) and ask
+                    // for the verdict at once. Radio tunes keep their audio;
+                    // the watchdog accepts those.
+                    if isForceHLSDirect,
+                       !AudioOnlyTuneIntent.shared.radioRequested,
+                       !DeclaredRadioChannels.shared.contains(removingHLSOutputFormat(url).absoluteString) {
+                        avPlayer.isMuted = true
+                        debugLog("[FORCE-HLS] ready with no video track channel=\(channelName): output muted, asking the watchdog now")
+                        stallWatchdog?.pollNow()
+                    }
                 }
                 for t in videoTracks {
                     guard let at = t.assetTrack else { continue }

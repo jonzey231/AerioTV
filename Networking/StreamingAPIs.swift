@@ -210,22 +210,43 @@ enum HLSSessionResolver {
     }
 }
 
-/// Force HLS (developer): channels whose HLS entry proved not to be HLS in
-/// this app session (Redirect stream profile). The next tune of the channel
-/// goes straight to the TS remuxer. In memory only: a new session re-tries.
+/// Force HLS (developer): channels whose HLS entry proved not to be HLS
+/// (Redirect stream profile), or whose HLS copy AVPlayer could not render
+/// (HEVC in TS segments: ready with audio and no video track). The next
+/// tune of the channel goes straight to the TS remuxer. Remembered across
+/// launches for 24 h: in-memory only, every launch replayed the direct
+/// attempt on the same HEVC channels (iPhone 2026-11-04 16:23 ESPN HD,
+/// 2026-11-05 09:40 ESPN HD, 2026-11-06 16:05 ESPN UHD), each a 3.5 s
+/// detour with a burst of audio before the fallback.
 @MainActor
 enum ForceHLSNotHLSMemory {
-    private static var keys: Set<String> = []
+    private static let defaultsKey = "forceHLSNotHLSMemory.v1"
+    static let ttl: TimeInterval = 24 * 3600
+    /// key -> expiry (seconds since 1970)
+    private static var entries: [String: Double] = load()
+
+    private static func load() -> [String: Double] {
+        let raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: Double] ?? [:]
+        let now = Date().timeIntervalSince1970
+        return raw.filter { $0.value > now }
+    }
+    private static func save() {
+        UserDefaults.standard.set(entries, forKey: defaultsKey)
+    }
 
     private static func key(_ url: URL) -> String {
         LiveConnectionRegistry.key(for: removingHLSOutputFormat(url))
     }
     static func remember(_ url: URL, channelID: String) {
-        keys.insert(key(url))
-        if !channelID.isEmpty { keys.insert("id:" + channelID) }
+        let expiry = Date().timeIntervalSince1970 + ttl
+        entries[key(url)] = expiry
+        if !channelID.isEmpty { entries["id:" + channelID] = expiry }
+        save()
     }
     static func contains(_ url: URL, channelID: String) -> Bool {
-        keys.contains(key(url)) || (!channelID.isEmpty && keys.contains("id:" + channelID))
+        let now = Date().timeIntervalSince1970
+        func live(_ k: String) -> Bool { (entries[k] ?? 0) > now }
+        return live(key(url)) || (!channelID.isEmpty && live("id:" + channelID))
     }
 }
 
