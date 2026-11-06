@@ -5502,6 +5502,10 @@ struct EPGGuideView: View {
     /// two handler runs ~50ms apart), and two overlapping scroll+assert
     /// tasks ping-pong focus visibly. New trigger cancels the old task.
     @State private var focusRestoreTask: Task<Void, Never>?
+    /// Single-flight guard for the Menu-to-top jump (`.guideScrollToTop`):
+    /// two quick Back presses used to run two assert loops at once (Apple TV
+    /// trace 2026-11-06 14:15:12). A new jump cancels the previous task.
+    @State private var scrollToTopTask: Task<Void, Never>?
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -6532,24 +6536,56 @@ struct EPGGuideView: View {
                 // to left-aligned now - "return to top channel" with the axis
                 // still hours in the future was useless. This keeps the sacred
                 // Menu semantics (top channel) and completes the home position.
-                if timelineIsAwayFromNow() { reAnchorTimelineToNow() }
-                Task { @MainActor in
-                    // Focus the top of the guide. Channel-column cells are non-
-                    // focusable on tvOS, so we focus a PROGRAM cell via
-                    // focusedProgramID. The very top channel frequently has no
-                    // guide data (focusTargetProgramID nil); resolveFocusProgramID
-                    // then scans down for the first channel that DOES, so focus
-                    // lands on a real cell near the top instead of bailing to the
-                    // List toggle (the reported bug). The viewport stays pinned to
-                    // guide.top so channel 1 is the topmost visible row.
-                    guard let target = resolveFocusProgramID(preferringChannel: channels.first?.id) else {
+                // Focus the top of the guide. Channel-column cells are non-
+                // focusable on tvOS, so we focus a PROGRAM cell via
+                // focusedProgramID. The very top channel frequently has no
+                // guide data (focusTargetProgramID nil); resolveFocusProgramID
+                // then scans down for the first channel that DOES, so focus
+                // lands on a real cell near the top instead of bailing to the
+                // List toggle (the reported bug). The viewport stays pinned to
+                // guide.top so channel 1 is the topmost visible row.
+                let target = resolveFocusProgramID(preferringChannel: channels.first?.id)
+                // Apple TV trace 2026-11-06 14:15:12: with the timeline a few
+                // minutes in the past (under the half-hour re-anchor slop) the
+                // viewport anchor column sat in the PREVIOUS program of the top
+                // channel. Landing on the current program is a channel change,
+                // so the column snap in onChange(of: focusedProgramID) pulled
+                // focus to that previous cell while this loop pushed it back:
+                // focus flipped between the two cells every ~35 ms for 300 ms.
+                // Two fixes: the jump re-anchors to now whenever the anchor
+                // column would miss the target cell (the home position is
+                // "top channel, current program, now at the left"), and the
+                // snap stands down for the whole jump (verticalSnapInFlight),
+                // so the current program is the only writer of focus.
+                let anchorMissesTarget: Bool = {
+                    guard let target, let chID = channelID(ofProgram: target),
+                          let prog = guideStore.programs[chID]?.first(where: { $0.id == target }) else { return false }
+                    let anchor = viewportAnchorTime
+                    return !(prog.start <= anchor && anchor < prog.end)
+                }()
+                if timelineIsAwayFromNow() || anchorMissesTarget {
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) re-anchor timeline to now (away=\(timelineIsAwayFromNow()) anchorMissesTarget=\(anchorMissesTarget))")
+                    reAnchorTimelineToNow()
+                }
+                if scrollToTopTask != nil { debugLog("🧭 [GuideFocus] scrollToTop(epg) superseding prior jump task") }
+                scrollToTopTask?.cancel()
+                scrollToTopTask = Task { @MainActor in
+                    guard let target else {
                         proxy.scrollTo("guide.top", anchor: .top); return
                     }
                     debugLog("🧭 [GuideFocus] scrollToTop(epg) → prog=\(target) count=\(channels.count)")
+                    focusScratch.verticalSnapInFlight = true
+                    defer {
+                        // A superseding jump owns the flag now; only the live
+                        // task clears it.
+                        if !Task.isCancelled { focusScratch.verticalSnapInFlight = false }
+                    }
                     for attempt in 0..<8 {
+                        if Task.isCancelled { return }
                         proxy.scrollTo("guide.top", anchor: .top)
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
+                        if Task.isCancelled { return }
                         debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
                         if focusedProgramID == target { break }
                     }
@@ -6559,8 +6595,10 @@ struct EPGGuideView: View {
                     // engine settle, then force the top so ch1 is the topmost
                     // visible row.
                     try? await Task.sleep(nanoseconds: 300_000_000)
+                    if Task.isCancelled { return }
                     proxy.scrollTo("guide.top", anchor: .top)
                     debugLog("🧭 [GuideFocus] scrollToTop(epg) final force-top, focus=\(focusedProgramID ?? "nil")")
+                    scrollToTopTask = nil
                 }
                 #else
                 scrollChannelRowsToTop(proxy)
