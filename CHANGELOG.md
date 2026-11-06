@@ -57,6 +57,9 @@
 - Apple TV Settings > Playlists: the hint under the list now reads "Select a
   playlist to open it, then Set Active in its Actions to make it active.",
   the same sentence shape as iPhone and iPad.
+- Appearance (iPhone and iPad): the Custom Accent Color swatch shows the
+  accent in use, so with the switch off it shows the theme's accent instead
+  of the stored custom color.
 - Apple TV mini player: the Search field and the Movies and TV Shows genre
   chips stop short of the corner mini player instead of running under it,
   and Settings stashes the mini fully off screen with no black sliver at the

@@ -675,8 +675,12 @@ struct AppearanceSettingsView: View {
     private var accentRows: some View {
         Toggle(isOn: $theme.useCustomAccent) {
             HStack(spacing: 14) {
+                // The effective accent: the custom color while the toggle
+                // is on, the theme's accent while it is off (Android
+                // CustomAccentRow). The stored hex alone showed a stale
+                // custom color next to an Off switch.
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color(hex: theme.customAccentHex))
+                    .fill(theme.useCustomAccent ? Color(hex: theme.customAccentHex) : theme.accent)
                     .frame(width: 22, height: 22)
                     .overlay(
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
