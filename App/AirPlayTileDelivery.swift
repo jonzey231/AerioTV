@@ -529,6 +529,21 @@ final class AirPlayTileDelivery {
             debugLog("[AVP-AIRPLAY] receiver quit on underrun again within \(Int(Self.underrunReissueWindow)) s; no reissue")
             return
         }
+        // Not an underrun when the receiver never fetched a media segment:
+        // it read the playlist and the init and gave up (iPhone 2026-11-06
+        // 16:07:43, HEVC fMP4 arm, Roku 3840R). A reissue gets the same
+        // answer; the -11870 rejection followed 7 s later. End now with
+        // the real reason.
+        if let st = remuxer?.lanLinkStats {
+            let receiverSegments = st.peerRequests.reduce(0) { sum, e in
+                e.key == st.localIP ? sum : sum + e.value.segment
+            }
+            if receiverSegments == 0, remuxer?.isHEVCFMP4Arm == true {
+                endReceiverSession("receiver quit without fetching a media segment "
+                    + "(HEVC fMP4 arm: init.mp4 + .m4s; this receiver class plays muxed TS only)")
+                return
+            }
+        }
         lastUnderrunReissue = now
         let segs = remuxer?.lanLinkStats.reservoirSegments ?? 0
         debugLog("[AVP-AIRPLAY] receiver quit on underrun; reissuing the LAN item (\(segs) segs available)")
@@ -591,6 +606,18 @@ final class AirPlayTileDelivery {
         let codec = remuxer.sourceAudioCodec
         let transcodable = codec == "AC-3" || codec == "E-AC-3"
         plan = (receiver.wantsAAC(mode: mode) && transcodable) ? .aacStereo : .passthrough
+        // iPhone 2026-11-06 16:07 (ESPN 2 HD, HEVC 3840x2160, Roku 3840R):
+        // the codec gate had put the session on the HEVC fMP4 arm, so the
+        // LAN served init.mp4 + .m4s with AC-3 passthrough while the log
+        // read "audio AAC-LC stereo". The receiver fetched the playlist
+        // and the init twice, never a media segment, and answered
+        // -11870 / -12927 (Not supported). Every verified non-Apple
+        // session (2026-09-26) was muxed TS. Say so up front.
+        if remuxer.isHEVCFMP4Arm, !receiver.isApple {
+            debugLog("[AVP-AIRPLAY] receiver is non-Apple and this channel is on the HEVC fMP4 arm: "
+                + "LAN serves init.mp4 + .m4s with \(codec == "unknown" ? "source" : codec) audio passthrough "
+                + "(the AAC rewrite is TS only); non-Apple receivers are verified with muxed TS only")
+        }
         let aac = await setLANAudio(remuxer: remuxer, aac: plan == .aacStereo)
         guard token == myToken else { return .unavailable }
         if plan == .aacStereo, !aac {

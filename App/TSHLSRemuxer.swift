@@ -2693,6 +2693,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
         }
         fmp4 = mux
+        airPlayLock.lock(); fmp4ArmShared = true; airPlayLock.unlock()
         codecGatePassed = true
         // Bytes already sitting in the TS arm's buffer belong to the new
         // arm; hand them over before the next network chunk arrives.
@@ -3756,6 +3757,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
     private let airPlayLock = NSLock()
     private var sourceAudioStreamTypeShared: UInt8 = 0
+    private var fmp4ArmShared = false
+
+    /// True once the codec gate switched this session to the HEVC fMP4
+    /// arm (init.mp4 + .m4s on both loopback and LAN). Readable from main.
+    var isHEVCFMP4Arm: Bool {
+        airPlayLock.lock(); defer { airPlayLock.unlock() }
+        return fmp4ArmShared
+    }
 
     private func setSourceAudioStreamType(_ type: UInt8) {
         airPlayLock.lock(); sourceAudioStreamTypeShared = type; airPlayLock.unlock()
