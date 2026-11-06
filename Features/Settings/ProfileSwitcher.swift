@@ -416,6 +416,7 @@ struct ProfileRootChrome: ViewModifier {
 struct TVProfileSwitcherCircle: View {
     @ObservedObject private var manager = ProfileManager.shared
     @State private var open = false
+    @State private var focused = false
 
     var body: some View {
         if let pid = activeProfilesPlaylist(),
@@ -423,26 +424,44 @@ struct TVProfileSwitcherCircle: View {
            RoleRules.canSeeSwitcher(manager.activeRoleNow) {
             let activeId = manager.activeProfileIds[pid]
             let active = profiles.first { $0.id == activeId } ?? profiles[0]
-            Button {
-                debugLog("[PROFILE] picker opened (tv top bar)")
-                open = true
-            } label: { ProfileAvatarView(active, size: 60) }
-                .buttonStyle(TVProfileCircleStyle())
+            // The circle sits inside the system tab bar's frame (UITabBar
+            // @0,46 1920x68 with a full-width focus guide; simulator hierarchy
+            // dump 2026-11-06), so the engine's own horizontal search from
+            // here is wrong both ways: Left finds nothing and Right lands back
+            // on the selected pill (Apple TV trace 2026-11-06 13:37, 13:39).
+            // A UIKit press catcher owns focus instead: from a UIKit item the
+            // engine's Left reaches the last pill on its own (simulator trace
+            // 13:56), with the explicit pill focus as the fallback, and Right
+            // is consumed so focus stays put (last item on the bar). Up and
+            // Down stay with the focus engine. Simulator: Select opens the
+            // picker, Menu closes it and focus returns to the circle.
+            ProfileAvatarView(active, size: 60)
+                .overlay(Circle().stroke(focused ? Color.white : .clear, lineWidth: 4))
+                .scaleEffect(focused ? 1.08 : 1)
+                .animation(.easeInOut(duration: 0.15), value: focused)
+                .overlay(
+                    TVPressOverlay(
+                        isFocused: $focused,
+                        interceptsDirectional: true,
+                        horizontalAdjustOnly: true,
+                        onTap: {
+                            debugLog("[PROFILE] picker opened (tv top bar)")
+                            open = true
+                        },
+                        onLongPress: {},
+                        onMoveLeft: {
+                            debugLog("[FOCUS] profile circle: Left -> Settings pill")
+                            TVTabPillFocuser.focusPill(title: "Settings", reason: "profile circle Left")
+                        },
+                        onMoveRight: {
+                            debugLog("[FOCUS] profile circle: Right stays (last item on the bar)")
+                        })
+                )
                 .accessibilityLabel("Switch Profile")
                 .fullScreenCover(isPresented: $open) {
                     WhoIsWatchingView(playlistId: pid, mode: .switcher) { open = false }
                 }
         }
-    }
-}
-
-private struct TVProfileCircleStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .overlay(Circle().stroke(isFocused ? Color.white : .clear, lineWidth: 4))
-            .scaleEffect(isFocused ? 1.08 : 1)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 #endif
