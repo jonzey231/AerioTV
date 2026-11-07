@@ -47,6 +47,10 @@ struct SetUpTvView: View {
     @State private var sync = false
     @State private var codeText = ""
     @State private var userOnly = false
+    /// iPhone: half height by default, full height for the code entry and sign-in steps (keyboard) and any step taller than half.
+    @State private var detent: PresentationDetent = .medium
+    @State private var contentHeight: CGFloat = 0
+    @Environment(\.horizontalSizeClass) private var hSize
 
     private static let noLongerWaiting = "The device is no longer waiting for setup. Start setup on the other device again."
 
@@ -71,11 +75,32 @@ struct SetUpTvView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 20)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { contentHeight = $0 }
             }
             .background(Color.appBackground.ignoresSafeArea())
         }
+        .modifier(SetUpTvDetents(enabled: hSize == .compact, detent: $detent))
+        // Settle first: heights mid-transition overshoot and would flash the sheet to full height.
+        .task(id: contentHeight) {
+            try? await Task.sleep(for: .milliseconds(400))
+            if !Task.isCancelled { updateDetent() }
+        }
+        .onChange(of: step) { _, _ in updateDetent() }
         .onAppear(perform: load)
         .onChange(of: center.tvs) { _, tvs in invalidateIfStale(tvs) }
+    }
+
+    private func updateDetent() {
+        let needsKeyboard: Bool
+        switch step {
+        case .code, .credential: needsKeyboard = true
+        default: needsKeyboard = false
+        }
+        let screenH = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.height ?? 800
+        // A medium sheet is about half the screen, less the grabber and bottom inset.
+        let tooTall = contentHeight > screenH * 0.5 - 40
+        let want: PresentationDetent = (needsKeyboard || tooTall) ? .large : .medium
+        if want != detent { detent = want }
     }
 
     @ViewBuilder
@@ -524,6 +549,18 @@ struct SetupHandoffRoot: ViewModifier {
             .sheet(item: Binding(get: { center.pendingLink }, set: { center.pendingLink = $0 })) { box in
                 SetUpTvView(link: box.link) { center.pendingLink = nil }
             }
+    }
+}
+/// iPhone only: the iPad form sheet keeps its own presentation.
+private struct SetUpTvDetents: ViewModifier {
+    let enabled: Bool
+    @Binding var detent: PresentationDetent
+    func body(content: Content) -> some View {
+        if enabled {
+            content.presentationDetents([.medium, .large], selection: $detent)
+        } else {
+            content
+        }
     }
 }
 #endif
