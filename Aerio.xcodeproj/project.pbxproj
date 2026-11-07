@@ -214,6 +214,10 @@
 		A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */; };
 		A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
 		A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
+		B2E9D1F0000000000000BB02 /* EPGDayDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E9D1F0000000000000BB01 /* EPGDayDiff.swift */; };
+		B2E9D1F0000000000000BB03 /* EPGDayDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E9D1F0000000000000BB01 /* EPGDayDiff.swift */; };
+		B2E9D1F0000000000000BC02 /* EPGSweepStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E9D1F0000000000000BC01 /* EPGSweepStore.swift */; };
+		B2E9D1F0000000000000BC03 /* EPGSweepStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E9D1F0000000000000BC01 /* EPGSweepStore.swift */; };
 		A1E5E7C0000000000000AA02 /* AppSettleGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E5E7C0000000000000AA01 /* AppSettleGate.swift */; };
 		A1E5E7C0000000000000AA03 /* AppSettleGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E5E7C0000000000000AA01 /* AppSettleGate.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
@@ -570,6 +574,8 @@
 		A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EventTimeParser.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890E9600030 /* EPGText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPGText.swift; sourceTree = "<group>"; };
 		A1BB2C3D4E5F60789ABCDEF1 /* LiveTVSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveTVSettingsView.swift; sourceTree = "<group>"; };
+		B2E9D1F0000000000000BB01 /* EPGDayDiff.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPGDayDiff.swift; sourceTree = "<group>"; };
+		B2E9D1F0000000000000BC01 /* EPGSweepStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPGSweepStore.swift; sourceTree = "<group>"; };
 		A1E5E7C0000000000000AA01 /* AppSettleGate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppSettleGate.swift; sourceTree = "<group>"; };
 		A1ECC0FF1ED1ABF1ED1ABF11 /* Aerio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Aerio.xcconfig; path = Config/Aerio.xcconfig; sourceTree = "<group>"; };
 		A2FD31E5C3E95D9CF2F53F4E /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1220,6 +1226,8 @@
 				B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */,
 				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
 				A1E5E7C0000000000000AA01 /* AppSettleGate.swift */,
+				B2E9D1F0000000000000BC01 /* EPGSweepStore.swift */,
+				B2E9D1F0000000000000BB01 /* EPGDayDiff.swift */,
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
 				A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */,
 				A1B2C3D4E5F678905C1A0003 /* SkipIntervals.swift */,
@@ -1633,6 +1641,8 @@
 				29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */,
 				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
 				A1E5E7C0000000000000AA02 /* AppSettleGate.swift in Sources */,
+				B2E9D1F0000000000000BC02 /* EPGSweepStore.swift in Sources */,
+				B2E9D1F0000000000000BB02 /* EPGDayDiff.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F678905C1A0001 /* SkipIntervals.swift in Sources */,
@@ -1826,6 +1836,8 @@
 				D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */,
 				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
 				A1E5E7C0000000000000AA03 /* AppSettleGate.swift in Sources */,
+				B2E9D1F0000000000000BC03 /* EPGSweepStore.swift in Sources */,
+				B2E9D1F0000000000000BB03 /* EPGDayDiff.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */,
 				A1B2C3D4E5F678905C1A0002 /* SkipIntervals.swift in Sources */,
