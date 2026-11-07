@@ -223,7 +223,10 @@ struct SetUpTvView: View {
 
     private func scopeStep(_ t: SetupTarget, _ code: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Send to \(t.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
+            // The header already names the device.
+            Text("What to send")
+                .scaledFont(.caption)
+                .foregroundColor(Color.contrastText(.textSecondary))
             VStack(spacing: 4) {
                 ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
                 ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
@@ -250,7 +253,7 @@ struct SetUpTvView: View {
 
     private func codeStep(_ t: SetupTarget, _ err: String?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Enter the code shown on \(t.name).")
+            Text("Enter the code shown on the other device.")
                 .scaledFont(.bodyLarge)
                 .foregroundColor(.textPrimary)
             AppTextField("6-digit code", placeholder: "000000", text: $codeText, icon: "number", keyboardType: .numberPad)
@@ -272,7 +275,6 @@ struct SetUpTvView: View {
         if let pl = playlist {
             let source = SetupSender.source(pl)
             VStack(alignment: .leading, spacing: 12) {
-                Text("Send to \(t.name)").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
                 Text("Playlist: \(source.playlistName)").scaledFont(.bodyLarge).foregroundColor(.textPrimary)
                 if source.isDispatcharr && !source.choices.isEmpty && !userOnly {
                     Text("Profiles").scaledFont(.headlineSmall).foregroundColor(.textPrimary)
