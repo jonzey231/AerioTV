@@ -90,15 +90,28 @@ final class SetupDiscovery: ObservableObject {
         let params = NWParameters.tcp
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
-        b.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in self?.heard = true }
-            if case .failed(let e) = state {
-                Task { @MainActor in debugLog("[SETUP] discovery failed \(e.errorCode)") }
-            } else if case .waiting(let e) = state {
-                // Local network permission off reads as waiting with a policy error.
-                Task { @MainActor in debugLog("[SETUP] discovery waiting \(e.errorCode)") }
-            } else if case .ready = state {
-                Task { @MainActor in debugLog("[SETUP] discovery ready") }
+        b.stateUpdateHandler = { [weak self, weak b] state in
+            // Only .ready (or a browse result) counts as heard: a browser stuck in .setup
+            // must still trip the silent-browser watchdog.
+            Task { @MainActor in
+                switch state {
+                case .ready:
+                    self?.heard = true
+                    debugLog("[SETUP] discovery ready")
+                case .setup:
+                    debugLog("[SETUP] discovery state setup")
+                case .cancelled:
+                    debugLog("[SETUP] discovery state cancelled")
+                case .failed(let e):
+                    debugLog("[SETUP] discovery failed \(e.errorCode)")
+                    self?.restartAfterError(b, reason: "failed")
+                case .waiting(let e):
+                    // Local network permission off reads as waiting with a policy error.
+                    debugLog("[SETUP] discovery waiting \(e.errorCode)")
+                    self?.restartAfterError(b, reason: "waiting")
+                @unknown default:
+                    debugLog("[SETUP] discovery state unknown")
+                }
             }
         }
         b.browseResultsChangedHandler = { [weak self] results, _ in
@@ -138,6 +151,14 @@ final class SetupDiscovery: ObservableObject {
             debugLog("[SETUP] discovery restarted (silent browser) attempt=\(self.silentRestarts)")
             self.restart()
         }
+    }
+
+    /// Restarts a browser that reported failed or waiting, sharing the silent-restart budget.
+    private func restartAfterError(_ b: NWBrowser?, reason: String) {
+        guard let b, browser === b, silentRestarts < 5 else { return }
+        silentRestarts += 1
+        debugLog("[SETUP] discovery restarted (\(reason)) attempt=\(silentRestarts)")
+        restart()
     }
 
     func stop() {
