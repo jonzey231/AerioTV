@@ -26,7 +26,14 @@ final class SetupApplyModel: ObservableObject {
         /// User QR request: waiting for Send on the device showing the code.
         case requesting(String)
         case requestFailed(String)
+        /// The received playlist matches one already on this device (existing name).
+        case duplicate(String)
     }
+
+    /// What to do with a received playlist that matches an existing one.
+    enum DuplicateChoice: Equatable { case replace(UUID), add }
+    private var choice: DuplicateChoice?
+    private var duplicateID: UUID?
 
     @Published private(set) var phase: Phase = .starting
     private let receiver = SetupReceiver()
@@ -100,13 +107,48 @@ final class SetupApplyModel: ObservableObject {
         Task { await apply(p) }
     }
 
+    /// Answer to the "This playlist already exists" prompt. nil = Cancel.
+    func resolveDuplicate(replace: Bool?) {
+        guard case .duplicate = phase, let p = pending else { return }
+        guard let replace else {
+            debugLog("[SETUP] receiver: duplicate playlist, user cancelled; received setup abandoned")
+            pending = nil
+            choice = nil
+            onCancelled?()
+            return
+        }
+        if replace, let id = duplicateID {
+            debugLog("[SETUP] receiver: duplicate playlist, replacing the existing one")
+            choice = .replace(id)
+        } else {
+            debugLog("[SETUP] receiver: duplicate playlist, adding as a second playlist")
+            choice = .add
+        }
+        Task { await apply(p) }
+    }
+
+    /// Fired when the user cancels at the duplicate prompt.
+    var onCancelled: (() -> Void)?
+
     private func apply(_ p: SetupProtocol.Payload) async {
         pending = p
         stop()
         guard let ctx = modelContext else { phase = .failed("Setup is not ready. Try again."); return }
-        phase = .applying("Connecting to your server")
         let pl = p.playlist
         let cred = pl.credential
+        if choice == nil {
+            let all = (try? ctx.fetch(FetchDescriptor<ServerConnection>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
+            let incoming = SetupPlaylistMatch.Candidate(type: SetupPlaylistMatch.kind(payloadType: pl.type), url: pl.url,
+                                                        username: cred?.username ?? "", apiKey: cred?.apiKey ?? "")
+            if let match = all.first(where: { SetupPlaylistMatch.matches(incoming, SetupPlaylistMatch.candidate(for: $0)) }) {
+                debugLog("[SETUP] receiver: received playlist matches an existing one; asking")
+                duplicateID = match.id
+                phase = .duplicate(match.name)
+                return
+            }
+            choice = .add
+        }
+        phase = .applying("Connecting to your server")
         let vm = ServerConnectionViewModel()
         vm.name = pl.name
         vm.baseURL = pl.url
@@ -143,7 +185,19 @@ final class SetupApplyModel: ObservableObject {
         // The Add Playlist save path (AddServerView.saveServer).
         let existing = (try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []
         for s in existing { s.isActive = false }
-        let server = vm.buildServerConnection()
+        var replaced = false
+        let server: ServerConnection
+        if case .replace(let id) = choice, let target = existing.first(where: { $0.id == id }) {
+            // Replace in place: same row id, so cached channels, EPG, and favorites stay.
+            let jwt = vm.pendingJWTPair
+            vm.pendingJWTPair = nil
+            SetupPlaylistMatch.copy(from: vm.buildServerConnection(), into: target)
+            if let jwt { DispatcharrTokenStore.shared.store(serverID: target.id, access: jwt.access, refresh: jwt.refresh) }
+            server = target
+            replaced = true
+        } else {
+            server = vm.buildServerConnection()
+        }
         server.isActive = true
         server.isVerified = true
         server.lastConnected = Date()
@@ -155,7 +209,7 @@ final class SetupApplyModel: ObservableObject {
                 server.dispatcharrChannelProfileIDs = pl.channelProfileIds.map(String.init).joined(separator: ",")
             }
         }
-        ctx.insert(server)
+        if !replaced { ctx.insert(server) }
         try? ctx.save()
         SyncManager.shared.saveCredentialsSynced(for: server)
         if server.type != .m3uPlaylist {
@@ -191,10 +245,13 @@ final class SetupApplyModel: ObservableObject {
             _ = await DispatcharrSyncManager.shared.awaitFirstPull()
         }
         pending = nil
-        debugLog("[SETUP] receiver: applied (\(p.profiles.count - skipped) profiles, skipped \(skipped))")
+        choice = nil
+        debugLog("[SETUP] receiver: applied (\(replaced ? "replaced existing playlist" : "new playlist"), \(p.profiles.count - skipped) profiles, skipped \(skipped))")
         // Fresh browse once set up: a browser started before Local Network
         // permission was granted may never deliver results.
+        #if os(iOS)
         if SetupTvOfferCenter.shared.discovery.isRunning { SetupTvOfferCenter.shared.discovery.restart() }
+        #endif
         phase = .done
     }
 }
@@ -235,6 +292,7 @@ struct ReceiveSetupView: View {
         .onAppear {
             model.modelContext = modelContext
             model.request = request
+            model.onCancelled = { onCancel() }
             model.start()
         }
         .onDisappear { model.stop() }
@@ -287,6 +345,8 @@ struct ReceiveSetupView: View {
                     .padding(.top, 12)
             }
             .frame(maxWidth: 640)
+        case .duplicate(let name):
+            duplicatePrompt(name)
         case .requestFailed(let msg):
             message(title: "Setup did not finish", body: msg,
                     primary: ("Import this user only", { model.stop(); onUserOnly?() }))
@@ -331,6 +391,41 @@ struct ReceiveSetupView: View {
         }
     }
 
+    static let duplicateTitle = "This playlist already exists"
+    static func duplicateBody(_ name: String) -> String {
+        "\(name) uses the same server and account. Replace it with the incoming setup, or add it as a second playlist?"
+    }
+
+    private enum DupFocus: Hashable { case cancel, add, replace }
+    @FocusState private var dupFocus: DupFocus?
+
+    /// Cancel, Add Anyway, Replace (primary, focused on TV). Matches Android.
+    private func duplicatePrompt(_ name: String) -> some View {
+        VStack(spacing: 12) {
+            Text(Self.duplicateTitle)
+                .scaledFont(isTV ? .system(size: 40, weight: .bold) : .headlineLarge)
+                .foregroundColor(.textPrimary)
+                .multilineTextAlignment(.center)
+            Text(Self.duplicateBody(name))
+                .scaledFont(isTV ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 16) {
+                OnboardingPillButton(title: "Cancel", filled: false) { model.resolveDuplicate(replace: nil) }
+                    .focused($dupFocus, equals: .cancel)
+                OnboardingPillButton(title: "Add Anyway", filled: false) { model.resolveDuplicate(replace: false) }
+                    .focused($dupFocus, equals: .add)
+                OnboardingPillButton(title: "Replace", filled: true) { model.resolveDuplicate(replace: true) }
+                    .focused($dupFocus, equals: .replace)
+            }
+            .padding(.top, 12)
+        }
+        .frame(maxWidth: 640)
+        .defaultFocus($dupFocus, .replace)
+        .onAppear { if isTV { dupFocus = .replace } }
+    }
+
     private func message(title: String, body: String, primary: (String, () -> Void)) -> some View {
         VStack(spacing: 12) {
             Text(title)
@@ -349,6 +444,101 @@ struct ReceiveSetupView: View {
             .padding(.top, 12)
         }
         .frame(maxWidth: 640)
+    }
+}
+
+/// Does a received playlist match one already on this device? Same source
+/// type, same normalized server URL (scheme, host, port, path; host case
+/// insensitive; trailing slash ignored), and the same account: username
+/// (Xtream), API key or Dispatcharr user (Dispatcharr), or the same playlist
+/// URL including its query (M3U). Pure logic; Android matches.
+enum SetupPlaylistMatch {
+    enum Kind: Equatable { case dispatcharr, xtream, m3u }
+    struct Candidate: Equatable {
+        var type: Kind
+        var url: String
+        var username: String
+        var apiKey: String
+    }
+
+    static func kind(payloadType: String) -> Kind {
+        switch payloadType { case "dispatcharr": return .dispatcharr; case "xtream": return .xtream; default: return .m3u }
+    }
+
+    static func candidate(for s: ServerConnection) -> Candidate {
+        let k: Kind = s.type == .dispatcharrAPI ? .dispatcharr : (s.type == .xtreamCodes ? .xtream : .m3u)
+        var user = s.username
+        if k == .dispatcharr, user.trimmingCharacters(in: .whitespaces).isEmpty {
+            user = DispatcharrAccountFactsStore.load(s.id).username
+        }
+        return Candidate(type: k, url: s.baseURL, username: user, apiKey: k == .dispatcharr ? s.baseApiKey : "")
+    }
+
+    /// Normalized "scheme://host:port/path" (plus "?query" when asked). nil when unparsable.
+    static func normalizedURL(_ raw: String, keepQuery: Bool = false) -> String? {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        if !t.contains("://") { t = "http://" + t }
+        guard let c = URLComponents(string: t), let scheme = c.scheme?.lowercased(),
+              let host = c.host?.lowercased(), !host.isEmpty else { return nil }
+        let port = c.port ?? (scheme == "https" ? 443 : (scheme == "http" ? 80 : -1))
+        var path = c.path
+        while path.hasSuffix("/") { path.removeLast() }
+        var out = "\(scheme)://\(host):\(port)\(path)"
+        if keepQuery, let q = c.query, !q.isEmpty { out += "?" + q }
+        return out
+    }
+
+    static func matches(_ a: Candidate, _ b: Candidate) -> Bool {
+        guard a.type == b.type else { return false }
+        let keepQuery = a.type == .m3u
+        guard let ua = normalizedURL(a.url, keepQuery: keepQuery), ua == normalizedURL(b.url, keepQuery: keepQuery) else { return false }
+        func t(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
+        switch a.type {
+        case .m3u:
+            return true
+        case .xtream:
+            return !t(a.username).isEmpty && t(a.username) == t(b.username)
+        case .dispatcharr:
+            if !t(a.apiKey).isEmpty && t(a.apiKey) == t(b.apiKey) { return true }
+            return !t(a.username).isEmpty && t(a.username).lowercased() == t(b.username).lowercased()
+        }
+    }
+
+    /// Replace in place: copies the verified incoming connection's settings
+    /// onto the existing row, keeping its id (and so its cached data).
+    @MainActor
+    static func copy(from n: ServerConnection, into s: ServerConnection) {
+        s.name = n.name
+        s.baseURL = n.baseURL
+        s.username = n.username
+        s.password = n.password
+        s.apiKey = n.apiKey
+        s.epgURL = n.epgURL
+        s.localURL = n.localURL
+        s.localEPGURL = n.localEPGURL
+        s.dispatcharrXMLTVURL = n.dispatcharrXMLTVURL
+        s.xtreamXMLTVURL = n.xtreamXMLTVURL
+        s.vodEnabled = n.vodEnabled
+        s.epgRetentionDays = n.epgRetentionDays
+        guard s.type == .dispatcharrAPI else { return }
+        if !n.dispatcharrAuthMode.isEmpty { s.dispatcharrAuthMode = n.dispatcharrAuthMode }
+        s.dispatcharrCredentialTypeRaw = n.dispatcharrCredentialTypeRaw
+        s.dispatcharrUserLevel = n.dispatcharrUserLevel
+        s.dispatcharrChannelProfileIDs = n.dispatcharrChannelProfileIDs
+        s.dispatcharrDVRAccess = n.dispatcharrDVRAccess
+        s.dispatcharrCatchupEnabled = n.dispatcharrCatchupEnabled
+        s.dispatcharrVODMoviesEnabled = n.dispatcharrVODMoviesEnabled
+        s.dispatcharrVODSeriesEnabled = n.dispatcharrVODSeriesEnabled
+        s.dispatcharrIsStaff = n.dispatcharrIsStaff
+        s.dispatcharrIsSuperuser = n.dispatcharrIsSuperuser
+        s.dispatcharrSystemCatchupEnabled = n.dispatcharrSystemCatchupEnabled
+        if !n.dispatcharrCustomPropertiesJSON.isEmpty {
+            s.dispatcharrCustomPropertiesJSON = n.dispatcharrCustomPropertiesJSON
+            s.dispatcharrCapabilitiesSchema = n.dispatcharrCapabilitiesSchema
+            s.dispatcharrPermissionsFetchedAt = n.dispatcharrPermissionsFetchedAt
+        }
+        if !n.dispatcharrServerVersion.isEmpty { s.dispatcharrServerVersion = n.dispatcharrServerVersion }
     }
 }
 
