@@ -33,6 +33,13 @@ struct AddServerView: View {
     @State private var formScanTrigger = 0
     /// "Set up from another device" from Settings > Add Playlist.
     @State private var showReceiveSetup = false
+    /// iPad Settings sheet: measured scroll content and safe-area insets
+    /// (nav bar on top, keyboard at the bottom), so the sheet hugs them.
+    @State private var padContentHeight: CGFloat = 0
+    @State private var padInsets: CGFloat = 0
+    #if os(iOS)
+    @Environment(\.padSheetHeightSink) private var padSheetHeightSink
+    #endif
     #if os(tvOS)
     /// Apple TV: first focus on Continue with Dispatcharr.
     @FocusState private var heroFocused: Bool
@@ -142,6 +149,9 @@ struct AddServerView: View {
                 .onboardingPadWidth(560, other: isTV ? SettingsMetrics.tvReadingColumnWidth : nil)
                 .padding(.horizontal, isPad ? 40 : 20)
                 .padding(.vertical, tvTypePickerFitsPage ? 0 : 20)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                    if abs(h - padContentHeight) > 0.5 { padContentHeight = h }
+                }
             }
             // Settings > Add Playlist sits in a sheet: top-aligned under the
             // header (centering left a large gap above Connect a Server).
@@ -154,6 +164,17 @@ struct AddServerView: View {
             #endif
             }
         }
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top + $0.safeAreaInsets.bottom } action: { h in
+            if abs(h - padInsets) > 0.5 { padInsets = h }
+        }
+        #if os(iOS)
+        #if os(iOS)
+        .onChange(of: padContentHeight + padInsets, initial: true) { _, h in
+            // Idiom, not size class: a form sheet can report compact width.
+            if UIDevice.current.userInterfaceIdiom == .pad && !isOnboarding { padSheetHeightSink?(h) }
+        }
+        #endif
+        #endif
         .onAppear {
             guard !appliedInitialType else { return }
             appliedInitialType = true
@@ -1460,21 +1481,59 @@ extension View {
 }
 
 #if os(iOS)
-/// iPad Settings > Add Playlist: the standard form sheet width, with the
-/// height taken up to the window's safe area so the Connect a Server page
-/// (through the Set up from another device card) and the receiver screen
-/// fit without scrolling. The stock form height (about 960 pt on a 12.9-inch
-/// iPad in portrait) cut the last card off. Compact widths ignore sizing.
-struct TallFormPresentationSizing: PresentationSizing {
-    func proposedSize(for root: PresentationSizingRoot, context: PresentationSizingContext) -> ProposedViewSize {
-        let form = FormPresentationSizing.form.proposedSize(for: root, context: context)
-        return ProposedViewSize(width: form.width, height: .infinity)
+/// Receives the measured height (nav header, page, keyboard when up) the
+/// iPad Add Playlist sheet should take. Environment, not a preference:
+/// preferences do not leave the sheet's NavigationStack.
+extension EnvironmentValues {
+    @Entry var padSheetHeightSink: ((CGFloat) -> Void)? = nil
+}
+
+/// iPad Settings > Add Playlist: keeps the form sheet's width and sets its
+/// height to the measured content, capped by the window's safe area. The
+/// stock form height cut off the Set up from another device card; a fixed
+/// full height left half the sheet empty. SwiftUI's PresentationSizing is
+/// read once at presentation, so the live height goes through the sheet's
+/// preferredContentSize. Apply outside the sheet's NavigationStack.
+struct PadFittedFormSheet: ViewModifier {
+    @State private var height: CGFloat = 0
+    func body(content: Content) -> some View {
+        content
+            .environment(\.padSheetHeightSink, { h in
+                if abs(h - height) > 0.5 { height = h }
+            })
+            .background(SheetHeightSetter(height: height).frame(width: 0, height: 0))
     }
 }
 
 extension View {
-    func tallFormSheetOnPad() -> some View {
-        presentationSizing(TallFormPresentationSizing())
+    func padFittedFormSheet() -> some View { modifier(PadFittedFormSheet()) }
+}
+
+private struct SheetHeightSetter: UIViewRepresentable {
+    let height: CGFloat
+    func makeUIView(context: Context) -> Probe { Probe() }
+    func updateUIView(_ v: Probe, context: Context) {
+        v.height = height
+        DispatchQueue.main.async { v.apply() }
+    }
+
+    final class Probe: UIView {
+        var height: CGFloat = 0
+        override func didMoveToWindow() { super.didMoveToWindow(); apply() }
+        func apply() {
+            guard height > 1, let window else { return }
+            var r: UIResponder? = self
+            var vc: UIViewController?
+            while let n = r { if let c = n as? UIViewController { vc = c; break }; r = n.next }
+            while let p = vc?.parent { vc = p }
+            guard let root = vc, root.presentingViewController != nil,
+                  UIDevice.current.userInterfaceIdiom == .pad else { return }
+            let cap = window.bounds.height - window.safeAreaInsets.top - window.safeAreaInsets.bottom - 40
+            let h = min(height.rounded(.up), cap)
+            let w = root.view.bounds.width
+            guard w > 0, abs(root.preferredContentSize.height - h) > 0.5 else { return }
+            root.preferredContentSize = CGSize(width: w, height: h)
+        }
     }
 }
 #endif
