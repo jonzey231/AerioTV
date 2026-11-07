@@ -8699,10 +8699,13 @@ private struct GuideGlyphBand: ViewModifier {
     let showsRadio: Bool
 
     /// Width of one trailing glyph slot. The three trailing marks (star,
-    /// radio, catch-up clock) each own a RESERVED slot of this width on
-    /// every row, present or not, so each mark sits at the same x in every
-    /// cell whatever the other two do (Logan 2026-11-06: the radio glyph
-    /// used to follow the name and wandered with its length).
+    /// radio, catch-up clock) pack against the trailing corner in that
+    /// order, and an absent mark takes no slot (Android parity): the clock
+    /// keeps the corner when shown, the radio glyph sits one slot before
+    /// the clock or takes the corner without it, and the star sits
+    /// immediately before whichever of the two are present, or takes the
+    /// corner when neither is. The marks stay in the band, not after the
+    /// name, so they never wander with the name's length.
     private var slotWidth: CGFloat { glyphSize + 6 }
 
     func body(content: Content) -> some View {
@@ -8717,8 +8720,8 @@ private struct GuideGlyphBand: ViewModifier {
                         .padding(.leading, leadingInset)
                 }
                 Spacer(minLength: 0)
-                // Fixed slots, left to right: favorite star, radio, catch-up
-                // clock. The clock keeps the corner it always had.
+                // Packed slots, left to right: favorite star, radio, catch-up
+                // clock. Only the marks shown take a slot.
                 glyphSlot(showsFavorite) {
                     Image(systemName: "star.fill")
                         .scaledFont(.system(size: glyphSize))
@@ -8746,14 +8749,14 @@ private struct GuideGlyphBand: ViewModifier {
         }
     }
 
-    /// One reserved trailing slot: the mark when shown, the same width of
-    /// nothing when not, so the slots to its left never shift.
+    /// One trailing slot: the mark at the fixed slot width when shown,
+    /// nothing at all when not, so empty slots collapse.
     @ViewBuilder
     private func glyphSlot<Mark: View>(_ shown: Bool, @ViewBuilder mark: () -> Mark) -> some View {
-        Group {
-            if shown { mark() } else { Color.clear }
+        if shown {
+            mark()
+                .frame(width: slotWidth, height: glyphSize + 4, alignment: .trailing)
         }
-        .frame(width: slotWidth, height: glyphSize + 4, alignment: .trailing)
     }
 }
 #endif

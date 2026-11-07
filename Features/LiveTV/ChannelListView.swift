@@ -6816,7 +6816,7 @@ struct ChannelBadge: View {
                 }
                 // Guide only: the list row keeps the name in its text column.
                 // No radio glyph here on tvOS: the guide draws it in the
-                // band's fixed slot (`GuideGlyphBand`), so `isRadio` is
+                // band's trailing slots (`GuideGlyphBand`), so `isRadio` is
                 // read by the iPhone / iPad branch only.
                 if showName, nameFontSize > 0 {
                     Text(name)
