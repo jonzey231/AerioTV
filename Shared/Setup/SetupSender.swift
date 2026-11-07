@@ -226,6 +226,34 @@ final class SetupDiscovery: ObservableObject {
     }
 }
 
+extension SetupDiscovery {
+    /// Resolves a discovered device again right before a send, so a device that
+    /// started a new session (new port and key) is reached at its current
+    /// advert. Waits up to `timeout` for the same instance name; keeps the old
+    /// target when the device is not seen (a QR target is returned as is).
+    static func fresh(_ t: SetupTarget, timeout: TimeInterval = 3) async -> SetupTarget {
+        guard let service = t.serviceName else { return t }
+        let d = SetupDiscovery()
+        d.start()
+        defer { d.stop() }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if var live = d.tvs.first(where: { $0.serviceName == service }) {
+                live.code = t.code
+                if live.pk != t.pk || live.port != t.port {
+                    debugLog("[SETUP] send target refreshed old=\(t.fingerprint) new=\(live.fingerprint) port \(t.port) -> \(live.port)")
+                } else {
+                    debugLog("[SETUP] send target confirmed key=\(live.fingerprint)")
+                }
+                return live
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        debugLog("[SETUP] send target not re-resolved in \(Int(timeout)) s, using last advert key=\(t.fingerprint)")
+        return t
+    }
+}
+
 // MARK: - Shared offer (dock card + Settings banner)
 
 /// One discovery, one gate, and one dismissal set for the dock card and the

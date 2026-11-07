@@ -315,6 +315,9 @@ struct SetUpTvView: View {
             : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
         step = .sending
         Task { @MainActor in
+            // Resolve again right before every send: the device may have started a
+            // new session (new port and key) since the card or list last saw it.
+            let t = await SetupDiscovery.fresh(t)
             switch await SetupSender.send(t, code: code, payload: payload) {
             case .ok:
                 debugLog("[SETUP] sent, TV finishing setup key=\(t.fingerprint)")
