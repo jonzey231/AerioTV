@@ -414,7 +414,10 @@ struct SetUpTvView: View {
         }
         guard let t = current else { return }
         let rotated = tvs.contains { ($0.serviceName == t.serviceName && t.serviceName != nil || $0.host == t.host) && $0.pk != t.pk }
-        let gone = t.serviceName != nil && !tvs.contains { $0.serviceName == t.serviceName && $0.pk == t.pk }
+        // Measured 2026-11-06: every Scene inactive (Control Center, a notification) stops
+        // discovery and empties the list, which read as gone and showed the error with no
+        // send. Only a running browser that has heard results can report a device gone.
+        let gone = center.discovery.heard && t.serviceName != nil && !tvs.contains { $0.serviceName == t.serviceName && $0.pk == t.pk }
         if rotated || gone {
             debugLog("[SETUP] target \(rotated ? "key changed" : "gone") key=\(t.fingerprint)")
             step = .error(Self.noLongerWaiting, .pick)

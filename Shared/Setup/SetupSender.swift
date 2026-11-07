@@ -74,7 +74,9 @@ final class SetupDiscovery: ObservableObject {
     var isRunning: Bool { browser != nil }
     /// True once the current browser has delivered a browse result set (even an empty one).
     /// A browser that only reports .ready can still be deaf for the whole session.
-    private var heard = false
+    /// True once the running browser delivered a result. Reset on start and stop, so a
+    /// list emptied by stop() (scene inactive) is not read as the device leaving.
+    private(set) var heard = false
     /// Recreations of a browser that reached ready but never delivered results.
     private var recreations = 0
     private var silentRestarts = 0
@@ -186,6 +188,7 @@ final class SetupDiscovery: ObservableObject {
         resolving.values.forEach { $0.cancel() }
         resolving.removeAll()
         byService.removeAll()
+        heard = false
         if !tvs.isEmpty { tvs = [] }
         debugLog("[SETUP] discovery stopped")
     }
