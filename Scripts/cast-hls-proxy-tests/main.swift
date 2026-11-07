@@ -4351,5 +4351,41 @@ final class FakeH264Transcoder: CastVideoTranscoding {
 runTranscodeStageChecks()
 
 
+// MARK: Resume gate policy (mirrors Android ResumeGatePolicyTest)
+
+do {
+    typealias P = ResumeGatePolicy
+    expectEq(P.shouldArm(ahead: 0, target: 7.223, ratio: 1.0, repeat: false), .arm, "gate: arms on empty buffer, healthy feed")
+    expectEq(P.shouldArm(ahead: 0, target: 7.223, ratio: nil, repeat: false), .arm, "gate: arms with unmeasured rate")
+    expectEq(P.shouldArm(ahead: 8, target: 7.223, ratio: 1.0, repeat: false), .notNeeded, "gate: no arm at target")
+    expectEq(P.shouldArm(ahead: 0, target: 0, ratio: 1.0, repeat: false), .notNeeded, "gate: no arm without target")
+    // Streamer 2026-11-07 01:14:57: repeat stall at 0.68x held 15.5 s.
+    expectEq(P.shouldArm(ahead: 1.376, target: 10.268, ratio: 0.68, repeat: true), .skipSlowFeed(ratio: 0.68), "gate: repeat stall on slow feed skipped")
+    expectEq(P.shouldArm(ahead: 1.376, target: 7, ratio: 0.77, repeat: false), .skipSlowFeed(ratio: 0.77), "gate: first stall on slow feed skipped")
+    expectEq(P.shouldArm(ahead: 1.376, target: 10.268, ratio: 0.95, repeat: true), .arm, "gate: repeat stall on healthy feed arms")
+    expectEq(P.releaseOnTick(ahead: 7.223, target: 7.223, ratio: 0.5, held: 0.1, timeout: 25), .targetReached, "gate: release at target")
+    expectEq(P.releaseOnTick(ahead: 7.222, target: 7.223, ratio: 1.0, held: 0.1, timeout: 25), nil, "gate: hold below target")
+    expectEq(P.releaseOnTick(ahead: 3, target: 7.223, ratio: 0.6, held: 2.999, timeout: 25), nil, "gate: starved hold settles 3 s")
+    expectEq(P.releaseOnTick(ahead: 3, target: 7.223, ratio: 0.6, held: 3, timeout: 25), .feedStarved, "gate: starved hold released at 3 s")
+    expectEq(P.releaseOnTick(ahead: 3, target: 7.223, ratio: nil, held: 10, timeout: 25), nil, "gate: unmeasured rate keeps holding")
+    expectEq(P.releaseOnTick(ahead: 3, target: 7.223, ratio: 1.0, held: 25, timeout: 25), .timeout, "gate: hard timeout")
+    expect(P.wantsToPlay(playerRunning: false, gateHolding: true, audioOnlyHolding: false), "gate: wants to play during gate hold")
+    expect(P.wantsToPlay(playerRunning: false, gateHolding: false, audioOnlyHolding: true), "gate: wants to play during audio-only hold")
+    expect(!P.wantsToPlay(playerRunning: false, gateHolding: false, audioOnlyHolding: false), "gate: paused with no hold")
+    // Switch window: no arm, no release, no shrink while open.
+    expect(P.switchWindowOpen(secondsSinceSwitch: 1), "switch: open 1 s after")
+    expect(!P.switchWindowOpen(secondsSinceSwitch: P.switchWindow), "switch: closed at window end")
+    expect(!P.switchWindowOpen(secondsSinceSwitch: nil), "switch: closed without a switch")
+    expectEq(P.shouldArm(ahead: 0, target: 7, ratio: 1.0, repeat: false, switchOpen: true), .deferForSwitch, "switch: arm deferred")
+    expectEq(P.releaseOnTick(ahead: 9, target: 7, ratio: 1.0, held: 2, timeout: 25, switchOpen: true), nil, "switch: no release onto a dropped buffer")
+    expectEq(P.releaseOnTick(ahead: 1, target: 7, ratio: 0.5, held: 5, timeout: 25, switchOpen: true), nil, "switch: no starved release")
+    expectEq(P.releaseOnTick(ahead: 1, target: 7, ratio: 1.0, held: 25, timeout: 25, switchOpen: true), .timeout, "switch: fuse still blows")
+    expectEq(P.nextTarget(current: 9, proposed: 4, switchOpen: true), 9, "switch: target never shrinks")
+    expectEq(P.nextTarget(current: 9, proposed: 4, switchOpen: false), 4, "switch: target follows after the window")
+    expect(P.endHoldForViewerPause(userPaused: true, holding: true), "pause: viewer pause ends the hold")
+    expect(!P.endHoldForViewerPause(userPaused: false, holding: true), "pause: no viewer pause keeps the hold")
+}
+
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

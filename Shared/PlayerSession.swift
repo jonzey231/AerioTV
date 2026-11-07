@@ -2652,7 +2652,8 @@ final class RadioModeSession: ObservableObject {
 
     private func publishPlaybackRate() {
         guard isActive else { return }
-        NowPlayingBridge.shared.updateElapsed(0, rate: (isPaused || isFailed || isBuffering) ? 0 : 1)
+        NowPlayingBridge.shared.updateElapsed(0, rate: (isPaused || isFailed || isBuffering) ? 0 : 1,
+                                              buffering: isBuffering && !isPaused && !isFailed)
     }
 
     /// Lock screen / Control Center for Radio Mode. The AVPlayer tile path

@@ -5622,7 +5622,7 @@ final class AVPlayerProgressDriver {
                     debugLog("[PLAYER] rate rose while user paused (status=\(status.rawValue)) caller:\n\(stack)")
                 }
                 guard let self else { return }
-                self.store.isPaused = (p.timeControlStatus == .paused)
+                self.publishPausedState(p.timeControlStatus)
                 // A paused live stream is behind its edge by definition,
                 // and the periodic observer stops ticking while paused -
                 // without this the Playback submenu's Return to Live
@@ -6130,33 +6130,62 @@ final class AVPlayerProgressDriver {
                 return
             }
         }
+        // Post-stall hold (ResumeGatePolicy): release at the target, after
+        // 3 s on a feed below 0.9x, or at the 25 s fuse; never while an
+        // upstream switch window is open (Streamer 2026-11-07: two releases
+        // onto a buffer about to be dropped froze again 1 s later).
+        let switchOpen = switchWindowOpen
+        if postSwitchHoldPending, !switchOpen, stallGateSince == nil {
+            postSwitchHoldPending = false
+            let gap = TSHLSRemuxer.feedRateWindow.worstGap()
+            stallGateTarget = min(12.0, max(learnedHoldback(), gap * 1.5 + 2.0))
+            stallGateSince = Date()
+            debugLog(String(format:
+                "[AVP-NUDGE] upstream switch settled: holding once until %.1f s buffered, timeout %.0f s",
+                stallGateTarget, AVPlayerProgressDriver.stallGateTimeout))
+        }
+        if switchOpen, postSwitchHoldPending || stallGateSince != nil { return }
+        if let since = stallGateSince {
+            let waited = Date().timeIntervalSince(since)
+            var gateAhead = 0.0
+            if let loaded = item.loadedTimeRanges.last?.timeRangeValue {
+                let a = (loaded.end - item.currentTime()).seconds
+                if a.isFinite { gateAhead = max(0, a) }
+            }
+            let rate = TSHLSRemuxer.feedRateWindow.rateRatio()
+            switch ResumeGatePolicy.releaseOnTick(ahead: gateAhead, target: stallGateTarget, ratio: rate,
+                                                  held: waited, timeout: AVPlayerProgressDriver.stallGateTimeout,
+                                                  switchOpen: switchOpen) {
+            case nil:
+                debugLog(String(format:
+                    "[AVP-NUDGE] holding %.0f s until %.1f s buffered (gap %.1f s), %.1f s loaded ahead",
+                    waited, stallGateTarget, TSHLSRemuxer.feedRateWindow.worstGap(), gateAhead))
+                return
+            case .timeout?:
+                debugLog(String(format:
+                    "[AVP-NUDGE] resume gate timed out after %.0f s with only %.1f s buffered (wanted %.1f s); resuming anyway",
+                    waited, gateAhead, stallGateTarget))
+            case .feedStarved?:
+                debugLog(String(format:
+                    "[AVP-NUDGE] resume gate released after %.0f s: upstream rate %.2f below %.2f, %.1f s buffered (wanted %.1f s)",
+                    waited, rate ?? 0, ResumeGatePolicy.mediaRatioMin, gateAhead, stallGateTarget))
+            case .targetReached?:
+                debugLog(String(format:
+                    "[AVP-NUDGE] resume gate satisfied after %.0f s: %.1f s buffered (wanted %.1f s)",
+                    waited, gateAhead, stallGateTarget))
+            }
+            stallGateSince = nil
+            nudgedThisWaitStreak = true
+            publishPausedState()
+            guard autoPlayAllowed("resume gate") else { return }
+            player.playImmediately(atRate: 1.0)
+            debugLog(String(format: "[AVP-NUDGE] resume gate: playImmediately with %.1fs loaded ahead", gateAhead))
+            return
+        }
         guard newSegments >= 1 else { return }
         guard let loadedEnd = item.loadedTimeRanges.last?.timeRangeValue,
               (loadedEnd.end - item.currentTime()).seconds >= (liveTargetDuration?() ?? 2.0) else { return }
         let ahead = (loadedEnd.end - item.currentTime()).seconds
-        // Post-stall: hold until the cushion is real (or the 25 s fuse
-        // blows). The plain first-join case, where no stall has armed the
-        // gate, keeps the original playImmediately behavior.
-        if let since = stallGateSince {
-            let waited = Date().timeIntervalSince(since)
-            if ahead < stallGateTarget, waited < AVPlayerProgressDriver.stallGateTimeout {
-                debugLog(String(format:
-                    "[AVP-NUDGE] holding %.0f s until %.1f s buffered (gap %.1f s), %.1f s loaded ahead",
-                    waited, stallGateTarget,
-                    TSHLSRemuxer.feedRateWindow.worstGap(), ahead))
-                return
-            }
-            if ahead < stallGateTarget {
-                debugLog(String(format:
-                    "[AVP-NUDGE] resume gate timed out after %.0f s with only %.1f s buffered (wanted %.1f s); resuming anyway",
-                    waited, ahead, stallGateTarget))
-            } else {
-                debugLog(String(format:
-                    "[AVP-NUDGE] resume gate satisfied after %.0f s: %.1f s buffered (wanted %.1f s)",
-                    waited, ahead, stallGateTarget))
-            }
-            stallGateSince = nil
-        }
         nudgedThisWaitStreak = true
         guard autoPlayAllowed("waiting nudge") else { return }
         player.playImmediately(atRate: 1.0)
@@ -6437,6 +6466,7 @@ final class AVPlayerProgressDriver {
         guard let fill = audioOnlyFill else { return }
         audioOnlyFill = nil
         RadioModeSession.shared.setBuffering(false)
+        defer { publishPausedState() }
         let waited = Date().timeIntervalSince(fill.startedAt)
         guard resume else {
             debugLog(String(format: "[AVP-NUDGE] audio-only hold: ended after %.0f s without resume (%@)",
@@ -6506,6 +6536,35 @@ final class AVPlayerProgressDriver {
         let repeated = lastStallAt.map { now.timeIntervalSince($0) < 60 } ?? false
         lastStallAt = now
         let gap = TSHLSRemuxer.feedRateWindow.worstGap()
+        // Rate check first, for first AND repeat stalls (Streamer
+        // 2026-11-07: a repeat-stall hold skipped it and held 15.5 s on a
+        // feed at 0.68x real time). An open upstream switch window defers
+        // the hold: the buffer it would fill is about to be dropped.
+        let rate = TSHLSRemuxer.feedRateWindow.rateRatio()
+        let ahead: Double = {
+            guard let item = player.currentItem,
+                  let loaded = item.loadedTimeRanges.last?.timeRangeValue else { return 0 }
+            let a = (CMTimeRangeGetEnd(loaded) - item.currentTime()).seconds
+            return a.isFinite ? max(0, a) : 0
+        }()
+        switch ResumeGatePolicy.shouldArm(ahead: ahead, target: max(1, gap * 1.5 + 2.0), ratio: rate,
+                                          repeat: repeated, switchOpen: switchWindowOpen) {
+        case .deferForSwitch:
+            if stallGateSince == nil { postSwitchHoldPending = true }
+            debugLog(String(format:
+                "[AVP-NUDGE] gate deferred: upstream switch %.1f s ago (%@ stall); one full hold after the switch",
+                TSHLSRemuxer.lastSourceSwitch.secondsSince() ?? -1, repeated ? "repeat" : "first"))
+            return
+        case .skipSlowFeed(let r):
+            stallGateSince = nil
+            postSwitchHoldPending = false
+            debugLog(String(format: "[AVP-NUDGE] gate skipped: upstream rate %.2f below %.2f (%@ stall)",
+                            r, ResumeGatePolicy.mediaRatioMin, repeated ? "repeat" : "first"))
+            publishPausedState()
+            return
+        case .arm, .notNeeded:
+            break
+        }
         if repeated, isRepeatStallHoldAllowed() {
             // Second stall inside a minute (device 2026-11-04 10:29:37):
             // the old rejoin seeked 9 s BACKWARD and replayed video the
@@ -6522,11 +6581,6 @@ final class AVPlayerProgressDriver {
                 "[AVP-NUDGE] repeat stall: holding at the playhead until %.1f s buffered "
                 + "(no backward seek), timeout %.0f s",
                 target, AVPlayerProgressDriver.stallGateTimeout))
-            return
-        }
-        if let rate = TSHLSRemuxer.feedRateWindow.rateRatio(), rate < 0.9 {
-            stallGateSince = nil
-            debugLog(String(format: "[AVP-NUDGE] gate skipped: upstream rate %.2f", rate))
             return
         }
         let target = min(12.0, gap * 1.5 + 2.0)
@@ -6546,6 +6600,38 @@ final class AVPlayerProgressDriver {
         if let last = lastRejoinAt, Date().timeIntervalSince(last) < 180 { return false }
         return true
     }
+
+    /// Chrome and Now Playing paused state. A resume hold (stall gate or
+    /// audio-only fill) is buffering, not a pause (Streamer 2026-11-07:
+    /// holds of 13.5 s, 15.5 s, and 6.1 s showed Pause). A viewer pause
+    /// during a hold ends the hold quietly, so its release can never
+    /// un-pause the viewer.
+    func publishPausedState(_ status: AVPlayer.TimeControlStatus? = nil) {
+        let status = status ?? player.timeControlStatus
+        let gate = stallGateSince != nil
+        let fill = audioOnlyFill != nil
+        if ResumeGatePolicy.endHoldForViewerPause(userPaused: store.userPaused, holding: gate || fill || postSwitchHoldPending) {
+            if gate { debugLog("[AVP-NUDGE] resume gate ended: viewer paused during the hold") }
+            stallGateSince = nil
+            postSwitchHoldPending = false
+            if fill { cancelAudioOnlyFill("user paused") }
+        }
+        let wants = ResumeGatePolicy.wantsToPlay(playerRunning: status != .paused,
+                                                 gateHolding: stallGateSince != nil,
+                                                 audioOnlyHolding: audioOnlyFill != nil)
+        let paused = !wants
+        if store.isPaused != paused { store.isPaused = paused }
+    }
+
+    /// Upstream switch window (TSHLSRemuxer marks every detected source
+    /// change and the new source's first segment).
+    private var switchWindowOpen: Bool {
+        ResumeGatePolicy.switchWindowOpen(secondsSinceSwitch: TSHLSRemuxer.lastSourceSwitch.secondsSince())
+    }
+
+    /// A stall inside an upstream switch window: no hold armed then; one
+    /// hold to the full target once the window closes.
+    private var postSwitchHoldPending = false
 
     /// False (and logged) when the user paused this tile: automatic
     /// recovery may fill the buffer, never start playback.

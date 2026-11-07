@@ -236,7 +236,9 @@ final class NowPlayingBridge {
         publishInfo()
     }
 
-    func updateElapsed(_ time: Double, rate: Float) {
+    /// `buffering`: rate is 0 because a resume hold is filling the buffer,
+    /// not because the viewer paused; the system state stays playing.
+    func updateElapsed(_ time: Double, rate: Float, buffering: Bool = false) {
         if currentIsLive, let bounds = programBounds() {
             // EPG is (now) available: upgrade to a bounded programme timeline,
             // dropping the "LIVE" chip. This self-heals the common case where
@@ -258,7 +260,7 @@ final class NowPlayingBridge {
         publishInfo()
         // #43: keep tvOS's active-app signal in sync with play/pause so the
         // relayed widget reflects the right state and stays alive.
-        setPlaybackState(rate > 0 ? .playing : .paused)
+        setPlaybackState(rate > 0 || buffering ? .playing : .paused)
     }
 
     /// Duration + clamped elapsed for the current-program window, or nil when
