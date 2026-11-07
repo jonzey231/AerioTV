@@ -47,9 +47,11 @@ struct SetUpTvView: View {
     @State private var sync = false
     @State private var codeText = ""
     @State private var userOnly = false
-    /// iPhone: half height by default, full height for the code entry and sign-in steps (keyboard) and any step taller than half.
-    @State private var detent: PresentationDetent = .medium
-    @State private var contentHeight: CGFloat = 0
+    /// Remote-session (Cast) sheet sizing: hug the content, full height for the
+    /// code entry and sign-in steps (keyboard) or when the user drags it up.
+    @State private var contentHeight: CGFloat = 320
+    @State private var fitHeight: CGFloat = 320
+    @State private var userLarge = false
     @Environment(\.horizontalSizeClass) private var hSize
 
     private static let noLongerWaiting = "The device is no longer waiting for setup. Start setup on the other device again."
@@ -57,50 +59,86 @@ struct SetUpTvView: View {
     private var playlist: ServerConnection? { server ?? servers.first(where: \.isActive) }
 
     var body: some View {
-        NavigationStack {
+        ZStack {
+            Color.black.ignoresSafeArea()
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Set up another device")
-                        .scaledFont(.headlineLarge)
-                        .foregroundColor(.textPrimary)
-                    stepView
-                    if step != .sent && step != .sending {
-                        HStack(spacing: 12) {
-                            if step != .pick { SecondaryButton("Back") { back() } }
-                            SecondaryButton("Cancel") { onClose() }
+                VStack(spacing: 14) {
+                    header
+                    VStack(alignment: .leading, spacing: 14) {
+                        stepView
+                        if step != .sent && step != .sending {
+                            HStack(spacing: 12) {
+                                if step != .pick { SetupSheetButton("Back", primary: false) { back() } }
+                                SetupSheetButton("Cancel", primary: false) { onClose() }
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: 560, alignment: .leading)
+                .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 20)
-                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { contentHeight = $0 }
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+                .padding(.bottom, 8)
+                .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
+                    let rounded = (h * 2).rounded() / 2
+                    if abs(contentHeight - rounded) > 0.5 { contentHeight = rounded }
+                }
             }
-            .background(Color.appBackground.ignoresSafeArea())
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .modifier(SetUpTvDetents(enabled: hSize == .compact, detent: $detent))
-        // Settle first: heights mid-transition overshoot and would flash the sheet to full height.
+        .modifier(SetUpTvDetents(enabled: hSize == .compact, fitHeight: fitHeight + Self.bottomInset,
+                                 forceLarge: needsKeyboard, userLarge: $userLarge))
+        // Settle first: heights mid-transition overshoot and would flash the sheet taller.
         .task(id: contentHeight) {
             try? await Task.sleep(for: .milliseconds(400))
-            if !Task.isCancelled { updateDetent() }
+            if !Task.isCancelled, fitHeight != contentHeight { fitHeight = contentHeight }
         }
-        .onChange(of: step) { _, _ in updateDetent() }
         .onAppear(perform: load)
         .onChange(of: center.tvs) { _, tvs in invalidateIfStale(tvs) }
     }
 
-    private func updateDetent() {
-        let needsKeyboard: Bool
+    private var needsKeyboard: Bool {
         switch step {
-        case .code, .credential: needsKeyboard = true
-        default: needsKeyboard = false
+        case .code, .credential: return true
+        default: return false
         }
-        let screenH = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.height ?? 800
-        // A medium sheet is about half the screen, less the grabber and bottom inset.
-        let tooTall = contentHeight > screenH * 0.5 - 40
-        let want: PresentationDetent = (needsKeyboard || tooTall) ? .large : .medium
-        if want != detent { detent = want }
+    }
+
+    private static var bottomInset: CGFloat {
+        let inset = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom }
+            .first ?? 0
+        return max(12, inset)
+    }
+
+    private var stepTarget: SetupTarget? {
+        switch step {
+        case .scope(let t, _), .credential(let t, _, _), .code(let t, _), .choose(let t, _): return t
+        default: return nil
+        }
+    }
+
+    /// The remote-session sheet header: accent glyph, bold title, accent device line.
+    private var header: some View {
+        VStack(spacing: 4) {
+            Image(systemName: stepTarget?.kind.symbol ?? "tv")
+                .font(.system(size: 40))  // glyph in a fixed box: not text, stays fixed
+                .foregroundStyle(ThemeManager.shared.accent)
+                .frame(height: 56)
+            Text("Set up another device")
+                .scaledFont(.title3.weight(.bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let t = stepTarget {
+                Text(t.name)
+                    .scaledFont(.subheadline)
+                    .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
+                    .lineLimit(2)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -128,12 +166,12 @@ struct SetUpTvView: View {
             Text("Sent. The device is finishing setup now.")
                 .scaledFont(.bodyLarge)
                 .foregroundColor(.textPrimary)
-            PrimaryButton("Done") { onClose() }
+            SetupSheetButton("Done") { onClose() }
         case .error(let msg, _):
             Text(msg)
                 .scaledFont(.bodyLarge)
                 .foregroundColor(.statusLive)
-            PrimaryButton("Try Again") { back() }
+            SetupSheetButton("Try Again") { back() }
         }
     }
 
@@ -164,7 +202,7 @@ struct SetUpTvView: View {
                         Image(systemName: "chevron.right").foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .padding(.horizontal, 14).padding(.vertical, 12)
-                    .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }
@@ -191,8 +229,8 @@ struct SetUpTvView: View {
                 ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
             }
             .padding(8)
-            .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            PrimaryButton("Continue") {
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            SetupSheetButton("Continue") {
                 if userOnly, let pl = playlist, let p = SetupSender.userOnlyMissingSignIn(pl) {
                     step = .credential(t, code, p)
                 } else {
@@ -223,7 +261,7 @@ struct SetUpTvView: View {
             if let err {
                 Text(err).scaledFont(.bodySmall).foregroundColor(.statusLive)
             }
-            PrimaryButton("Continue", isDisabled: codeText.count != 6) { submitCode(t) }
+            SetupSheetButton("Continue", isDisabled: codeText.count != 6) { submitCode(t) }
         }
     }
 
@@ -268,7 +306,7 @@ struct SetUpTvView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                PrimaryButton("Send") { send(t, code, pl) }
+                SetupSheetButton("Send") { send(t, code, pl) }
                     .padding(.top, 4)
                 Text("Sent only to this device over your network, encrypted with its code. Nothing goes through your server.")
                     .scaledFont(.bodySmall.subtext())
@@ -551,16 +589,52 @@ struct SetupHandoffRoot: ViewModifier {
             }
     }
 }
-/// iPhone only: the iPad form sheet keeps its own presentation.
+/// iPhone only: the remote-session (Cast) sheet's detents, a content-hugging
+/// height plus .large. The iPad form sheet keeps its own presentation.
 private struct SetUpTvDetents: ViewModifier {
     let enabled: Bool
-    @Binding var detent: PresentationDetent
+    let fitHeight: CGFloat
+    let forceLarge: Bool
+    @Binding var userLarge: Bool
     func body(content: Content) -> some View {
         if enabled {
-            content.presentationDetents([.medium, .large], selection: $detent)
-        } else {
+            let fit = PresentationDetent.height(fitHeight)
             content
+                .presentationDetents([fit, .large], selection: Binding(
+                    get: { forceLarge || userLarge ? .large : fit },
+                    set: { userLarge = $0 == .large }))
+                .presentationDragIndicator(.visible)
+                .presentationBackground(Color.sheetBackground)
+        } else {
+            content.presentationBackground(Color.sheetBackground)
         }
+    }
+}
+
+/// The remote-session sheet's wide button: 14 pt corners, semibold label;
+/// primary on the accent, secondary on 12% white.
+private struct SetupSheetButton: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let title: String
+    var primary = true
+    var isDisabled = false
+    let action: () -> Void
+    init(_ title: String, primary: Bool = true, isDisabled: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.primary = primary; self.isDisabled = isDisabled; self.action = action
+    }
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .scaledFont(.body.weight(.semibold))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(primary ? ThemeManager.shared.accent : Color.white.opacity(0.12),
+                            in: RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.4 : 1)
     }
 }
 #endif
