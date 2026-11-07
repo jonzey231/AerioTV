@@ -1623,6 +1623,8 @@ final class GuideStore: ObservableObject {
     /// Fingerprint observed by the most recent gate check, adopted only when a
     /// sweep completes (an interrupted sweep must be retried, not forgotten).
     private var pendingSweepFingerprint: String?
+    /// The per-source plan the pending sweep runs under (delta-only sweep).
+    private var pendingSweepPlan: EPGSweepPlanner.Plan?
     /// When the gate last asked the server for its source list.
     private var lastEPGSourceGateCheckAt: Date?
     /// The sources list is unreadable on this server: log once, then fall back
@@ -3066,12 +3068,18 @@ final class GuideStore: ObservableObject {
             return
         }
         lastEPGSourceGateCheckAt = Date()
-        if let cached = gridCoverageSourcesFingerprint, cached == probe.fingerprint {
+        // Per source (Android bacd6d0e): only the sources whose
+        // (id, last-updated) pair is new since the cached guide are in scope.
+        let forced = EPGSweepStore.forcedSourceID
+        guard let plan = EPGSweepPlanner.plan(fresh: probe.fingerprint,
+                                              stored: gridCoverageSourcesFingerprint,
+                                              forcedSourceID: forced) else {
             debugLog("[EPG grid window] sources unchanged, background sweep skipped")
             return
         }
-        debugLog("[EPG grid window] sources changed (\(probe.count) sources, gate: \(reason)); scheduling background re-sweep")
+        debugLog("[EPG grid window] sources changed (\(plan.changedSourceIDs.count) of \(probe.count) refreshed since cache\(forced.map { ", source \($0) forced" } ?? "")\(plan.allChannels ? ", all channels" : ""), gate: \(reason)); scheduling background re-sweep")
         pendingSweepFingerprint = probe.fingerprint
+        pendingSweepPlan = plan
         startBackgroundGridSweep(server: server, channels: channels, maps: maps)
     }
 
@@ -3151,6 +3159,7 @@ final class GuideStore: ObservableObject {
     /// frame, or the app is not in the foreground.
     private var backgroundSweepShouldPause: Bool {
         if TuneTimeline.shared.isTuning { return true }
+        if !MultiviewStore.shared.tiles.isEmpty { return true }
         return UIApplication.shared.applicationState != .active
     }
 
@@ -3171,6 +3180,43 @@ final class GuideStore: ObservableObject {
         // Settle first: the guide paints from cache, and a tune started with
         // the launch is past first frame, before the first request goes out.
         try? await Task.sleep(for: .seconds(Self.backgroundSweepSettleDelay))
+        guard isCurrent, !Task.isCancelled, let container = cachedContainer else { return }
+        // Delta-only sweep (Android bacd6d0e, Logan: never rewrite everything).
+        // Scope: only channels fed by the refreshed sources; a first sweep or
+        // a decoder bump covers every channel.
+        let plan = pendingSweepPlan
+        var scopeIDs: Set<String>? = nil
+        if let plan, !plan.allChannels {
+            guard let keys = await EPGSweepStore.keysForSources(api: api, sourceIDs: plan.changedSourceIDs) else {
+                if isCurrent { backgroundSweepTask = nil }
+                return
+            }
+            let ids = EPGSweepStore.channelIDs(forKeys: keys, tvgIDToChannelIDs: maps.tvgIDToChannelIDs)
+            guard isCurrent else { return }
+            if ids.isEmpty {
+                debugLog("[EPG grid window] refreshed sources feed no channels here; nothing to sweep")
+                if let fp = pendingSweepFingerprint { gridCoverageSourcesFingerprint = fp }
+                pendingSweepFingerprint = nil
+                pendingSweepPlan = nil
+                persistGridCoverage()
+                backgroundSweepTask = nil
+                return
+            }
+            scopeIDs = ids
+        }
+        let scope = scopeIDs
+        // Resume: a day applied toward this same server state is not fetched
+        // again after an interruption.
+        let progressKey = EPGSweepStore.progressKey(fingerprint: pendingSweepFingerprint ?? "")
+        var doneDays = EPGSweepStore.progress(serverID: serverID, key: progressKey)
+        if !doneDays.isEmpty {
+            let before = backgroundSweepRemaining.count
+            backgroundSweepRemaining.removeAll { doneDays.contains($0) }
+            debugLog("[EPG grid window] background re-sweep resuming: \(before - backgroundSweepRemaining.count) of \(before) day(s) already applied")
+        }
+        let sweepT0 = Date()
+        var totalWrites = 0
+        var totalIDOnly = 0
         var staged = programs_snapshotForMerge()
         var unpublished = 0
         var swept = 0
@@ -3205,6 +3251,7 @@ final class GuideStore: ObservableObject {
                 guard let w = residentWindow else { return true }
                 return day < w.end && dayEnd > w.start
             }()
+            let t0Day = Date()
             let fetched: [DispatcharrCurrentProgram]
             do {
                 fetched = try await api.getEPGGrid(start: day, end: dayEnd, lowPriority: true)
@@ -3218,88 +3265,67 @@ final class GuideStore: ObservableObject {
                 try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
                 continue
             }
-            if !isResidentDay {
-                let written = await persistSweptDay(fetched, maps: maps, serverID: serverID,
-                                                    day: day, dayEnd: dayEnd)
-                merged += written
-                recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
-                try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
-                continue
-            }
-            // REPLACE the day rather than merge into it: a sporting event moved
-            // to another day must not leave its old entry behind. Programs that
-            // straddle the day edge come back with this chunk's own response
-            // (the grid returns everything overlapping the window), so stripping
-            // by overlap loses nothing.
-            //
-            // The strip runs INSIDE the detached task, together with the merge
-            // (2026-09-12). It used to run here, on the @MainActor: rebuilding
-            // `base` walks every channel and every programme the store holds,
-            // which on Logan's playlist with Guide Days = All Available is 757
-            // channels and ~64k programmes, once per chunk, 91 times in a
-            // sweep. Field log atvlogs/session5.txt shows what that cost: from
-            // the sweep's start (02:30:11) to its end (02:34:39) the gap
-            // between `[MEM] commitPrograms begin` and the next main-thread
-            // tally grew from 1.0 s to 4.0 s, RSS climbed 172 MB -> 257 MB
-            // (three full copies of the programme map alive at once: `staged`
-            // on main, `base`, and the merge result), and a D-pad press at
-            // 02:36:25 took 5.82 s from `began` to `ended`. Handing the map to
-            // the background task and dropping the main actor's reference
-            // first keeps ONE copy live and leaves the main thread free.
-            let stagedIn = staged
-            staged = [:]
-            //
-            // The replace is PER CHANNEL (2026-09-25, dev-build-log-2026-09-25j):
-            // only a channel this chunk actually returned programmes for has
-            // its day stripped. The strip used to cover every channel, so a
-            // chunk that came back partial (the server was mid-import after
-            // "sources changed (7 sources)") wiped today for every channel
-            // missing from it: 5048 -> 4906 programmes at 17:06:53 and
-            // ESPN2 / ESPNU / ESPNews / NFL Network lost their now-playing line.
-            // A channel absent from the response keeps its cached day.
+            // Diff the day against the cache and write only the additions,
+            // removals, and changes (EPGDayDiff), off the main actor.
             let now = Date()
-            let result = await Task.detached(priority: .background) {
+            let tFetch = Date()
+            let dayResult = await EPGCacheWriteGate.shared.run("swept day") {
+              await Task.detached(priority: .background) { () -> (EPGSweepStore.DayOutcome?, [String: [GuideProgram]]) in
                 let fresh = GuideStore.mergeGridPrograms(fetched, into: [:],
                                                          tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
                                                          intIDToChannelID: maps.intIDToChannelID,
                                                          uuidToChannelID: maps.uuidToChannelID,
                                                          windowStart: day, windowEnd: dayEnd)
-                var dict = stagedIn
-                var keptAbsent = 0
-                var keptAbsentAiring = 0
-                var lostAiring: [String] = []
-                for (channelID, list) in stagedIn {
-                    let airing = list.contains { $0.start <= now && $0.end > now }
-                    guard let replacement = fresh.dict[channelID], !replacement.isEmpty else {
-                        if list.contains(where: { $0.end > day && $0.start < dayEnd }) {
-                            keptAbsent += 1
-                            if airing { keptAbsentAiring += 1 }
-                        }
-                        continue
+                let inScope: ((String) -> Bool)? = scope.map { ids in { ids.contains($0) } }
+                var rows: [EPGDiffRow] = []
+                var scoped: [String: [GuideProgram]] = [:]
+                for (channelID, list) in fresh.dict where inScope?(channelID) ?? true {
+                    scoped[channelID] = list
+                    for gp in list {
+                        rows.append(EPGDiffRow(channelID: channelID, start: gp.start, end: gp.end,
+                                               title: gp.title, description: gp.description,
+                                               subTitle: gp.subTitle, season: gp.season,
+                                               episode: gp.episode, isNew: gp.isNew,
+                                               isLiveBroadcast: gp.isLiveBroadcast,
+                                               isPremiere: gp.isPremiere, isFinale: gp.isFinale,
+                                               isRepeat: gp.isRepeat, iconURL: gp.posterURL ?? "",
+                                               category: gp.category, programID: gp.programID))
                     }
-                    var out = list.filter { $0.end <= day || $0.start >= dayEnd }
+                }
+                let outcome = EPGSweepStore.applyDay(container: container, serverID: serverID,
+                                                     fetched: rows, day: day, dayEnd: dayEnd,
+                                                     inScope: inScope, now: now)
+                return (outcome, scoped)
+              }.value
+            }
+            guard let outcome = dayResult.0 else { break }
+            let dayMs = Int(Date().timeIntervalSince(t0Day) * 1000)
+            debugLog("[EPG grid window] sweep day=\(Self.chunkStamp(day)) fetched=\(fetched.count) inScope=\(outcome.fetchedInScope) unchanged=\(outcome.unchanged) added=\(outcome.added) removed=\(outcome.removed) changed=\(outcome.changed) writes=\(outcome.writes) idOnly=\(outcome.idOnly) fetchMs=\(Int(tFetch.timeIntervalSince(t0Day) * 1000)) diffMs=\(outcome.diffMs) ms=\(dayMs)")
+            totalWrites += outcome.writes
+            totalIDOnly += outcome.idOnly
+            doneDays.insert(day)
+            EPGSweepStore.saveProgress(serverID: serverID, key: progressKey, days: doneDays)
+            recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
+            // Republish only resident days that actually changed.
+            guard isResidentDay, outcome.writes + outcome.idOnly > 0 else {
+                try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
+                continue
+            }
+            let freshScoped = dayResult.1
+            let stagedIn = staged
+            staged = [:]
+            let result = await Task.detached(priority: .background) {
+                var dict = stagedIn
+                for (channelID, replacement) in freshScoped where !replacement.isEmpty {
+                    var out = (stagedIn[channelID] ?? []).filter { $0.end <= day || $0.start >= dayEnd }
                     out.append(contentsOf: replacement)
                     out.sort { $0.start < $1.start }
-                    if airing && !out.contains(where: { $0.start <= now && $0.end > now }) {
-                        lostAiring.append(channelID)
-                    }
                     dict[channelID] = out
                 }
-                for (channelID, list) in fresh.dict where stagedIn[channelID] == nil {
-                    dict[channelID] = list
-                }
-                return (dict: dict, matched: fresh.matched, keptAbsent: keptAbsent,
-                        keptAbsentAiring: keptAbsentAiring, lostAiring: lostAiring,
-                        freshChannels: fresh.dict.count)
+                return dict
             }.value
-            if result.keptAbsent > 0 {
-                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): \(result.freshChannels) channel(s) in response; kept cached day for \(result.keptAbsent) channel(s) the server returned nothing for (\(result.keptAbsentAiring) airing now)")
-            }
-            if !result.lostAiring.isEmpty {
-                debugLog("[EPG grid window] background re-sweep chunk \(Self.chunkStamp(day)): replacement drops the currently-airing programme for \(result.lostAiring.count) channel(s): \(result.lostAiring.prefix(8).joined(separator: ", "))")
-            }
-            staged = result.dict
-            merged += result.matched
+            staged = result
+            merged += outcome.writes
             unpublished += 1
             // Batched publishes: see `backgroundSweepPublishEvery`. The FIRST
             // chunk is today, the day the guide is showing, so it publishes on
@@ -3318,7 +3344,6 @@ final class GuideStore: ObservableObject {
                 unpublished = 0
                 staged = programs_snapshotForMerge()
             }
-            recordGridCoverage(start: day, end: dayEnd, programCount: fetched.count)
             try? await Task.sleep(for: .seconds(Self.backgroundSweepChunkPause))
         }
         guard isCurrent else {
@@ -3334,85 +3359,16 @@ final class GuideStore: ObservableObject {
             // leaves the old value so the next gate check sweeps again.
             gridCoverageSourcesFingerprint = fingerprint
             pendingSweepFingerprint = nil
+            pendingSweepPlan = nil
+            EPGSweepStore.clearProgress(serverID: serverID)
         }
         persistGridCoverage()
         // Catch-up reach prune at the end of every sweep (Logan 2026-09-12).
+        // No whole-cache save afterwards: every applied day already wrote its
+        // delta to the store.
         await pruneBeyondCatchupReach(channels: ChannelStore.shared.channels, serverID: serverID)
-        if finished, let container = cachedContainer {
-            // Persist the corrected programs so the next launch serves them
-            // from cache instead of re-sweeping for the same change.
-            saveToCache(modelContext: ModelContext(container), serverID: serverID)
-        }
-        debugLog("[EPG grid window] background re-sweep \(finished ? "complete" : "interrupted"): \(swept) of \(startedWith) day(s), \(merged) program(s) merged")
+        debugLog("[EPG grid window] background re-sweep \(finished ? "complete" : "interrupted"): \(swept) of \(startedWith) day(s) fetched, \(doneDays.count) applied, writes=\(totalWrites) idOnly=\(totalIDOnly) in \(Int(Date().timeIntervalSince(sweepT0) * 1000)) ms")
         if isCurrent { backgroundSweepTask = nil }
-    }
-
-    /// Write one swept day straight into the SwiftData cache, with no publish.
-    ///
-    /// Used for every day outside the resident window (Logan 2026-09-12: keep
-    /// the full cache, let a low-resource sweep scan for changes). The merge and
-    /// the store write both run off the main actor; the main actor sees nothing
-    /// but the returned count. Same REPLACE semantics the resident path uses:
-    /// the day's existing rows are deleted before the fresh ones go in, so a
-    /// programme that moved to another day does not leave its old entry behind.
-    private func persistSweptDay(_ fetched: [DispatcharrCurrentProgram],
-                                 maps: DispatcharrGridMaps,
-                                 serverID: String,
-                                 day: Date, dayEnd: Date) async -> Int {
-        guard let container = cachedContainer else { return 0 }
-        return await EPGCacheWriteGate.shared.run("swept day") {
-          await Task.detached(priority: .background) {
-            // Empty base: `mergeGridPrograms` clamps to the window, so the
-            // result is exactly this day's programmes.
-            let merged = GuideStore.mergeGridPrograms(fetched, into: [:],
-                                                     tvgIDToChannelIDs: maps.tvgIDToChannelIDs,
-                                                     intIDToChannelID: maps.intIDToChannelID,
-                                                     uuidToChannelID: maps.uuidToChannelID,
-                                                     windowStart: day, windowEnd: dayEnd)
-            guard merged.matched > 0 else { return 0 }
-            var ctx = ModelContext(container)
-            ctx.autosaveEnabled = false
-            // Per-channel replace (2026-09-25): only channels this chunk
-            // returned are cleared for the day; the rest keep their cached rows.
-            let replacedIDs = Array(merged.dict.keys)
-            try? ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
-                $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
-                    && replacedIDs.contains($0.channelID)
-            })
-            try? ctx.save()
-            var written = 0
-            var chunk = 0
-            ctx = ModelContext(container)
-            ctx.autosaveEnabled = false
-            for (channelID, list) in merged.dict {
-                for gp in list {
-                    ctx.insert(EPGProgram(channelID: channelID, title: gp.title,
-                                          description: gp.description,
-                                          startTime: gp.start, endTime: gp.end,
-                                          category: gp.category, serverID: serverID,
-                                          programID: gp.programID,
-                                          subTitle: gp.subTitle, season: gp.season,
-                                          episode: gp.episode, isNew: gp.isNew,
-                                          isLiveBroadcast: gp.isLiveBroadcast,
-                                          isPremiere: gp.isPremiere, isFinale: gp.isFinale,
-                                          isRepeat: gp.isRepeat))
-                    written += 1
-                    chunk += 1
-                    // Fresh context per chunk: the same memory discipline
-                    // `saveToCache` uses, so a 60-day sweep never holds more
-                    // than one chunk of managed objects.
-                    if chunk >= 5_000 {
-                        try? ctx.save()
-                        ctx = ModelContext(container)
-                        ctx.autosaveEnabled = false
-                        chunk = 0
-                    }
-                }
-            }
-            try? ctx.save()
-            return written
-          }.value
-        }
     }
 
     private static func chunkStamp(_ d: Date) -> String {
