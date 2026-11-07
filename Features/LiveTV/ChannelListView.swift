@@ -3316,6 +3316,11 @@ struct ChannelListView: View {
         }
     }
     #endif
+    #if os(tvOS)
+    /// tvOS has no guide search results overlay, so the grid always shows
+    /// the selected group's rows.
+    private var guideChannels: [ChannelDisplayItem] { filteredChannels }
+    #endif
 
     /// Pre-warm the EPG cache for the first 20 visible channels so cards open instantly.
     /// Skipped entirely when playback is active, network requests compete with the
