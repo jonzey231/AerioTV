@@ -1701,7 +1701,7 @@ struct MultiviewTileView: View {
                    let engine = store.tileEngines[tile.id] {
                     Text(engine)
                         .scaledFont(.system(size: formatPillSize, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(0.85))
                         .lineLimit(1)
                         .fixedSize()
                         .padding(.horizontal, formatPillSize * 16 / 18)
@@ -1709,7 +1709,7 @@ struct MultiviewTileView: View {
                         .background(.ultraThinMaterial, in: Capsule())
                         .accessibilityLabel("Playback pipeline \(engine)")
                 }
-                TVVideoFormatBadge(progress: progressStore, fontSize: formatPillSize)
+                TVVideoFormatBadge(progress: progressStore, fontSize: formatPillSize, textOpacity: 0.85)
             }
             .padding(.horizontal, 8)
             // Above the picture's bottom inset: broadcast tickers and lower thirds fill the
@@ -1731,7 +1731,7 @@ struct MultiviewTileView: View {
                 Text(tile.item.name)
                     .scaledFont(.caption.weight(.semibold))
                     .lineLimit(1)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(

@@ -1839,6 +1839,10 @@ struct TVVideoFormatBadge: View {
     /// Text size. tvOS keeps 18; the iOS chrome passes a device-scaled
     /// size (iPad near the TV size, iPhone landscape smaller).
     var fontSize: CGFloat = 18
+    /// Text alpha on the grey capsule. The single player keeps 0.55;
+    /// Multiview tiles pass 0.85 so the pill reads over moving video
+    /// (Android parity).
+    var textOpacity: Double = 0.55
 
     private var info: StreamInfo? { progress.streamInfo }
 
@@ -1888,7 +1892,7 @@ struct TVVideoFormatBadge: View {
         if let text = progress.isAudioOnlyProgram ? Self.audioText(for: info) : Self.text(for: info) {
             Text(text)
                 .scaledFont(.system(size: fontSize, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(.white.opacity(textOpacity))
                 .lineLimit(1)
                 .fixedSize()
                 .padding(.horizontal, fontSize * 16 / 18)
