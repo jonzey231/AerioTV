@@ -288,6 +288,8 @@ struct ReceiveSetupView: View {
                     .padding(.horizontal, isTV ? 80 : 20)
                     .padding(.vertical, isTV ? 60 : 32)
             }
+            // iPad: centered vertically, as in the Welcome flow.
+            .onboardingPadCentered()
         }
         .onAppear {
             model.modelContext = modelContext

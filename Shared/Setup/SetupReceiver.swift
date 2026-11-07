@@ -58,7 +58,7 @@ final class SetupReceiver: ObservableObject {
         #endif
     }
 
-    static var deviceName: String { String(DeviceInfo.deviceNickname.prefix(60)) }
+    static var deviceName: String { String(DeviceInfo.displayName.prefix(60)) }
 
     /// Returns false when the device has no LAN address or the bind failed.
     /// `advertise` false skips the Bonjour advert (a User QR request hands the link over directly).

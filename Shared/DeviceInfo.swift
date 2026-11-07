@@ -32,6 +32,45 @@ enum DeviceInfo {
         return identifier
     }
 
+    /// Name to show other people's devices (the setup receiver's name line,
+    /// its Bonjour TXT name, and so the sender's "Set up <name>" card).
+    /// Order: the user's own nickname, then UIDevice.current.name when it
+    /// is personal (iOS 16+ returns the generic "iPad" or "iPhone" without
+    /// the user-assigned-device-name entitlement), then the marketing model
+    /// name, then the product family. Never the raw hardware identifier.
+    static var displayName: String {
+        let stored = (UserDefaults.standard.string(forKey: "deviceNickname") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stored.isEmpty, stored != rawHardwareIdentifier { return stored }
+        #if canImport(UIKit)
+        let system = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generic: Set<String> = ["iPad", "iPhone", "iPod touch", "Apple TV", UIDevice.current.model]
+        if !system.isEmpty, !generic.contains(system) { return system }
+        #endif
+        if let friendly = friendlyNameMap[rawHardwareIdentifier] { return friendly }
+        let id = rawHardwareIdentifier
+        if id.hasPrefix("iPad") { return "iPad" }
+        if id.hasPrefix("iPhone") { return "iPhone" }
+        if id.hasPrefix("AppleTV") { return "Apple TV" }
+        #if canImport(UIKit)
+        return UIDevice.current.model
+        #else
+        return "AerioTV device"
+        #endif
+    }
+
+    /// A name another device advertised. Older builds advertised the raw
+    /// hardware identifier (e.g. "iPad8,11"); map those to the marketing
+    /// name, or the product family when the identifier is unknown.
+    static func friendlyName(advertised: String) -> String {
+        if let friendly = friendlyNameMap[advertised] { return friendly }
+        let isIdentifier = advertised.range(of: "^(iPad|iPhone|AppleTV)[0-9]+,[0-9]+$", options: .regularExpression) != nil
+        guard isIdentifier else { return advertised }
+        if advertised.hasPrefix("iPad") { return "iPad" }
+        if advertised.hasPrefix("iPhone") { return "iPhone" }
+        return "Apple TV"
+    }
+
     private static var rawHardwareIdentifier: String {
         // When running inside a Simulator, hw.machine returns the host Mac's
         // identifier (e.g. "arm64"), not the simulated device. Prefer the
@@ -55,6 +94,14 @@ enum DeviceInfo {
     /// iPadOS 18+). Generated from Apple's public model identifier list.
     private static let friendlyNameMap: [String: String] = [
         // MARK: iPhone
+        "iPhone12,1": "iPhone 11",
+        "iPhone12,3": "iPhone 11 Pro",
+        "iPhone12,5": "iPhone 11 Pro Max",
+        "iPhone12,8": "iPhone SE (2nd generation)",
+        "iPhone13,1": "iPhone 12 mini",
+        "iPhone13,2": "iPhone 12",
+        "iPhone13,3": "iPhone 12 Pro",
+        "iPhone13,4": "iPhone 12 Pro Max",
         "iPhone14,4": "iPhone 13 mini",
         "iPhone14,5": "iPhone 13",
         "iPhone14,2": "iPhone 13 Pro",
@@ -79,6 +126,24 @@ enum DeviceInfo {
         "iPhone18,2": "iPhone 17 Pro Max",
 
         // MARK: iPad
+        "iPad8,1":   "iPad Pro 11-inch (1st generation)",
+        "iPad8,2":   "iPad Pro 11-inch (1st generation)",
+        "iPad8,3":   "iPad Pro 11-inch (1st generation)",
+        "iPad8,4":   "iPad Pro 11-inch (1st generation)",
+        "iPad8,5":   "iPad Pro 12.9-inch (3rd generation)",
+        "iPad8,6":   "iPad Pro 12.9-inch (3rd generation)",
+        "iPad8,7":   "iPad Pro 12.9-inch (3rd generation)",
+        "iPad8,8":   "iPad Pro 12.9-inch (3rd generation)",
+        "iPad8,9":   "iPad Pro 11-inch (2nd generation)",
+        "iPad8,10":  "iPad Pro 11-inch (2nd generation)",
+        "iPad8,11":  "iPad Pro 12.9-inch (4th generation)",
+        "iPad8,12":  "iPad Pro 12.9-inch (4th generation)",
+        "iPad11,1":  "iPad mini (5th generation)",
+        "iPad11,2":  "iPad mini (5th generation)",
+        "iPad11,3":  "iPad Air (3rd generation)",
+        "iPad11,4":  "iPad Air (3rd generation)",
+        "iPad11,6":  "iPad (8th generation)",
+        "iPad11,7":  "iPad (8th generation)",
         "iPad13,1":  "iPad Air (4th generation)",
         "iPad13,2":  "iPad Air (4th generation)",
         "iPad13,16": "iPad Air (5th generation)",
@@ -122,6 +187,8 @@ enum DeviceInfo {
         "iPad16,6":  "iPad Pro 13-inch (M4)",
 
         // MARK: Apple TV
+        "AppleTV5,3":  "Apple TV HD",
+        "AppleTV6,2":  "Apple TV 4K (1st generation)",
         "AppleTV11,1": "Apple TV 4K (2nd generation)",
         "AppleTV14,1": "Apple TV 4K (3rd generation)",
         "AppleTV15,1": "Apple TV 4K (4th generation)",

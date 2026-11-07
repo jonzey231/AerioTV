@@ -744,6 +744,7 @@ struct SettingsView: View {
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
                     .settingsSheetLog("Add Playlist")
+                    .tallFormSheetOnPad()
                     .overlay(alignment: .top) {
                         Capsule()
                             .fill(.ultraThinMaterial)
@@ -866,6 +867,7 @@ struct SettingsView: View {
         // branch is mounted, so they never double-present).
         .sheet(isPresented: $showAddServer) {
             NavigationStack { AddServerView(onSave: { _ in }) }
+                .tallFormSheetOnPad()
         }
         .sheet(isPresented: $showSetUpTv) {
             SetUpTvView { showSetUpTv = false }

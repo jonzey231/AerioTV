@@ -154,7 +154,7 @@ final class SetupDiscovery: ObservableObject {
                 guard let pk = txt[SetupProtocol.txtPk].flatMap(SetupCrypto.unb64), pk.count == 32 else {
                     drops.append("\(name): bad public key"); return nil
                 }
-                let shown = txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name
+                let shown = DeviceInfo.friendlyName(advertised: txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name)
                 let kind = SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind])
                 return (name, pk, shown + "\u{1F}" + kind.rawValue, r.endpoint)
             }
@@ -808,7 +808,7 @@ enum UserQrRequest {
                     }
                     var named = txt[SetupProtocol.txtName] ?? ""
                     if named.isEmpty, case let .service(n, _, _, _) = r.endpoint { named = n }
-                    resolve(r.endpoint, name: named.isEmpty ? "AerioTV" : named, v4Only: true, queue: queue, once: once, stats: stats)
+                    resolve(r.endpoint, name: named.isEmpty ? "AerioTV" : DeviceInfo.friendlyName(advertised: named), v4Only: true, queue: queue, once: once, stats: stats)
                 }
             }
             browser.start(queue: queue)

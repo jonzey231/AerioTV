@@ -143,7 +143,9 @@ struct AddServerView: View {
                 .padding(.horizontal, isPad ? 40 : 20)
                 .padding(.vertical, tvTypePickerFitsPage ? 0 : 20)
             }
-            .onboardingPadCentered()
+            // Settings > Add Playlist sits in a sheet: top-aligned under the
+            // header (centering left a large gap above Connect a Server).
+            .onboardingPadCentered(isOnboarding)
             #if os(tvOS)
             // First focus lands on Continue with Dispatcharr (mid-page), not
             // on the bottom card the focus engine picked on its own, which
@@ -1432,13 +1434,14 @@ struct OnboardingPadWidth: ViewModifier {
 /// iPad: a scroll view's content sits vertically centered while it fits and
 /// scrolls from the top when it does not. iPhone and tvOS are unchanged.
 struct OnboardingPadCentered: ViewModifier {
+    var enabled: Bool = true
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
 
     func body(content: Content) -> some View {
         #if os(iOS)
-        content.defaultScrollAnchor(horizontalSizeClass == .regular ? .center : nil, for: .alignment)
+        content.defaultScrollAnchor(enabled && horizontalSizeClass == .regular ? .center : nil, for: .alignment)
         #else
         content
         #endif
@@ -1451,7 +1454,27 @@ extension View {
         modifier(OnboardingPadWidth(pad: pad, other: other))
     }
 
-    func onboardingPadCentered() -> some View {
-        modifier(OnboardingPadCentered())
+    func onboardingPadCentered(_ enabled: Bool = true) -> some View {
+        modifier(OnboardingPadCentered(enabled: enabled))
     }
 }
+
+#if os(iOS)
+/// iPad Settings > Add Playlist: the standard form sheet width, with the
+/// height taken up to the window's safe area so the Connect a Server page
+/// (through the Set up from another device card) and the receiver screen
+/// fit without scrolling. The stock form height (about 960 pt on a 12.9-inch
+/// iPad in portrait) cut the last card off. Compact widths ignore sizing.
+struct TallFormPresentationSizing: PresentationSizing {
+    func proposedSize(for root: PresentationSizingRoot, context: PresentationSizingContext) -> ProposedViewSize {
+        let form = FormPresentationSizing.form.proposedSize(for: root, context: context)
+        return ProposedViewSize(width: form.width, height: .infinity)
+    }
+}
+
+extension View {
+    func tallFormSheetOnPad() -> some View {
+        presentationSizing(TallFormPresentationSizing())
+    }
+}
+#endif
