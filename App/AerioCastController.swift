@@ -3291,7 +3291,7 @@ struct RemoteSessionSheet: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
+        .presentationDetents([.height(contentHeight), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.sheetBackground)
         .task {

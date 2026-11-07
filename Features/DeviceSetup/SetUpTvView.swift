@@ -87,7 +87,7 @@ struct SetUpTvView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .modifier(SetUpTvDetents(enabled: hSize == .compact, fitHeight: fitHeight + Self.bottomInset,
+        .modifier(SetUpTvDetents(enabled: hSize == .compact, fitHeight: fitHeight,
                                  forceLarge: needsKeyboard, userLarge: $userLarge))
         // Settle first: heights mid-transition overshoot and would flash the sheet taller.
         .task(id: contentHeight) {
