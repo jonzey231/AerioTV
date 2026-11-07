@@ -81,20 +81,36 @@ final class SetupDiscovery: ObservableObject {
         b.stateUpdateHandler = { state in
             if case .failed(let e) = state {
                 Task { @MainActor in debugLog("[SETUP] discovery failed \(e.errorCode)") }
+            } else if case .waiting(let e) = state {
+                // Local network permission off reads as waiting with a policy error.
+                Task { @MainActor in debugLog("[SETUP] discovery waiting \(e.errorCode)") }
+            } else if case .ready = state {
+                Task { @MainActor in debugLog("[SETUP] discovery ready") }
             }
         }
         b.browseResultsChangedHandler = { [weak self] results, _ in
+            var drops: [String] = []
             let snapshot = results.compactMap { r -> (String, Data, String, NWEndpoint)? in
-                guard case let .service(name, _, _, _) = r.endpoint,
-                      case let .bonjour(txt) = r.metadata else { return nil }
-                guard txt[UserQrCrypto.txtRole] != UserQrCrypto.roleSource,
-                      txt[SetupProtocol.txtVersion] == String(SetupProtocol.version),
-                      let pk = txt[SetupProtocol.txtPk].flatMap(SetupCrypto.unb64), pk.count == 32 else { return nil }
+                guard case let .service(name, _, _, _) = r.endpoint else { return nil }
+                guard case let .bonjour(txt) = r.metadata else { drops.append("\(name): no TXT"); return nil }
+                if txt[UserQrCrypto.txtRole] == UserQrCrypto.roleSource { return nil }
+                guard txt[SetupProtocol.txtVersion] == String(SetupProtocol.version) else {
+                    drops.append("\(name): version \(txt[SetupProtocol.txtVersion] ?? "none")"); return nil
+                }
+                guard let pk = txt[SetupProtocol.txtPk].flatMap(SetupCrypto.unb64), pk.count == 32 else {
+                    drops.append("\(name): bad public key"); return nil
+                }
                 let shown = txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name
                 let kind = SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind])
                 return (name, pk, shown + "\u{1F}" + kind.rawValue, r.endpoint)
             }
-            Task { @MainActor in self?.apply(snapshot) }
+            // Every browse change is logged (names and kinds only) so a device that never
+            // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
+            let seen = snapshot.map { "\($0.0) (\($0.2.split(separator: "\u{1F}").last ?? ""))" }
+            Task { @MainActor in
+                debugLog("[SETUP] browse adverts=\(results.count) valid=[\(seen.joined(separator: ", "))] dropped=[\(drops.joined(separator: ", "))]")
+                self?.apply(snapshot)
+            }
         }
         browser = b
         b.start(queue: queue)
@@ -158,9 +174,12 @@ final class SetupDiscovery: ObservableObject {
                 let clean = hostString.split(separator: "%").first.map(String.init) ?? hostString
                 let t = SetupTarget(name: shown, host: clean, port: Int(port.rawValue), pk: pk, serviceName: service, kind: kind)
                 Task { @MainActor in self?.resolved(service: service, target: t) }
-            case .failed, .waiting:
+            case .failed(let e), .waiting(let e):
                 c?.cancel()
-                Task { @MainActor in self?.resolving.removeValue(forKey: service) }
+                Task { @MainActor in
+                    debugLog("[SETUP] resolve failed \(shown) (\(kind.rawValue)): \(e.errorCode)")
+                    self?.resolving.removeValue(forKey: service)
+                }
             default:
                 break
             }
