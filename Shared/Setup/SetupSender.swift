@@ -72,13 +72,26 @@ final class SetupDiscovery: ObservableObject {
     private let queue = DispatchQueue(label: "aerio.setup.discovery")
 
     var isRunning: Bool { browser != nil }
+    /// True once the current browser has delivered any state or browse result.
+    private var heard = false
+    private var silentRestarts = 0
+    private var watchdog: Task<Void, Never>?
+
+    /// Cancels and recreates the browser. A browser started before Local
+    /// Network permission was granted can stay silent for the whole session.
+    func restart() {
+        if browser != nil { stop() }
+        start()
+    }
 
     func start() {
         guard browser == nil else { return }
+        heard = false
         let params = NWParameters.tcp
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
-        b.stateUpdateHandler = { state in
+        b.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor in self?.heard = true }
             if case .failed(let e) = state {
                 Task { @MainActor in debugLog("[SETUP] discovery failed \(e.errorCode)") }
             } else if case .waiting(let e) = state {
@@ -108,6 +121,7 @@ final class SetupDiscovery: ObservableObject {
             // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
             let seen = snapshot.map { "\($0.0) (\($0.2.split(separator: "\u{1F}").last ?? ""))" }
             Task { @MainActor in
+                self?.heard = true
                 debugLog("[SETUP] browse adverts=\(results.count) valid=[\(seen.joined(separator: ", "))] dropped=[\(drops.joined(separator: ", "))]")
                 self?.apply(snapshot)
             }
@@ -115,9 +129,20 @@ final class SetupDiscovery: ObservableObject {
         browser = b
         b.start(queue: queue)
         debugLog("[SETUP] discovery started")
+        watchdog?.cancel()
+        watchdog = Task { @MainActor [weak self, weak b] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard let self, !Task.isCancelled, let b, self.browser === b, !self.heard else { return }
+            guard self.silentRestarts < 5 else { return }
+            self.silentRestarts += 1
+            debugLog("[SETUP] discovery restarted (silent browser) attempt=\(self.silentRestarts)")
+            self.restart()
+        }
     }
 
     func stop() {
+        watchdog?.cancel()
+        watchdog = nil
         browser?.cancel()
         browser = nil
         resolving.values.forEach { $0.cancel() }
@@ -230,7 +255,8 @@ final class SetupTvOfferCenter: ObservableObject {
     }
 
     func setForeground(_ active: Bool) {
-        if active { discovery.start() } else { discovery.stop() }
+        // A fresh browser on every return to the foreground.
+        if active { discovery.restart() } else { discovery.stop() }
     }
 
     /// The TV on offer: the first advertising TV not dismissed, hidden while
@@ -243,6 +269,14 @@ final class SetupTvOfferCenter: ObservableObject {
     func dismiss(_ t: SetupTarget) {
         dismissed.insert(t.id)
         debugLog("[SETUP] offer dismissed key=\(t.fingerprint)")
+    }
+
+    /// A device that accepted the payload is never offered again under that key,
+    /// even when its advert goodbye never reaches this browser. A new session
+    /// (new key) shows again.
+    func completed(_ t: SetupTarget) {
+        dismissed.insert(t.id)
+        debugLog("[SETUP] offer cleared after send key=\(t.fingerprint)")
     }
 
     func setUp(_ t: SetupTarget) { presentedTarget = t }

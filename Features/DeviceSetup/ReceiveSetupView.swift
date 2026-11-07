@@ -192,6 +192,9 @@ final class SetupApplyModel: ObservableObject {
         }
         pending = nil
         debugLog("[SETUP] receiver: applied (\(p.profiles.count - skipped) profiles, skipped \(skipped))")
+        // Fresh browse once set up: a browser started before Local Network
+        // permission was granted may never deliver results.
+        if SetupTvOfferCenter.shared.discovery.isRunning { SetupTvOfferCenter.shared.discovery.restart() }
         phase = .done
     }
 }

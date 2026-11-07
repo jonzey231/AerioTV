@@ -318,6 +318,7 @@ struct SetUpTvView: View {
             switch await SetupSender.send(t, code: code, payload: payload) {
             case .ok:
                 debugLog("[SETUP] sent, TV finishing setup key=\(t.fingerprint)")
+                SetupTvOfferCenter.shared.completed(t)
                 step = .sent
             case .wrongCode:
                 var again = t
