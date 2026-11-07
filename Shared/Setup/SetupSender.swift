@@ -72,8 +72,11 @@ final class SetupDiscovery: ObservableObject {
     private let queue = DispatchQueue(label: "aerio.setup.discovery")
 
     var isRunning: Bool { browser != nil }
-    /// True once the current browser has delivered any state or browse result.
+    /// True once the current browser has delivered a browse result set (even an empty one).
+    /// A browser that only reports .ready can still be deaf for the whole session.
     private var heard = false
+    /// Recreations of a browser that reached ready but never delivered results.
+    private var recreations = 0
     private var silentRestarts = 0
     private var watchdog: Task<Void, Never>?
 
@@ -86,17 +89,40 @@ final class SetupDiscovery: ObservableObject {
 
     func start() {
         guard browser == nil else { return }
+        recreations = 0
+        makeBrowser()
+        debugLog("[SETUP] discovery started")
+        watchdog?.cancel()
+        // While no results callback has fired, recreate the browser every 5 s for as long as
+        // discovery runs. Measured: a browser sat at ready with zero results for over 2 minutes
+        // while the advert resolved on the LAN; a relaunch always fixed it. Once results arrive
+        // the loop ends; a browse that later returns to empty is normal. stop() cancels it, and
+        // everything here runs on the main actor, so it cannot interleave with stop() or start().
+        watchdog = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, !Task.isCancelled, let old = self.browser else { return }
+                if self.heard { return }
+                self.recreations += 1
+                let n = self.recreations
+                if n <= 3 || n % 5 == 0 { debugLog("[SETUP] discovery recreated (ready, no results) n=\(n)") }
+                old.cancel()
+                self.makeBrowser()
+            }
+        }
+    }
+
+    private func makeBrowser() {
         heard = false
         let params = NWParameters.tcp
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
         b.stateUpdateHandler = { [weak self, weak b] state in
-            // Only .ready (or a browse result) counts as heard: a browser stuck in .setup
-            // must still trip the silent-browser watchdog.
+            // Only a browse result counts as heard; .ready alone does not.
             Task { @MainActor in
+                guard let self, let b, self.browser === b else { return }
                 switch state {
                 case .ready:
-                    self?.heard = true
                     debugLog("[SETUP] discovery ready")
                 case .setup:
                     debugLog("[SETUP] discovery state setup")
@@ -104,17 +130,17 @@ final class SetupDiscovery: ObservableObject {
                     debugLog("[SETUP] discovery state cancelled")
                 case .failed(let e):
                     debugLog("[SETUP] discovery failed \(e.errorCode)")
-                    self?.restartAfterError(b, reason: "failed")
+                    self.restartAfterError(b, reason: "failed")
                 case .waiting(let e):
                     // Local network permission off reads as waiting with a policy error.
                     debugLog("[SETUP] discovery waiting \(e.errorCode)")
-                    self?.restartAfterError(b, reason: "waiting")
+                    self.restartAfterError(b, reason: "waiting")
                 @unknown default:
                     debugLog("[SETUP] discovery state unknown")
                 }
             }
         }
-        b.browseResultsChangedHandler = { [weak self] results, _ in
+        b.browseResultsChangedHandler = { [weak self, weak b] results, _ in
             var drops: [String] = []
             let snapshot = results.compactMap { r -> (String, Data, String, NWEndpoint)? in
                 guard case let .service(name, _, _, _) = r.endpoint else { return nil }
@@ -134,23 +160,14 @@ final class SetupDiscovery: ObservableObject {
             // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
             let seen = snapshot.map { "\($0.0) (\($0.2.split(separator: "\u{1F}").last ?? ""))" }
             Task { @MainActor in
-                self?.heard = true
+                guard let self, let b, self.browser === b else { return }
+                self.heard = true
                 debugLog("[SETUP] browse adverts=\(results.count) valid=[\(seen.joined(separator: ", "))] dropped=[\(drops.joined(separator: ", "))]")
-                self?.apply(snapshot)
+                self.apply(snapshot)
             }
         }
         browser = b
         b.start(queue: queue)
-        debugLog("[SETUP] discovery started")
-        watchdog?.cancel()
-        watchdog = Task { @MainActor [weak self, weak b] in
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, !Task.isCancelled, let b, self.browser === b, !self.heard else { return }
-            guard self.silentRestarts < 5 else { return }
-            self.silentRestarts += 1
-            debugLog("[SETUP] discovery restarted (silent browser) attempt=\(self.silentRestarts)")
-            self.restart()
-        }
     }
 
     /// Restarts a browser that reported failed or waiting, sharing the silent-restart budget.
