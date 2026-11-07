@@ -3013,7 +3013,7 @@ struct RemoteControlScreen: View {
         }
         // Small sheet over the page the user was on (the channel list stays
         // visible above it), draggable up to full height for the options.
-        .presentationDetents([.height(contentHeight + Self.bottomInset), .large])
+        .presentationDetents([.height(contentHeight), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.black)
         .sheet(isPresented: $showOptions) {
