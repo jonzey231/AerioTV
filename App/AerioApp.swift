@@ -1431,6 +1431,8 @@ struct RootView: View {
     /// which previously left the UIKit responder chain and tvOS focus engine
     /// in a dead state after iCloud sync.
     @State private var showOnboarding = false
+    /// Onboarding rose in this launch (it already asked about Dispatcharr Sync).
+    @State private var onboardingShownThisLaunch = false
 
     /// v1.6.12: drives the post-update "What's new" sheet. Set to
     /// `true` from `onAppear` only when `WhatsNewStore.shouldShow()`
@@ -1458,6 +1460,11 @@ struct RootView: View {
             .whatsNewSheet(isPresented: $showWhatsNew)
             // One-time "Keep your devices in sync" offer after onboarding's first restore or pull.
             .modifier(SyncProvidersOfferHost(onboardingVisible: showOnboarding))
+            // One-time Dispatcharr Sync offer on the first launch after an update.
+            .modifier(DsyncUpgradeOfferHost(onboardingVisible: showOnboarding,
+                                            onboardingRanThisLaunch: onboardingShownThisLaunch,
+                                            blocked: showWhatsNew))
+            .onChange(of: showOnboarding) { _, on in if on { onboardingShownThisLaunch = true } }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 

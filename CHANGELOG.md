@@ -4,6 +4,11 @@
 
 ### Added
 
+- After an update, a Dispatcharr playlist with Dispatcharr Sync off offers it
+  once: when another device already syncs the account, a "Dispatcharr Sync is
+  on for this account" prompt turns it on here with no setup comparison;
+  otherwise the usual "Turn on Dispatcharr Sync?" step runs. Not Now (or
+  Skip) is remembered on this device; Settings > Sync still works.
 - Appearance > Color Theme has a new "Custom" theme: pick one Theme Color
   (color picker or hex field; the hex field on Apple TV) and AerioTV builds
   the whole theme from it, including backgrounds, cards, sheets, dividers,

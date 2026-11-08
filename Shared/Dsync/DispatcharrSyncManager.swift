@@ -524,6 +524,19 @@ final class DispatcharrSyncManager: ObservableObject {
         schedule(s, key, 0)
     }
 
+    /// Read-only: does this account already hold an AerioTV App Data record, under `<user>.aeriotv`
+    /// or the legacy key? True or false only when the server answered; nil on any failure.
+    func accountRecordPresent(_ playlistId: String) async -> Bool? {
+        guard let server = DsyncLocal.server(playlistId), let c = DsyncLocal.client(server) else { return nil }
+        guard let name = await c.username(), let main = DsyncKeyName.main(name) else { return nil }
+        guard let r = await c.appDataGet(main) else { return nil }
+        if r.ok { return true }
+        guard r.status == 404 else { return nil }
+        guard let old = await c.appDataGet(DsyncKeyName.LEGACY_MAIN) else { return nil }
+        if old.ok { return true }
+        return old.status == 404 ? false : nil
+    }
+
     /// Read-only probe: the base user's App Data for [playlistId], summarized per shared category.
     /// Nil when the server could not be read; an absent key reads as an empty summary.
     func serverSummary(_ playlistId: String) async -> SetupSourceChoice.Summary? {

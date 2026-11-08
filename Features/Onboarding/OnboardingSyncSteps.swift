@@ -23,6 +23,8 @@ struct DispatcharrSyncStepView: View {
     let onDone: () -> Void
     /// Cancel on the "Which setup" prompt.
     let onCancel: () -> Void
+    /// Skip tapped (the upgrade offer remembers it); onDone still follows.
+    var onSkip: (() -> Void)? = nil
 
     @ObservedObject private var coordinator = SetupSourceCoordinator.shared
     @State private var ready = false
@@ -133,6 +135,7 @@ struct DispatcharrSyncStepView: View {
                     Task { @MainActor in
                         await coordinator.releaseHeld()
                         debugLog("[DSYNC] onboarding step skipped")
+                        onSkip?()
                         onDone()
                     }
                 }
@@ -360,5 +363,213 @@ struct SyncProvidersOfferHost: ViewModifier {
         SyncProvidersOfferStore.markOfferShown(pid)
         debugLog("[SYNC] offer providers=\(offers)")
         return offers
+    }
+}
+
+// MARK: - One-time Dispatcharr Sync offer after an app update
+
+/// Persisted state for the upgrade offer: the app version last evaluated and the per-device
+/// Not Now. A failed probe writes nothing, so the next launch tries again.
+@MainActor
+enum DsyncUpgradeOfferStore {
+    static let offeredVersionKey = "dsyncUpgradeOfferVersion"
+    static let declinedKey = "dsyncUpgradeOfferDeclined"
+    /// DEBUG only: "found" or "missing" stands in for the server read (simulator checks).
+    static let simulateKey = "dsyncUpgradeOfferSimulate"
+
+    static var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
+    }
+    static var due: Bool { UserDefaults.standard.string(forKey: offeredVersionKey) != currentVersion }
+    static func markEvaluated() { UserDefaults.standard.set(currentVersion, forKey: offeredVersionKey) }
+    static var declined: Bool { UserDefaults.standard.bool(forKey: declinedKey) }
+    static func decline() { UserDefaults.standard.set(true, forKey: declinedKey) }
+
+    static func log(record: String, decision: String) {
+        debugLog("[DSYNC] upgrade offer: record=\(record) decision=\(decision)")
+    }
+}
+
+/// First foreground launch after an update: when the active playlist is Dispatcharr and
+/// Dispatcharr Sync is off, read (only) whether the account already has a record and offer
+/// the matching flow once. Never during onboarding, the PIN gate, or playback.
+struct DsyncUpgradeOfferHost: ViewModifier {
+    let onboardingVisible: Bool
+    /// True when onboarding ran in this launch: it already asked about Dispatcharr Sync.
+    let onboardingRanThisLaunch: Bool
+    let blocked: Bool
+
+    enum Offer: String, Identifiable { case optIn, migrate; var id: String { rawValue } }
+    @State private var offer: Offer?
+    @State private var started = false
+    /// Live copies: the long-running task reads these, not the values captured at its start.
+    @State private var liveOnboarding = true
+    @State private var liveBlocked = true
+    @State private var liveRan = false
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { liveOnboarding = onboardingVisible; liveBlocked = blocked; liveRan = onboardingRanThisLaunch }
+            .onChange(of: onboardingVisible) { _, v in liveOnboarding = v }
+            .onChange(of: blocked) { _, v in liveBlocked = v }
+            .onChange(of: onboardingRanThisLaunch) { _, v in liveRan = v }
+            .task {
+                guard !started else { return }
+                started = true
+                await run()
+            }
+            #if os(tvOS)
+            .fullScreenCover(item: $offer) { o in sheet(o) }
+            #else
+            .sheet(item: $offer) { o in sheet(o) }
+            #endif
+    }
+
+    @ViewBuilder private func sheet(_ o: Offer) -> some View {
+        switch o {
+        case .optIn:
+            DsyncUpgradeOptInView(
+                iCloudOn: UserDefaults.standard.bool(forKey: "iCloudSyncEnabled"),
+                onTurnOn: {
+                    offer = nil
+                    // The first device already migrated: adopt the server record through the
+                    // normal merge path, no comparison prompt. The legacy key move runs in the first cycle.
+                    DispatcharrSyncManager.shared.setEnabled(true)
+                    debugLog("[DSYNC] enabled from upgrade offer")
+                },
+                onNotNow: {
+                    DsyncUpgradeOfferStore.decline()
+                    debugLog("[DSYNC] upgrade offer declined")
+                    offer = nil
+                })
+        case .migrate:
+            DispatcharrSyncStepView(
+                autoEnable: false,
+                onDone: { offer = nil },
+                onCancel: { offer = nil },
+                onSkip: {
+                    DsyncUpgradeOfferStore.decline()
+                    debugLog("[DSYNC] upgrade offer declined")
+                })
+        }
+    }
+
+    @MainActor private var gatesOpen: Bool {
+        if liveOnboarding || liveBlocked { return false }
+        let pm = ProfileManager.shared
+        if pm.launchGate != nil || pm.launchPicker != nil || pm.switching { return false }
+        if PlayerSession.shared.mode != .idle || !MultiviewStore.shared.tiles.isEmpty { return false }
+        let cs = ChannelStore.shared
+        return !cs.isLoading && !cs.channels.isEmpty
+    }
+
+    @MainActor private func run() async {
+        guard DsyncUpgradeOfferStore.due else { return }
+        // Wait for the playlist and every gate; the next idle moment, up to ten minutes.
+        var waited = 0
+        while !gatesOpen {
+            if waited >= 600 { return }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            waited += 1
+        }
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        guard gatesOpen else { return }
+        if liveRan {
+            DsyncUpgradeOfferStore.markEvaluated()
+            return
+        }
+        guard let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString else {
+            DsyncUpgradeOfferStore.log(record: "error", decision: "not-dispatcharr")
+            DsyncUpgradeOfferStore.markEvaluated()
+            return
+        }
+        if DispatcharrSyncManager.shared.isEnabled {
+            DsyncUpgradeOfferStore.log(record: "error", decision: "already-on")
+            DsyncUpgradeOfferStore.markEvaluated()
+            return
+        }
+        if DsyncUpgradeOfferStore.declined {
+            DsyncUpgradeOfferStore.log(record: "error", decision: "declined-before")
+            DsyncUpgradeOfferStore.markEvaluated()
+            return
+        }
+        if ProfileManager.shared.nonDefaultActive() { return }
+        var present: Bool?
+        #if DEBUG
+        switch UserDefaults.standard.string(forKey: DsyncUpgradeOfferStore.simulateKey) {
+        case "found"?: present = true
+        case "missing"?: present = false
+        default: present = await DispatcharrSyncManager.shared.accountRecordPresent(pid)
+        }
+        #else
+        present = await DispatcharrSyncManager.shared.accountRecordPresent(pid)
+        #endif
+        guard let present else {
+            // Server unreadable: nothing shown, nothing remembered; the next launch tries again.
+            DsyncUpgradeOfferStore.log(record: "error", decision: "none")
+            return
+        }
+        // The read can take a while: never rise over playback or a gate that opened meanwhile.
+        while !gatesOpen { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+        DsyncUpgradeOfferStore.markEvaluated()
+        DsyncUpgradeOfferStore.log(record: present ? "found" : "missing",
+                                   decision: present ? "shown-optin" : "shown-migrate")
+        offer = present ? .optIn : .migrate
+    }
+}
+
+/// "Dispatcharr Sync is on for this account": another device already syncs this account.
+struct DsyncUpgradeOptInView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let iCloudOn: Bool
+    let onTurnOn: () -> Void
+    let onNotNow: () -> Void
+    #if os(tvOS)
+    @FocusState private var turnOnFocused: Bool
+    #endif
+
+    static func body(iCloudOn: Bool) -> String {
+        "Another device already syncs this account through Dispatcharr. "
+            + (iCloudOn ? "Turn it on here too, alongside iCloud?" : "Turn it on here too?")
+    }
+
+    var body: some View {
+        let tv: Bool = {
+            #if os(tvOS)
+            return true
+            #else
+            return false
+            #endif
+        }()
+        SyncStepFrame {
+            VStack(spacing: tv ? 20 : 12) {
+                Text("Dispatcharr Sync is on for this account")
+                    .scaledFont(tv ? .system(size: 38, weight: .semibold) : .headlineLarge)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text(Self.body(iCloudOn: iCloudOn))
+                    .scaledFont(tv ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                SyncStepPrimaryButton(title: "Turn On") { onTurnOn() }
+                #if os(tvOS)
+                .focused($turnOnFocused)
+                #endif
+                .padding(.top, 8)
+                SyncStepSecondaryButton(title: "Not Now") { onNotNow() }
+                Text("You can change this later in Settings > Sync.")
+                    .scaledFont(tv ? .system(size: 20).subtext() : .bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .multilineTextAlignment(.center)
+            }
+            .onboardingPadWidth(560, other: tv ? 900 : 520)
+        }
+        #if os(tvOS)
+        .onAppear { turnOnFocused = true }
+        .onExitCommand { onNotNow() }
+        #endif
     }
 }
