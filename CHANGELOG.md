@@ -76,7 +76,7 @@
   before the pick. Same glyph and placement in AerioTV for Android.
 - Profiles on iPhone, iPad, and Apple TV, as in AerioTV for Android:
   Settings > Playlists > a playlist > Profiles lists, adds, renames,
-  reorders, and switches profiles with roles (Admin, User, Child), PINs, a
+  reorders, and switches profiles with roles (Admin, Standard, Child), PINs, a
   Device Admin PIN, per-profile settings and permissions, Channel Profiles,
   and Enable API access (admin only). The Live TV header (iPhone) and bar
   (iPad) carry a profile switcher when a playlist has two or more profiles,
