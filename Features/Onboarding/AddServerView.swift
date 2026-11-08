@@ -1507,6 +1507,13 @@ struct PadFittedFormSheet: ViewModifier {
 
 extension View {
     func padFittedFormSheet() -> some View { modifier(PadFittedFormSheet()) }
+
+    /// Same sizing for a sheet that measures itself (no NavigationStack in
+    /// the way): sets the hosting iPad form sheet's height to `height`,
+    /// capped by the window's safe area. No effect off iPad.
+    func padSheetHeight(_ height: CGFloat) -> some View {
+        background(SheetHeightSetter(height: height).frame(width: 0, height: 0))
+    }
 }
 
 private struct SheetHeightSetter: UIViewRepresentable {

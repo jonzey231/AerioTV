@@ -52,6 +52,8 @@ struct SetUpTvView: View {
     @State private var contentHeight: CGFloat = 320
     @State private var fitHeight: CGFloat = 320
     @State private var userLarge = false
+    @State private var sheetInsets: CGFloat = 0
+    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     @Environment(\.horizontalSizeClass) private var hSize
 
     private static let noLongerWaiting = "The device is no longer waiting for setup. Start setup on the other device again."
@@ -87,7 +89,13 @@ struct SetUpTvView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
         }
-        .modifier(SetUpTvDetents(enabled: hSize == .compact, fitHeight: fitHeight,
+        // iPad form sheet: hug the measured step plus the safe-area insets
+        // (keyboard on code entry), as the Add Playlist sheet does.
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top + $0.safeAreaInsets.bottom } action: { h in
+            if abs(h - sheetInsets) > 0.5 { sheetInsets = h }
+        }
+        .padSheetHeight(isPad ? fitHeight + sheetInsets : 0)
+        .modifier(SetUpTvDetents(enabled: hSize == .compact && !isPad, fitHeight: fitHeight,
                                  forceLarge: needsKeyboard, userLarge: $userLarge))
         // Settle first: heights mid-transition overshoot and would flash the sheet taller.
         .task(id: contentHeight) {
