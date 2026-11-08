@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.8.45 - 2026-11-07
 
 ### Added
 
@@ -55,6 +55,61 @@
   guide channel column, the Live TV list, and Search (channel rows and
   Programs cards), so a pick that opens Radio Mode minimized is marked
   before the pick. Same glyph and placement in AerioTV for Android.
+
+- Profiles on iPhone, iPad, and Apple TV, as in AerioTV for Android:
+  Settings > Playlists > a playlist > Profiles lists, adds, renames,
+  reorders, and switches profiles with roles (Admin, User, Child), PINs, a
+  Device Admin PIN, per-profile settings and permissions, Channel Profiles,
+  and Enable API access (admin only). The Live TV header (iPhone) and bar
+  (iPad) carry a profile switcher when a playlist has two or more profiles,
+  launch asks for a PIN when set, and Apple TV opens with a "Who is
+  watching?" picker. Onboarding gains Add Profiles and role steps and a
+  kid-only path.
+- Dispatcharr Sync: favorites, progress, settings, and profiles sync
+  through the Dispatcharr account itself, alongside or instead of iCloud.
+  Settings > Sync matches Android: iCloud, Dispatcharr Sync (Sync Now,
+  Push, Pull, and Push to both), and Sync Categories. When both providers
+  hold different data, AerioTV asks which setup this device starts from,
+  and after onboarding it offers once the providers the other devices use.
+- Sync Categories: every synced setting has its own scope (all devices,
+  TVs only, phones and tablets only, or this device only), each settings
+  group has a row that sets the whole group, and each data set has its own
+  toggle. Each device offers only the lanes for its own class.
+- iCloud now backs up every setting and data set a user expects on a
+  second device, including Live TV display options, Player gestures,
+  Multiview, Live Rewind, DVR buffers, Movies and TV Shows options,
+  Recently Watched, Watchlist, and channel collections. Playlist sync also
+  carries the DVR destination, Fetch On Demand, and the catch-up offset.
+- Scan QR code and Choose from Photos on iPhone and iPad sign in with a
+  Dispatcharr user QR code, and "Set up a TV" sends a playlist and its
+  profiles from iPhone or iPad to an Apple TV.
+- Onboarding redesign: Welcome leads with where your content lives (START
+  HERE) and KEEP YOUR DEVICES IN SYNC, with Skip for now one press away on
+  Apple TV. Connect a Server gains a Scan QR code row, a compact Playlist
+  details step, Guide Days as a pill row (1, 3, 7, 14, All), and a note on
+  the recording destination when DVR access is denied. iPad uses a 560 pt
+  centered column on every step.
+- Playback Speed for recordings, catch-up, and Movies and TV Shows on
+  iPhone, iPad, and Apple TV (0.5x, 0.75x, Normal (1.0x), 1.25x, 1.5x,
+  and 2.0x). The chosen speed now holds across a pause or a stall.
+- Live TV (iPhone and iPad): an optional left-edge swipe opens the group
+  sidebar (Group Selection, Sidebar Menu only; off by default). The
+  sidebar slides out and closes under the finger, a drag on the guide
+  channel column opens it, and a drag never selects a row. Addresses
+  [#102](https://github.com/jonzey231/AerioTV/issues/102).
+- Set up from another device asks before adding a duplicate playlist:
+  "This playlist already exists" with Cancel, Add Anyway, and Replace.
+  Replace updates the existing playlist in place, so its cached channels,
+  guide, and favorites stay.
+- Settings > General has an About Refreshing section, as on Android, and
+  the playlist is pulled again on a return to the app once the Background
+  Refresh interval has passed. Addresses
+  [AerioTV-Android#147](https://github.com/jonzey231/AerioTV-Android/issues/147).
+- Multiview tiles show a resolution and frame rate pill and a pipeline
+  pill; on Apple TV they follow the focus indicator. The player shows the
+  resolution and frame rate pills in iPhone portrait too.
+- Switch Stream on Apple TV: hold to reorder, with a pinned header that
+  explains the reorder.
 
 ### Changed
 
@@ -121,7 +176,6 @@
   versions.
 - "Set up a TV" is now "Set up another device", and "Set up from your
   phone" is now "Set up from another device".
-
 - Guide category tints for what is airing now come from one programs search
   request instead of one detail request per program (about 280 on a cold
   launch). Servers without the search fall back to the per-program request.
@@ -131,6 +185,63 @@
   record once (read the old key, save it under the new one, then remove the
   old one), so every device keeps the same favorites, progress, and
   settings. Same change in AerioTV for Android.
+
+- Set up another device uses the same sheet as the Cast remote session
+  (half height on iPhone, sized to its content), names the device once in
+  the header, and the remote-session, AerioTV Remote, and setup sheets end
+  at their last button. On iPad the Add Playlist sheet, the setup receiver,
+  and the Set up another device sheet fit their content without
+  scrolling, with a friendly device name, and Settings shows the Set up a
+  TV offer once, as the dock card.
+- Guide: the overnight sweep writes only programs that were added,
+  removed, or changed, per guide source, and never rewrites the whole
+  cache; a failed pass resumes where it stopped instead of starting over.
+  The launch save writes only the changes as well.
+- Guide Days: the open-ended choice is labeled All, and new playlists
+  default to All.
+- Live player: a resume after a stall holds until enough is buffered and
+  shows Buffering during the hold, never holds on a feed that cannot
+  refill, and never seeks backward to replay what was already watched.
+  After a stream switch the hold window closes on the new source's first
+  frame.
+- Live reconnect stops after six empty sessions in a row with a notice,
+  instead of showing Reconnecting indefinitely.
+- AirPlay to non-Apple receivers (iPhone and iPad): HEVC channels are
+  transcoded to H.264 on the phone, encoding starts from the first segment
+  so playback starts sooner, and a receiver that never fetches a segment,
+  or a failed transcode stage, ends the session with the reason. HEVC in
+  TS stays available as an opt-in.
+- Apple TV HDR: HEVC HDR channels carry their mastering display and
+  content light level metadata, so the TV tone maps against the program's
+  own values. Direct-play Movies and TV Shows request their content frame
+  rate.
+- Radio channels remember their learned hold-back for 30 days, and a
+  raise pauses to fill with Buffering shown instead of seeking back.
+- Player: pausing shows the controls and holds them until resume, on
+  iPhone, iPad, and Apple TV. Live sessions show the full transport row on
+  every engine, Pause works on live sessions without a rewind window, and
+  Go Live and the behind-live label appear during a live pause, sit 16 pt
+  after Forward, and resume at live in one tap. Addresses
+  [AerioTV-Android#148](https://github.com/jonzey231/AerioTV-Android/issues/148).
+- Direct Connect reads the channel name, number, logo, group, and guide id
+  as overridden in Dispatcharr. Addresses
+  [#97](https://github.com/jonzey231/AerioTV/issues/97) and
+  [AerioTV-Android#160](https://github.com/jonzey231/AerioTV-Android/issues/160).
+- Apple TV Search: a live airing plays its channel and Back returns to the
+  results, matching
+  [AerioTV-Android#162](https://github.com/jonzey231/AerioTV-Android/issues/162).
+  On iPhone and iPad a live result plays its channel too.
+- Movies and TV Shows: once a title is matched, its artwork and details
+  come from that match (by year and id), Resume on a Continue Watching
+  card plays at once, tapping the hero artwork opens Details, a fitted
+  portrait poster draws clean, and details show a Resume label and a
+  one-decimal rating. iPad DVR uses a denser poster grid.
+- Custom theme surfaces carry the theme hue while the custom accent stays
+  on interactive elements, and every themed view repaints at once after a
+  sync or a profile switch.
+- Live TV lands on the synced Default Group on iPhone, iPad, and Apple TV.
+- Sync Categories: My List is labeled Watchlist, as on Android.
+- The one-time "New: Live Rewind" prompt is retired.
 
 ### Fixed
 
@@ -148,15 +259,51 @@
   next Menu press closes Search as before. The first press used to close
   Search and leave focus on the Search circle.
 
+- A channel on a Redirect stream profile plays: a playlist answer is
+  played as HLS, a TS answer starts the remuxer at once and is remembered,
+  and the server's sign-in headers are never sent to another host.
+  Addresses
+  [AerioTV-Android#159](https://github.com/jonzey231/AerioTV-Android/issues/159).
+- With Force HLS off, TS channels are never upgraded to HLS from a saved
+  result.
+- Direct HLS resumes inside the server's window after a long pause, and a
+  long-pause resume keeps Go Live until the viewer rejoins live.
+- HEVC live channels no longer play a burst of audio before the picture
+  starts, and Movies and TV Shows files tagged hev1 now play.
+- Matroska Movies and TV Shows keep memory bounded on Apple TV after a
+  forward seek, so playback no longer quits.
+- Multiview: a busy tile waits for the server to release its own session,
+  keeps its stream open through the whole stream walk, and on Apple TV
+  keeps its display mode across a retry. On iPad the search field no
+  longer covers the source pills, and tile pill text is easier to read.
+- Set up another device finds and reaches waiting devices reliably: the
+  device is resolved again before every send, a silent discovery restarts,
+  the offer clears after a successful send, and a sender going briefly
+  inactive no longer reads as the device leaving.
+- Hex Color commits only a full six-digit color, and Appearance keeps its
+  scroll position when the custom accent toggles.
+- Apple TV guide: a short Right moves focus first, the Menu-to-top jump
+  no longer fights the column snap, the channel column follows a live
+  accent change, empty glyph slots collapse, and the profile circle on the
+  bar takes Left and Right. Connect a Server sits still on open.
+- iPhone and iPad Live TV guide search lists results in the List view
+  layout, with Programs under the last matching channel.
+- Search drops the keyboard on every entry into the player.
+- The TMDB artwork cache is capped so it no longer grows without limit.
+
 ### Server paths
 
-- Set up another device and Show User QR Code add no server
-  paths; both work on the local network or on the device only.
-- New: `GET /api/epg/programs/search/` (`airing_at`, `fields`, `page_size`,
-  `page`), covered by the existing `/api/*` rule.
-- Dispatcharr Sync adds no server paths: the same
-  `/api/accounts/users/me/app-data/` endpoints and the existing
-  `/api/accounts/users/me/` read; only the key in the path changes.
+- New: `GET /api/epg/programs/search/` (`airing_at`, `fields`,
+  `page_size`, `page`) for now-airing guide tints.
+- New: `/api/accounts/users/me/app-data/` and
+  `/api/accounts/users/me/app-data/<key>/` for Dispatcharr Sync (key
+  `<username>.aeriotv`; a record under `app.molinete.aerio` is moved once).
+- New (admin only): `POST /api/accounts/api-keys/generate/` and
+  `POST /api/accounts/api-keys/revoke/` for Enable API access on a
+  profile, and `PATCH /api/accounts/users/<id>/` for a profile's Channel
+  Profiles.
+- All are covered by the existing `/api/*` rule. Set up another device,
+  Show User QR Code, and the guide sweep add no server paths.
 
 ## v1.8.44 - 2026-10-16
 
