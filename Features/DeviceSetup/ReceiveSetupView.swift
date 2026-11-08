@@ -36,6 +36,8 @@ final class SetupApplyModel: ObservableObject {
     private var duplicateID: UUID?
 
     @Published private(set) var phase: Phase = .starting
+    /// The received setup had Dispatcharr Sync on: offer it here before closing.
+    @Published var syncOffer = false
     private let receiver = SetupReceiver()
     private var timeout: Task<Void, Never>?
     private var pending: SetupProtocol.Payload?
@@ -238,11 +240,14 @@ final class SetupApplyModel: ObservableObject {
                 }
             }
         }
-        if isD, let sync = p.sync, sync.enabled, sync.provider == "dispatcharr" {
-            phase = .applying("Syncing")
-            DispatcharrSyncManager.shared.setEnabled(true)
-            debugLog("[DSYNC] enabled from another device's setup")
-            _ = await DispatcharrSyncManager.shared.awaitFirstPull()
+        if isD, let sync = p.sync, sync.enabled, sync.provider == "dispatcharr", !DispatcharrSyncManager.shared.isEnabled {
+            // Never turned on silently: the owner answers the opt-in once the setup has applied.
+            if DsyncUpgradeOfferStore.declined {
+                debugLog("[DSYNC] setup carried sync: declined before, not offered")
+            } else {
+                syncOffer = true
+                debugLog("[DSYNC] setup carried sync: offering")
+            }
         }
         pending = nil
         choice = nil
@@ -262,6 +267,7 @@ struct ReceiveSetupView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = SetupApplyModel()
+    @State private var showSyncOffer = false
     var request: UserQrSourceRequest? = nil
     /// "Import this user only" after a failed User QR request.
     var onUserOnly: (() -> Void)? = nil
@@ -298,11 +304,44 @@ struct ReceiveSetupView: View {
             model.start()
         }
         .onDisappear { model.stop() }
-        .onChange(of: model.phase) { _, p in if p == .done { onDone() } }
+        .onChange(of: model.phase) { _, p in
+            if p == .done {
+                if model.syncOffer { showSyncOffer = true } else { onDone() }
+            }
+        }
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showSyncOffer) { syncOfferView }
+        #else
+        .sheet(isPresented: $showSyncOffer) { syncOfferView.interactiveDismissDisabled() }
+        #endif
         #if os(tvOS)
         .onExitCommand { if !applying { cancel() } }
         #endif
         .interactiveDismissDisabled(applying)
+    }
+
+    /// Same prompt and copy as the upgrade offer's "record found" case ("Turn it on here too?").
+    private var syncOfferView: some View {
+        DsyncUpgradeOptInView(
+            iCloudOn: false,
+            onTurnOn: {
+                WelcomeSyncChain.markAnswered(SyncProvidersRules.DISPATCHARR)
+                DispatcharrSyncManager.shared.setEnabled(true)
+                debugLog("[DSYNC] enabled from another device's setup (opt-in)")
+                finishSyncOffer()
+            },
+            onNotNow: {
+                WelcomeSyncChain.markAnswered(SyncProvidersRules.DISPATCHARR)
+                DsyncUpgradeOfferStore.decline()
+                debugLog("[DSYNC] setup sync offer declined")
+                finishSyncOffer()
+            })
+    }
+
+    private func finishSyncOffer() {
+        model.syncOffer = false
+        showSyncOffer = false
+        onDone()
     }
 
     private var applying: Bool { if case .applying = model.phase { return true }; return false }
