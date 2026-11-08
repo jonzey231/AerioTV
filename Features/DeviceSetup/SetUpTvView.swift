@@ -450,11 +450,13 @@ private struct SetupTvOfferContent: View {
                         Text(target.name)
                             .scaledFont(.subheadline.weight(.bold))
                             .foregroundStyle(Color.textPrimary)
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(setupWaitingLine(target))
                             .scaledFont(.caption)
                             .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
-                            .lineLimit(1)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }

@@ -927,12 +927,10 @@ struct SettingsView: View {
                     .padding(.horizontal, 14)
                     .padding(.bottom, 14)
 
-                if let t = setupCenter.offer {
-                    SetupTvSettingsBanner(target: t,
-                                          onSetUp: { setupCenter.setUp(t) },
-                                          onDismiss: { setupCenter.dismiss(t) })
-                        .padding(.bottom, 10)
-                }
+                // No Set up a TV banner here: on iPad the dock card above
+                // the tab pill is always visible on the Settings tab, so a
+                // sidebar copy rendered the same offer twice (Android tablet
+                // shows only the dock card).
 
                 padSidebarRow(.playlists, icon: "rectangle.stack.fill", iconColor: .accentPrimary,
                               title: "Playlists",
