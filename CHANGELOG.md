@@ -55,7 +55,6 @@
   guide channel column, the Live TV list, and Search (channel rows and
   Programs cards), so a pick that opens Radio Mode minimized is marked
   before the pick. Same glyph and placement in AerioTV for Android.
-
 - Profiles on iPhone, iPad, and Apple TV, as in AerioTV for Android:
   Settings > Playlists > a playlist > Profiles lists, adds, renames,
   reorders, and switches profiles with roles (Admin, User, Child), PINs, a
@@ -185,7 +184,6 @@
   record once (read the old key, save it under the new one, then remove the
   old one), so every device keeps the same favorites, progress, and
   settings. Same change in AerioTV for Android.
-
 - Set up another device uses the same sheet as the Cast remote session
   (half height on iPhone, sized to its content), names the device once in
   the header, and the remote-session, AerioTV Remote, and setup sheets end
@@ -258,7 +256,6 @@
   starts minimized), the first Menu press returns focus to that row; the
   next Menu press closes Search as before. The first press used to close
   Search and leave focus on the Search circle.
-
 - A channel on a Redirect stream profile plays: a playlist answer is
   played as HLS, a TS answer starts the remuxer at once and is remembered,
   and the server's sign-in headers are never sent to another host.
