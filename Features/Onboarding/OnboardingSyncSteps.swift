@@ -377,6 +377,12 @@ enum DsyncUpgradeOfferStore {
     /// DEBUG only: "found" or "missing" stands in for the server read (simulator checks).
     static let simulateKey = "dsyncUpgradeOfferSimulate"
 
+    #if DEBUG
+    static var simulating: Bool {
+        ["found", "missing"].contains(UserDefaults.standard.string(forKey: simulateKey) ?? "")
+    }
+    #endif
+
     static var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
@@ -421,7 +427,7 @@ struct DsyncUpgradeOfferHost: ViewModifier {
             #if os(tvOS)
             .fullScreenCover(item: $offer) { o in sheet(o) }
             #else
-            .sheet(item: $offer) { o in sheet(o) }
+            .sheet(item: $offer) { o in sheet(o).environment(\.syncStepFitsPadSheet, true) }
             #endif
     }
 
@@ -456,6 +462,10 @@ struct DsyncUpgradeOfferHost: ViewModifier {
 
     @MainActor private var gatesOpen: Bool {
         if liveOnboarding || liveBlocked { return false }
+        #if DEBUG
+        // Simulator checks run without a Dispatcharr playlist: skip the playlist gates.
+        if DsyncUpgradeOfferStore.simulating { return true }
+        #endif
         let pm = ProfileManager.shared
         if pm.launchGate != nil || pm.launchPicker != nil || pm.switching { return false }
         if PlayerSession.shared.mode != .idle || !MultiviewStore.shared.tiles.isEmpty { return false }
@@ -478,6 +488,13 @@ struct DsyncUpgradeOfferHost: ViewModifier {
             DsyncUpgradeOfferStore.markEvaluated()
             return
         }
+        #if DEBUG
+        if DsyncUpgradeOfferStore.simulating {
+            let found = UserDefaults.standard.string(forKey: DsyncUpgradeOfferStore.simulateKey) == "found"
+            offer = found ? .optIn : .migrate
+            return
+        }
+        #endif
         guard let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString else {
             DsyncUpgradeOfferStore.log(record: "error", decision: "not-dispatcharr")
             DsyncUpgradeOfferStore.markEvaluated()
@@ -585,8 +602,18 @@ struct DsyncRecordMissingHost: ViewModifier {
     @ObservedObject private var multiview = MultiviewStore.shared
 
     private var showing: Bool {
-        dsync.recordMissingPrompt && !onboardingVisible && player.mode == .idle && multiview.tiles.isEmpty
+        (dsync.recordMissingPrompt || simulated) && !onboardingVisible && player.mode == .idle && multiview.tiles.isEmpty
     }
+
+    /// DEBUG only: `-dsyncMissingRecordSimulate YES` shows the prompt for simulator checks;
+    /// either answer only dismisses it and touches no sync state.
+    @State private var simulated: Bool = {
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: "dsyncMissingRecordSimulate")
+        #else
+        return false
+        #endif
+    }()
 
     func body(content: Content) -> some View {
         let binding = Binding(get: { showing }, set: { _ in })
@@ -594,14 +621,22 @@ struct DsyncRecordMissingHost: ViewModifier {
             #if os(tvOS)
             .fullScreenCover(isPresented: binding) { prompt }
             #else
-            .sheet(isPresented: binding) { prompt.interactiveDismissDisabled() }
+            .sheet(isPresented: binding) {
+                prompt.interactiveDismissDisabled().environment(\.syncStepFitsPadSheet, true)
+            }
             #endif
     }
 
     private var prompt: some View {
         DsyncRecordMissingView(
-            onUploadAgain: { DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: true) },
-            onTurnOff: { DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: false) })
+            onUploadAgain: {
+                if simulated { simulated = false; return }
+                DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: true)
+            },
+            onTurnOff: {
+                if simulated { simulated = false; return }
+                DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: false)
+            })
     }
 }
 

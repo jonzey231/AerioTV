@@ -110,6 +110,11 @@ struct SyncStepFrame<Content: View>: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
     @ViewBuilder let content: Content
+    #if os(iOS)
+    @Environment(\.syncStepFitsPadSheet) private var fitsPadSheet
+    @State private var contentHeight: CGFloat = 0
+    @State private var insets: CGFloat = 0
+    #endif
 
     var body: some View {
         ZStack {
@@ -119,12 +124,35 @@ struct SyncStepFrame<Content: View>: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, syncPromptIsTV ? 80 : 20)
                     .padding(.vertical, syncPromptIsTV ? 60 : 24)
+                    #if os(iOS)
+                    .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in
+                        let r = (h * 2).rounded() / 2
+                        if abs(contentHeight - r) > 0.5 { contentHeight = r }
+                    }
+                    #endif
             }
             .scrollBounceBehavior(.basedOnSize)
             .defaultScrollAnchor(.center)
         }
+        #if os(iOS)
+        // iPad form sheet hosts (upgrade offers, missing-data prompt): hug the measured
+        // content plus the safe-area insets, as Add Playlist and Set up TV do.
+        .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top + $0.safeAreaInsets.bottom } action: { h in
+            if abs(h - insets) > 0.5 { insets = h }
+        }
+        .padSheetHeight(fitsPadSheet && UIDevice.current.userInterfaceIdiom == .pad && contentHeight > 0
+                        ? contentHeight + insets : 0)
+        #endif
     }
 }
+
+#if os(iOS)
+extension EnvironmentValues {
+    /// Set by a host that shows a SyncStepFrame as its own iPad form sheet: the sheet
+    /// takes the content's height instead of the stock form height.
+    @Entry var syncStepFitsPadSheet = false
+}
+#endif
 
 /// Filled Capsule CTA. tvOS: white ring on focus (primary action rule).
 struct SyncStepPrimaryButton: View {
