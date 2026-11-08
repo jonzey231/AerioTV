@@ -41,6 +41,8 @@
   Program Info to set a reminder or record. Up to 200 rows show, with a
   "Showing the first 200 matches" footer past that. On Apple TV the
   in-place Search screen shows the same "Channels" and "Programs" sections.
+  Partly addresses [#105](https://github.com/jonzey231/AerioTV/issues/105).
+  Thanks @sherif-fanous.
 - Live TV search: channel results match only a channel name or number; a
   program title match lists only under "Programs". Program results are
   full channel-card size with the program art, title, day and time, and
@@ -89,6 +91,9 @@
   Push, Pull, and Push to both), and Sync Categories. When both providers
   hold different data, AerioTV asks which setup this device starts from,
   and after onboarding it offers once the providers the other devices use.
+  Addresses [#108](https://github.com/jonzey231/AerioTV/issues/108) and
+  partly addresses [#110](https://github.com/jonzey231/AerioTV/issues/110).
+  Thanks @mjcocat and @matrix2669.
 - Sync Categories: every synced setting has its own scope (all devices,
   TVs only, phones and tablets only, or this device only), each settings
   group has a row that sets the whole group, and each data set has its own
@@ -114,7 +119,7 @@
   sidebar (Group Selection, Sidebar Menu only; off by default). The
   sidebar slides out and closes under the finger, a drag on the guide
   channel column opens it, and a drag never selects a row. Addresses
-  [#102](https://github.com/jonzey231/AerioTV/issues/102).
+  [#102](https://github.com/jonzey231/AerioTV/issues/102). Thanks @mrdynamo.
 - Set up from another device asks before adding a duplicate playlist:
   "This playlist already exists" with Cancel, Add Anyway, and Replace.
   Replace updates the existing playlist in place, so its cached channels,
@@ -122,7 +127,7 @@
 - Settings > General has an About Refreshing section, as on Android, and
   the playlist is pulled again on a return to the app once the Background
   Refresh interval has passed. Addresses
-  [AerioTV-Android#147](https://github.com/jonzey231/AerioTV-Android/issues/147).
+  [AerioTV-Android#147](https://github.com/jonzey231/AerioTV-Android/issues/147). Thanks @ruckusvol.
 - Multiview tiles show a resolution and frame rate pill and a pipeline
   pill; on Apple TV they follow the focus indicator. The player shows the
   resolution and frame rate pills in iPhone portrait too.
@@ -239,15 +244,16 @@
   every engine, Pause works on live sessions without a rewind window, and
   Go Live and the behind-live label appear during a live pause, sit 16 pt
   after Forward, and resume at live in one tap. Addresses
-  [AerioTV-Android#148](https://github.com/jonzey231/AerioTV-Android/issues/148).
+  [AerioTV-Android#148](https://github.com/jonzey231/AerioTV-Android/issues/148). Thanks @ruckusvol.
 - Direct Connect reads the channel name, number, logo, group, and guide id
   as overridden in Dispatcharr. Addresses
   [#97](https://github.com/jonzey231/AerioTV/issues/97) and
   [AerioTV-Android#160](https://github.com/jonzey231/AerioTV-Android/issues/160).
+  Thanks @ma-002 and @moctodhubgit.
 - Apple TV Search: a live airing plays its channel and Back returns to the
   results, matching
   [AerioTV-Android#162](https://github.com/jonzey231/AerioTV-Android/issues/162).
-  On iPhone and iPad a live result plays its channel too.
+  On iPhone and iPad a live result plays its channel too. Thanks @solsticxe.
 - Movies and TV Shows: once a title is matched, its artwork and details
   come from that match (by year and id), Resume on a Continue Watching
   card plays at once, tapping the hero artwork opens Details, a fitted
@@ -279,7 +285,7 @@
   played as HLS, a TS answer starts the remuxer at once and is remembered,
   and the server's sign-in headers are never sent to another host.
   Addresses
-  [AerioTV-Android#159](https://github.com/jonzey231/AerioTV-Android/issues/159).
+  [AerioTV-Android#159](https://github.com/jonzey231/AerioTV-Android/issues/159). Thanks @birdytsc.
 - With Force HLS off, TS channels are never upgraded to HLS from a saved
   result.
 - Direct HLS resumes inside the server's window after a long pause, and a
