@@ -696,6 +696,7 @@ final class TimestampBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Date?
     func set(_ date: Date) { lock.lock(); value = date; lock.unlock() }
+    func get() -> Date? { lock.lock(); defer { lock.unlock() }; return value }
     func secondsSince(_ now: Date = Date()) -> TimeInterval? {
         lock.lock(); defer { lock.unlock() }
         guard let value else { return nil }

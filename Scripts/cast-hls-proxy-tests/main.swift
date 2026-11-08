@@ -4373,9 +4373,30 @@ do {
     expect(P.wantsToPlay(playerRunning: false, gateHolding: false, audioOnlyHolding: true), "gate: wants to play during audio-only hold")
     expect(!P.wantsToPlay(playerRunning: false, gateHolding: false, audioOnlyHolding: false), "gate: paused with no hold")
     // Switch window: no arm, no release, no shrink while open.
-    expect(P.switchWindowOpen(secondsSinceSwitch: 1), "switch: open 1 s after")
-    expect(!P.switchWindowOpen(secondsSinceSwitch: P.switchWindow), "switch: closed at window end")
-    expect(!P.switchWindowOpen(secondsSinceSwitch: nil), "switch: closed without a switch")
+    do {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var w = P.SwitchWindow()
+        expect(!w.isOpen(at: t0), "switch: closed without a switch")
+        expect(w.noteSwitch(at: t0, boundary: 100), "switch: mark opens the window")
+        expect(w.isOpen(at: t0 + 10), "switch: open 10 s later with no new-source frame")
+        expect(!w.noteTick(at: t0 + 2, playhead: 99, clockAdvanced: true), "switch: old buffer playing out is not the first frame")
+        expect(!w.noteTick(at: t0 + 3, playhead: 101, clockAdvanced: false), "switch: frozen clock is not the first frame")
+        expect(!w.noteSwitch(at: t0 + 4, boundary: 105) && w.isOpen(at: t0 + 4), "switch: second mark re-arms an open window")
+        expectEq(w.boundary, 100, "switch: re-arm keeps the new-source boundary")
+        expect(w.noteTick(at: t0 + 6, playhead: 101, clockAdvanced: true), "switch: first frame of the new source")
+        expect(w.isOpen(at: t0 + 10.9), "switch: open during the settle")
+        expect(!w.isOpen(at: t0 + 11), "switch: closes 5 s after the first frame")
+        // A further switch after a first frame re-arms and clears it.
+        w.noteSwitch(at: t0 + 10, boundary: 120)
+        expect(w.isOpen(at: t0 + 20), "switch: re-arm clears the first frame")
+        // Never renders: the cap closes it.
+        var n = P.SwitchWindow()
+        n.noteSwitch(at: t0, boundary: nil)
+        expect(n.isOpen(at: t0 + P.switchWindowCap - 0.1), "switch: open just before the cap")
+        expect(!n.isOpen(at: t0 + P.switchWindowCap), "switch: cap closes a window that never rendered")
+        expect(!n.noteTick(at: t0 + P.switchWindowCap + 1, playhead: 5, clockAdvanced: true), "switch: no first frame after the cap")
+        expect(!n.noteSwitch(at: t0, boundary: nil), "switch: stale mark ignored")
+    }
     expectEq(P.shouldArm(ahead: 0, target: 7, ratio: 1.0, repeat: false, switchOpen: true), .deferForSwitch, "switch: arm deferred")
     expectEq(P.releaseOnTick(ahead: 9, target: 7, ratio: 1.0, held: 2, timeout: 25, switchOpen: true), nil, "switch: no release onto a dropped buffer")
     expectEq(P.releaseOnTick(ahead: 1, target: 7, ratio: 0.5, held: 5, timeout: 25, switchOpen: true), nil, "switch: no starved release")

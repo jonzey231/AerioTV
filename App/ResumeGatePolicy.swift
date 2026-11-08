@@ -18,9 +18,61 @@ enum ResumeGatePolicy {
     /// How long a running hold may sit on a starved feed before letting go.
     static let starvedReleaseAfter: TimeInterval = 3
 
-    /// An upstream source switch keeps its window open this long after the
-    /// last switch mark (switch detected, or the new source's first segment).
-    static let switchWindow: TimeInterval = 10
+    /// Switch window settle: it closes this long after the new source's
+    /// first rendered frame. Android has no first-frame close (its window
+    /// is a fixed 30 s re-armed by each switch); this matches its 5 s
+    /// SWITCH_JUMP_GRACE_MS, the grace after landing on a switched stream.
+    static let switchSettleAfterFirstFrame: TimeInterval = 5
+
+    /// Hard cap after the last switch mark (Android SWITCH_WINDOW_MS), so a
+    /// new source that never renders cannot hold the window open forever.
+    static let switchWindowCap: TimeInterval = 30
+
+    /// Upstream switch window. Opened by a switch mark (switch noted,
+    /// source change detected, SPS change, or the new source's first
+    /// segment), re-armed by every further mark, closed
+    /// `switchSettleAfterFirstFrame` after the new source's first rendered
+    /// frame, or `switchWindowCap` after the last mark.
+    struct SwitchWindow: Equatable {
+        private(set) var lastSwitchAt: Date?
+        private(set) var firstFrameAt: Date?
+        /// Media time where the new source starts (loaded end when the
+        /// window opened); the first frame must be at or past it, so the
+        /// old source's buffer playing out does not count.
+        private(set) var boundary: Double?
+
+        /// Records a switch mark. Returns true when it opened a closed window.
+        @discardableResult
+        mutating func noteSwitch(at date: Date, boundary newBoundary: Double?) -> Bool {
+            if let last = lastSwitchAt, date <= last { return false }
+            let wasOpen = isOpen(at: date)
+            if !wasOpen || boundary == nil { boundary = newBoundary }
+            lastSwitchAt = date
+            firstFrameAt = nil
+            return !wasOpen
+        }
+
+        /// Records a playback tick. Returns true when this tick is the new
+        /// source's first rendered frame (clock advanced while playing, at
+        /// or past the boundary).
+        @discardableResult
+        mutating func noteTick(at date: Date, playhead: Double, clockAdvanced: Bool) -> Bool {
+            guard let last = lastSwitchAt, firstFrameAt == nil, clockAdvanced, date >= last,
+                  date.timeIntervalSince(last) < ResumeGatePolicy.switchWindowCap else { return false }
+            if let boundary, playhead < boundary { return false }
+            firstFrameAt = date
+            return true
+        }
+
+        func isOpen(at now: Date) -> Bool {
+            guard let last = lastSwitchAt else { return false }
+            let since = now.timeIntervalSince(last)
+            if since < 0 || since >= ResumeGatePolicy.switchWindowCap { return false }
+            if let first = firstFrameAt,
+               now.timeIntervalSince(first) >= ResumeGatePolicy.switchSettleAfterFirstFrame { return false }
+            return true
+        }
+    }
 
     enum Release: Equatable { case targetReached, feedStarved, timeout }
 
@@ -34,12 +86,6 @@ enum ResumeGatePolicy {
         /// Upstream switch in progress: defer, then hold once to the full
         /// target after the last switch.
         case deferForSwitch
-    }
-
-    /// True while an upstream switch window is open.
-    static func switchWindowOpen(secondsSinceSwitch: TimeInterval?) -> Bool {
-        guard let s = secondsSinceSwitch else { return false }
-        return s >= 0 && s < switchWindow
     }
 
     /// Whether a stall may start a hold. `repeat` stays in the signature so

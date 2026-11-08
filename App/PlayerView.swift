@@ -5552,6 +5552,7 @@ final class AVPlayerProgressDriver {
                 }
                 self.firstFrameProbeClock = time
             }
+            if self.isLive { self.switchWindowTick(time) }
             self.maybeRaiseJoinOffset()
             // Frame rate is not always known when the item goes ready:
             // remuxed fMP4 declares no nominalFrameRate and
@@ -6138,7 +6139,9 @@ final class AVPlayerProgressDriver {
         if postSwitchHoldPending, !switchOpen, stallGateSince == nil {
             postSwitchHoldPending = false
             let gap = TSHLSRemuxer.feedRateWindow.worstGap()
-            stallGateTarget = min(12.0, max(learnedHoldback(), gap * 1.5 + 2.0))
+            stallGateTarget = ResumeGatePolicy.nextTarget(
+                current: stallGateTarget, proposed: min(12.0, max(learnedHoldback(), gap * 1.5 + 2.0)),
+                switchOpen: true)
             stallGateSince = Date()
             debugLog(String(format:
                 "[AVP-NUDGE] upstream switch settled: holding once until %.1f s buffered, timeout %.0f s",
@@ -6623,10 +6626,45 @@ final class AVPlayerProgressDriver {
         if store.isPaused != paused { store.isPaused = paused }
     }
 
-    /// Upstream switch window (TSHLSRemuxer marks every detected source
-    /// change and the new source's first segment).
+    /// Upstream switch window (ResumeGatePolicy.SwitchWindow): opened and
+    /// re-armed by every TSHLSRemuxer switch mark, closed 5 s after the new
+    /// source's first rendered frame or 30 s after the last mark.
+    private var switchWindow = ResumeGatePolicy.SwitchWindow()
+    private var switchProbeClock: CMTime = .invalid
     private var switchWindowOpen: Bool {
-        ResumeGatePolicy.switchWindowOpen(secondsSinceSwitch: TSHLSRemuxer.lastSourceSwitch.secondsSince())
+        updateSwitchWindow()
+        return switchWindow.isOpen(at: Date())
+    }
+
+    /// Pulls the latest switch mark into the window. Main thread.
+    private func updateSwitchWindow() {
+        guard let mark = TSHLSRemuxer.lastSourceSwitch.get() else { return }
+        var loadedEnd: Double?
+        if let item = player.currentItem, let loaded = item.loadedTimeRanges.last?.timeRangeValue {
+            let e = CMTimeRangeGetEnd(loaded).seconds
+            if e.isFinite { loadedEnd = e }
+        }
+        let wasOpen = switchWindow.isOpen(at: Date())
+        if let prior = switchWindow.lastSwitchAt, mark <= prior { return }
+        switchWindow.noteSwitch(at: mark, boundary: loadedEnd)
+        debugLog(String(format: "[AVP-NUDGE] switch window %@ (mark %.1f s ago, new source from %.1f s)",
+                        wasOpen ? "re-armed" : "opened", Date().timeIntervalSince(mark),
+                        switchWindow.boundary ?? -1))
+    }
+
+    /// Periodic-observer tick: the new source's first rendered frame
+    /// (clock advanced while playing, at or past the boundary).
+    private func switchWindowTick(_ time: CMTime) {
+        updateSwitchWindow()
+        let advanced = player.rate > 0 && time.isValid && switchProbeClock.isValid
+            && (time - switchProbeClock).seconds > 0.01
+        switchProbeClock = time
+        if switchWindow.noteTick(at: Date(), playhead: time.seconds, clockAdvanced: advanced),
+           let last = switchWindow.lastSwitchAt {
+            debugLog(String(format:
+                "[AVP-NUDGE] switch window: new source first frame %.1f s after the last switch; closes in %.0f s",
+                Date().timeIntervalSince(last), ResumeGatePolicy.switchSettleAfterFirstFrame))
+        }
     }
 
     /// A stall inside an upstream switch window: no hold armed then; one
