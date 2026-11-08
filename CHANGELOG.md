@@ -5,15 +5,29 @@
 ### Added
 
 - After an update, a Dispatcharr playlist with Dispatcharr Sync off offers it
-  once: when another device already syncs the account, a "Dispatcharr Sync is
-  on for this account" prompt turns it on here with no setup comparison;
-  otherwise the usual "Turn on Dispatcharr Sync?" step runs. Not Now (or
-  Skip) is remembered on this device; Settings > Sync still works.
+  once, on the first launch after the playlist loads (never during
+  onboarding, the PIN prompt, or playback). On the first device, with no
+  sync record yet, the usual "Turn on Dispatcharr Sync?" step runs and moves
+  this device's setup up. Later devices, finding the account already
+  synced, get one "Dispatcharr Sync is on for this account" prompt that
+  turns it on here with the account's data and no setup comparison. Not Now
+  (or Skip) is remembered on this device, a failed check asks again next
+  launch, and Settings > Sync still works.
+- Dispatcharr Sync asks before re-creating a record that was removed: when
+  a device that has already synced finds the account's sync data gone, it
+  pauses with no writes and shows "Dispatcharr Sync data is missing". Upload
+  Again sends this device's data as a first sync does; Turn Off leaves the
+  server alone, turns Dispatcharr Sync off here, and keeps local data. The
+  prompt waits until the player and Multiview are closed.
+- A device set up from another device no longer turns Dispatcharr Sync on
+  by itself: after the setup arrives it asks "Dispatcharr Sync is on for
+  this account. Turn it on here too?", and Not Now is remembered on this
+  device.
 - Appearance > Color Theme has a new "Custom" theme: pick one Theme Color
   (color picker or hex field; the hex field on Apple TV) and AerioTV builds
   the whole theme from it, including backgrounds, cards, sheets, dividers,
-  text, and a matching accent. Light and Dark Mode and True Black Background
-  apply as they do for the presets, and Custom Accent Color still overrides
+  text, and a matching accent. Every Mode choice (System, Light, Dark,
+  and True Black) applies as it does for the presets, and Custom Accent Color still overrides
   the matched accent. The Theme Color syncs with the Color Theme item.
 - Theme Color and Accent Color open one color sheet: the system color
   picker (grid, spectrum, and sliders) with a Hex Color field above it. The
@@ -291,6 +305,10 @@
 - iPhone and iPad Live TV guide search lists results in the List view
   layout, with Programs under the last matching channel.
 - Search drops the keyboard on every entry into the player.
+- iPad: the Dispatcharr Sync prompts ("Dispatcharr Sync data is missing",
+  "Dispatcharr Sync is on for this account", and "Turn on Dispatcharr
+  Sync?") fit their content instead of sitting in a tall, mostly empty
+  sheet.
 - The TMDB artwork cache is capped so it no longer grows without limit.
 
 ### Server paths
@@ -305,7 +323,9 @@
   profile, and `PATCH /api/accounts/users/<id>/` for a profile's Channel
   Profiles.
 - All are covered by the existing `/api/*` rule. Set up another device,
-  Show User QR Code, and the guide sweep add no server paths.
+  Show User QR Code, and the guide sweep add no server paths. The
+  Dispatcharr Sync offer and missing-record check read the existing
+  app-data path.
 
 ## v1.8.44 - 2026-10-16
 
