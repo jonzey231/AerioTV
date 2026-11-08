@@ -113,6 +113,9 @@ final class DispatcharrSyncManager: ObservableObject {
     }
 
     @Published private(set) var ui = Ui()
+    /// "Dispatcharr Sync data is missing" waits on the owner; no writes until answered.
+    @Published private(set) var recordMissingPrompt = false
+    private var missingHold = false
 
     /// Dispatcharr Sync on or off (Android KEY_DSYNC_ENABLED, same name).
     /// Device-local, never synced; independent of iCloud Sync.
@@ -522,6 +525,22 @@ final class DispatcharrSyncManager: ObservableObject {
         if s.pending[key] != nil { return }
         debugLog("[DSYNC] force push \(key.suffix) retry (\(why)) rows=\(s.awaitingCache[key] ?? 0)")
         schedule(s, key, 0)
+    }
+
+    /// The owner's answer to "Dispatcharr Sync data is missing". Turn Off leaves the server
+    /// untouched and keeps local data; Upload Again seeds from local as the first write does.
+    func resolveMissingRecord(uploadAgain: Bool) {
+        debugLog("[DSYNC] record missing answer: \(uploadAgain ? "upload again" : "turn off")")
+        recordMissingPrompt = false
+        if uploadAgain {
+            guard let s = session else { missingHold = false; return }
+            state.set(k("fpdone", s), false)
+            missingHold = false
+            Task { await pullAll(s, "upload again") }
+        } else {
+            missingHold = false
+            setEnabled(false)
+        }
     }
 
     /// Read-only: does this account already hold an AerioTV App Data record, under `<user>.aeriotv`
@@ -1160,6 +1179,10 @@ final class DispatcharrSyncManager: ObservableObject {
         await s.mutex.lock()
         defer { s.mutex.unlock() }
         guard session === s else { return }
+        if missingHold {
+            recordMissingPrompt = true
+            return
+        }
         if choiceHeld() {
             debugLog("[DSYNC] pull (\(reason)) held while the iCloud backup applies")
             return
@@ -1186,6 +1209,14 @@ final class DispatcharrSyncManager: ObservableObject {
             s.serverBytes = sizes
         }
         guard await migrateKey(s, c) else { return }
+        let listed = DsyncBucket.allCases.contains { s.serverBytes[wire(s, $0)] != nil }
+        if DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: state.bool(k("fpdone", s)), anyBucketListed: listed) {
+            if !missingHold { debugLog("[DSYNC] record missing after first read: prompting") }
+            missingHold = true
+            for key in Array(s.pending.keys) { s.pending.removeValue(forKey: key)?.cancel() }
+            recordMissingPrompt = true
+            return
+        }
         for b in DsyncBucket.allCases {
             guard session === s else { return }
             let keys = b.keys.filter { pulled($0, s) }
@@ -1452,6 +1483,7 @@ final class DispatcharrSyncManager: ObservableObject {
     }
 
     private func write(_ s: DsyncSession, _ key: DsyncKey) async {
+        if missingHold { return }
         await s.mutex.lock()
         defer { s.mutex.unlock() }
         await writeLocked(s, key)

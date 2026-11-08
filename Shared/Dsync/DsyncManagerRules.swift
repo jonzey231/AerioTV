@@ -62,6 +62,13 @@ enum DsyncPullAction: Equatable, Sendable {
 }
 
 enum DsyncPullRules {
+    /// The record vanished after this device already read it once (fpdone): never re-upload on
+    /// our own. The owner decides (Upload Again or Turn Off). A first read of an absent record
+    /// still seeds from local as before.
+    static func recordMissingAfterFirstRead(hadFirstRead: Bool, anyBucketListed: Bool) -> Bool {
+        hadFirstRead && !anyBucketListed
+    }
+
     static func decide(_ key: DsyncKey, forced: Bool, consumedBefore: Bool, data: DsyncObject,
                        localAt: Int64, localDevice: String, remoteAt: Int64, remoteDevice: String,
                        dirty: Bool, dirtyAt: Int64, forceApply: Bool) -> DsyncPullAction {

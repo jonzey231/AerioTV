@@ -1023,4 +1023,11 @@ do {
     check(settings.slot("c") == nil, "delete scope")
 }
 
+// Record missing after the first read: prompt, never re-upload on our own.
+do {
+    check(DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: true, anyBucketListed: false), "missing after first read prompts")
+    check(!DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: false, anyBucketListed: false), "first read of an absent record seeds")
+    check(!DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: true, anyBucketListed: true), "present record syncs")
+}
+
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

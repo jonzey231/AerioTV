@@ -573,3 +573,79 @@ struct DsyncUpgradeOptInView: View {
         #endif
     }
 }
+
+// MARK: - "Dispatcharr Sync data is missing"
+
+/// The record vanished after this device's first read: the cycle is paused and nothing is
+/// written until the owner answers. Waits while a player or Multiview is up.
+struct DsyncRecordMissingHost: ViewModifier {
+    let onboardingVisible: Bool
+    @ObservedObject private var dsync = DispatcharrSyncManager.shared
+    @ObservedObject private var player = PlayerSession.shared
+    @ObservedObject private var multiview = MultiviewStore.shared
+
+    private var showing: Bool {
+        dsync.recordMissingPrompt && !onboardingVisible && player.mode == .idle && multiview.tiles.isEmpty
+    }
+
+    func body(content: Content) -> some View {
+        let binding = Binding(get: { showing }, set: { _ in })
+        content
+            #if os(tvOS)
+            .fullScreenCover(isPresented: binding) { prompt }
+            #else
+            .sheet(isPresented: binding) { prompt.interactiveDismissDisabled() }
+            #endif
+    }
+
+    private var prompt: some View {
+        DsyncRecordMissingView(
+            onUploadAgain: { DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: true) },
+            onTurnOff: { DispatcharrSyncManager.shared.resolveMissingRecord(uploadAgain: false) })
+    }
+}
+
+struct DsyncRecordMissingView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let onUploadAgain: () -> Void
+    let onTurnOff: () -> Void
+    #if os(tvOS)
+    @FocusState private var uploadFocused: Bool
+    #endif
+
+    var body: some View {
+        let tv: Bool = {
+            #if os(tvOS)
+            return true
+            #else
+            return false
+            #endif
+        }()
+        SyncStepFrame {
+            VStack(spacing: tv ? 20 : 12) {
+                Text("Dispatcharr Sync data is missing")
+                    .scaledFont(tv ? .system(size: 38, weight: .semibold) : .headlineLarge)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                Text("The sync data for this account is no longer on your Dispatcharr server. Upload this device's data again, or leave the server alone and turn Dispatcharr Sync off on this device?")
+                    .scaledFont(tv ? .system(size: 24).subtext() : .bodyMedium.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                SyncStepPrimaryButton(title: "Upload Again") { onUploadAgain() }
+                #if os(tvOS)
+                .focused($uploadFocused)
+                #endif
+                .padding(.top, 8)
+                SyncStepSecondaryButton(title: "Turn Off") { onTurnOff() }
+            }
+            .onboardingPadWidth(560, other: tv ? 900 : 520)
+        }
+        #if os(tvOS)
+        .onAppear { uploadFocused = true }
+        .onExitCommand { }
+        #endif
+    }
+}

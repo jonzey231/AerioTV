@@ -1465,6 +1465,8 @@ struct RootView: View {
                                             onboardingRanThisLaunch: onboardingShownThisLaunch,
                                             blocked: showWhatsNew))
             .onChange(of: showOnboarding) { _, on in if on { onboardingShownThisLaunch = true } }
+            // The Dispatcharr record vanished after this device's first read: the owner decides.
+            .modifier(DsyncRecordMissingHost(onboardingVisible: showOnboarding))
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 
