@@ -122,6 +122,28 @@ do {
     check(EPGSweepPlanner.decodeProgress(nil, key: "x").isEmpty, "progress empty")
 }
 
+// history floor: one rule for the prunes and the writers
+do {
+    let cap: TimeInterval = 7 * 86_400
+    check(EPGHistoryWindow.floor(reachDays: 0, capSeconds: cap, now: now) == now.addingTimeInterval(-86_400), "floor no catch-up keeps a day")
+    check(EPGHistoryWindow.floor(reachDays: 3, capSeconds: cap, now: now) == now.addingTimeInterval(-3 * 86_400), "floor reach 3")
+    check(EPGHistoryWindow.floor(reachDays: 30, capSeconds: cap, now: now) == now.addingTimeInterval(-cap), "floor capped by retention")
+    check(EPGHistoryWindow.floor(reachDays: nil, capSeconds: cap, now: now) == now.addingTimeInterval(-cap), "floor unknown channel")
+    check(EPGHistoryWindow.floor(reachDays: 90, capSeconds: 40 * 86_400, now: now) == now.addingTimeInterval(-30 * 86_400), "floor reach capped at 30")
+}
+// a repeat pass over what the first pass wrote costs zero writes
+do {
+    let fetched = [row(nil, "a", -30, -28, "Old"), row(nil, "a", 1, 2, "One"), row(nil, "b", 2, 3, "Two")]
+    let first = EPGDayDiff.compute(fetched: fetched, cached: [], inScope: nil, now: now)
+    check(first.added == 3 && first.writes == 3, "first pass adds")
+    let stored = first.upserts.enumerated().map { i, r -> EPGDiffRow in var x = r; x.rowID = "r\(i)"; return x }
+    let second = EPGDayDiff.compute(fetched: fetched, cached: stored, inScope: nil, now: now)
+    check(second.writes == 0 && second.unchanged == 3, "repeat pass writes nothing")
+    // a partial snapshot (channel a only) never removes channel b
+    let partial = EPGDayDiff.compute(fetched: [fetched[1]], cached: stored, inScope: nil, now: now)
+    check(partial.writes == 0, "partial snapshot keeps other channels")
+}
+
 print("\(passed) checks passed, \(failures) failed")
 if failures > 0 { exit(1) }
 print("ALL TESTS PASSED")

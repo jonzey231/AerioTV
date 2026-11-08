@@ -222,3 +222,25 @@ enum EPGSweepPlanner {
         })
     }
 }
+
+/// How far back the cache keeps an aired program for one channel. Every path
+/// that prunes history and every path that writes it (the sweep, the launch
+/// save) go through this one rule, so nothing writes a row a prune deletes
+/// again before the next run (measured 2026-11-07: the sweep re-added about
+/// 3,400 rows a day on 11-05 that the catch-up prune then dropped).
+enum EPGHistoryWindow {
+    /// Kept for a channel the provider does not archive.
+    static let noCatchupSeconds: TimeInterval = 24 * 3600
+
+    /// Oldest end time a row of this channel may have. `reachDays` is the
+    /// channel's catch-up reach (nil when unknown, 0 when it does not
+    /// archive), capped at 30; `capSeconds` is the playlist's history bound.
+    static func floor(reachDays: Int?, capSeconds: TimeInterval, now: Date) -> Date {
+        var keep = capSeconds
+        if let reachDays {
+            let r = reachDays > 0 ? TimeInterval(min(reachDays, 30)) * 86_400 : noCatchupSeconds
+            keep = min(keep, r)
+        }
+        return now.addingTimeInterval(-keep)
+    }
+}

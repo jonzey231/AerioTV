@@ -1176,6 +1176,8 @@ final class GuideStore: ObservableObject {
         }
         lastSavedSignature[serverID] = signature
         let retentionSecs = GuideStore.activeRetentionSeconds()
+        let reach = catchupReachDays
+        let historyCap = historyCapSeconds(channelCount: ChannelStore.shared.channels.count)
         let snapshotTotal = snapshot.values.reduce(0) { $0 + $1.count }
         debugLog("📺 GuideStore.saveToCache: persisting \(snapshotTotal) programs across \(snapshot.count) channels (server \(serverID))")
         // The in-memory guide IS what was just persisted: do not force the next
@@ -1199,86 +1201,66 @@ final class GuideStore: ObservableObject {
                 return
             }
             let now = Date()
+            // Delta save (Logan's rule for this release: the EPG cache is never
+            // rewritten wholesale). The old save deleted every future row up to
+            // the snapshot's furthest end and reinserted the resident map: on
+            // the iPhone 18 Pro simulator (2026-11-07) that dropped the rows of
+            // channels whose resident list ended earlier, lost poster URLs, and
+            // the next sweep re-added about 4,500 rows a day. Now the snapshot
+            // is diffed against the stored rows of its own span, a batch of
+            // channels at a time, and only additions, changes, and removals
+            // (within each channel's own span, never before now) are written.
             let retentionCutoff = now.addingTimeInterval(-retentionSecs)
-            // The delete must be bounded by what the snapshot can replace.
-            // Since the resident map holds only the days the guide can draw
-            // (see `residentForwardSeconds`), an unbounded "delete every future
-            // row" would throw away the 89 cached days the snapshot does not
-            // carry, and the next launch would have nothing to page in.
-            var snapshotEnd = now
-            for list in snapshot.values {
-                if let last = list.last, last.end > snapshotEnd { snapshotEnd = last.end }
-            }
             do {
                 let ctx = ModelContext(container)
                 ctx.autosaveEnabled = false
                 try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.endTime < retentionCutoff })
-                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime > now && $0.startTime < snapshotEnd
-                })
                 try ctx.save()
             } catch {
-                debugLog("📺 GuideStore.saveToCache: batch delete failed: \(error)")
+                debugLog("📺 GuideStore.saveToCache: retention delete failed: \(error)")
             }
-
-            var pastKeys = Set<String>()
-            autoreleasepool {
-                let ctx = ModelContext(container)
-                let pastDescriptor = FetchDescriptor<EPGProgram>(
-                    predicate: #Predicate<EPGProgram> {
-                        $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
-                    }
-                )
-                if let pastRows = try? ctx.fetch(pastDescriptor) {
-                    for r in pastRows {
-                        pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
-                    }
-                }
-            }
-
-            var count = 0
-            var chunk = 0
-            var duplicateRows = 0
-            var ctx = ModelContext(container)
-            ctx.autosaveEnabled = false
-            for (channelID, progs) in snapshot {
-                // One row per id: a list carrying one programme twice must
-                // not write it twice (the future rows had no key check).
-                var writtenIDs = Set<String>()
-                writtenIDs.reserveCapacity(progs.count)
-                for gp in progs {
-                    guard writtenIDs.insert(gp.id).inserted else { duplicateRows += 1; continue }
-                    if gp.end <= now {
-                        let key = "\(channelID)|\(Int(gp.start.timeIntervalSince1970))"
-                        if pastKeys.contains(key) { continue }
-                        if gp.end <= retentionCutoff { continue }
-                        pastKeys.insert(key)
-                    }
-                    let ep = EPGProgram(channelID: channelID, title: gp.title,
-                                        description: gp.description,
-                                        startTime: gp.start, endTime: gp.end,
-                                        category: gp.category, serverID: serverID,
-                                        programID: gp.programID,
-                                        subTitle: gp.subTitle, season: gp.season,
-                                        episode: gp.episode, isNew: gp.isNew,
-                                        isLiveBroadcast: gp.isLiveBroadcast,
-                                        isPremiere: gp.isPremiere, isFinale: gp.isFinale,
-                                        isRepeat: gp.isRepeat)
-                    ctx.insert(ep)
-                    count += 1
-                    chunk += 1
-                    if chunk >= 5_000 {
-                        try? ctx.save()
-                        ctx = ModelContext(container)
-                        ctx.autosaveEnabled = false
-                        chunk = 0
+            var count = 0, added = 0, changed = 0, removed = 0, unchanged = 0, skippedOld = 0
+            var batch: [String] = []
+            var failed = false
+            func flush() {
+                guard !batch.isEmpty, !failed else { batch.removeAll(); return }
+                var rows: [EPGDiffRow] = []
+                var spanStart = Date.distantFuture, spanEnd = Date.distantPast
+                for channelID in batch {
+                    let floor = EPGHistoryWindow.floor(reachDays: reach[channelID], capSeconds: historyCap, now: now)
+                    for gp in snapshot[channelID] ?? [] {
+                        if gp.end <= floor { skippedOld += 1; continue }
+                        rows.append(EPGDiffRow(channelID: channelID, start: gp.start, end: gp.end,
+                                               title: gp.title, description: gp.description,
+                                               subTitle: gp.subTitle, season: gp.season,
+                                               episode: gp.episode, isNew: gp.isNew,
+                                               isLiveBroadcast: gp.isLiveBroadcast,
+                                               isPremiere: gp.isPremiere, isFinale: gp.isFinale,
+                                               isRepeat: gp.isRepeat, iconURL: gp.posterURL ?? "",
+                                               category: gp.category, programID: gp.programID))
+                        if gp.start < spanStart { spanStart = gp.start }
+                        if gp.end > spanEnd { spanEnd = gp.end }
                     }
                 }
+                let ids = Set(batch)
+                batch.removeAll()
+                guard !rows.isEmpty else { return }
+                autoreleasepool {
+                    guard let o = EPGSweepStore.applyDay(container: container, serverID: serverID,
+                                                         fetched: rows, day: spanStart, dayEnd: spanEnd,
+                                                         inScope: nil, now: now, channelIDs: ids) else {
+                        failed = true; return
+                    }
+                    count += o.writes; added += o.added; changed += o.changed
+                    removed += o.removed; unchanged += o.unchanged
+                }
             }
-            try? ctx.save()
-            if duplicateRows > 0 {
-                debugLog("[GUIDE] saveToCache skipped \(duplicateRows) duplicate row(s) in the snapshot")
+            for channelID in snapshot.keys {
+                batch.append(channelID)
+                if batch.count >= 500 { flush() }
             }
+            flush()
+            debugLog("📺 GuideStore.saveToCache: delta added=\(added) changed=\(changed) removed=\(removed) unchanged=\(unchanged) belowHistoryFloor=\(skippedOld) writes=\(count)\(failed ? " (stopped: a batch write failed)" : "")")
             debugLog("[PUBLISH] swiftdata epg save \(count) items took \(Int((CFAbsoluteTimeGetCurrent() - saveStart) * 1000))ms (background context)")
             debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background, chunked) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
           }
@@ -1512,14 +1494,32 @@ final class GuideStore: ObservableObject {
     private var catchupReachDays: [String: Int] = [:]
     /// Max reach across the playlist, 0 when nothing archives.
     private var maxCatchupReachDays = 0
+    /// True once `pruneBeyondCatchupReach` has read the channels' reach.
+    private var catchupReachKnown = false
 
     /// History bound for the grid walk and the coverage prune: never further
     /// back than the playlist can actually replay.
     private func historyReachSeconds(default fallback: TimeInterval) -> TimeInterval {
+        // Until a prune pass has read the channels' catch-up days the reach is
+        // unknown, not zero. Treating it as zero shrank the bound to 24 h, and
+        // the launch walk's history-bound prune then deleted every older row
+        // on disk (simulator 2026-11-07: 11-01 to 11-05, about 8,100 rows),
+        // which the next sweep added back, every run.
+        guard catchupReachKnown else { return fallback }
         guard maxCatchupReachDays > 0 else {
             return min(fallback, Self.noCatchupHistorySeconds)
         }
         return min(fallback, TimeInterval(maxCatchupReachDays) * 86_400)
+    }
+
+    /// The playlist's history bound: retention (6 h above
+    /// `largePlaylistChannels`), never further back than anything replays.
+    /// With `EPGHistoryWindow.floor` it is the one rule shared by the prunes,
+    /// the sweep, and the launch save.
+    func historyCapSeconds(channelCount: Int) -> TimeInterval {
+        let raw: TimeInterval = channelCount > Self.largePlaylistChannels
+            ? Self.largePlaylistHistorySecs : Self.activeRetentionSeconds()
+        return historyReachSeconds(default: raw)
     }
 
     /// Delete cached programmes that have aired and can no longer be replayed,
@@ -1540,17 +1540,17 @@ final class GuideStore: ObservableObject {
         }
         catchupReachDays = reach
         maxCatchupReachDays = maxDays
+        catchupReachKnown = true
         let now = Date()
         // Group channels by reach so the delete is a handful of predicates
         // rather than one per channel.
         var idsByDays: [Int: Set<String>] = [:]
         for (id, days) in reach { idsByDays[days, default: []].insert(id) }
+        let cap = historyCapSeconds(channelCount: channels.count)
         let pruned = await Task.detached(priority: .utility) { () -> Int in
             var removed = 0
             for (days, ids) in idsByDays {
-                let cutoff = days > 0
-                    ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
-                    : now.addingTimeInterval(-GuideStore.noCatchupHistorySeconds)
+                let cutoff = EPGHistoryWindow.floor(reachDays: days, capSeconds: cap, now: now)
                 let ctx = ModelContext(container)
                 ctx.autosaveEnabled = false
                 let descriptor = FetchDescriptor<EPGProgram>(predicate: #Predicate<EPGProgram> {
@@ -1582,15 +1582,11 @@ final class GuideStore: ObservableObject {
         // `pruneOutsideGridWindow` filter was inside a 1004 ms [HANG] at
         // 14:54:12.903); main only commits the result.
         let snapshot = residentPrograms
-        let noCatchupSecs = Self.noCatchupHistorySeconds
         let trim: (dict: [String: [GuideProgram]], dropped: Int) = await Task.detached(priority: .utility) {
             var trimmed: [String: [GuideProgram]] = [:]
             var dropped = 0
             for (channelID, list) in snapshot {
-                let days = reach[channelID] ?? 0
-                let cutoff = days > 0
-                    ? now.addingTimeInterval(-TimeInterval(days) * 86_400)
-                    : now.addingTimeInterval(-noCatchupSecs)
+                let cutoff = EPGHistoryWindow.floor(reachDays: reach[channelID] ?? 0, capSeconds: cap, now: now)
                 let kept = list.filter { $0.end >= cutoff }
                 dropped += list.count - kept.count
                 if !kept.isEmpty { trimmed[channelID] = kept }
@@ -3205,6 +3201,8 @@ final class GuideStore: ObservableObject {
             scopeIDs = ids
         }
         let scope = scopeIDs
+        let sweepReach = catchupReachDays
+        let sweepCap = historyCapSeconds(channelCount: ChannelStore.shared.channels.count)
         // Resume: a day applied toward this same server state is not fetched
         // again after an interruption.
         let progressKey = EPGSweepStore.progressKey(fingerprint: pendingSweepFingerprint ?? "")
@@ -3279,7 +3277,12 @@ final class GuideStore: ObservableObject {
                 let inScope: ((String) -> Bool)? = scope.map { ids in { ids.contains($0) } }
                 var rows: [EPGDiffRow] = []
                 var scoped: [String: [GuideProgram]] = [:]
-                for (channelID, list) in fresh.dict where inScope?(channelID) ?? true {
+                for (channelID, all) in fresh.dict where inScope?(channelID) ?? true {
+                    // Never write an aired row the catch-up prune would drop
+                    // again before the next run (see EPGHistoryWindow).
+                    let floor = EPGHistoryWindow.floor(reachDays: sweepReach[channelID], capSeconds: sweepCap, now: now)
+                    let list = all.filter { $0.end > floor }
+                    guard !list.isEmpty else { continue }
                     scoped[channelID] = list
                     for gp in list {
                         rows.append(EPGDiffRow(channelID: channelID, start: gp.start, end: gp.end,

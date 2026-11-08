@@ -94,13 +94,24 @@ enum EPGSweepStore {
     /// actor (inside EPGCacheWriteGate). nil when the save failed.
     static func applyDay(container: ModelContainer, serverID: String,
                          fetched: [EPGDiffRow], day: Date, dayEnd: Date,
-                         inScope: ((String) -> Bool)?, now: Date) -> DayOutcome? {
+                         inScope: ((String) -> Bool)?, now: Date,
+                         channelIDs: Set<String>? = nil) -> DayOutcome? {
         let t0 = Date()
         let ctx = ModelContext(container)
         ctx.autosaveEnabled = false
-        let descriptor = FetchDescriptor<EPGProgram>(predicate: #Predicate<EPGProgram> {
-            $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
-        })
+        // `channelIDs` bounds the read (and so the diff) to a batch of
+        // channels, for the launch save over a large resident map.
+        let descriptor: FetchDescriptor<EPGProgram>
+        if let channelIDs {
+            descriptor = FetchDescriptor<EPGProgram>(predicate: #Predicate<EPGProgram> {
+                $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
+                    && channelIDs.contains($0.channelID)
+            })
+        } else {
+            descriptor = FetchDescriptor<EPGProgram>(predicate: #Predicate<EPGProgram> {
+                $0.serverID == serverID && $0.endTime > day && $0.startTime < dayEnd
+            })
+        }
         guard let cachedModels = try? ctx.fetch(descriptor) else { return nil }
         let cached = cachedModels.map(diffRow)
         let diff = EPGDayDiff.compute(fetched: fetched, cached: cached, inScope: inScope, now: now)
