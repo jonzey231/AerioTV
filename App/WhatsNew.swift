@@ -57,6 +57,20 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.45",
+            title: "What's new in 1.8.45",
+            bullets: [
+                "Profiles: profiles for Dispatcharr playlists, one Dispatcharr user per profile, with Admin, User, and Child roles, optional PINs, and a launch picker",
+                "Dispatcharr Sync: settings, favorites, and progress sync to your Dispatcharr account. After an update AerioTV offers it once, and it asks before uploading a missing record again",
+                "Set up another device: any iPhone, iPad, or Apple TV can receive a setup from another device on the same network, or sign in by scanning a Dispatcharr user QR code",
+                "Program search: Search lists matching programs from the whole loaded guide, with full-size program cards and Record",
+                "Custom color theme: build a whole theme from one Theme Color, True Black joins Mode, and the Light preset is now named Slate",
+                "Player: Playback Speed for movies, episodes, recordings, and Catch-Up",
+                "Fixes: smoother live playback, a faster guide at launch, and a lighter background guide refresh"
+            ],
+            releaseURL: nil
+        ),
+        WhatsNewRelease(
             version: "1.8.41",
             title: "What's new in 1.8.41",
             bullets: [
