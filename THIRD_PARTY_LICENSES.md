@@ -1,7 +1,7 @@
 # Third-party licenses
 
-AerioTV for iOS, iPadOS, and tvOS is licensed under the GNU General Public
-License v3.0 or later (see [LICENSE](LICENSE) and
+AerioTV for iOS, iPadOS, and tvOS is licensed under the GNU Affero General
+Public License v3.0 or later (see [LICENSE](LICENSE) and
 [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md)). This file lists the third-party
 components it distributes or links, and the terms they carry.
 
@@ -134,7 +134,7 @@ Portions of this software are copyright (C) 2026 The FreeType Project
 
 `google-cast-sdk-no-bluetooth` (Google LLC) is used under the Google APIs Terms
 of Service and the Google Cast SDK Additional Developer Terms of Service. It is
-not open source. A GPL section 7 linking exception covering it is granted in
+not open source. An AGPL section 7 linking exception covering it is granted in
 [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md).
 
 Upstream: https://developers.google.com/cast

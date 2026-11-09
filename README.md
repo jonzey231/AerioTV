@@ -643,21 +643,25 @@ TopShelfExtension/      Apple TV Top Shelf content provider
 Copyright (C) 2026 Logan Jones and contributors
 
 AerioTV for iOS, iPadOS, and tvOS is free software: you can redistribute it
-and/or modify it under the terms of the GNU General Public License as published
-by the Free Software Foundation, either version 3 of the License, or (at your
-option) any later version. See [LICENSE](LICENSE).
+and/or modify it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version. See [LICENSE](LICENSE).
 
 This program is distributed in the hope that it will be useful, but WITHOUT ANY
 WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
 
-An additional permission under GPL section 7 covers linking with the
+An additional permission under AGPL section 7 covers linking with the
 proprietary Google Cast SDK. See [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md).
+Contributions received while the project was MIT licensed keep their MIT notice
+there as well.
 
 Releases published before the relicensing commit were under the MIT License.
 That grant is not revoked: any copy obtained under MIT keeps its MIT rights to
-that snapshot in perpetuity. Everything from the relicensing commit forward is
-GPL-3.0-or-later.
+that snapshot in perpetuity. Releases from 1.8.40 through 1.8.45 (2) were
+under GPL-3.0-or-later, and that grant is likewise not revoked for those
+versions. Everything from the AGPL relicensing commit forward is
+AGPL-3.0-or-later.
 
 ### Third-party components
 
@@ -682,8 +686,8 @@ mpv, or FFmpeg source directly, open an issue at
 
 The Google Cast SDK for iOS is proprietary and is used under the Google APIs
 Terms of Service and the Google Cast SDK Additional Developer Terms of Service.
-Linking it with this GPL-licensed program is permitted by an additional
-permission under GPL section 7; see
+Linking it with this AGPL-licensed program is permitted by an additional
+permission under AGPL section 7; see
 [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md).
 
 This product includes software developed by the OpenSSL Project for use in the
