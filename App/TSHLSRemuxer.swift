@@ -1442,6 +1442,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private let rewindWindowSeconds: Double
     private var spillDir: URL?
     private var spilled: [(seq: Int, url: URL, duration: Double)] = []
+    /// Byte size of each `spilled` entry, in lockstep (RewindDiskGovernor cap).
+    private var spilledBytes: [Int64] = []
+    private var spillCreatedMs: Int64 = 0
 
     init(sourceURL: URL, headers: [String: String], rewindWindowSeconds: Double = 0) {
         self.sourceURLStorage = sourceURL
@@ -1512,9 +1515,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         #else
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         #endif
+        let createdMs = Int64(Date().timeIntervalSince1970 * 1000)
+        // Unique even when two remuxers start in the same millisecond.
         let dir = base
             .appendingPathComponent("LiveRewind", isDirectory: true)
-            .appendingPathComponent("avp_sess_\(Int64(Date().timeIntervalSince1970 * 1000))", isDirectory: true)
+            .appendingPathComponent("avp_sess_\(createdMs)_\(deliveryID.prefix(6))", isDirectory: true)
+        // Claimed BEFORE the folder exists so a concurrent launch sweep
+        // never sees it as an orphan.
+        RewindDiskGovernor.shared.claim(dirName: dir.lastPathComponent)
+        spillCreatedMs = createdMs
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             var values = URLResourceValues()
@@ -1526,6 +1535,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         } catch {
             // No disk window: degrade to the classic 6-segment live edge.
             spillDir = nil
+            RewindDiskGovernor.shared.release(dirName: dir.lastPathComponent)
             debugLog("[TS-REMUX] rewind spill dir FAILED (\(error)); classic live window only")
         }
     }
@@ -1567,8 +1577,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             // would hold its whole dead buffer (Apple #74).
             self.pending = Data()
             self.spilled.removeAll()
+            self.spilledBytes.removeAll()
             if let dir = self.spillDir {
                 try? FileManager.default.removeItem(at: dir)
+                RewindDiskGovernor.shared.release(dirName: dir.lastPathComponent)
                 self.spillDir = nil
             }
             debugLog("[TS-REMUX] stopped (ingested \(self.totalBytesIngested / 1_048_576) MB)")
@@ -3013,14 +3025,34 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             debugLog("[TS-REMUX] spill write failed (\(error)); dropping disk window")
             spillDir = nil
             spilled.removeAll()
+            spilledBytes.removeAll()
             return
         }
         spilled.append((seq: seq, url: url, duration: duration))
+        spilledBytes.append(Int64(data.count))
         var total = spilled.reduce(0) { $0 + $1.duration }
         while total > rewindWindowSeconds, spilled.count > liveWindowSegments {
             let oldest = spilled.removeFirst()
+            spilledBytes.removeFirst()
             total -= oldest.duration
             try? FileManager.default.removeItem(at: oldest.url)
+        }
+        // Hard byte cap across every rewind session (2026-11-08: 43.64 GB
+        // container on macOS). The governor answers how many of OUR oldest
+        // segments must go; retained channels are asked first.
+        let bytes = spilledBytes.reduce(0, +)
+        let rate = total > 0 ? Double(bytes) / total : 0
+        let drop = RewindDiskGovernor.shared.report(
+            dirName: dir.lastPathComponent, createdMs: spillCreatedMs,
+            active: retainedRAMCap == nil, segmentBytes: spilledBytes,
+            keepMin: liveWindowSegments, bytesPerSecond: rate)
+        if drop > 0 {
+            for _ in 0..<min(drop, max(0, spilled.count - liveWindowSegments)) {
+                let oldest = spilled.removeFirst()
+                spilledBytes.removeFirst()
+                try? FileManager.default.removeItem(at: oldest.url)
+            }
+            RewindDiskGovernor.shared.update(dirName: dir.lastPathComponent, segmentBytes: spilledBytes)
         }
     }
 

@@ -4407,6 +4407,55 @@ do {
     expect(!P.endHoldForViewerPause(userPaused: false, holding: true), "pause: no viewer pause keeps the hold")
 }
 
+// MARK: Live Rewind and catch-up spool disk caps (2026-11-08, 43.64 GB container)
+do {
+    typealias R = RewindDiskPolicy
+    let g = R.gib
+    // 1 h depth at 1 MB/s x 5 channels = 18 GB, so the 16 GB ceiling wins.
+    expectEq(R.capBytes(depthSeconds: 3600, allowanceBytesPerSecond: 1_000_000, ceilingBytes: 16 * g,
+                        usageBytes: 0, freeBytes: nil), 16 * g, "rewind cap: ceiling wins on a long depth")
+    // 15 min at 1 MB/s x 5 = 4.5 GB, under the ceiling.
+    expectEq(R.capBytes(depthSeconds: 900, allowanceBytesPerSecond: 1_000_000, ceilingBytes: 16 * g,
+                        usageBytes: 0, freeBytes: nil), 4_500_000_000, "rewind cap: depth x channels x rate")
+    expectEq(R.capBytes(depthSeconds: 3600, allowanceBytesPerSecond: 1_000_000, ceilingBytes: 8 * g,
+                        usageBytes: 0, freeBytes: nil), 8 * g, "rewind cap: tvOS ceiling")
+    // A huge free disk never raises the cap (the 43 GB bug).
+    expectEq(R.capBytes(depthSeconds: 3600, allowanceBytesPerSecond: 1_000_000, ceilingBytes: 16 * g,
+                        usageBytes: 40 * g, freeBytes: 2000 * g), 16 * g, "rewind cap: big disk still capped")
+    // Free-space floor still limits: 1 GB used, 2.5 GB free, 2 GB floor -> 1.5 GB.
+    expectEq(R.capBytes(depthSeconds: 3600, allowanceBytesPerSecond: 1_000_000, ceilingBytes: 16 * g,
+                        usageBytes: g, freeBytes: g * 5 / 2), g + g / 2, "rewind cap: free-space floor")
+    expectEq(R.capBytes(depthSeconds: 3600, allowanceBytesPerSecond: 1_000_000, usageBytes: 0, freeBytes: g),
+             0, "rewind cap: below the floor is zero")
+    expectEq(R.allowanceBytesPerSecond(measuredPeak: nil), R.defaultBytesPerSecond, "allowance: default before measuring")
+    expectEq(R.allowanceBytesPerSecond(measuredPeak: 1_000_000), 1_250_000, "allowance: measured plus headroom")
+
+    // Trim order: oldest non-active first, then the active one, keepMin honored.
+    let active = R.Session(id: "a", createdMs: 300, active: true, segmentBytes: [10, 10, 10, 10, 10], keepMin: 2)
+    let retainedOld = R.Session(id: "r1", createdMs: 100, active: false, segmentBytes: [10, 10, 10], keepMin: 2)
+    let retainedNew = R.Session(id: "r2", createdMs: 200, active: false, segmentBytes: [10, 10, 10], keepMin: 2)
+    expectEq(R.planTrim(sessions: [active, retainedOld, retainedNew], capBytes: 110), [:], "trim: under cap no-op")
+    expectEq(R.planTrim(sessions: [active, retainedNew, retainedOld], capBytes: 100), ["r1": 1], "trim: oldest retained first")
+    expectEq(R.planTrim(sessions: [active, retainedNew, retainedOld], capBytes: 80), ["r1": 1, "r2": 1, "a": 1],
+             "trim: then next retained, then active")
+    expectEq(R.planTrim(sessions: [active, retainedNew, retainedOld], capBytes: 0), ["r1": 1, "r2": 1, "a": 3],
+             "trim: never below keepMin")
+    let orphan = R.Session(id: "o", createdMs: 50, active: false, segmentBytes: [20, 20], keepMin: 0)
+    expectEq(R.planTrim(sessions: [active, orphan], capBytes: 50), ["o": 2], "trim: orphan may go entirely")
+    expectEq(R.planTrim(sessions: [active, orphan], capBytes: 70), ["o": 1], "trim: stops once under cap")
+
+    // Spool.
+    expectEq(R.spoolRoom(written: 3 * g, otherSpoolBytes: 0), g, "spool: room to 4 GB")
+    expectEq(R.spoolRoom(written: 3 * g, otherSpoolBytes: 2 * g), 0, "spool: others count")
+    let files = [R.SpoolFile(name: "x", mtimeMs: 1, bytes: 3 * g, owned: true),
+                 R.SpoolFile(name: "y", mtimeMs: 2, bytes: 3 * g, owned: true),
+                 R.SpoolFile(name: "z", mtimeMs: 0, bytes: 1, owned: false)]
+    expectEq(R.spoolDeletions(files: files), ["z", "x"], "spool: unowned plus oldest owned over cap")
+    expectEq(R.spoolDeletions(files: [files[1]]), [], "spool: never the newest owned")
+    expectEq(R.orphans(names: ["avp_sess_1", "sess_2", "avp_sess_3"], owned: ["avp_sess_3"]),
+             ["avp_sess_1", "sess_2"], "sweep: everything unowned, any age")
+}
+
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

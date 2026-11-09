@@ -25,6 +25,7 @@
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */; };
 		A1R9RG000000000000000B01 /* ResumeGatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */; };
+		A1RDP0000000000000000B01 /* RewindDiskPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */; };
 		A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
 		A1RHEVC00000000000000002 /* TSLANHEVCDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */; };
 		5B11801E8D7B1330A0EA0F6E /* MultiviewCompositor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */; };
@@ -34,6 +35,7 @@
 		A1R97E4D2C14EFFBDA110B5E /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
 		A1R8CEDC79EEAEB1C433DB60 /* AudioOnlySampleClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */; };
 		A1R9RG000000000000000B02 /* ResumeGatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */; };
+		A1RDP0000000000000000B02 /* RewindDiskPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */; };
 		A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
 		A1RHEVC00000000000000003 /* TSLANHEVCDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */; };
 		A1R8CEDC79EEAEB1C433DC6A /* TSHLSPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */; };
@@ -456,6 +458,7 @@
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOnlySampleClock.swift; sourceTree = "<group>"; };
 		A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeGatePolicy.swift; sourceTree = "<group>"; };
+		A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RewindDiskPolicy.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANAudioRewriter.swift; sourceTree = "<group>"; };
 		A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANHEVCDelivery.swift; sourceTree = "<group>"; };
 		9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiviewCompositor.swift; sourceTree = "<group>"; };
@@ -1201,6 +1204,7 @@
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
 				A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */,
 				A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */,
+				A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */,
 				A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */,
 				A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */,
 				9D76CB0DDDCB8645B547021D /* MultiviewCompositor.swift */,
@@ -1554,6 +1558,7 @@
 				A033846791D84DCD15BE0E86 /* SetupProtocol.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DB60 /* AudioOnlySampleClock.swift in Sources */,
 				A1R9RG000000000000000B02 /* ResumeGatePolicy.swift in Sources */,
+				A1RDP0000000000000000B02 /* RewindDiskPolicy.swift in Sources */,
 				A1R8CEDC79EEAEB1C433DB5F /* TSLANAudioRewriter.swift in Sources */,
 				A1RHEVC00000000000000003 /* TSLANHEVCDelivery.swift in Sources */,
 				5B11801E8D7B1330A0EA0F6E /* MultiviewCompositor.swift in Sources */,
@@ -1747,6 +1752,7 @@
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */,
 				A1R9RG000000000000000B01 /* ResumeGatePolicy.swift in Sources */,
+				A1RDP0000000000000000B01 /* RewindDiskPolicy.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */,
 				A1RHEVC00000000000000002 /* TSLANHEVCDelivery.swift in Sources */,
 				4EDBB7B772510A4904D83395 /* MultiviewCompositor.swift in Sources */,

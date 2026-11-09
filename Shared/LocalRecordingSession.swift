@@ -758,41 +758,9 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     /// TimeshiftController.FIXED_RETENTION_MS parity).
     var retentionMs: Int64 { 60 * 60 * 1000 }
 
-    /// The Storage Limit SETTING was removed (user directive
-    /// 2026-07-11: retention is the only user-facing knob, with storage
-    /// estimates shown under it). This is the invisible seatbelt that
-    /// replaced it: the buffer may use its current footprint plus
-    /// whatever free space the volume has above a 2 GB floor, so a long
-    /// retention on a full disk evicts oldest video instead of filling
-    /// the device. Recomputed on every enforcement pass. The old
-    /// liveRewindBudgetGB default stays as the fallback if free space
-    /// can't be read.
-    var budgetBytes: Int64 {
-        // Plain volumeAvailableCapacityKey: the "ImportantUsage" variant
-        // is unavailable on tvOS. Slightly conservative (doesn't count
-        // OS-purgeable space) - fine for a seatbelt.
-        let values = try? rootDir.resourceValues(forKeys: [.volumeAvailableCapacityKey])
-        guard let free = values?.volumeAvailableCapacity.map({ Int64($0) }) else {
-            // Free space unreadable: fall back to the old default cap.
-            return 10 * 1024 * 1024 * 1024
-        }
-        let floor: Int64 = 2 * 1024 * 1024 * 1024
-        return currentUsageBytes() + max(0, free - floor)
-    }
-
-    /// Total bytes of buffered media (.ts and fMP4 .m4s) across all session dirs (rewind
-    /// segments AND AVPlayer spill files), for the free-space budget.
-    private func currentUsageBytes() -> Int64 {
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
-        var total: Int64 = 0
-        for dir in dirs where dir.hasDirectoryPath {
-            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
-                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-            }
-        }
-        return total
-    }
+    /// The free-space seatbelt (usage plus free space above 2 GB) is no
+    /// longer the only limit: RewindDiskGovernor applies a real ceiling
+    /// (2026-11-08, 43.64 GB container on macOS). See RewindDiskPolicy.
 
     /// UI-facing state (mirrors Android's TimeshiftController.State).
     @Published private(set) var buffering = false
@@ -949,6 +917,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
             self?.enforceBudget()
         }
         let dir = rootDir.appendingPathComponent("sess_\(Int64(Date().timeIntervalSince1970 * 1000))", isDirectory: true)
+        RewindDiskGovernor.shared.claim(dirName: dir.lastPathComponent)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             // Rewind buffers are large and regenerable: never in iCloud
@@ -959,6 +928,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
             try? mutableDir.setResourceValues(values)
         } catch {
             debugLog("[REWIND] session dir create failed: \(error)")
+            RewindDiskGovernor.shared.release(dirName: dir.lastPathComponent)
             return false
         }
         let buffer = LiveRewindBuffer(sessionDir: dir, depthMs: Int64(depthMinutes) * 60_000)
@@ -1016,6 +986,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         if let dir = finished?.sessionDir {
             DispatchQueue.global(qos: .utility).async {
                 try? FileManager.default.removeItem(at: dir)
+                RewindDiskGovernor.shared.release(dirName: dir.lastPathComponent)
                 debugLog("[REWIND] released buffer \(dir.lastPathComponent)")
             }
         }
@@ -1094,73 +1065,45 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: retention + budget
 
-    /// Launch-time reaper (user clarification 2026-07-11: buffered video
-    /// dies an hour after the SESSION ends - practically, often at the
-    /// NEXT app launch, since the app usually isn't running to see the
-    /// hour pass). The in-session timer only sweeps while a session is
-    /// rolling, so AerioApp calls this once at startup.
+    /// Launch-time reaper. Sessions never survive a process, so at launch
+    /// every rewind folder, catch-up spool file, and app temp file that
+    /// this process does not own is deleted, whatever its age (2026-11-08:
+    /// a 43.64 GB macOS container came down to 55 MB only because a
+    /// relaunch ran the old one-hour sweep). AerioApp calls this once.
     func startupSweep() {
+        let launchedAt = Date()
         DispatchQueue.global(qos: .utility).async {
-            self.pruneExpired()
-            self.enforceBudget()
-            // Catch-up spool leftovers: CatchupHTTPReader deletes its
-            // spool on close and sweeps stale files when a NEW catch-up
-            // session starts - but a killed app leaks multi-GB .ts
-            // files that then sit in Caches until the user happens to
-            // replay something. On tvOS that bloat invites the system
-            // to purge the ENTIRE app data container under storage
-            // pressure (observed 2026-07-11: the field ATV came up
-            // hasCompletedOnboarding=false after a day of leaked
-            // spools). Sweep anything over an hour old here too.
-            let spoolDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("CatchupSpool", isDirectory: true)
-            let cutoff = Date().addingTimeInterval(-3600)
-            let files = (try? FileManager.default.contentsOfDirectory(
-                at: spoolDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            for f in files {
-                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                if (m ?? .distantPast) < cutoff {
-                    try? FileManager.default.removeItem(at: f)
-                }
-            }
+            RewindDiskGovernor.shared.sweepOrphans(reason: "launch", includeTemp: true, tempOlderThan: launchedAt)
         }
     }
 
+    /// Runtime sweep: orphaned (unowned) session folders only. Owned
+    /// sessions are never touched here; each trims itself on the cap.
     private func pruneExpired() {
-        let cutoff = Date().addingTimeInterval(-Double(retentionMs) / 1000)
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        for dir in dirs {
-            let newest = LiveRewindBuffer.listSegments(in: dir).last
-                .flatMap { try? FileManager.default.attributesOfItem(atPath: $0.url.path)[.modificationDate] as? Date }
-            let stamp = newest
-                ?? ((try? FileManager.default.attributesOfItem(atPath: dir.path)[.modificationDate] as? Date) ?? .distantPast)
-            if stamp < cutoff { try? FileManager.default.removeItem(at: dir) }
-        }
+        RewindDiskGovernor.shared.sweepOrphans(reason: "runtime", includeTemp: false)
     }
 
+    /// Byte cap for the mpv-path buffer: report this engine's session to
+    /// the governor and drop the oldest segments it asks for.
     private func enforceBudget() {
-        // Enumerate every .ts/.m4s under the root by modification date, not
-        // just parseable seg_<wallMs> names: the AVPlayer spill files
-        // (seg<seq>.ts in avp_sess_ dirs) were invisible to the budget.
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
-        var segs: [(url: URL, mtime: Date, size: Int64)] = []
-        for dir in dirs where dir.hasDirectoryPath {
-            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
-            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
-                let vals = try? f.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-                segs.append((f, vals?.contentModificationDate ?? .distantPast, Int64(vals?.fileSize ?? 0)))
-            }
-        }
-        // Hoist: budgetBytes now enumerates the disk (free-space
-        // seatbelt), so reading it per loop iteration would be
-        // quadratic in segment count.
-        let budget = budgetBytes
-        var total = segs.reduce(0) { $0 + $1.size }
-        for seg in segs.sorted(by: { $0.mtime < $1.mtime }) {
-            if total <= budget { break }
-            total -= seg.size
+        stateLock.lock()
+        let buffer = activeBuffer
+        stateLock.unlock()
+        guard let buffer else { return }
+        let dir = buffer.sessionDir
+        let segs = LiveRewindBuffer.listSegments(in: dir)
+        let sizes = segs.map { Int64((try? $0.url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) }
+        let spanMs = (segs.last?.startWallMs ?? 0) - (segs.first?.startWallMs ?? 0)
+        let rate = spanMs > 0 ? Double(sizes.reduce(0, +)) / (Double(spanMs) / 1000) : 0
+        let drop = RewindDiskGovernor.shared.report(
+            dirName: dir.lastPathComponent, createdMs: buffer.sessionStartMs, active: true,
+            segmentBytes: sizes, keepMin: 3, bytesPerSecond: rate)
+        guard drop > 0 else { return }
+        for seg in segs.prefix(min(drop, max(0, segs.count - 3))) {
             try? FileManager.default.removeItem(at: seg.url)
         }
+        RewindDiskGovernor.shared.update(dirName: dir.lastPathComponent,
+                                         segmentBytes: Array(sizes.dropFirst(min(drop, max(0, segs.count - 3)))))
     }
 }
 
@@ -1362,6 +1305,9 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     private let spoolURL: URL
     private var writeHandle: FileHandle?
     private var readHandle: FileHandle?
+    private var capReached = false
+    /// Other owned spool files at open time (counted against the ceiling).
+    private lazy var otherSpoolBytes: Int64 = RewindDiskGovernor.shared.ownedSpoolBytes(excluding: spoolURL.lastPathComponent)
 
     /// Disk spool, NOT suspend/resume flow control: Dispatcharr sends
     /// the whole remaining archive at line rate (~66 MB/s measured), so
@@ -1374,17 +1320,12 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("CatchupSpool", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // Sweep leftovers from crashed sessions (anything over an hour
-        // old cannot belong to a live reader).
-        if let leftovers = try? FileManager.default.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) {
-            let cutoff = Date().addingTimeInterval(-3600)
-            for f in leftovers {
-                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                if (m ?? .distantPast) < cutoff { try? FileManager.default.removeItem(at: f) }
-            }
-        }
         spoolURL = dir.appendingPathComponent(UUID().uuidString + ".ts")
+        // Claim first, then sweep: any spool file this process does not own
+        // is a leftover (no other reader can exist), whatever its age, and
+        // owned ones beyond the 4 GB ceiling go oldest first.
+        RewindDiskGovernor.shared.claimSpool(name: spoolURL.lastPathComponent)
+        RewindDiskGovernor.shared.trimSpool()
         FileManager.default.createFile(atPath: spoolURL.path, contents: nil)
         writeHandle = try? FileHandle(forWritingTo: spoolURL)
         readHandle = try? FileHandle(forReadingFrom: spoolURL)
@@ -1460,6 +1401,22 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     /// URLSession delegate and the NWConnection stream sink.
     private func appendSpool(_ data: Data) {
         cond.lock()
+        if capReached { cond.unlock(); return }
+        // 4 GB ceiling on the spool (2026-11-08 disk audit: the server sends
+        // the whole archive at line rate with no cap). Stop the download at
+        // the ceiling; the reader plays what is spooled, then EOF, and the
+        // player's catch-up EOF re-tune continues from that position.
+        if RewindDiskPolicy.spoolRoom(written: bytesWritten,
+                                      otherSpoolBytes: otherSpoolBytes) < Int64(data.count) {
+            capReached = true
+            finished = true
+            cond.signal()
+            cond.unlock()
+            debugLog("[REWIND] catch-up spool reached its cap at \(bytesWritten / 1_048_576) MB; download stopped")
+            nwTask?.cancel()
+            task?.cancel()
+            return
+        }
         do {
             try writeHandle?.write(contentsOf: data)
             bytesWritten += Int64(data.count)
@@ -1542,6 +1499,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
         try? writeHandle?.close()
         try? readHandle?.close()
         try? FileManager.default.removeItem(at: spoolURL)
+        RewindDiskGovernor.shared.releaseSpool(name: spoolURL.lastPathComponent)
     }
 }
 
@@ -1568,5 +1526,186 @@ enum CatchupRelay {
         guard let data = Data(base64Encoded: b64),
               let str = String(data: data, encoding: .utf8) else { return nil }
         return URL(string: str)
+    }
+}
+
+/// Process-wide owner of Live Rewind and catch-up spool disk use
+/// (2026-11-08: a macOS container reached 43.64 GB from orphaned rewind
+/// folders and a budget that never trimmed on a large disk). Every session
+/// claims its folder or spool file here; anything unclaimed on disk is an
+/// orphan from an earlier process and is deleted regardless of age. The
+/// arithmetic lives in RewindDiskPolicy (tested by the proxy test script).
+final class RewindDiskGovernor: @unchecked Sendable {
+    static let shared = RewindDiskGovernor()
+
+    private let lock = NSLock()
+    private var owned: Set<String> = []
+    private var ownedSpool: Set<String> = []
+    private struct Live {
+        var createdMs: Int64
+        var active: Bool
+        var segmentBytes: [Int64]
+        var keepMin: Int
+        var bytesPerSecond: Double
+    }
+    private var live: [String: Live] = [:]
+    private var freeAt = Date.distantPast
+    private var freeBytes: Int64?
+    private var lastOverLog = Date.distantPast
+
+    var rootDir: URL {
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        #else
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        #endif
+        return base.appendingPathComponent("LiveRewind", isDirectory: true)
+    }
+    var spoolDir: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("CatchupSpool", isDirectory: true)
+    }
+
+    func claim(dirName: String) { lock.lock(); owned.insert(dirName); lock.unlock() }
+    func release(dirName: String) {
+        lock.lock(); owned.remove(dirName); live[dirName] = nil; lock.unlock()
+    }
+    func claimSpool(name: String) { lock.lock(); ownedSpool.insert(name); lock.unlock() }
+    func releaseSpool(name: String) { lock.lock(); ownedSpool.remove(name); lock.unlock() }
+
+    func ownedSpoolBytes(excluding name: String) -> Int64 {
+        lock.lock(); let names = ownedSpool.subtracting([name]); lock.unlock()
+        return names.reduce(Int64(0)) { sum, n in
+            sum + Int64((try? spoolDir.appendingPathComponent(n).resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+    }
+
+    private var depthSeconds: Double {
+        let v = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+        return Double(v > 0 ? v : 30) * 60
+    }
+
+    /// A session reports its segments after each write; the answer is how
+    /// many of its OWN oldest segments it must drop now to keep every
+    /// session together under the cap.
+    func report(dirName: String, createdMs: Int64, active: Bool, segmentBytes: [Int64],
+                keepMin: Int, bytesPerSecond: Double) -> Int {
+        let now = Date()
+        lock.lock()
+        defer { lock.unlock() }
+        let prev = live[dirName]?.bytesPerSecond ?? 0
+        live[dirName] = Live(createdMs: createdMs, active: active, segmentBytes: segmentBytes,
+                             keepMin: keepMin, bytesPerSecond: max(prev * 0.9, bytesPerSecond))
+        if now.timeIntervalSince(freeAt) > 30 {
+            freeAt = now
+            let values = try? rootDir.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+            freeBytes = values?.volumeAvailableCapacity.map { Int64($0) }
+        }
+        let usage = live.values.reduce(Int64(0)) { $0 + $1.segmentBytes.reduce(0, +) }
+        let peak = live.values.map(\.bytesPerSecond).max()
+        let cap = RewindDiskPolicy.capBytes(
+            depthSeconds: depthSeconds,
+            allowanceBytesPerSecond: RewindDiskPolicy.allowanceBytesPerSecond(measuredPeak: peak),
+            usageBytes: usage, freeBytes: freeBytes)
+        let sessions = live.map { RewindDiskPolicy.Session(
+            id: $0.key, createdMs: $0.value.createdMs, active: $0.value.active,
+            segmentBytes: $0.value.segmentBytes, keepMin: $0.value.keepMin) }
+        let plan = RewindDiskPolicy.planTrim(sessions: sessions, capBytes: cap)
+        if !plan.isEmpty, now.timeIntervalSince(lastOverLog) > 60 {
+            lastOverLog = now
+            debugLog("[REWIND] over cap: \(usage / 1_048_576) MB in \(live.count) session(s), cap \(cap / 1_048_576) MB; trimming oldest")
+        }
+        return plan[dirName] ?? 0
+    }
+
+    /// After a session dropped segments, record what it holds now.
+    func update(dirName: String, segmentBytes: [Int64]) {
+        lock.lock(); live[dirName]?.segmentBytes = segmentBytes; lock.unlock()
+    }
+
+    /// Delete every rewind folder (and at launch every spool and app temp
+    /// file) that this process does not own. Logs counts and bytes only.
+    func sweepOrphans(reason: String, includeTemp: Bool, tempOlderThan: Date = Date()) {
+        let fm = FileManager.default
+        lock.lock(); let ownedNow = owned; let ownedSpoolNow = ownedSpool; lock.unlock()
+        var dirs = 0, files = 0, temps = 0
+        var bytes: Int64 = 0
+        let entries = (try? fm.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
+        let orphanNames = Set(RewindDiskPolicy.orphans(names: entries.map(\.lastPathComponent), owned: ownedNow))
+        for e in entries where orphanNames.contains(e.lastPathComponent) {
+            bytes += Self.size(of: e)
+            if (try? fm.removeItem(at: e)) != nil { dirs += 1 }
+        }
+        let spools = (try? fm.contentsOfDirectory(at: spoolDir, includingPropertiesForKeys: nil)) ?? []
+        let spoolOrphans = Set(RewindDiskPolicy.orphans(names: spools.map(\.lastPathComponent), owned: ownedSpoolNow))
+        for f in spools where spoolOrphans.contains(f.lastPathComponent) {
+            bytes += Self.size(of: f)
+            if (try? fm.removeItem(at: f)) != nil { files += 1 }
+        }
+        if includeTemp {
+            // tmp is per app container; anything there at launch was made
+            // by an earlier run of this app (XMLTV downloads and gunzips,
+            // XC spill files) and nothing reads it across launches.
+            let tmp = fm.temporaryDirectory
+            for t in (try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+                // Only what predates this launch: a download this run
+                // just started may already be writing here.
+                let m = (try? t.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                guard (m ?? .distantPast) < tempOlderThan else { continue }
+                bytes += Self.size(of: t)
+                if (try? fm.removeItem(at: t)) != nil { temps += 1 }
+            }
+        }
+        if dirs + files + temps > 0 || reason == "launch" {
+            debugLog("[REWIND] \(reason) sweep: removed \(dirs) rewind folder(s), \(files) spool file(s), \(temps) temp item(s), freed \(bytes / 1_048_576) MB")
+        }
+    }
+
+    /// Catch-up spool ceiling: unowned files go, owned ones oldest first
+    /// beyond 4 GB (the newest, the one being written, is kept).
+    func trimSpool() {
+        let fm = FileManager.default
+        lock.lock(); let ownedNow = ownedSpool; lock.unlock()
+        let urls = (try? fm.contentsOfDirectory(at: spoolDir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+        let files = urls.map { u -> RewindDiskPolicy.SpoolFile in
+            let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return .init(name: u.lastPathComponent,
+                         mtimeMs: Int64((v?.contentModificationDate ?? .distantPast).timeIntervalSince1970 * 1000),
+                         bytes: Int64(v?.fileSize ?? 0), owned: ownedNow.contains(u.lastPathComponent))
+        }
+        for name in RewindDiskPolicy.spoolDeletions(files: files) {
+            try? fm.removeItem(at: spoolDir.appendingPathComponent(name))
+        }
+    }
+
+    /// Exit path (window close, scene disconnect, terminate): delete every
+    /// rewind folder and spool file, owned or not. Synchronous on purpose:
+    /// the process may be gone a moment later.
+    func purgeAllForExit(reason: String) {
+        let fm = FileManager.default
+        var bytes: Int64 = 0, count = 0
+        for root in [rootDir, spoolDir] {
+            for e in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? [] {
+                bytes += Self.size(of: e)
+                if (try? fm.removeItem(at: e)) != nil { count += 1 }
+            }
+        }
+        debugLog("[REWIND] \(reason) sweep: removed \(count) rewind/spool item(s), freed \(bytes / 1_048_576) MB")
+    }
+
+    private static func size(of url: URL) -> Int64 {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { return 0 }
+        if !isDir.boolValue {
+            return Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+        var total: Int64 = 0
+        if let en = fm.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
+            for case let f as URL in en {
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+        }
+        return total
     }
 }

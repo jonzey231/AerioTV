@@ -19,6 +19,7 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/casthls_tests" \
     ../../App/LiveFMP4Remuxer.swift \
     ../../App/AudioOnlySampleClock.swift \
     ../../App/ResumeGatePolicy.swift \
+    ../../App/RewindDiskPolicy.swift \
     ../../App/TSHLSPlaylist.swift \
     ../../App/MultiviewCompositeTS.swift \
     ../../Features/Multiview/MultiviewGridMath.swift

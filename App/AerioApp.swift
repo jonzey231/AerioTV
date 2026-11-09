@@ -593,6 +593,7 @@ struct AerioApp: App {
         // running - so the reaper must run at launch, not only during
         // sessions (user clarification 2026-07-11).
         LiveRewindEngine.shared.startupSweep()
+        RewindExitSweep.install()
     }
 
     var body: some Scene {
@@ -2304,5 +2305,41 @@ struct RootView: View {
         if !pendingCredentials.isEmpty {
             debugLog("🔑 All \(pendingCredentials.count) credentials saved (local + iCloud)")
         }
+    }
+}
+
+/// Exit-path cleanup for Live Rewind and the catch-up spool (2026-11-08:
+/// 43.64 GB of rewind folders orphaned by closing the Mac window or quitting
+/// built up between launches). On terminate, and when the last scene
+/// disconnects (macOS window close, iPadOS scene discard), every session is
+/// ended and its folder deleted. An abrupt quit skips this; the launch sweep
+/// then removes everything the dead process left behind.
+enum RewindExitSweep {
+    nonisolated(unsafe) private static var installed = false
+
+    @MainActor static func install() {
+        guard !installed else { return }
+        installed = true
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { run(reason: "terminate") }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIScene.didDisconnectNotification, object: nil, queue: .main) { note in
+            let gone = note.object as? UIScene
+            MainActor.assumeIsolated {
+                // Another window (or a CarPlay scene) still running: its
+                // playback may own a session, so leave everything alone.
+                let remaining = UIApplication.shared.connectedScenes.filter { $0 !== gone }
+                guard remaining.isEmpty else { return }
+                run(reason: "scene disconnect")
+            }
+        }
+    }
+
+    @MainActor private static func run(reason: String) {
+        LiveChannelRetention.shared.stopAll(reason: reason)
+        LiveRewindEngine.shared.stopSession()
+        RewindDiskGovernor.shared.purgeAllForExit(reason: reason)
     }
 }
