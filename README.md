@@ -658,7 +658,7 @@ there as well.
 
 Releases published before the relicensing commit were under the MIT License.
 That grant is not revoked: any copy obtained under MIT keeps its MIT rights to
-that snapshot in perpetuity. Releases from 1.8.40 through 1.8.45 (2) were
+that snapshot in perpetuity. Releases 1.8.26 through 1.8.44 were
 under GPL-3.0-or-later, and that grant is likewise not revoked for those
 versions. Everything from the AGPL relicensing commit forward is
 AGPL-3.0-or-later.
