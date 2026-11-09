@@ -46,7 +46,7 @@ cannot handle a stream; hardware and platform decoding is preferred wherever
 the device supports it.
 
 These implementations may be covered by patents in some countries. AerioTV is
-free software under GPL-3.0-or-later and grants no patent license; users are
+free software under AGPL-3.0-or-later and grants no patent license; users are
 responsible for compliance with any patent or licensing requirements where they
 live. Dolby, DTS and other codec and format names are trademarks of their
 respective owners; AerioTV is not affiliated with, endorsed by, or certified by

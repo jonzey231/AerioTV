@@ -701,7 +701,7 @@ https://www.apache.org/licenses/LICENSE-2.0
 
 AerioTV includes independent implementations of audio and video codecs through
 FFmpeg that may be covered by patents in some countries. AerioTV is free
-software under GPL-3.0-or-later and grants no patent license; users are
+software under AGPL-3.0-or-later and grants no patent license; users are
 responsible for compliance with any patent or licensing requirements where they
 live.
 
