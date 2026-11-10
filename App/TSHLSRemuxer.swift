@@ -928,6 +928,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.releaseConnection()
             self.errorStatusCode = nil
             self.errorRetryAfter = nil
+            self.errorRetryAfterRaw = nil
+            self.errorResponseFailed = false
             self.errorBody = Data()
             if self.silenceReported {
                 self.silenceReported = false
@@ -1120,6 +1122,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// only on the URLSession delegate queue.
     private var errorStatusCode: Int?
     private var errorRetryAfter: Double?
+    /// The 429's Retry-After as sent (seconds or an HTTP date), for the gate.
+    private var errorRetryAfterRaw: String?
+    /// Set once an HTTP error response has failed this ingest: its task's
+    /// completion is not a "clean EOF" (a 429 re-opened at once through the
+    /// clean-end reconnect, spending the rate-limit retry).
+    private var errorResponseFailed = false
     private var errorBody = Data()
 
     // MARK: State
@@ -1610,6 +1618,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         LiveConnectionRegistry.shared.waitForRelease(sourceURL, timeout: 3)
         connLock.lock(); let abandoned = stopRequested; connLock.unlock()
         guard !stopped, !abandoned else { return }
+        errorResponseFailed = false
+        // No stream opens while the server is paused after a 429 (first
+        // try, retry, failover, AirPlay re-ingest): fail at once, locally.
+        let wait = DispatcharrRequestGate.shared.streamOpenWaitSeconds(sourceURL.absoluteString)
+        if wait > 0 {
+            let why = DispatcharrRequestGate.shared.pausedReason(DispatcharrRequestGate.serverKey(sourceURL.absoluteString))
+            debugLog("[RATE] stream open skipped: server paused after a 429 (\(why.rawValue)), \(wait)s left")
+            queue.async { [weak self] in
+                self?.fail(.ingestFailed("HTTP 429 | refusal=lockout | wait=\(wait) | why=\(why.rawValue) | paused"))
+            }
+            return
+        }
         let config = URLSessionConfiguration.default
         // First-bytes patience (Freyguy, 2026-09-03): a Dispatcharr behind a
         // slow provider can take 20-30 s to deliver the first TS bytes; at
@@ -4709,10 +4729,11 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             // the failure reason can quote Dispatcharr verbatim.
             // 429 too: Dispatcharr's "Stream limit exceeded" body is the
             // only proof of a session-limit refusal (DispatcharrConnectionLimit).
-            if http.statusCode == 503 || http.statusCode == 429 {
+            if http.statusCode == 503 || http.statusCode == 429 || http.statusCode == 403 {
                 errorStatusCode = http.statusCode
                 errorBody.removeAll()
-                if let header = http.value(forHTTPHeaderField: "Retry-After"),
+                errorRetryAfterRaw = http.value(forHTTPHeaderField: "Retry-After")
+                if let header = errorRetryAfterRaw,
                    let secs = Double(header.trimmingCharacters(in: .whitespaces)) {
                     errorRetryAfter = secs
                 }
@@ -4822,6 +4843,9 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             failWithIngestError()
             return
         }
+        // The error response already failed this ingest (its body parsed
+        // before the task ended): the end of that body is not a clean EOF.
+        if errorResponseFailed { return }
         // A redirected answer shorter than the sniff window (a small HLS
         // playlist): classify what arrived before treating it as EOF.
         if redirectSniffPending, error == nil, !redirectSniffBuffer.isEmpty {
@@ -4867,7 +4891,8 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         guard !errorBody.isEmpty,
               let object = try? JSONSerialization.jsonObject(with: errorBody),
               let dict = object as? [String: Any],
-              let reason = dict["error"] as? String else { return nil }
+              // "detail": DRF's Throttled (the API key lockout) uses it.
+              let reason = (dict["error"] as? String) ?? (dict["detail"] as? String) else { return nil }
         let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -4880,8 +4905,23 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     private func failWithIngestError() {
         guard let code = errorStatusCode else { return }
         errorStatusCode = nil
+        errorResponseFailed = true
         var text = "HTTP \(code)"
         if let reason = ingestErrorReason() { text += " | reason=\(reason)" }
+        if code == 429, DispatcharrConnectionLimit.directConnectActive {
+            // Stream 429 (stream-429-spec.md), Dispatcharr playlists only
+            // (Xtream and M3U keep their handling): a rate limit pauses the
+            // shared gate like an API 429 so nothing reopens this server
+            // until it ends; a stream-limit refusal never touches the gate.
+            let refusal = Dispatcharr429.classify(body: errorBody, retryAfter: errorRetryAfterRaw)
+            DispatcharrRequestGate.shared.noteStream429(sourceURL.absoluteString, refusal)
+            text += Stream429Marker.marker(refusal)
+        } else if code == 403, let said = Dispatcharr429.reasonText(errorBody),
+                  case .streamLimit(let count) = Dispatcharr429.classify(reasonText: said, retryAfter: nil) {
+            // Timeshift answers its stream limit as 403 "Stream limit exceeded":
+            // the same as the 429 stream limit.
+            text += Stream429Marker.marker(.streamLimit(count: count))
+        }
         if let retryAfter = errorRetryAfter { text += " | retryAfter=\(retryAfter)" }
         if let object = try? JSONSerialization.jsonObject(with: errorBody),
            let dict = object as? [String: Any], let waited = dict["waited"] as? String {
@@ -5732,6 +5772,15 @@ struct LoadingDetailSample {
 /// text is non-nil, so its own lifetime IS the "statusText went nil ->
 /// non-nil" clock the 3 s delay is keyed to; a change between two
 /// non-nil status texts leaves it mounted and the clock running.
+/// Side insets of a tile's centered message text, shared by the loading
+/// status line and the stop-notice card so both wrap at the same width.
+enum TileMessageInsets {
+    /// On the text itself.
+    static func text(compact: Bool) -> CGFloat { compact ? 8 : 24 }
+    /// On the stack that holds it.
+    static func stack(compact: Bool) -> CGFloat { compact ? 12 : 32 }
+}
+
 struct LoadingDetailLine: View {
     /// Current status text, watched only for the failover step ("Trying
     /// another stream..."), which restarts the waiting counter.
@@ -6091,6 +6140,9 @@ struct AVPlayerMultiviewTile: View {
     /// (grid tiles never PiP, mpv-path parity). Passed by the parent as
     /// isSoleTile so the flag tracks tile-count changes.
     var pipEnabled: Bool = false
+    /// Solo/fullscreen tile: the status line takes the stop-notice card's
+    /// full-size insets; grid tiles take its compact ones.
+    var isSoleTile: Bool = false
     /// Parent flips this tile back to the mpv engine.
     let onEngineFallback: (String) -> Void
 
@@ -6295,6 +6347,10 @@ struct AVPlayerMultiviewTile: View {
     /// (session.txt:3610-3619) because nothing tried again. Cancelled by
     /// bumping `teardownToken` on teardown or a channel change.
     @State private var standingRetries = 0
+    /// Retries after a stream 429 lockout (stream-429-spec.md): each waits
+    /// out the shared pause with a countdown; past RateLimitRetry's budget
+    /// the tile shows the rate-limit card instead.
+    @State private var streamLockoutRetries = 0
     /// Guide channel id of a live stream that failed (standing retry or
     /// the terminal card) and has not shown a frame since. stop() never
     /// hands that channel to Keep Recent Channels Live.
@@ -6460,11 +6516,18 @@ struct AVPlayerMultiviewTile: View {
                !(progressStore.userPaused && (statusText.hasPrefix("Reconnecting") || statusText.hasPrefix("Retrying"))) {
                 VStack(spacing: 8) {
                     ProgressView()
+                    // Same side insets and centering as the stop-notice
+                    // card, so a long line (the 429 countdown) wraps like
+                    // the card that follows it.
                     Text(statusText)
                         .scaledFont(.caption)
                         .foregroundColor(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(isSoleTile ? nil : 3)
+                        .padding(.horizontal, TileMessageInsets.text(compact: !isSoleTile))
                     LoadingDetailLine(statusText: statusText) { loadingDetailSample() }
                 }
+                .padding(.horizontal, TileMessageInsets.stack(compact: !isSoleTile))
             }
             if let tileError {
                 VStack(spacing: 10) {
@@ -6576,6 +6639,8 @@ struct AVPlayerMultiviewTile: View {
         .onChange(of: readyLocalURL) { _, url in
             guard let url else { return }
             statusText = nil
+            // Playing: a later rate limit earns the full retry budget again.
+            streamLockoutRetries = 0
             #if os(iOS)
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
@@ -6675,6 +6740,7 @@ struct AVPlayerMultiviewTile: View {
             channelStoppingRetries = 0
             channelStoppingWaited = 0
             standingRetries = 0
+            streamLockoutRetries = 0
             selfReleasedAt = nil
             teardownToken = UUID()
             // The failed-channel id stays for stop()'s Kept Live check (it
@@ -7097,6 +7163,58 @@ struct AVPlayerMultiviewTile: View {
     /// Stops the pipeline for good and shows the notice. No retry, no
     /// failover walk, no Reconnecting status: the connection is released
     /// and the tile waits for Retry.
+    /// Seconds to wait for a stream 429 lockout reason (built by
+    /// TSHLSRemuxer.failWithIngestError or its paused-open guard); nil for
+    /// anything else, the stream-limit 429 included.
+    private static func streamLockoutWait(_ reason: String) -> (seconds: Int, why: RateLimitReason)? {
+        guard reason.contains("HTTP 429"), reason.contains("refusal=lockout") else { return nil }
+        var seconds = DispatcharrRequestGate.defaultRetryAfter
+        var why = RateLimitReason.other
+        for field in reason.components(separatedBy: " | ") {
+            if field.hasPrefix("wait="), let n = Int(field.dropFirst("wait=".count)) { seconds = max(1, n) }
+            if field.hasPrefix("why="), let r = RateLimitReason(rawValue: String(field.dropFirst("why=".count))) { why = r }
+        }
+        return (seconds, why)
+    }
+
+    /// The server's stream-limit sentence from a stream 429 reason, or the
+    /// marker phrase when the body was not read; nil for anything else.
+    private static func streamLimitCount(_ reason: String) -> Int?? {
+        guard reason.contains("HTTP 429"), reason.contains("refusal=limit") else { return nil }
+        for field in reason.components(separatedBy: " | ") where field.hasPrefix("count=") {
+            return .some(Int(field.dropFirst("count=".count)))
+        }
+        return .some(nil)
+    }
+
+
+
+    private func handleStreamLockout(_ reason: String, wait: Int, why: RateLimitReason) {
+        if streamLockoutRetries >= RateLimitRetry.maxAutoRetries {
+            debugLog("[RATE] stream still rate-limited (\(why.rawValue)) after \(streamLockoutRetries) retries; stopping channel=\(channelName)")
+            if isVOD || isDVR || catchup != nil {
+                // The VOD error card keeps its header; the rate-limit line
+                // replaces its text (and the countdown line comes down).
+                failOrFallbackTerminal(reason, message: DispatcharrRateLimitCopy.rateLimitedMessage(wait, reason: why))
+            } else {
+                showLiveStopNotice(.rateLimited(seconds: wait, reason: why), reason: reason)
+            }
+            return
+        }
+        streamLockoutRetries += 1
+        debugLog("[RATE] stream rate-limited; retry \(streamLockoutRetries)/\(RateLimitRetry.maxAutoRetries) "
+            + "when the pause ends in \(wait)s channel=\(channelName)")
+        stop()
+        let token = teardownToken
+        func tick(_ left: Int) {
+            guard token == teardownToken else { return }
+            if left <= 0 { start(); return }
+            statusText = DispatcharrRateLimitCopy.serverBusyCountdown(left, reason: why)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { tick(left - 1) }
+        }
+        tick(wait)
+    }
+
     private func showLiveStopNotice(_ notice: LiveStopNotice, reason: String) {
         guard progressStore.liveStopNotice == nil else { return }
         debugLog("[LIMIT] \(notice.kind.rawValue) (\(reason)); connection released, waiting for Retry channel=\(channelName)")
@@ -7156,6 +7274,7 @@ struct AVPlayerMultiviewTile: View {
         channelStoppingRetries = 0
         channelStoppingWaited = 0
         standingRetries = 0
+        streamLockoutRetries = 0
         start()
     }
 
@@ -7586,6 +7705,22 @@ struct AVPlayerMultiviewTile: View {
         // resume handler owns recovery, not the card.
         if backgroundSuspended { return }
         #endif
+        // Stream 429 lockout (stream-429-spec.md): the server refuses every
+        // request from this network for a while. No retry, failover, or
+        // AirPlay re-ingest until the shared pause ends; a countdown, then
+        // one retry, and past the budget the rate-limit card.
+        if tileError == nil, progressStore.liveStopNotice == nil,
+           let lockout = Self.streamLockoutWait(reason) {
+            handleStreamLockout(reason, wait: lockout.seconds, why: lockout.why)
+            return
+        }
+        // Stream-limit 429: stop trying this stream, no retry or failover
+        // (live, VOD, DVR, catch-up).
+        if tileError == nil, progressStore.liveStopNotice == nil,
+           let count = Self.streamLimitCount(reason) {
+            showLiveStopNotice(.streamLimit(count: count), reason: reason)
+            return
+        }
         // Redirect stream profile answered HLS: re-tune the redirect
         // target through direct HLS once, ahead of every other recovery.
         if !isVOD, !isDVR, catchup == nil, redirectHLSTarget == nil,
@@ -8011,7 +8146,7 @@ struct AVPlayerMultiviewTile: View {
 
     /// The error card, with playback torn down. Shared by the generic
     /// failure tail and the catch-up archive 404.
-    private func failOrFallbackTerminal(_ reason: String, version: String? = nil) {
+    private func failOrFallbackTerminal(_ reason: String, version: String? = nil, message: String? = nil) {
         guard tileError == nil else { return }
         player?.pause()
         // A paused AVPlayer still reloads a live playlist (field log
@@ -8027,7 +8162,7 @@ struct AVPlayerMultiviewTile: View {
         let friendly = Self.userFacingError(reason)
         if !isVOD, !isDVR, catchup == nil { markLiveFailure(reason) }
         tileError = TileError(title: friendly.title,
-                              message: friendly.message,
+                              message: message ?? friendly.message,
                               version: version,
                               diagnostic: reason)
     }
@@ -10594,5 +10729,21 @@ extension AVPlayerMultiviewTile {
             kind.append(p)
         }
         return kind.isEmpty ? "other" : kind.joined(separator: "/")
+    }
+}
+
+/// Stream 429 (stream-429-spec.md): the marker added to a stream failure
+/// reason, read by AVPlayerMultiviewTile's failure handler.
+enum Stream429Marker {
+    /// Logged with the classified reason, never the key.
+    static func marker(_ refusal: Dispatcharr429) -> String {
+        switch refusal {
+        case .rateLimited(let why, let seconds):
+            debugLog("[RATE] stream HTTP 429 reason=\(why.rawValue); server paused \(seconds)s, no reopen until then")
+            return " | refusal=lockout | wait=\(seconds) | why=\(why.rawValue)"
+        case .streamLimit(let count):
+            debugLog("[LIMIT] stream HTTP 429 reason=streamLimit count=\(count.map(String.init) ?? "-"); not retried")
+            return " | refusal=limit" + (count.map { " | count=\($0)" } ?? "")
+        }
     }
 }

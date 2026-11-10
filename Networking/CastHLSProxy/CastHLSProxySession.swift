@@ -42,7 +42,7 @@ enum CastHLSProxyError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .stopped(let notice): return "\(notice.title). \(notice.message)"
+        case .stopped(let notice): return notice.text
         case .noLANAddress: return "no Wi-Fi LAN address to serve the cast proxy on"
         case .serverFailed: return "local HTTP server failed to start"
         case .ingestUnreachable: return "stream unreachable"
@@ -117,6 +117,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var server: CastHLSProxyServer?
     private var store: CastHLSSegmentStore?
     private var ingest: IngestConnection?
+    /// Retries after a stream 429 lockout this session (stream-429-spec.md).
+    private var lockoutRetries = 0
     private var remuxer: CastFMP4Remuxer?
     /// Terminal ingest failure (unsupported codec, connect exhaustion),
     /// observed by `startChannel`'s ready wait. First error wins.
@@ -449,6 +451,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.cleanEndPolicy.reset()
             self.liveSessionStartedAt = Date()
             self.consecutiveFailures = 0
+            self.lockoutRetries = 0
             self.everConnected = false
             self.lastIngestConnectAt = nil
             self.currentGeneration = store.beginGeneration()
@@ -588,6 +591,19 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// realigns (sync scan, wait for SPS/PPS + keyframe) and the store
     /// presents the restart as a playlist discontinuity.
     private func startIngestLocked(url: URL, headers: [String: String]) {
+        // No stream opens while the server is paused after a 429
+        // (stream-429-spec.md): wait it out, then open.
+        let paused = DispatcharrRequestGate.shared.streamOpenWaitSeconds(url.absoluteString)
+        if paused > 0 {
+            let waitEpoch = ingestEpoch
+            log("[RATE] ingest open waits \(paused)s: server paused after a 429")
+            queue.asyncAfter(deadline: .now() + .seconds(paused)) { [weak self] in
+                guard let self, self.ingestEpoch == waitEpoch, self.activeURL == url,
+                      self.terminalError == nil else { return }
+                self.startIngestLocked(url: url, headers: headers)
+            }
+            return
+        }
         let epoch = ingestEpoch
         let gen = currentGeneration
         segmentsLogged = 0
@@ -720,6 +736,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                 }
                 self.everConnected = true
                 self.consecutiveFailures = 0
+                self.lockoutRetries = 0
                 self.lastIngestConnectAt = Date()
             },
             onData: { [weak self] data in
@@ -759,6 +776,31 @@ final class CastHLSProxySession: @unchecked Sendable {
                    let notice = DispatcharrConnectionLimit.fromResponse(code: code, body: body) {
                     self.log("[LIMIT] ingest \(notice.kind.rawValue): refused, no reconnect")
                     self.stopForNoticeLocked(notice)
+                    return
+                }
+                // Stream 429 (stream-429-spec.md). Stream limit: stop, the
+                // server's sentence. Lockout: pause the shared gate, wait it
+                // out, retry; past the budget the rate-limit notice.
+                if failureReason == "http=429", DispatcharrConnectionLimit.directConnectActive {
+                    let refusal = Dispatcharr429.classify(body: errorBody, retryAfter: self.ingest?.retryAfterRaw)
+                    DispatcharrRequestGate.shared.noteStream429(url.absoluteString, refusal)
+                    switch refusal {
+                    case .streamLimit(let count):
+                        self.log("[LIMIT] ingest 429 reason=streamLimit: refused, no reconnect")
+                        self.stopForNoticeLocked(.streamLimit(count: count))
+                    case .rateLimited(let reason, let seconds):
+                        if self.lockoutRetries >= RateLimitRetry.maxAutoRetries {
+                            self.log("[RATE] ingest still rate-limited (\(reason.rawValue)) after \(self.lockoutRetries) retries; stopping")
+                            self.stopForNoticeLocked(.rateLimited(seconds: seconds, reason: reason))
+                        } else {
+                            self.lockoutRetries += 1
+                            self.log("[RATE] ingest 429 reason=\(reason.rawValue); retry \(self.lockoutRetries)/"
+                                + "\(RateLimitRetry.maxAutoRetries) when the pause ends in \(seconds)s")
+                            self.stopIngestLocked()
+                            // startIngestLocked itself waits out the pause.
+                            self.startIngestLocked(url: url, headers: headers)
+                        }
+                    }
                     return
                 }
                 // Clean end: reconnect on the escalating ladder, and from
@@ -825,7 +867,7 @@ final class CastHLSProxySession: @unchecked Sendable {
         terminalError = CastHLSProxyError.stopped(notice)
         stopIngestLocked()
         if readyReturned, let hook = onTerminalAfterReady {
-            let text = "\(notice.title). \(notice.message)"
+            let text = notice.text
             DispatchQueue.main.async { hook(text) }
         }
     }
@@ -911,6 +953,8 @@ final class CastHLSProxySession: @unchecked Sendable {
         /// the session can recognize a connection-limit refusal.
         private var errorStatus: Int?
         private var errorBody = Data()
+        /// A 429's Retry-After as sent, read by the session when it ends.
+        private(set) var retryAfterRaw: String?
         private var session: URLSession?
         private var task: URLSessionDataTask?
         private var cancelled = false
@@ -965,7 +1009,11 @@ final class CastHLSProxySession: @unchecked Sendable {
             if let http = response as? HTTPURLResponse,
                http.statusCode == 429 || http.statusCode == 503 {
                 let code = http.statusCode
-                queue.async { [weak self] in self?.errorStatus = code }
+                let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
+                queue.async { [weak self] in
+                    self?.errorStatus = code
+                    self?.retryAfterRaw = retryAfter
+                }
                 completionHandler(.allow)
                 return
             }

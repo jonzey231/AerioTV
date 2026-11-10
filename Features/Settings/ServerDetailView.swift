@@ -1323,8 +1323,10 @@ struct ServerDetailView: View {
             // A 429: countdown, two automatic retries, then the rate-limit
             // copy (RateLimitRetry, Android 289112b4).
             try await RateLimitRetry.run(
-                rateLimitSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
-                onCountdown: { connectionWaiting = DispatcharrRateLimitCopy.serverBusyCountdown($0) },
+                rateLimit: { DispatcharrHTTPGate.rateLimit(in: $0) },
+                onCountdown: { left, reason in
+                    connectionWaiting = DispatcharrRateLimitCopy.serverBusyCountdown(left, reason: reason)
+                },
                 onRetry: { connectionWaiting = nil }
             ) {
                 try await testConnectionOnce()

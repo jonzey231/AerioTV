@@ -21,15 +21,30 @@ enum DispatcharrRateLimitCopy {
         seconds == 1 ? "1 second" : "\(seconds) seconds"
     }
 
-    /// Final copy once the automatic retries are spent: names the rate limit.
-    static func rateLimitedMessage(_ seconds: Int) -> String {
-        "The server is rate-limiting requests from this network (HTTP 429). "
-            + "Wait \(secondsPhrase(seconds)) and try again."
+    /// The rate-limit sentence for `reason` (stream-429-spec.md UPDATE:
+    /// say exactly that Dispatcharr rate-limited them, and why).
+    private static func rateLimitLead(_ reason: RateLimitReason) -> String {
+        switch reason {
+        case .apiKeyLockout: return "Dispatcharr rate-limited this network after too many failed API key attempts."
+        case .signInLockout: return "Dispatcharr rate-limited sign-ins from this network after too many failed attempts."
+        case .other: return "Dispatcharr rate-limited this network (HTTP 429)."
+        }
     }
 
-    /// The countdown line interactive flows show while they wait out a 429.
-    static func serverBusyCountdown(_ seconds: Int) -> String {
-        "The server is busy. Trying again in \(secondsPhrase(seconds))."
+    /// Final copy once the automatic retries are spent.
+    static func rateLimitedMessage(_ seconds: Int, reason: RateLimitReason = .other) -> String {
+        "\(rateLimitLead(reason)) Wait \(secondsPhrase(seconds)) and try again."
+    }
+
+    /// The countdown line while a 429 is waited out.
+    static func serverBusyCountdown(_ seconds: Int, reason: RateLimitReason = .other) -> String {
+        "\(rateLimitLead(reason)) Trying again in \(secondsPhrase(seconds))."
+    }
+
+    /// The stream-limit refusal (no retry).
+    static func streamLimitMessage(_ count: Int?) -> String {
+        guard let count else { return "Dispatcharr stream limit reached." }
+        return "Dispatcharr stream limit reached: \(count) concurrent streams allowed for this account."
     }
 
     /// Error text for a call the rejected-key gate held locally.
@@ -65,12 +80,13 @@ enum DispatcharrRateLimitCopy {
 /// The give-up failure: its description is the user-facing rate-limit copy.
 struct RateLimitedFinal: Error, LocalizedError, Equatable, Sendable {
     let seconds: Int
-    var errorDescription: String? { DispatcharrRateLimitCopy.rateLimitedMessage(seconds) }
+    var reason: RateLimitReason = .other
+    var errorDescription: String? { DispatcharrRateLimitCopy.rateLimitedMessage(seconds, reason: reason) }
 }
 
 /// Interactive flows (device setup receiver, Add Playlist, Test Connection)
-/// when the server answers 429: show "The server is busy. Trying again in N
-/// seconds." with a live countdown, try again automatically up to
+/// when the server answers 429: show the reason's countdown line
+/// (`serverBusyCountdown`) live, try again automatically up to
 /// `maxAutoRetries` times, then fail with `RateLimitedFinal`.
 enum RateLimitRetry {
     /// 2 automatic retries, 3 attempts in all.
@@ -83,9 +99,9 @@ enum RateLimitRetry {
     /// any other failure is rethrown unchanged.
     static func run<T>(
         isolation: isolated (any Actor)? = #isolation,
-        rateLimitSeconds: (Error) -> Int? = { DispatcharrGateError.rateLimitSeconds($0) },
+        rateLimit: (Error) -> (seconds: Int, reason: RateLimitReason)? = { DispatcharrGateError.rateLimit($0) },
         tick: () async -> Void = { try? await Task.sleep(nanoseconds: 1_000_000_000) },
-        onCountdown: (Int) -> Void,
+        onCountdown: (_ secondsLeft: Int, _ reason: RateLimitReason) -> Void,
         onRetry: () -> Void = {},
         attempt: () async throws -> T
     ) async throws -> T {
@@ -94,13 +110,14 @@ enum RateLimitRetry {
             do {
                 return try await attempt()
             } catch {
-                guard let wait = rateLimitSeconds(error) else { throw error }
-                if retries >= maxAutoRetries { throw RateLimitedFinal(seconds: max(1, wait)) }
+                guard let limit = rateLimit(error) else { throw error }
+                let wait = limit.seconds
+                if retries >= maxAutoRetries { throw RateLimitedFinal(seconds: max(1, wait), reason: limit.reason) }
                 retries += 1
                 var left = min(max(wait, 1), DispatcharrRequestGate.maxRetryAfter)
                 while left > 0 {
                     if Task.isCancelled { throw CancellationError() }
-                    onCountdown(left)
+                    onCountdown(left, limit.reason)
                     await tick()
                     left -= 1
                 }
@@ -114,16 +131,16 @@ enum RateLimitRetry {
     /// LoginThrottled) waits out the login gate's park for that server, which
     /// holds the Retry-After; the default when the park has already lapsed.
     /// nil: not a rate limit, so the caller's normal error copy applies.
-    static func signInWaitSeconds(
+    static func signInWait(
         _ error: Error,
-        apiSeconds: (Error) -> Int?,
+        apiLimit: (Error) -> (seconds: Int, reason: RateLimitReason)?,
         isLogin429: (Error) -> Bool,
-        loginParkedSeconds: () -> Int
-    ) -> Int? {
-        if let s = apiSeconds(error) { return s }
+        loginParked: () -> (seconds: Int, reason: RateLimitReason)
+    ) -> (seconds: Int, reason: RateLimitReason)? {
+        if let limit = apiLimit(error) { return limit }
         guard isLogin429(error) else { return nil }
-        let left = loginParkedSeconds()
-        return left > 0 ? left : DispatcharrRequestGate.defaultRetryAfter
+        let parked = loginParked()
+        return (parked.seconds > 0 ? parked.seconds : DispatcharrRequestGate.defaultRetryAfter, parked.reason)
     }
 }
 
@@ -135,8 +152,9 @@ enum SetupKeyCheck: Equatable, Sendable {
     case accepted
     /// 401/403, or a key the gate already holds as rejected (nothing sent).
     case rejected
-    /// No verdict: `retryAfter` set for a 429, nil for a network error or any other status.
-    case unknown(retryAfter: Int?)
+    /// No verdict: `retryAfter` set for a 429 (with the server's reason),
+    /// nil for a network error or any other status.
+    case unknown(retryAfter: Int?, reason: RateLimitReason = .other)
 }
 
 enum SetupKeyVerdict: Equatable, Sendable {
@@ -151,25 +169,25 @@ enum SetupKeyPreflight {
     static let networkRetrySeconds = 3
 
     /// 401/403 = `.rejected`. A 429 counts down its Retry-After through
-    /// `onCountdown(left, true)` and checks again; a network error waits
-    /// `networkRetrySeconds` (`onCountdown(left, false)`) and checks again;
+    /// `onCountdown(left, reason)` and checks again; a network error waits
+    /// `networkRetrySeconds` (`onCountdown(left, nil)`) and checks again;
     /// up to `RateLimitRetry.maxAutoRetries` re-checks, then the send goes
     /// ahead (the receiver has its own 429 retry).
     static func run(
         isolation: isolated (any Actor)? = #isolation,
         tick: () async -> Void = { try? await Task.sleep(nanoseconds: 1_000_000_000) },
         check: () async -> SetupKeyCheck,
-        onCountdown: (_ secondsLeft: Int, _ rateLimited: Bool) -> Void
+        onCountdown: (_ secondsLeft: Int, _ rateLimit: RateLimitReason?) -> Void
     ) async -> SetupKeyVerdict {
         var retries = 0
         while true {
             switch await check() {
             case .accepted: return .send
             case .rejected: return .rejected
-            case .unknown(let retryAfter):
+            case .unknown(let retryAfter, let reason):
                 if retries >= RateLimitRetry.maxAutoRetries { return .send }
                 retries += 1
-                let limited = retryAfter != nil
+                let limited: RateLimitReason? = retryAfter != nil ? reason : nil
                 var left = min(max(retryAfter ?? networkRetrySeconds, 1), DispatcharrRequestGate.maxRetryAfter)
                 while left > 0 {
                     if Task.isCancelled { return .send }

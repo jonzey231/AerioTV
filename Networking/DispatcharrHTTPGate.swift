@@ -58,7 +58,7 @@ enum DispatcharrHTTPGate {
             if left > 0 {
                 SkipLog.note("[RATE] skipped \(method) \(url.path): server paused after a 429, \(left)s left",
                              bucket: "rate|\(server)")
-                throw DispatcharrGateError.rateLimited(seconds: left)
+                throw DispatcharrGateError.rateLimited(seconds: left, reason: gate.pausedReason(server))
             }
         }
         return req
@@ -72,13 +72,19 @@ enum DispatcharrHTTPGate {
               DispatcharrRequestGate.isPausedPath(url.path) else { return }
         let raw = http.value(forHTTPHeaderField: "Retry-After")
         let secs = DispatcharrRequestGate.parseRetryAfter(raw)
+        // The server's reason (stream-429-spec.md UPDATE): named in every 429 message.
+        let reason: RateLimitReason = {
+            if case .rateLimited(let r, _) = Dispatcharr429.classify(body: body, retryAfter: raw) { return r }
+            return .other
+        }()
         let serverHeader = http.value(forHTTPHeaderField: "Server")
         let snippet = body.map { String(decoding: $0.prefix(200), as: UTF8.self) } ?? ""
         let flat = snippet.replacingOccurrences(of: "\r", with: " ").replacingOccurrences(of: "\n", with: " ")
         debugLog("[RATE] HTTP 429 for \(request.httpMethod ?? "GET") \(url.path): Retry-After=\(raw ?? "none") "
                  + "(waiting \(secs)s) Server=\(serverHeader ?? "none") body=\(DebugLogger.sanitize(flat))")
-        DispatcharrRequestGate.shared.pause(DispatcharrRequestGate.serverKey(url.absoluteString), seconds: secs)
-        throw DispatcharrGateError.rateLimited(seconds: secs)
+        DispatcharrRequestGate.shared.pause(DispatcharrRequestGate.serverKey(url.absoluteString), seconds: secs, reason: reason)
+        debugLog("[RATE] 429 reason=\(reason.rawValue) for \(request.httpMethod ?? "GET") \(url.path)")
+        throw DispatcharrGateError.rateLimited(seconds: secs, reason: reason)
     }
 
     /// Stream and logo headers: a key the server already rejected is left
@@ -97,9 +103,15 @@ enum DispatcharrHTTPGate {
 
     /// The 429 wait anywhere in `error`, including inside an `APIError.networkError`.
     static func rateLimitSeconds(in error: Error) -> Int? {
-        if let s = DispatcharrGateError.rateLimitSeconds(error) { return s }
+        rateLimit(in: error)?.seconds
+    }
+
+    /// The 429 wait and the server's reason anywhere in `error`, including
+    /// inside an `APIError.networkError`.
+    static func rateLimit(in error: Error) -> (seconds: Int, reason: RateLimitReason)? {
+        if let limit = DispatcharrGateError.rateLimit(error) { return limit }
         if case APIError.networkError(let inner)? = error as? APIError {
-            return DispatcharrGateError.rateLimitSeconds(inner)
+            return DispatcharrGateError.rateLimit(inner)
         }
         return nil
     }

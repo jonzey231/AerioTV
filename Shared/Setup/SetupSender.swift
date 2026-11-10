@@ -679,7 +679,7 @@ enum SetupSender {
 enum SetupKeySender {
     @MainActor
     static func check(key: String, server: ServerConnection,
-                      onCountdown: (_ secondsLeft: Int, _ rateLimited: Bool) -> Void) async -> SetupKeyVerdict {
+                      onCountdown: (_ secondsLeft: Int, _ rateLimit: RateLimitReason?) -> Void) async -> SetupKeyVerdict {
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(key),
                                  userAgent: server.effectiveUserAgent, authMode: server.dispatcharrHeaderMode)
         let verdict = await SetupKeyPreflight.run(check: { await api.checkSetupKey() }, onCountdown: onCountdown)

@@ -35,16 +35,31 @@ import CryptoKit
 /// Failures the gate raises instead of sending a request.
 enum DispatcharrGateError: Error, LocalizedError, Equatable, Sendable {
     /// HTTP 429 from a Dispatcharr API call, or a call skipped because an
-    /// earlier 429 still pauses the server. `seconds` is the wait left.
-    case rateLimited(seconds: Int)
+    /// earlier 429 still pauses the server. `seconds` is the wait left;
+    /// `reason` is the server's (stream-429-spec.md UPDATE).
+    case rateLimited(seconds: Int, reason: RateLimitReason = .other)
     /// The server already rejected this exact API key and nothing was sent.
     case keyRejected
 
     var errorDescription: String? {
         switch self {
-        case .rateLimited(let s): return DispatcharrRateLimitCopy.rateLimitedMessage(s)
+        case .rateLimited(let s, let reason): return DispatcharrRateLimitCopy.rateLimitedMessage(s, reason: reason)
         case .keyRejected: return DispatcharrRateLimitCopy.keyRejectedErrorMessage
         }
+    }
+
+    /// The 429 wait and reason carried by `error` (or one it wraps), nil
+    /// when it is not a rate limit.
+    static func rateLimit(_ error: Error) -> (seconds: Int, reason: RateLimitReason)? {
+        var current: Error? = error
+        var depth = 0
+        while let e = current, depth < 8 {
+            if case DispatcharrGateError.rateLimited(let s, let r)? = e as? DispatcharrGateError { return (s, r) }
+            if let final = e as? RateLimitedFinal { return (final.seconds, final.reason) }
+            current = (e as NSError).userInfo[NSUnderlyingErrorKey] as? Error
+            depth += 1
+        }
+        return nil
     }
 
     /// The 429 wait carried by `error` (or one it wraps through
@@ -53,7 +68,7 @@ enum DispatcharrGateError: Error, LocalizedError, Equatable, Sendable {
         var current: Error? = error
         var depth = 0
         while let e = current, depth < 8 {
-            if case DispatcharrGateError.rateLimited(let s)? = e as? DispatcharrGateError { return s }
+            if case DispatcharrGateError.rateLimited(let s, _)? = e as? DispatcharrGateError { return s }
             if let final = e as? RateLimitedFinal { return final.seconds }
             current = (e as NSError).userInfo[NSUnderlyingErrorKey] as? Error
             depth += 1
@@ -90,6 +105,8 @@ final class DispatcharrRequestGate: @unchecked Sendable {
 
     private let lock = NSLock()
     private var pausedUntil: [String: TimeInterval] = [:]
+    /// The server's reason for each pause (stream-429-spec.md UPDATE).
+    private var pausedReason: [String: RateLimitReason] = [:]
     /// Key hash -> playlist ids that saw it rejected.
     private var rejected: [String: Set<String>] = [:]
     private var rechecks: [String: Recheck] = [:]
@@ -147,12 +164,20 @@ final class DispatcharrRequestGate: @unchecked Sendable {
 
     /// Park `server` for `seconds`. A later, longer 429 extends it; a
     /// shorter one never shortens it.
-    func pause(_ server: String, seconds: Int) {
+    func pause(_ server: String, seconds: Int, reason: RateLimitReason = .other) {
         let s = min(max(seconds, 1), Self.maxRetryAfter)
         let until = clock() + TimeInterval(s)
         lock.lock()
         pausedUntil[server] = max(pausedUntil[server] ?? 0, until)
+        // The latest reason wins: it is what the server says now.
+        pausedReason[server] = reason
         lock.unlock()
+    }
+
+    /// The server's reason for the current pause (`.other` when unknown).
+    func pausedReason(_ server: String) -> RateLimitReason {
+        lock.lock(); defer { lock.unlock() }
+        return pausedReason[server] ?? .other
     }
 
     /// Whole seconds left on `server`'s pause, 0 when requests may go out.
@@ -503,6 +528,89 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         acceptedAt.removeAll()
         pendingPrompt = nil
         lock.unlock()
+    }
+}
+
+// MARK: - 429 reasons (stream-429-spec.md, UPDATE 2026-11-10)
+
+/// Why Dispatcharr answered 429, read from its body. Every 429 the app shows
+/// (API calls, sign-in, streams) names the reason.
+enum RateLimitReason: String, Equatable, Sendable {
+    /// "Too many API key attempts. Try again later." (apps/accounts/authentication.py)
+    case apiKeyLockout
+    /// "Too many login attempts. Try again later."
+    case signInLockout
+    /// Any other 429.
+    case other
+}
+
+/// A Dispatcharr 429, classified. Pure so the gate tests can check every
+/// body shape (JSON "detail" or "error", plain text, unknown).
+enum Dispatcharr429: Equatable, Sendable {
+    /// Rate limited: wait `seconds` (Retry-After, else the gate default), then retry.
+    case rateLimited(RateLimitReason, seconds: Int)
+    /// The per-user stream limit: no retry. `count` from the server's text when it has one.
+    case streamLimit(count: Int?)
+
+    static let apiKeyLockoutPhrase = "Too many API key attempts"
+    static let signInLockoutPhrase = "Too many login attempts"
+    static let streamLimitPhrase = "Stream limit exceeded"
+
+    /// The server's sentence: JSON "detail" or "error", else the plain-text body.
+    static func reasonText(_ body: Data?) -> String? {
+        guard let body, !body.isEmpty else { return nil }
+        if let object = try? JSONSerialization.jsonObject(with: body) {
+            guard let dict = object as? [String: Any] else { return nil }
+            for key in ["detail", "error"] {
+                if let text = (dict[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                    return text
+                }
+            }
+            return nil
+        }
+        let raw = String(decoding: body.prefix(1024), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? nil : raw
+    }
+
+    static func classify(body: Data?, retryAfter: String?, now: Date = Date()) -> Dispatcharr429 {
+        classify(reasonText: reasonText(body), retryAfter: retryAfter, now: now)
+    }
+
+    /// Matches the leading phrase case-insensitively (spec).
+    static func classify(reasonText: String?, retryAfter: String?, now: Date = Date()) -> Dispatcharr429 {
+        let text = (reasonText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        func leads(_ phrase: String) -> Bool {
+            text.range(of: phrase, options: [.caseInsensitive, .anchored]) != nil
+        }
+        if leads(streamLimitPhrase) { return .streamLimit(count: streamCount(text)) }
+        let seconds = DispatcharrRequestGate.parseRetryAfter(retryAfter, now: now)
+        if leads(apiKeyLockoutPhrase) { return .rateLimited(.apiKeyLockout, seconds: seconds) }
+        if leads(signInLockoutPhrase) { return .rateLimited(.signInLockout, seconds: seconds) }
+        return .rateLimited(.other, seconds: seconds)
+    }
+
+    /// "Stream limit exceeded (2 concurrent streams allowed)" -> 2.
+    static func streamCount(_ text: String) -> Int? {
+        guard let open = text.firstIndex(of: "(") else { return nil }
+        let digits = text[text.index(after: open)...].prefix { $0.isNumber }
+        return Int(digits)
+    }
+}
+
+extension DispatcharrRequestGate {
+    /// Seconds a stream open to `url`'s server must still wait: no stream
+    /// opens (first try, retry, or failover) while the server is paused
+    /// after a 429. 0 = go ahead.
+    func streamOpenWaitSeconds(_ url: String) -> Int {
+        pausedSeconds(Self.serverKey(url))
+    }
+
+    /// A stream 429: a rate limit pauses the server exactly like an API
+    /// 429; a stream-limit refusal changes nothing here.
+    func noteStream429(_ url: String, _ refusal: Dispatcharr429) {
+        if case .rateLimited(let reason, let seconds) = refusal {
+            pause(Self.serverKey(url), seconds: seconds, reason: reason)
+        }
     }
 }
 

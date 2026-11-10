@@ -121,7 +121,7 @@ do {
     var attempts = 0
     var thrown: Error?
     do {
-        let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { shown.append($0) }) {
+        let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { left, _ in shown.append(left) }) {
             attempts += 1
             throw DispatcharrGateError.rateLimited(seconds: 3)
         }
@@ -130,7 +130,7 @@ do {
     eq(shown, [3, 2, 1, 3, 2, 1], "countdown twice")
     let msg = (thrown as? LocalizedError)?.errorDescription ?? ""
     check(thrown is RateLimitedFinal, "final error type")
-    eq(msg, "The server is rate-limiting requests from this network (HTTP 429). Wait 3 seconds and try again.", "final copy")
+    eq(msg, "Dispatcharr rate-limited this network (HTTP 429). Wait 3 seconds and try again.", "final copy")
     check(!msg.contains("Could not connect"), "no Could not connect prefix")
 }
 
@@ -138,7 +138,7 @@ do {
 do {
     var attempts = 0
     var retried = 0
-    let r: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { _ in }, onRetry: { retried += 1 }) {
+    let r: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { _, _ in }, onRetry: { retried += 1 }) {
         attempts += 1
         if attempts == 1 { throw DispatcharrGateError.rateLimited(seconds: 1) }
         return 7
@@ -153,7 +153,7 @@ do {
     var attempts = 0
     var thrown: Error?
     do {
-        let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { _ in }) {
+        let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { _, _ in }) {
             attempts += 1
             throw Unauthorized()
         }
@@ -166,7 +166,7 @@ do {
 do {
     var shown: [Int] = []
     var attempts = 0
-    let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { shown.append($0) }) {
+    let _: Int = try await RateLimitRetry.run(tick: {}, onCountdown: { left, _ in shown.append(left) }) {
         attempts += 1
         if attempts == 1 { throw DispatcharrGateError.rateLimited(seconds: 500) }
         return 1
@@ -180,26 +180,31 @@ do {
 // the login gate's park, retries twice, then names the rate limit (Android
 // LoginThrottled through RateLimitRetry.run).
 struct Login429: Error {}
-func signInSeconds(_ e: Error, parked: Int) -> Int? {
-    RateLimitRetry.signInWaitSeconds(e,
-                                     apiSeconds: { DispatcharrGateError.rateLimitSeconds($0) },
-                                     isLogin429: { $0 is Login429 },
-                                     loginParkedSeconds: { parked })
+func signInLimit(_ e: Error, parked: Int) -> (seconds: Int, reason: RateLimitReason)? {
+    RateLimitRetry.signInWait(e,
+                              apiLimit: { DispatcharrGateError.rateLimit($0) },
+                              isLogin429: { $0 is Login429 },
+                              loginParked: { (parked, .signInLockout) })
 }
+func signInSeconds(_ e: Error, parked: Int) -> Int? { signInLimit(e, parked: parked)?.seconds }
 eq(signInSeconds(Login429(), parked: 45), 45, "login 429 waits the park")
 eq(signInSeconds(Login429(), parked: 0), 60, "login 429 with a lapsed park waits the default")
 eq(signInSeconds(DispatcharrGateError.rateLimited(seconds: 7), parked: 45), 7, "API 429 keeps its own seconds")
 eq(signInSeconds(Unauthorized(), parked: 45), nil, "other failures are not a rate limit")
+eq(signInLimit(Login429(), parked: 45)?.reason, .signInLockout, "login 429: the sign-in lockout reason")
+eq(signInLimit(DispatcharrGateError.rateLimited(seconds: 7, reason: .apiKeyLockout), parked: 45)?.reason, .apiKeyLockout,
+   "API 429 keeps its own reason")
 do {
     var shown: [Int] = []
+    var reasons: [RateLimitReason] = []
     var retried = 0
     var attempts = 0
     var thrown: Error?
     do {
         let _: Int = try await RateLimitRetry.run(
-            rateLimitSeconds: { signInSeconds($0, parked: 2) },
+            rateLimit: { signInLimit($0, parked: 2) },
             tick: {},
-            onCountdown: { shown.append($0) },
+            onCountdown: { left, reason in shown.append(left); reasons.append(reason) },
             onRetry: { retried += 1 }
         ) {
             attempts += 1
@@ -209,15 +214,17 @@ do {
     eq(attempts, 3, "login: three attempts")
     eq(retried, 2, "login: two automatic retries")
     eq(shown, [2, 1, 2, 1], "login: countdown from the park")
-    eq(shown.map(DispatcharrRateLimitCopy.serverBusyCountdown).first,
-       "The server is busy. Trying again in 2 seconds.", "login: countdown line")
+    eq(Set(reasons), [.signInLockout], "login: the sign-in reason on every tick")
+    eq(DispatcharrRateLimitCopy.serverBusyCountdown(shown[0], reason: reasons[0]),
+       "Dispatcharr rate-limited sign-ins from this network after too many failed attempts. Trying again in 2 seconds.",
+       "login: countdown line")
     eq((thrown as? LocalizedError)?.errorDescription,
-       "The server is rate-limiting requests from this network (HTTP 429). Wait 2 seconds and try again.",
+       "Dispatcharr rate-limited sign-ins from this network after too many failed attempts. Wait 2 seconds and try again.",
        "login: final copy")
 }
 do {
     var attempts = 0
-    let r: Int = try await RateLimitRetry.run(rateLimitSeconds: { signInSeconds($0, parked: 1) }, tick: {}, onCountdown: { _ in }) {
+    let r: Int = try await RateLimitRetry.run(rateLimit: { signInLimit($0, parked: 1) }, tick: {}, onCountdown: { _, _ in }) {
         attempts += 1
         if attempts == 1 { throw Login429() }
         return 5
@@ -227,12 +234,31 @@ do {
 }
 
 // countdownCopy
-eq(DispatcharrRateLimitCopy.serverBusyCountdown(45), "The server is busy. Trying again in 45 seconds.", "countdown plural")
-eq(DispatcharrRateLimitCopy.serverBusyCountdown(1), "The server is busy. Trying again in 1 second.", "countdown singular")
+// The exact copy table (stream-429-spec.md UPDATE).
+eq(DispatcharrRateLimitCopy.serverBusyCountdown(45, reason: .apiKeyLockout),
+   "Dispatcharr rate-limited this network after too many failed API key attempts. Trying again in 45 seconds.", "API key countdown")
+eq(DispatcharrRateLimitCopy.rateLimitedMessage(45, reason: .apiKeyLockout),
+   "Dispatcharr rate-limited this network after too many failed API key attempts. Wait 45 seconds and try again.", "API key final")
+eq(DispatcharrRateLimitCopy.serverBusyCountdown(30, reason: .signInLockout),
+   "Dispatcharr rate-limited sign-ins from this network after too many failed attempts. Trying again in 30 seconds.", "sign-in countdown")
+eq(DispatcharrRateLimitCopy.rateLimitedMessage(30, reason: .signInLockout),
+   "Dispatcharr rate-limited sign-ins from this network after too many failed attempts. Wait 30 seconds and try again.", "sign-in final")
+eq(DispatcharrRateLimitCopy.serverBusyCountdown(45),
+   "Dispatcharr rate-limited this network (HTTP 429). Trying again in 45 seconds.", "other countdown plural")
+eq(DispatcharrRateLimitCopy.serverBusyCountdown(1),
+   "Dispatcharr rate-limited this network (HTTP 429). Trying again in 1 second.", "other countdown singular")
 eq(DispatcharrRateLimitCopy.rateLimitedMessage(1),
-   "The server is rate-limiting requests from this network (HTTP 429). Wait 1 second and try again.", "final singular")
+   "Dispatcharr rate-limited this network (HTTP 429). Wait 1 second and try again.", "other final singular")
+eq(DispatcharrRateLimitCopy.rateLimitedMessage(1, reason: .apiKeyLockout),
+   "Dispatcharr rate-limited this network after too many failed API key attempts. Wait 1 second and try again.", "API key final singular")
+eq(DispatcharrRateLimitCopy.streamLimitMessage(2),
+   "Dispatcharr stream limit reached: 2 concurrent streams allowed for this account.", "stream limit with count")
+eq(DispatcharrRateLimitCopy.streamLimitMessage(nil), "Dispatcharr stream limit reached.", "stream limit without count")
 eq(DispatcharrGateError.rateLimited(seconds: 60).errorDescription,
-   "The server is rate-limiting requests from this network (HTTP 429). Wait 60 seconds and try again.", "typed error copy")
+   "Dispatcharr rate-limited this network (HTTP 429). Wait 60 seconds and try again.", "typed error copy")
+eq(DispatcharrGateError.rateLimited(seconds: 60, reason: .apiKeyLockout).errorDescription,
+   "Dispatcharr rate-limited this network after too many failed API key attempts. Wait 60 seconds and try again.",
+   "typed error copy names the reason")
 
 // MARK: - DispatcharrKeyGateTest
 
@@ -343,6 +369,60 @@ do {
     eq(g.replacementKey(for: "same"), nil, "a re-login that returns the same key replaces nothing")
     now += DispatcharrRequestGate.replacementMemo + 1
     eq(g.replacementKey(for: "old-key"), nil, "the swap expires after the memo window")
+}
+
+// 429 reasons (stream-429-spec.md UPDATE): every body shape.
+do {
+    func c(_ body: String?, _ retryAfter: String? = nil) -> Dispatcharr429 {
+        Dispatcharr429.classify(body: body.map { Data($0.utf8) }, retryAfter: retryAfter)
+    }
+    eq(c(#"{"detail":"Too many API key attempts. Try again later."}"#, "58"), .rateLimited(.apiKeyLockout, seconds: 58),
+       "JSON detail, API key lockout")
+    eq(c(#"{"detail":"Too many API key attempts. Try again later. Expected available in 41 seconds."}"#, "41"),
+       .rateLimited(.apiKeyLockout, seconds: 41), "JSON detail with the DRF suffix")
+    eq(c(#"{"detail":"too many api key attempts. try again later."}"#), .rateLimited(.apiKeyLockout, seconds: 60),
+       "case-insensitive; no Retry-After: the gate default")
+    eq(c(#"{"detail":"Too many login attempts. Try again later."}"#, "30"), .rateLimited(.signInLockout, seconds: 30),
+       "JSON detail, sign-in lockout")
+    eq(c("Too many login attempts. Try again later.", "15"), .rateLimited(.signInLockout, seconds: 15),
+       "plain-text sign-in lockout")
+    eq(c("Too many API key attempts. Try again later.\n"), .rateLimited(.apiKeyLockout, seconds: 60), "plain-text API key lockout")
+    eq(c(#"{"error":"Stream limit exceeded (2 concurrent streams allowed)"}"#), .streamLimit(count: 2),
+       "stream limit JSON error with its count")
+    eq(c(#"{"error":"Stream limit exceeded (2 concurrent streams allowed)"}"#, "30"), .streamLimit(count: 2),
+       "stream limit wins over a Retry-After")
+    eq(c(#"{"error":"Stream limit exceeded"}"#), .streamLimit(count: nil), "stream limit without a count")
+    eq(c(#"{"detail":"Request was throttled."}"#, "12"), .rateLimited(.other, seconds: 12), "unknown JSON detail: other")
+    eq(c("<html>429</html>", "9"), .rateLimited(.other, seconds: 9), "unknown plain text: other")
+    eq(c(nil, "500"), .rateLimited(.other, seconds: 120), "no body: other, capped Retry-After")
+    eq(c("", "0"), .rateLimited(.other, seconds: 60), "empty body, zero Retry-After: default")
+    eq(c(#"{"detail":"Server says: Too many API key attempts"}"#), .rateLimited(.other, seconds: 60),
+       "only a LEADING phrase counts")
+    eq(Dispatcharr429.streamCount("Stream limit exceeded (12 concurrent streams allowed)"), 12, "count parsed")
+    // Timeshift answers its stream limit as 403 plain text.
+    eq(Dispatcharr429.classify(reasonText: Dispatcharr429.reasonText(Data("Stream limit exceeded".utf8)), retryAfter: nil),
+       .streamLimit(count: nil), "timeshift 403 plain text: stream limit")
+}
+// No stream opens while the server is paused.
+do {
+    let g = freshGate()
+    let stream = "https://tv.example.test/proxy/ts/stream/abc"
+    eq(g.streamOpenWaitSeconds(stream), 0, "not paused: open")
+    g.noteStream429(stream, .streamLimit(count: 2))
+    eq(g.streamOpenWaitSeconds(stream), 0, "a stream limit never pauses the gate")
+    g.noteStream429(stream, .rateLimited(.apiKeyLockout, seconds: 30))
+    eq(g.streamOpenWaitSeconds(stream), 30, "lockout: no open for the Retry-After")
+    eq(g.pausedReason(DispatcharrRequestGate.serverKey(stream)), .apiKeyLockout, "the pause keeps the server's reason")
+    eq(g.pausedSeconds(DispatcharrRequestGate.serverKey("https://tv.example.test/api/channels/channels/")), 30,
+       "the same pause as API calls to that server")
+    eq(g.streamOpenWaitSeconds("https://other.example.test/proxy/ts/stream/x"), 0, "other servers unaffected")
+    now += 29
+    eq(g.streamOpenWaitSeconds(stream), 1, "one second left")
+    now += 1
+    eq(g.streamOpenWaitSeconds(stream), 0, "open again once the pause ends")
+    // An API 429 pauses stream opens too.
+    g.pause(DispatcharrRequestGate.serverKey("https://tv.example.test/api/epg/grid/"), seconds: 10)
+    eq(g.streamOpenWaitSeconds(stream), 10, "an API 429 also holds stream opens")
 }
 
 // Key probe single flight: concurrent callers for one key share one probe.
@@ -589,7 +669,7 @@ func preflight(_ answers: [SetupKeyCheck]) async -> (SetupKeyVerdict, Int, [(Int
         let a = answers[min(i, answers.count - 1)]
         i += 1
         return a
-    }, onCountdown: { left, limited in shown.append((left, limited)) })
+    }, onCountdown: { left, limited in shown.append((left, limited != nil)) })
     return (v, i, shown)
 }
 

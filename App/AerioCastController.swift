@@ -1328,7 +1328,7 @@ final class AerioCastController: NSObject, ObservableObject {
                 ? "Dispatcharr could not start this channel (HTTP \(code))."
                 : "The server could not start this channel (HTTP \(code))."
         case CastHLSProxyError.stopped(let notice):
-            return "\(notice.title). \(notice.message)"
+            return notice.text
         case CastHLSProxyError.ingestUnreachable:
             return "This channel's stream could not be reached from this iPhone."
         case CastHLSProxyError.noLANAddress:

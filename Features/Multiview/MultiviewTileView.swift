@@ -894,6 +894,7 @@ struct MultiviewTileView: View {
                         catchup: tile.catchup,
                         progressStore: progressStore,
                         pipEnabled: isSoleTile,
+                        isSoleTile: isSoleTile,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
                         // one-way, so the grid stays pure rather than
@@ -1288,6 +1289,7 @@ struct MultiviewTileView: View {
                         catchup: tile.catchup,
                         progressStore: progressStore,
                         pipEnabled: isSoleTile,
+                        isSoleTile: isSoleTile,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )
                 } else {
@@ -1896,16 +1898,18 @@ struct MultiviewTileView: View {
         return ZStack {
             Color.black.opacity(compact ? 0.82 : 0.72)
             VStack(spacing: compact ? 6 : 12) {
-                Text(notice.title)
-                    .scaledFont(compact ? .headline : .title3.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
+                if !notice.title.isEmpty {
+                    Text(notice.title)
+                        .scaledFont(compact ? .headline : .title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                }
                 Text(notice.message)
                     .scaledFont(compact ? .caption : .subheadline)
                     .foregroundStyle(.white.opacity(0.85))
                     .multilineTextAlignment(.center)
                     .lineLimit(compact ? 3 : nil)
-                    .padding(.horizontal, compact ? 8 : 24)
+                    .padding(.horizontal, TileMessageInsets.text(compact: compact))
                 #if os(tvOS)
                 if compact {
                     Text("Select Retry in the controls.")
@@ -1926,7 +1930,7 @@ struct MultiviewTileView: View {
                 .buttonStyle(.plain)
                 #endif
             }
-            .padding(compact ? 12 : 32)
+            .padding(TileMessageInsets.stack(compact: compact))
         }
     }
 

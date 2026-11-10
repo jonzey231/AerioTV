@@ -1906,7 +1906,7 @@ private struct PlayerRootView: View {
             guard let notice, state == .playing else { return }
             debugLog("[LIMIT] player screen showing \(notice.kind.rawValue) notice")
             didAttemptPlayFailover = true
-            lastError = "\(notice.title). \(notice.message)"
+            lastError = notice.text
             state = .error
         }
         // Offset and opacity applied to the whole view (including the black background) so the

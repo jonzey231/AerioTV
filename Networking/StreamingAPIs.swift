@@ -380,15 +380,37 @@ struct LiveStopNotice: Equatable, Sendable {
         case providerLimit
         /// Clean end again within 60 s of the automatic reconnect.
         case streamEnded
+        /// A stream 429 lockout that outlasted the automatic retries.
+        case rateLimited
     }
     let kind: Kind
+    /// Empty for the rate-limit card: its one line is the message.
     let title: String
     let message: String
+
+    /// One line for logs and the Cast failure text: "Title. Message", or the
+    /// message alone when there is no title.
+    var text: String { title.isEmpty ? message : "\(title). \(message)" }
 
     static let streamEnded = LiveStopNotice(
         kind: .streamEnded,
         title: "Stream ended",
         message: "This stream was stopped by the server. Press Retry to start it again.")
+
+    /// Stream 429 rate limit past the retry budget: the same final copy as
+    /// an API 429, naming the server's reason (stream-429-spec.md UPDATE).
+    static func rateLimited(seconds: Int, reason: RateLimitReason) -> LiveStopNotice {
+        LiveStopNotice(kind: .rateLimited,
+                       title: "",
+                       message: DispatcharrRateLimitCopy.rateLimitedMessage(seconds, reason: reason))
+    }
+
+    /// Stream-limit 429 (no retry): the spec's sentence with the server's count.
+    static func streamLimit(count: Int?) -> LiveStopNotice {
+        LiveStopNotice(kind: .userStreamLimit,
+                       title: "Too many sessions playing",
+                       message: DispatcharrRateLimitCopy.streamLimitMessage(count))
+    }
 }
 
 /// Dispatcharr connection-limit refusals (Android parity, cf8afe49),
@@ -425,9 +447,8 @@ enum DispatcharrConnectionLimit {
               let reason = reason?.trimmingCharacters(in: .whitespacesAndNewlines),
               !reason.isEmpty else { return nil }
         if code == 429, reason.range(of: userLimitPrefix, options: [.caseInsensitive, .anchored]) != nil {
-            return LiveStopNotice(kind: .userStreamLimit,
-                                  title: "Too many sessions playing",
-                                  message: userLimitMessage(reason))
+            // stream-429-spec.md UPDATE: the spec's sentence with the server's count.
+            return .streamLimit(count: Dispatcharr429.streamCount(reason))
         }
         if code == 503, reason.range(of: providerLimitPrefix, options: [.caseInsensitive, .anchored]) != nil {
             return LiveStopNotice(kind: .providerLimit,
@@ -461,22 +482,6 @@ enum DispatcharrConnectionLimit {
               let reason = dict["error"] as? String else { return nil }
         let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func userLimitMessage(_ reason: String) -> String {
-        var count: Int?
-        if let open = reason.firstIndex(of: "(") {
-            let digits = reason[reason.index(after: open)...].prefix { $0.isNumber }
-            count = Int(digits)
-        }
-        let sessions: String
-        switch count {
-        case nil: sessions = "a limited number of sessions"
-        case 1: sessions = "1 session"
-        case let n?: sessions = "\(n) sessions"
-        }
-        return "Your account can play \(sessions) at once, and they are all in use. "
-            + "Stop something that is playing, or contact your server administrator."
     }
 }
 
@@ -7740,8 +7745,8 @@ extension DispatcharrAPI {
             }
         } catch DispatcharrGateError.keyRejected {
             return .rejected
-        } catch DispatcharrGateError.rateLimited(let seconds) {
-            return .unknown(retryAfter: seconds)
+        } catch DispatcharrGateError.rateLimited(let seconds, let reason) {
+            return .unknown(retryAfter: seconds, reason: reason)
         } catch {
             return .unknown(retryAfter: nil)
         }

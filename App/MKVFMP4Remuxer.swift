@@ -78,6 +78,12 @@ final class MKVRangeFetcher: @unchecked Sendable {
     }
 
     func fetch(offset: Int64, length: Int) throws -> Data {
+        // No stream opens while the server is paused after a 429 (stream-429-spec.md).
+        let paused = DispatcharrRequestGate.shared.streamOpenWaitSeconds(url.absoluteString)
+        if paused > 0 {
+            let why = DispatcharrRequestGate.shared.pausedReason(DispatcharrRequestGate.serverKey(url.absoluteString))
+            throw MKVRemuxError(reason: "range fetch HTTP 429 | refusal=lockout | wait=\(paused) | why=\(why.rawValue) | paused")
+        }
         var request = URLRequest(url: url)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-\(offset + Int64(length) - 1)", forHTTPHeaderField: "Range")
@@ -88,7 +94,13 @@ final class MKVRangeFetcher: @unchecked Sendable {
             defer { sem.signal() }
             if let err { error = err; return }
             guard let http = response as? HTTPURLResponse, http.statusCode == 206 || http.statusCode == 200 else {
-                error = MKVRemuxError(reason: "range fetch HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                var reason = "range fetch HTTP \(code)"
+                if code == 429, let self {
+                    reason += MKVStream429.note(url: self.url, body: data,
+                                                retryAfter: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"))
+                }
+                error = MKVRemuxError(reason: reason)
                 return
             }
             if let self, self.totalLength == 0,
@@ -302,6 +314,15 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         failed = nil
         suspended = false
         parked = false
+        // No stream opens while the server is paused after a 429 (stream-429-spec.md).
+        let paused = DispatcharrRequestGate.shared.streamOpenWaitSeconds(url.absoluteString)
+        if paused > 0 {
+            let why = DispatcharrRequestGate.shared.pausedReason(DispatcharrRequestGate.serverKey(url.absoluteString))
+            failed = "HTTP 429 on media range | refusal=lockout | wait=\(paused) | why=\(why.rawValue) | paused"
+            debugLog("[RATE] VOD stream open skipped: server paused after a 429, \(paused)s left")
+            cond.broadcast()
+            return
+        }
         var request = URLRequest(url: url)
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
@@ -595,6 +616,14 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             debugLog("[MKV] response rejected: \(reason) (HTTP \(status), Content-Range '\(rangeHeader)')")
             self.cond.broadcast()
             completionHandler(.cancel)
+        }
+        if status == 429 {
+            // No body here (the response is cancelled): the lockout carries
+            // a Retry-After, Dispatcharr's stream-limit answer does not.
+            let retryAfter = http?.value(forHTTPHeaderField: "Retry-After")
+            reject("HTTP 429 on media range" + MKVStream429.note(url: url, body: nil, retryAfter: retryAfter,
+                                                                  noBodyMeansLimit: retryAfter == nil))
+            return
         }
         if status >= 400 {
             reject("HTTP \(status) on media range"); return
@@ -3001,5 +3030,20 @@ final class MKVVODServer: @unchecked Sendable {
         connection.send(content: response, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+}
+
+/// Stream 429 on a VOD/DVR media request (stream-429-spec.md): classify,
+/// feed the shared gate on a rate limit, and return the marker the tile's
+/// failure handler reads.
+enum MKVStream429 {
+    static func note(url: URL, body: Data?, retryAfter: String?, noBodyMeansLimit: Bool = false) -> String {
+        // Dispatcharr playlists only; Xtream and M3U keep their handling.
+        guard DispatcharrConnectionLimit.directConnectActive else { return "" }
+        let refusal: Dispatcharr429 = (body == nil && noBodyMeansLimit)
+            ? .streamLimit(count: nil)
+            : Dispatcharr429.classify(body: body, retryAfter: retryAfter)
+        DispatcharrRequestGate.shared.noteStream429(url.absoluteString, refusal)
+        return Stream429Marker.marker(refusal)
     }
 }

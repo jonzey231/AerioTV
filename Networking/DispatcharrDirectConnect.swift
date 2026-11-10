@@ -471,7 +471,10 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
         case .refreshExpired:
             return "Your session expired. AerioTV will re-authenticate automatically."
         case .loginRateLimited:
-            return "The server is rate-limiting login attempts (HTTP 429). Wait a minute and try again."
+            // stream-429-spec.md UPDATE; the wait is the gate default here
+            // (flows that know the server's Retry-After count it down).
+            return DispatcharrRateLimitCopy.rateLimitedMessage(DispatcharrRequestGate.defaultRetryAfter,
+                                                               reason: .signInLockout)
         case .noAPIKeyForAccount(let username):
             return "The Dispatcharr account '\(username)' has no API key. In Dispatcharr, open System, then Users, edit this user, and generate an API key, then try again."
         case .unexpectedUserResponse(let detail):
@@ -604,7 +607,8 @@ extension DispatcharrAPI {
             debugLog("📺 Direct Connect login FAIL: rate limited (HTTP 429)")
             DispatcharrLoginGate.shared.parkServer(
                 baseURL: baseURL,
-                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
+                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"),
+                body: data
             )
             throw DispatcharrDirectConnectError.loginRateLimited
         }
@@ -659,7 +663,8 @@ extension DispatcharrAPI {
         if status == 429 {
             DispatcharrLoginGate.shared.parkServer(
                 baseURL: baseURL,
-                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")
+                retryAfterHeader: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"),
+                body: data
             )
             throw DispatcharrDirectConnectError.loginRateLimited
         }
@@ -940,6 +945,8 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     private var lastKey: [UUID: String] = [:]
     private var rejectedUntil: [UUID: Date] = [:]
     private var serverParkedUntil: [String: Date] = [:]
+    /// The server's reason for each login park (stream-429-spec.md UPDATE).
+    private var serverParkedReason: [String: RateLimitReason] = [:]
 
     private static func hostKey(_ baseURL: String) -> String {
         if let c = URLComponents(string: baseURL.trimmingCharacters(in: .whitespaces)), let h = c.host {
@@ -949,6 +956,12 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     }
 
     /// Whole seconds left on a 429 park for this host, 0 when logins may go out.
+    /// The server's reason for the current login park.
+    func serverParkedReason(baseURL: String) -> RateLimitReason {
+        lock.lock(); defer { lock.unlock() }
+        return serverParkedReason[Self.hostKey(baseURL)] ?? .signInLockout
+    }
+
     func serverParkedSeconds(baseURL: String) -> Int {
         lock.lock(); defer { lock.unlock() }
         guard let until = serverParkedUntil[Self.hostKey(baseURL)] else { return 0 }
@@ -957,13 +970,20 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     }
 
     /// Record a 429 from the login (or refresh) endpoint.
-    func parkServer(baseURL: String, retryAfterHeader: String?) {
+    func parkServer(baseURL: String, retryAfterHeader: String?, body: Data? = nil) {
         // Same parser as the API-call pause (seconds or HTTP date, 60 s
         // default, 120 s cap; DispatcharrRequestGate).
         let secs = TimeInterval(DispatcharrRequestGate.parseRetryAfter(retryAfterHeader))
+        // A login 429 is the sign-in lockout unless the body says otherwise.
+        var reason = RateLimitReason.signInLockout
+        if case .rateLimited(let r, _) = Dispatcharr429.classify(body: body, retryAfter: retryAfterHeader), r != .other {
+            reason = r
+        }
         lock.lock()
         serverParkedUntil[Self.hostKey(baseURL)] = Date(timeIntervalSinceNow: secs)
+        serverParkedReason[Self.hostKey(baseURL)] = reason
         lock.unlock()
+        debugLog("[AUTH] login 429 reason=\(reason.rawValue)")
         debugLog("[AUTH] login throttled by the server; next attempt in \(Int(secs))s")
     }
 

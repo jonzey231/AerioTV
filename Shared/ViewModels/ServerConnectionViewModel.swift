@@ -326,18 +326,21 @@ final class ServerConnectionViewModel {
         let signInBase = normalizedURL
         do {
             try await RateLimitRetry.run(
-                rateLimitSeconds: { error in
-                    RateLimitRetry.signInWaitSeconds(
+                rateLimit: { error in
+                    RateLimitRetry.signInWait(
                         error,
-                        apiSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
+                        apiLimit: { DispatcharrHTTPGate.rateLimit(in: $0) },
                         isLogin429: {
                             if case .loginRateLimited? = $0 as? DispatcharrDirectConnectError { return true }
                             return false
                         },
-                        loginParkedSeconds: { DispatcharrLoginGate.shared.serverParkedSeconds(baseURL: signInBase) })
+                        loginParked: {
+                            (DispatcharrLoginGate.shared.serverParkedSeconds(baseURL: signInBase),
+                             DispatcharrLoginGate.shared.serverParkedReason(baseURL: signInBase))
+                        })
                 },
-                onCountdown: { left in
-                    let line = DispatcharrRateLimitCopy.serverBusyCountdown(left)
+                onCountdown: { left, reason in
+                    let line = DispatcharrRateLimitCopy.serverBusyCountdown(left, reason: reason)
                     self.busyMessage = line
                     onCountdown?(line, left)
                 },

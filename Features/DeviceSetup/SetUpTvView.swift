@@ -433,8 +433,8 @@ struct SetUpTvView: View {
             if payload.playlist.type == "dispatcharr", let key = payload.playlist.credential?.apiKey {
                 step = .checking(DispatcharrRateLimitCopy.checkingLine)
                 let verdict = await SetupKeySender.check(key: key, server: pl) { left, limited in
-                    step = .checking(limited ? DispatcharrRateLimitCopy.serverBusyCountdown(left)
-                                             : DispatcharrRateLimitCopy.checkingLine)
+                    step = .checking(limited.map { DispatcharrRateLimitCopy.serverBusyCountdown(left, reason: $0) }
+                                     ?? DispatcharrRateLimitCopy.checkingLine)
                 }
                 if verdict == .rejected {
                     step = .keyRejected(pl.id, .choose(t, code))
