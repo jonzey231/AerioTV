@@ -10801,7 +10801,15 @@ final class RemoteSessionCardMetrics: ObservableObject {
         guard width > 0, height > 0 else { return }
 
         // Candidate frames in the bar's own (untransformed) bounds space.
+        // The glass capsule is the item platter view (seen as
+        // _UITabBarItemPlatterView on every measured bar); it wins whatever
+        // its share of the bar. On a wide bar it is well under 60 percent:
+        // the iPhone Duo inner display in portrait has a 669 pt bar with a
+        // five-tab capsule of about 400 pt, the capsule was never found, and
+        // the dock cards fell back to 20 pt margins, nearly full width
+        // (Logan 2026-11-10). The 60 percent rule stays as the fallback.
         var best: (rect: CGRect, view: UIView)?
+        var platter: (rect: CGRect, view: UIView)?
         func walk(_ view: UIView, origin: CGPoint, depth: Int) {
             for sub in view.subviews where !sub.isHidden && sub.alpha > 0.01 {
                 let l = sub.layer
@@ -10809,13 +10817,18 @@ final class RemoteSessionCardMetrics: ObservableObject {
                     x: origin.x + l.position.x - l.anchorPoint.x * sub.bounds.width - view.bounds.origin.x,
                     y: origin.y + l.position.y - l.anchorPoint.y * sub.bounds.height - view.bounds.origin.y)
                 let r = CGRect(origin: o, size: sub.bounds.size)
-                if r.width < width - 1, r.width >= width * 0.6, r.height >= 40 {
-                    if best == nil || r.width > best!.rect.width { best = (r, sub) }
+                if r.width < width - 1, r.height >= 40 {
+                    if r.width >= width * 0.6, best == nil || r.width > best!.rect.width { best = (r, sub) }
+                    if r.width >= 120, String(describing: type(of: sub)).hasSuffix("PlatterView"),
+                       platter == nil || r.width > platter!.rect.width {
+                        platter = (r, sub)
+                    }
                 }
                 if depth < 4 { walk(sub, origin: o, depth: depth + 1) }
             }
         }
         walk(bar, origin: .zero, depth: 0)
+        if let platter { best = platter }
 
         let barLayer = bar.layer
         let barOriginX = barLayer.position.x - barLayer.anchorPoint.x * width
