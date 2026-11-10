@@ -140,6 +140,9 @@ private struct SettingsPhoneTabBarChrome: ViewModifier {
                                 for: .scrollContent)
                 .ignoresSafeArea(.container, edges: .bottom)
                 .aerioContentUnderTabBar()
+                // iPhone Duo vertical bar: the Control-a-TV item on every
+                // Settings page, root and pushed (Logan 2026-11-09).
+                .aerioVerticalBarControlATV()
         } else if PadTabPill.isActive {
             // iPad bottom pill (Logan 2026-10-04): last row clears it.
             content

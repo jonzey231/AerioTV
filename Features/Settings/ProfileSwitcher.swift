@@ -30,6 +30,9 @@ struct ProfileSwitcherButton: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
     var size: CGFloat = 38
+    /// Toolbar use (iPhone Duo vertical bar): a titled symbol label, so the
+    /// system overflow menu lists it as "Switch Profile" with an icon.
+    var titled: Bool = false
     @ObservedObject private var manager = ProfileManager.shared
     @State private var open = false
 
@@ -39,7 +42,16 @@ struct ProfileSwitcherButton: View {
            RoleRules.canSeeSwitcher(manager.activeRoleNow) {
             let activeId = manager.activeProfileIds[pid]
             let active = profiles.first { $0.id == activeId } ?? profiles[0]
-            Button { open = true } label: { ProfileAvatarView(active, size: size) }
+            Button { open = true } label: {
+                if titled {
+                    // A symbol, not the avatar: menus drop custom icon views
+                    // (the overflow showed the bare title), and bars draw
+                    // symbols in the same weight as their other items.
+                    Label("Switch Profile", systemImage: "person.crop.circle")
+                } else {
+                    ProfileAvatarView(active, size: size)
+                }
+            }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Switch Profile")
                 .sheet(isPresented: $open) {

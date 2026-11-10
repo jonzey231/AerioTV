@@ -606,7 +606,8 @@ struct MoviesView: View {
             // under the library header, where the search circle is, like
             // Android (Logan 2026-09-09); the page scrolls the header to
             // the top so the results land in view.
-            .toolbar(.hidden, for: .navigationBar)
+            // iPhone Duo vertical bar: the bar stays on to carry the actions.
+            .aerioPhoneNavigationBarHidden()
             #endif
             .task(id: libraryKey) {
                 // The filter and the sort run in SQL and hand back row ids

@@ -169,6 +169,9 @@ struct SettingsView: View {
     @MainActor
     private func applySettingsDeepLink(_ page: SettingsDeepLinkPage) {
         let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        // Edit Playlist may name a playlist other than the active one.
+        let editTarget = SettingsDeepLink.shared.takeEditPlaylistID()
+            .flatMap { id in servers.first(where: { $0.id == id }) } ?? activeServer
         debugLog("🔗 SettingsView: deep link page=\(page.rawValue)")
         // A short hop off the current turn so the navigation container has
         // finished mounting (cold launch lands here inside the first
@@ -186,7 +189,7 @@ struct SettingsView: View {
                 if let server = activeServer { tvSelection = .server(server.id) }
                 tvDetailFocusToken += 1
             case .editPlaylist:
-                if let server = activeServer {
+                if let server = editTarget {
                     tvSelection = .server(server.id)
                     navPath = NavigationPath()
                     navPath.append(SettingsRoute.editServer(server.id))
@@ -215,7 +218,7 @@ struct SettingsView: View {
                     phonePath.append(SettingsRoute.server(server.id))
                 }
             case .editPlaylist:
-                guard let server = activeServer else { return }
+                guard let server = editTarget else { return }
                 // Edit is a sheet on both iPhone and iPad.
                 if isPad { padSelection = .server(server.id) } else { phonePath = NavigationPath() }
                 serverToEdit = server
@@ -658,6 +661,9 @@ struct SettingsView: View {
             #if os(iOS)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            // iPhone Duo vertical bar: the Control-a-TV item comes from
+            // settingsPhoneTabBarChrome, like every pushed Settings page.
+            .aerioTrimsLargeTitleGapInVerticalBar()
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             #if os(iOS)

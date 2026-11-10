@@ -4925,6 +4925,9 @@ struct MainTabView: View {
     /// AirPlay rides the same card (rule 2): the monitor reports when the
     /// AVPlayer engine's output actually moved to an AirPlay receiver.
     @ObservedObject private var airPlay = AirPlayMonitor.shared
+    /// iPhone Duo vertical bar: whether the bar carries the Control-a-TV
+    /// button (the tabs report the posture, this view reports the gates).
+    @ObservedObject private var verticalBarControlATV = VerticalBarControlATV.shared
     /// Presents the "Control a TV" picker from the floating pill (no channel
     /// needs to be playing on the phone -- act as a pure remote).
     @State private var showCompanionPickerGlobal = false
@@ -6464,7 +6467,10 @@ struct MainTabView: View {
                // Radio Mode card row carries the button (Logan 2026-10-15).
                !radioCardCarriesControlATV,
                // The Set up a TV card row carries it too.
-               !setupCardVisible {
+               !setupCardVisible,
+               // iPhone Duo vertical bar: the button is a bar item there
+               // (VerticalBarControlATV), never a floating circle.
+               !verticalBarControlATV.verticalBarActive {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
             }
         }
@@ -6692,6 +6698,12 @@ struct MainTabView: View {
         // only while the Nothing Phone saw 11 Cast routes). Use the unified
         // sectioned picker instead. No channel is playing from here, so the
         // AirPlay section (an AVPlayer-session affordance) stays off.
+        .onChange(of: controlATVBaseGate, initial: true) { _, gate in
+            if verticalBarControlATV.available != gate { verticalBarControlATV.available = gate }
+        }
+        .onAppear {
+            verticalBarControlATV.open = { showCompanionPickerGlobal = true }
+        }
         .sheet(isPresented: $showCompanionPickerGlobal) {
             // AirPlay row too (2026-09-21 rebuild): picking a TV here puts
             // the card in its "Select a channel" idle-route state.
@@ -7741,8 +7753,16 @@ struct MainTabView: View {
             && !setupCardVisible
     }
 
-    /// Same gates as the phone's floating Control-a-TV button.
+    /// Same gates as the phone's floating Control-a-TV button. False while
+    /// the iPhone Duo vertical bar carries the button as a bar item, so no
+    /// dock card row draws a second one.
     private var showsControlATVButton: Bool {
+        controlATVBaseGate && !verticalBarControlATV.verticalBarActive
+    }
+
+    /// The Control-a-TV gates without the vertical bar rule; feeds the
+    /// vertical bar item (VerticalBarControlATV.available).
+    private var controlATVBaseGate: Bool {
         (!companionClient.devices.isEmpty || castController.state != .unavailable)
             && !companionClient.isControlling
             && !castController.isCasting
@@ -10410,6 +10430,12 @@ final class TabBarCollapseState: ObservableObject {
     func set(_ value: Bool) {
         // iPad's bottom pill never collapses (Logan 2026-10-04).
         if PadTabPill.isActive { return }
+        // Nor does the iPhone Duo vertical bar: the system draws that rail
+        // and keeps it on screen, so collapsing only hid an empty UITabBar,
+        // drew the minimized tab button over the content, and the show's
+        // frame correction stretched that UITabBar over the whole window
+        // (simulator logs 2026-11-09: "shown: frame=0,0 466x678").
+        if value && VerticalBarControlATV.shared.verticalBarActive { return }
         guard collapsed != value else { return }
         collapsed = value
         // Off the caller's turn: the show arrives from the scroll geometry
@@ -10564,6 +10590,14 @@ final class TabBarCollapseState: ObservableObject {
         // -168 at 01:39:37). Only then set the frame UITabBarController
         // would: full width on the bottom edge, at the bar's own height.
         guard let superview = bar.superview else { return }
+        // Never for the iPhone Duo side rail: its UITabBar is a tall, narrow
+        // column the system places, and this "bottom edge, full width" frame
+        // stretched it over the whole window (0,0 466x678), after which the
+        // system redrew the rail wide with labels over the actions group
+        // (Logan's report and simulator logs, 2026-11-09).
+        if VerticalBarControlATV.shared.verticalBarActive || bar.bounds.height > bar.bounds.width {
+            return
+        }
         let height = bar.bounds.height
         let expected = CGRect(x: 0, y: superview.bounds.height - height,
                               width: superview.bounds.width, height: height)
@@ -11011,6 +11045,161 @@ extension View {
         } else {
             self
         }
+    }
+}
+
+// MARK: - iPhone Duo vertical bar
+
+extension EnvironmentValues {
+    /// True while the system lays this navigation container's bars out as
+    /// one vertical bar (iPhone Duo outer display, and the inner display in
+    /// landscape; Apple Tech Talk 111462, "Design for iPhone Duo"). Read it
+    /// inside a NavigationStack. Always false before iOS 27.1.
+    var aerioVerticalBarActive: Bool {
+        if #available(iOS 27.1, *) { return toolbarVerticalEdge != nil }
+        return false
+    }
+}
+
+extension View {
+    /// The phone screens hide the navigation bar and draw their own header
+    /// row. With a vertical bar the system moves the navigation bar's items
+    /// into the side region, so the bar stays on there and carries the
+    /// screen's actions (Apple: use the bars navigation containers provide).
+    func aerioPhoneNavigationBarHidden() -> some View {
+        modifier(PhoneNavigationBarHidden())
+    }
+}
+
+extension View {
+    /// Reports aerioVerticalBarActive, as seen here inside a NavigationStack,
+    /// to a view that owns the stack and so cannot read it itself.
+    func aerioReadsVerticalBar(_ active: Binding<Bool>) -> some View {
+        modifier(VerticalBarReader(active: active))
+    }
+}
+
+private struct VerticalBarReader: ViewModifier {
+    @Environment(\.aerioVerticalBarActive) private var vertical
+    @Binding var active: Bool
+    func body(content: Content) -> some View {
+        content.onChange(of: vertical, initial: true) { _, value in
+            if active != value { active = value }
+        }
+    }
+}
+
+/// iPhone Duo vertical bar: the round Control-a-TV button becomes a bar
+/// item (Logan 2026-11-09: "get the cast button above the nav bar"), the
+/// first item of the screen's actions group in the column above the tab
+/// bar. The system lays the group out and overflows it (Apple Tech Talk
+/// 111462); this item has the highest visibility priority so it never
+/// overflows. A floating circle could not know where the system put the
+/// actions and covered one of them, and a bottom placement added a second
+/// group plus a spacer that pushed every action but Search into the
+/// overflow menu (simulator, 2026-11-09).
+@MainActor
+final class VerticalBarControlATV: ObservableObject {
+    static let shared = VerticalBarControlATV()
+    /// MainTabView's Control-a-TV gates (devices found, not casting, no
+    /// fullscreen player, and so on).
+    @Published var available = false
+    /// True while the tabs report a vertical bar layout. Entering it
+    /// expands a collapsed bar (the vertical bar never collapses).
+    @Published var verticalBarActive = false {
+        didSet {
+            if verticalBarActive && !oldValue { TabBarCollapseState.shared.set(false) }
+        }
+    }
+    /// Opens the Control-a-TV picker (set by MainTabView).
+    var open: () -> Void = {}
+}
+
+extension View {
+    /// Adds the Control-a-TV bar item while the vertical bar is active and
+    /// reports the posture to MainTabView. Apply inside each tab's
+    /// NavigationStack. No effect with a bottom bar.
+    func aerioVerticalBarControlATV() -> some View {
+        modifier(VerticalBarControlATVItem())
+    }
+}
+
+private struct VerticalBarControlATVItem: ViewModifier {
+    @Environment(\.aerioVerticalBarActive) private var vertical
+    @ObservedObject private var model = VerticalBarControlATV.shared
+    func body(content: Content) -> some View {
+        Group {
+            if #available(iOS 27.1, *), vertical, model.available {
+                content.toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        // Primary color, like the unselected tab items.
+                        Button { model.open() } label: {
+                            Label("Control a TV", systemImage: "tv.and.mediabox")
+                        }
+                        .tint(.primary)
+                    }
+                    // Above every screen action: the owner's ask is that
+                    // this button always sits above the tab bar.
+                    .visibilityPriority(ToolbarItemVisibilityPriority(
+                        higherThan: ToolbarItemVisibilityPriority(higherThan: .high)))
+                }
+            } else {
+                content
+            }
+        }
+        .onChange(of: vertical, initial: true) { _, value in
+            if model.verticalBarActive != value { model.verticalBarActive = value }
+        }
+    }
+}
+
+extension View {
+    /// iPhone Duo vertical bar: a horizontal scroller (chips, card decks)
+    /// stops at the content edge instead of running under the side column.
+    /// SwiftUI scroll views extend into the safe area along their scroll
+    /// axis, which put chips behind the clock and the bar. The wrapper
+    /// keeps the safe-area frame and clips to it. No-op with a bottom bar.
+    func aerioClipsAtVerticalBar() -> some View {
+        modifier(VerticalBarContentClip())
+    }
+}
+
+private struct VerticalBarContentClip: ViewModifier {
+    @Environment(\.aerioVerticalBarActive) private var vertical
+    func body(content: Content) -> some View {
+        if vertical {
+            ZStack { content }.clipped()
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// iPhone Duo vertical bar: a large-title list's first section starts
+    /// about 100 pt under the title glyphs on the outer display (system
+    /// layout, measured with and without our bar items), against about 24
+    /// pt between the other Settings sections. Logan 2026-11-09: "Still a
+    /// lot of padding". Pulls the list up by the excess, vertical bar only.
+    func aerioTrimsLargeTitleGapInVerticalBar() -> some View {
+        modifier(VerticalBarLargeTitleTrim())
+    }
+}
+
+private struct VerticalBarLargeTitleTrim: ViewModifier {
+    @Environment(\.aerioVerticalBarActive) private var vertical
+    /// Measured on the Duo simulator 2026-11-09: title glyphs end at y 65,
+    /// the first header starts at y 165; 24 pt is the target.
+    static let excess: CGFloat = 76
+    func body(content: Content) -> some View {
+        content.contentMargins(.top, vertical ? -Self.excess : 0, for: .scrollContent)
+    }
+}
+
+private struct PhoneNavigationBarHidden: ViewModifier {
+    @Environment(\.aerioVerticalBarActive) private var vertical
+    func body(content: Content) -> some View {
+        content.toolbar(vertical ? .visible : .hidden, for: .navigationBar)
     }
 }
 

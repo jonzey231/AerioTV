@@ -655,15 +655,24 @@ struct ChannelListView: View {
                 // system search is up. iPad keeps its bar.
                 .navigationTitle("")
                 .navigationBarTitleDisplayMode(.inline)
-                .toolbar(isPhoneIdiom && !(phoneSearchPresented || !searchText.isEmpty) ? .hidden : .visible,
+                // iPhone Duo vertical bar: the bar stays on and carries the
+                // header's actions (verticalBarActions).
+                .toolbar(isPhoneIdiom && !verticalBar && !(phoneSearchPresented || !searchText.isEmpty) ? .hidden : .visible,
                          for: .navigationBar)
+                .aerioReadsVerticalBar($verticalBar)
+                .modifier(LiveTVVerticalBarToolbar(owner: self))
+                // Outer of the two: the Control-a-TV item leads the column's
+                // actions group (the layout Logan approved 2026-11-09).
+                .aerioVerticalBarControlATV()
                 #endif
                 .toolbarBackground(Color.appBackground, for: .navigationBar)
                 #if os(tvOS)
                 .toolbar(.hidden, for: .navigationBar)
                 #endif
                 .toolbar {
-                    // Sort menu (iOS + tvOS)
+                    // Sort menu (iOS + tvOS). The iPhone Duo vertical bar
+                    // declares its own set (verticalBarActions).
+                    if !verticalBarOwnsActions {
                     ToolbarItem(placement: {
                         #if os(iOS)
                         .navigationBarTrailing
@@ -688,9 +697,12 @@ struct ChannelListView: View {
                                 if sortModeRaw == "favorites" { Label("Favorites First", systemImage: "checkmark") } else { Text("Favorites First") }
                             }
                         } label: {
-                            Image(systemName: "arrow.up.arrow.down")
+                            // Titled for the vertical bar's overflow menu;
+                            // bars draw it icon-only (Apple Tech Talk 111462).
+                            Label("Sort", systemImage: "arrow.up.arrow.down")
                                 .foregroundColor(.accentPrimary)
                         }
+                    }
                     }
                     #if os(iOS)
                     // iPad background-sync indicator (the phone header row
@@ -711,21 +723,24 @@ struct ChannelListView: View {
                     // Session-only: toggling never writes defaultLiveTVView.
                     // (iPad search button moved into the chip row, see
                     // groupFilterBar's iPad branch.)
+                    if !verticalBarOwnsActions {
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button {
                             userDidToggleView = true
                             withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
                             LiveTVViewSession.showGuideView = showGuideView
                         } label: {
-                            Image(systemName: showGuideView ? "list.bullet" : "calendar")
+                            Label(showGuideView ? "Show List" : "Show Guide",
+                                  systemImage: showGuideView ? "list.bullet" : "calendar")
                                 .foregroundColor(.accentPrimary)
                         }
+                    }
                     }
                     // Compact-chrome mode: surface the Manage Groups button in
                     // the nav bar since the inline pill-bar copy is hidden.
                     // Badge mirrors the inline button's count so users keep
                     // visibility into how many groups are hidden.
-                    if isCompactChrome {
+                    if isCompactChrome && !verticalBarOwnsActions {
                         ToolbarItem(placement: .navigationBarTrailing) {
                             Button {
                                 showManageGroups = true
@@ -766,7 +781,8 @@ struct ChannelListView: View {
                     PerIdiomSearchableModifier(
                         text: $searchText,
                         presented: $phoneSearchPresented,
-                        iPhoneDisplayMode: .always
+                        iPhoneDisplayMode: .always,
+                        verticalBar: verticalBar
                     )
                 )
                 #endif
@@ -1079,6 +1095,16 @@ struct ChannelListView: View {
         }
     }
 
+    /// True while the iPhone Duo vertical bar carries the header actions
+    /// (LiveTVVerticalBarToolbar declares them all there, in one group).
+    private var verticalBarOwnsActions: Bool {
+        #if os(iOS)
+        return verticalBar && isPhoneIdiom
+        #else
+        return false
+        #endif
+    }
+
     #if os(iOS)
     /// Phone Live TV chrome (header row, group drawer, no navigation bar,
     /// collapse on scroll). iPad runs the same bottom-bar layout since
@@ -1087,6 +1113,10 @@ struct ChannelListView: View {
     private var isPhoneIdiom: Bool { usesPhoneLiveTVLayout }
     /// Header overflow (three-dot) state: see `phoneHeaderActions`.
     @State private var phoneHeaderActionsExpanded = false
+    /// iPhone Duo vertical bar layout, read inside the NavigationStack.
+    @State private var verticalBar = false
+    /// Focus for the vertical bar layout's inline search field.
+    @FocusState private var verticalSearchFocused: Bool
 
     #endif
     /// GH #102 Guide view: a drag that starts anywhere on the fixed channel
@@ -1189,13 +1219,68 @@ struct ChannelListView: View {
     /// name and count (sidebar mode), then search, sort and the list / guide
     /// toggle. No navigation bar above it.
     private var phoneHeaderRow: some View {
+        VStack(spacing: 0) {
+            phoneHeaderBar
+            if verticalBar && phoneSearchPresented {
+                phoneVerticalSearchField
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 6)
+            }
+        }
+    }
+
+    /// iPhone Duo vertical bar: full-width search field under the header,
+    /// opened by the bar's Search item, closed by the same item (now Close
+    /// Search). Same pill as the Movies and TV Shows field.
+    private var phoneVerticalSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .scaledFont(.system(size: 15, weight: .semibold))
+                .foregroundColor(Color.contrastText(.textSecondary))
+            TextField("Search channels and programs", text: $searchText)
+                .scaledFont(.system(size: 16))
+                .foregroundColor(.textPrimary)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .focused($verticalSearchFocused)
+            // Apple's convention: the field's X only clears the text; the
+            // bar's Close Search item closes search.
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .scaledFont(.system(size: 16))
+                        .foregroundColor(Color.contrastText(.textSecondary))
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: 40)
+        .background(Capsule().fill(Color.elevatedBackground))
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { verticalSearchFocused = true }
+        }
+    }
+
+    private func closeVerticalBarSearch() {
+        verticalSearchFocused = false
+        withAnimation(.spring(response: 0.25)) {
+            phoneSearchPresented = false
+            if !searchText.isEmpty { searchText = "" }
+        }
+    }
+
+    private var phoneHeaderBar: some View {
         HStack(spacing: 8) {
             if guideSidebarSelectorActive {
-                Button {
-                    debugLog("[DRAWER] open: header button")
-                    phoneDrawerOpen = true
-                } label: { phoneCircle("sidebar.leading") }
-                    .accessibilityLabel("Channel Groups")
+                if !verticalBar {
+                    Button {
+                        debugLog("[DRAWER] open: header button")
+                        phoneDrawerOpen = true
+                    } label: { phoneCircle("sidebar.leading") }
+                        .accessibilityLabel("Channel Groups")
+                }
                 Text(Self.groupTitle(selectedGroup))
                     .scaledFont(.labelMedium)
                     .foregroundColor(.textPrimary)
@@ -1205,6 +1290,7 @@ struct ChannelListView: View {
                     .foregroundColor(Color.contrastText(.textTertiary))
                 Spacer(minLength: 4)
             } else {
+                if !verticalBar {
                 Button { showManageGroups = true } label: {
                     ZStack(alignment: .topTrailing) {
                         phoneCircle("line.3.horizontal.decrease.circle")
@@ -1220,6 +1306,7 @@ struct ChannelListView: View {
                     }
                 }
                 .accessibilityLabel("Manage Groups")
+                }
                 if phoneGroupPillsShown {
                     // Clipped: the strip must not run under the icons.
                     groupFilterBar
@@ -1233,11 +1320,13 @@ struct ChannelListView: View {
             if channelStore.isLoading || channelStore.isEPGLoading {
                 PhoneHeaderSyncSpinner()
             }
-            phoneHeaderActions
-            #if os(iOS)
-            // Profiles: avatar switcher, drawn only with 2+ profiles (Android LiveTvTopBar).
-            ProfileSwitcherButton(size: 38)
-            #endif
+            if !verticalBar {
+                phoneHeaderActions
+                #if os(iOS)
+                // Profiles: avatar switcher, drawn only with 2+ profiles (Android LiveTvTopBar).
+                ProfileSwitcherButton(size: 38)
+                #endif
+            }
         }
         .padding(.horizontal, 16)
         #if os(iOS)
@@ -1307,7 +1396,7 @@ struct ChannelListView: View {
     /// True while the pill strip owns the header's middle: sidebar mode
     /// keeps all three circles, since nothing competes for the width.
     private var phoneHeaderActionsCollapsible: Bool {
-        !guideSidebarSelectorActive && phoneGroupPillsShown
+        !guideSidebarSelectorActive && phoneGroupPillsShown && !verticalBar
     }
 
     private var phoneGroupPillsShown: Bool {
@@ -6906,17 +6995,132 @@ private struct NaturalTopPreference: PreferenceKey {
 /// drawer, but iPhone's pull-down-to-reveal idiom doesn't apply
 /// when a binding is present, so the two surfaces use distinct
 /// modifier overloads.
+extension ChannelListView {
+    /// iPhone Duo vertical bar (outer display, inner display in landscape):
+    /// the header row's actions become navigation bar items, which the
+    /// system stacks in the side region above the tab bar and overflows into
+    /// its own menu when they do not fit (Apple Tech Talk 111462, "Design
+    /// for iPhone Duo"). Groups is primary navigation, so it leads (top of
+    /// the bar). Search is the system search item there (the searchable
+    /// modifier's toolbar placement, see PerIdiomSearchableModifier); Sort
+    /// and the List / Guide toggle are the existing trailing items. Nothing
+    /// here applies to a bottom-bar layout.
+    struct LiveTVVerticalBarToolbar: ViewModifier {
+        let owner: ChannelListView
+        func body(content: Content) -> some View {
+            if #available(iOS 27.1, *), owner.verticalBar, owner.isPhoneIdiom {
+                content.toolbar { owner.verticalBarActions }
+            } else {
+                content
+            }
+        }
+    }
+
+    /// One group, top to bottom: Search (the searchable modifier's toolbar
+    /// placement), Groups, Sort, List / Guide, then the profile avatar.
+    /// Items overflow bottom to top into the system's own menu when the
+    /// column is short; Search keeps the high priority, the avatar the low
+    /// one. Icons take the bar's default (untinted) color, like the tab bar.
+    @available(iOS 27.1, *)
+    @ToolbarContentBuilder
+    fileprivate var verticalBarActions: some ToolbarContent {
+        // Search opens the inline field under the header (phoneHeaderRow),
+        // Movies style: the system's expanding bar field slid in at mid
+        // height over the cards, clipped at the edge, and halved the
+        // results' width (simulator, 2026-11-09).
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                if phoneSearchPresented || !searchText.isEmpty {
+                    closeVerticalBarSearch()
+                } else {
+                    phoneSearchPresented = true
+                }
+            } label: {
+                Label(phoneSearchPresented ? "Close Search" : "Search",
+                      systemImage: phoneSearchPresented ? "xmark" : "magnifyingglass")
+            }
+            .tint(.primary)
+        }
+        .visibilityPriority(ToolbarItemVisibilityPriority(higherThan: .high))
+        if guideSidebarSelectorActive {
+            ToolbarItem(placement: .topBarTrailing) {
+                // A toggle here (Logan 2026-11-09): the bar stays tappable
+                // above the open drawer, so the same button closes it, and
+                // it takes the accent while open, like the selected tab.
+                Button {
+                    debugLog("[DRAWER] \(phoneDrawerOpen ? "close" : "open"): vertical bar button")
+                    withAnimation(phoneDrawerSpring) { phoneDrawerOpen.toggle() }
+                } label: { Label("Channel Groups", systemImage: "sidebar.leading") }
+                .tint(phoneDrawerOpen ? Color.accentPrimary : .primary)
+            }
+            // Always in the column, like Search (Logan 2026-11-09), so it
+            // can always close the drawer.
+            .visibilityPriority(ToolbarItemVisibilityPriority(higherThan: .high))
+        } else {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showManageGroups = true } label: {
+                    Label("Manage Groups", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                .badge(hiddenGroups.count)
+                .tint(.primary)
+            }
+            .visibilityPriority(.high)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                Button { sortModeRaw = "number" } label: {
+                    if sortModeRaw == "number" { Label("By Number", systemImage: "checkmark") } else { Text("By Number") }
+                }
+                Button { sortModeRaw = "name" } label: {
+                    if sortModeRaw == "name" { Label("By Name", systemImage: "checkmark") } else { Text("By Name") }
+                }
+                Button { sortModeRaw = "favorites" } label: {
+                    if sortModeRaw == "favorites" { Label("Favorites First", systemImage: "checkmark") } else { Text("Favorites First") }
+                }
+            } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
+            .tint(.primary)
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                userDidToggleView = true
+                withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
+                LiveTVViewSession.showGuideView = showGuideView
+            } label: {
+                Label(showGuideView ? "Show List" : "Show Guide",
+                      systemImage: showGuideView ? "list.bullet" : "calendar")
+            }
+            .tint(.primary)
+        }
+        // The most used Live TV action after Search stays in the column.
+        .visibilityPriority(.high)
+        ToolbarItem(placement: .topBarTrailing) {
+            // Drawn only with 2+ profiles, like the header avatar.
+            ProfileSwitcherButton(size: 30, titled: true)
+        }
+        .axisBehavior(.verticalPreferred)
+        .visibilityPriority(.low)
+    }
+}
+
 private struct PerIdiomSearchableModifier: ViewModifier {
     @Binding var text: String
     /// Phone: the header row's search icon presents the field.
     var presented: Binding<Bool> = .constant(false)
     let iPhoneDisplayMode: SearchFieldPlacement.NavigationBarDrawerDisplayMode
+    /// iPhone Duo vertical bar: the navigation bar stays on there, so a
+    /// drawer field would sit under it all the time, and the system's bar
+    /// search expands over the content. The header's inline field serves
+    /// search there instead.
+    var verticalBar: Bool = false
 
     func body(content: Content) -> some View {
         if !usesPhoneLiveTVLayout {
             // No-op off the phone layout. iPhone and iPad (since
             // 2026-10-04) present the system field from the header's
             // search circle through `presented`.
+            content
+        } else if verticalBar {
+            // Inline field instead (ChannelListView.phoneVerticalSearchField).
             content
         } else {
             content.searchable(
@@ -7486,7 +7690,13 @@ private struct DrawerSlideOffset: ViewModifier, @preconcurrency Animatable {
 
     func body(content: Content) -> some View {
         let h = min(max(hidden, 0), width)
-        content.offset(x: rtl ? h : -h)
+        // Fully closed, the drawer draws nothing: one width of travel is
+        // not enough when a leading safe-area inset holds the iPhone Duo's
+        // side bar (landscape), and the closed drawer's edge peeked out
+        // beside the bar (simulator, 2026-11-09).
+        content
+            .offset(x: rtl ? h : -h)
+            .opacity(h >= width - 0.5 ? 0 : 1)
     }
 }
 #endif

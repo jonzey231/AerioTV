@@ -379,7 +379,8 @@ struct DVRView: View {
             #else
             // Phone pass (Logan 2026-09-05): no navigation bar; the hero
             // starts under the status bar, sort sits in the library header.
-            .toolbar(.hidden, for: .navigationBar)
+            // iPhone Duo vertical bar: the bar stays on to carry the actions.
+            .aerioPhoneNavigationBarHidden()
             #endif
         }
         .confirmationDialog("Sort Recordings", isPresented: $showSortMenu, titleVisibility: .visible) {

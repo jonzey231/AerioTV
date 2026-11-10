@@ -495,6 +495,9 @@ struct VODDetailView: View {
         // through the toolbar API drops that bottom inset while pushed; the
         // mask and collapse state above still own the pop restore.
         .toolbar(.hidden, for: .tabBar)
+        // iPhone Duo vertical bar: the Control-a-TV item on the detail too
+        // (Logan 2026-11-09).
+        .aerioVerticalBarControlATV()
         .onAppear { TabBarCollapseState.shared.enterDetail() }
         .onDisappear { TabBarCollapseState.shared.leaveDetail() }
         #endif

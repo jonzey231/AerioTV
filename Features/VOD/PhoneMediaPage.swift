@@ -102,6 +102,8 @@ struct PhoneMediaPage: View {
     @State private var tabBarHidden = false
     @State private var scrollToHeaderTick = 0
     @FocusState private var searchFocused: Bool
+    /// iPhone Duo vertical bar layout (see verticalBarActions).
+    @Environment(\.aerioVerticalBarActive) private var verticalBar
 
     private let columnSpacing: CGFloat = 8
     private let rowSpacing: CGFloat = 16
@@ -129,8 +131,9 @@ struct PhoneMediaPage: View {
                                 Color.clear.frame(height: 3)
                                 ForEach(decks.filter { !$0.cards.isEmpty }, id: \.title) { deck in
                                     deckSection(deck)
+                                        .aerioClipsAtVerticalBar()
                                 }
-                                ForEach(rows) { row in row.view() }
+                                ForEach(rows) { row in row.view().aerioClipsAtVerticalBar() }
                                 libraryHeader(proxy: proxy)
                                     .id("page-library")
                                 if let search, search.isActive.wrappedValue {
@@ -138,10 +141,11 @@ struct PhoneMediaPage: View {
                                         .padding(.horizontal, 16)
                                 }
                                 if isSearching {
-                                    ForEach(searchExtras) { row in row.view() }
+                                    ForEach(searchExtras) { row in row.view().aerioClipsAtVerticalBar() }
                                 }
                                 if !isSearching, !pills.isEmpty {
                                     pillRow
+                                        .aerioClipsAtVerticalBar()
                                 }
                                 if itemCount == 0, let emptyView {
                                     emptyView()
@@ -229,6 +233,23 @@ struct PhoneMediaPage: View {
                 }
             }
         }
+        .modifier(PhoneMediaVerticalBarToolbar(actions: self))
+        // Outer of the two: the Control-a-TV item leads the column's
+        // actions group (the layout Logan approved 2026-11-09).
+        .aerioVerticalBarControlATV()
+    }
+
+    /// Applies verticalBarActions only where the API exists and only while
+    /// the vertical bar is active, so bottom-bar layouts get no toolbar items.
+    private struct PhoneMediaVerticalBarToolbar: ViewModifier {
+        let actions: PhoneMediaPage
+        func body(content: Content) -> some View {
+            if #available(iOS 27.1, *), actions.verticalBar {
+                content.toolbar { actions.verticalBarActions }
+            } else {
+                content
+            }
+        }
     }
 
     // MARK: Sections
@@ -247,14 +268,20 @@ struct PhoneMediaPage: View {
 
     private func libraryHeader(proxy: ScrollViewProxy) -> some View {
         HStack(alignment: .center, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(headerTitle)
-                    .scaledFont(.headlineSmall)
-                    .foregroundColor(.textPrimary)
-                Text("\(headerCount)")
-                    .scaledFont(.labelMedium.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                if headerIsUpdating { VODUpdatingBadge() }
+            HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(headerTitle)
+                        .scaledFont(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                    Text("\(headerCount)")
+                        .scaledFont(.labelMedium.subtext())
+                        .foregroundColor(Color.contrastText(.textTertiary))
+                }
+                // Centered on the title line rather than baseline aligned:
+                // the spinner has no text baseline, so baseline alignment
+                // hung the badge below the title once the header had room
+                // (iPhone Duo, header actions in the side bar, 2026-11-09).
+                if headerIsUpdating { VODUpdatingBadge().fixedSize() }
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -263,32 +290,70 @@ struct PhoneMediaPage: View {
                 }
             }
             Spacer()
-            HStack(spacing: 8) {
-                if let search {
-                    Button {
-                        if search.isActive.wrappedValue {
-                            searchFocused = false
-                            withAnimation(.spring(response: 0.3)) { search.onClose() }
-                        } else {
-                            // Insert the field with no animation, run ONE scroll,
-                            // and raise the keyboard after the scroll settles.
-                            var t = Transaction(); t.disablesAnimations = true
-                            withTransaction(t) { search.isActive.wrappedValue = true }
-                            DispatchQueue.main.async { scrollToHeaderTick += 1 }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { searchFocused = true }
-                        }
-                    } label: { circle("magnifyingglass") }
-                    .accessibilityLabel(search.isActive.wrappedValue ? "Close search" : "Search")
-                }
-                Menu { sortMenu() } label: { circle("arrow.up.arrow.down") }
-                    .accessibilityLabel("Sort")
-                if let onFilter {
-                    Button(action: onFilter) { circle("line.3.horizontal.decrease") }
-                        .accessibilityLabel("Filter")
+            // iPhone Duo vertical bar: the actions ride the system bar
+            // instead (verticalBarActions), so the header keeps only the
+            // title and count.
+            if !verticalBar {
+                HStack(spacing: 8) {
+                    if let search {
+                        Button { toggleSearch(search) } label: { circle("magnifyingglass") }
+                            .accessibilityLabel(search.isActive.wrappedValue ? "Close search" : "Search")
+                    }
+                    Menu { sortMenu() } label: { circle("arrow.up.arrow.down") }
+                        .accessibilityLabel("Sort")
+                    if let onFilter {
+                        Button(action: onFilter) { circle("line.3.horizontal.decrease") }
+                            .accessibilityLabel("Filter")
+                    }
                 }
             }
         }
         .padding(.horizontal, 16)
+    }
+
+    private func toggleSearch(_ search: PhoneSearch) {
+        if search.isActive.wrappedValue {
+            searchFocused = false
+            withAnimation(.spring(response: 0.3)) { search.onClose() }
+        } else {
+            // Insert the field with no animation, run ONE scroll,
+            // and raise the keyboard after the scroll settles.
+            var t = Transaction(); t.disablesAnimations = true
+            withTransaction(t) { search.isActive.wrappedValue = true }
+            DispatchQueue.main.async { scrollToHeaderTick += 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { searchFocused = true }
+        }
+    }
+
+    /// iPhone Duo vertical bar (outer display, inner display in landscape):
+    /// the header actions become navigation bar items, which the system
+    /// places in the side region above the tab bar and overflows into its
+    /// own menu when they do not fit (Apple Tech Talk 111462, "Design for
+    /// iPhone Duo"). Search has the high visibility priority so it is the
+    /// last to overflow. Labels carry titles for the overflow menu.
+    @available(iOS 27.1, *)
+    @ToolbarContentBuilder
+    private var verticalBarActions: some ToolbarContent {
+        if let search {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { toggleSearch(search) } label: {
+                    Label(search.isActive.wrappedValue ? "Close Search" : "Search",
+                          systemImage: search.isActive.wrappedValue ? "xmark" : "magnifyingglass")
+                }
+                .tint(.primary)
+            }
+            .visibilityPriority(ToolbarItemVisibilityPriority(higherThan: .high))
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu { sortMenu() } label: { Label("Sort", systemImage: "arrow.up.arrow.down") }
+            .tint(.primary)
+        }
+        if let onFilter {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: onFilter) { Label("Filter", systemImage: "line.3.horizontal.decrease") }
+                .tint(.primary)
+            }
+        }
     }
 
     private func circle(_ systemImage: String) -> some View {
@@ -316,15 +381,28 @@ struct PhoneMediaPage: View {
                 // The owning tab clears its own search state; this drops the
                 // field's focus so the keyboard cannot follow into PiP.
                 .onDismissSearch { searchFocused = false }
-            Button {
-                searchFocused = false
-                withAnimation(.spring(response: 0.25)) { search.onClose() }
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .scaledFont(.system(size: 16))
-                    .foregroundColor(Color.contrastText(.textSecondary))
+            if verticalBar {
+                // iPhone Duo vertical bar, Apple's convention: this X only
+                // clears the text; the bar's Close Search item closes.
+                if !search.text.wrappedValue.isEmpty {
+                    Button { search.text.wrappedValue = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .scaledFont(.system(size: 16))
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                    }
+                    .accessibilityLabel("Clear search")
+                }
+            } else {
+                Button {
+                    searchFocused = false
+                    withAnimation(.spring(response: 0.25)) { search.onClose() }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .scaledFont(.system(size: 16))
+                        .foregroundColor(Color.contrastText(.textSecondary))
+                }
+                .accessibilityLabel("Clear and close search")
             }
-            .accessibilityLabel("Clear and close search")
         }
         .padding(.horizontal, 14)
         .frame(minHeight: 40)
