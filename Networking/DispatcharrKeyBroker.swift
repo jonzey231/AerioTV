@@ -27,6 +27,8 @@ enum DispatcharrKeyBroker {
         let baseURL: String
         let username: String
         /// Username and password saved here: a silent re-login can re-mint the key.
+        /// Any playlist with both stored counts, whatever its credential type
+        /// (older playlists carry an empty type that reads as API Key).
         let hasPassword: Bool
         let authMode: DispatcharrAuthHeaderMode
         let userAgent: String
@@ -57,19 +59,40 @@ enum DispatcharrKeyBroker {
         }
         let match = all.first { $0.id == serverID && uses($0) } ?? all.first { uses($0) }
         guard let s = match else { return nil }
-        let hasPassword = s.dispatcharrCredentialType == .usernamePassword
-            && !s.username.isEmpty && !s.effectivePassword.isEmpty
+        let hasPassword = Self.hasStoredPassword(s)
         return PlaylistInfo(id: s.id, name: s.name, baseURL: s.effectiveBaseURL, username: s.username,
                             hasPassword: hasPassword, authMode: s.dispatcharrHeaderMode,
                             userAgent: s.effectiveUserAgent)
+    }
+
+    /// A username and a password saved for the playlist (Keychain): what
+    /// silentRebootstrapApiKey needs. 2026-11-10: this required the
+    /// usernamePassword credential type, so a playlist added before v1.7
+    /// (empty type) with a saved password was held and prompted on a
+    /// rotated key instead of re-signing in like Android.
+    @MainActor static func hasStoredPassword(_ s: ServerConnection) -> Bool {
+        !s.username.trimmingCharacters(in: .whitespaces).isEmpty && !s.effectivePassword.isEmpty
+    }
+
+    /// Who can re-mint `key` after the server refused it: the request's own
+    /// playlist when it carried a username, else the saved playlist that
+    /// uses the key and has a stored password. nil = nobody (hold).
+    @MainActor static func reloginTarget(key: String, serverID: UUID?,
+                                         savedUsername: String?) -> (id: UUID, username: String)? {
+        if let sid = serverID, let u = savedUsername, !u.isEmpty { return (sid, u) }
+        guard let info = playlist(forKey: key, serverID: serverID),
+              DispatcharrRequestGate.afterRejectedKey(
+                hasStoredPassword: info.hasPassword,
+                loginRefused: DispatcharrLoginGate.shared.isRejected(serverID: info.id)) == .relogin
+        else { return nil }
+        return (info.id, info.username)
     }
 
     @MainActor static func playlist(id: String) -> PlaylistInfo? {
         guard let container, let uuid = UUID(uuidString: id) else { return nil }
         let descriptor = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == uuid })
         guard let s = (try? container.mainContext.fetch(descriptor))?.first, !s.isGone else { return nil }
-        let hasPassword = s.dispatcharrCredentialType == .usernamePassword
-            && !s.username.isEmpty && !s.effectivePassword.isEmpty
+        let hasPassword = Self.hasStoredPassword(s)
         return PlaylistInfo(id: s.id, name: s.name, baseURL: s.effectiveBaseURL, username: s.username,
                             hasPassword: hasPassword, authMode: s.dispatcharrHeaderMode,
                             userAgent: s.effectiveUserAgent)
@@ -77,8 +100,7 @@ enum DispatcharrKeyBroker {
 
     // MARK: 401 probe (single flight per key)
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var inFlight: [String: Task<DispatcharrAPI.KeyProbe, Error>] = [:]
+    private static let probes = SingleFlight<DispatcharrAPI.KeyProbe>()
 
     /// After a 401 from `api` (an `.apiKey` instance): is the key itself
     /// good? Concurrent 401s for one key share one probe; a key proven good
@@ -91,29 +113,12 @@ enum DispatcharrKeyBroker {
         }
         let hash = DispatcharrRequestGate.keyHash(key)
         let host = URL(string: api.baseURL)?.host ?? "?"
-        let (task, mine) = claimProbe(hash) { Task { try await api.probeApiKeyShapes() } }
-        defer { if mine { releaseProbe(hash) } }
-        let result = try await task.value
+        let (result, mine) = try await probes.run(hash) { try await api.probeApiKeyShapes() }
         if mine {
             if case .accepted(let mode) = result { gate.noteKeyAccepted(key, mode: mode.rawValue) }
             debugLog("[AUTH] 401 on an API-key call to \(host); key probe: \(result.logName)")
         }
         return result
-    }
-
-    private static func claimProbe(_ hash: String,
-                                   _ make: () -> Task<DispatcharrAPI.KeyProbe, Error>)
-        -> (Task<DispatcharrAPI.KeyProbe, Error>, Bool) {
-        lock.withLock {
-            if let existing = inFlight[hash] { return (existing, false) }
-            let task = make()
-            inFlight[hash] = task
-            return (task, true)
-        }
-    }
-
-    private static func releaseProbe(_ hash: String) {
-        lock.withLock { inFlight[hash] = nil }
     }
 
     /// The probe proved the key rejected: hold it when that is the end of
@@ -261,10 +266,13 @@ final class DispatcharrKeyRecheck {
             return
         }
         let outcome: String
-        if r.passwordToo, let info, info.hasPassword {
+        // A stored username and password re-sign in (Android parity), whatever
+        // the hold recorded: a rotated key is replaced, not waited out.
+        if let info, info.hasPassword {
             let fresh = await DispatcharrAPI.silentRebootstrapApiKey(serverID: info.id, baseURL: info.baseURL,
                                                                      username: info.username, userAgent: info.userAgent)
-            accepted = fresh != nil
+            if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }
+            accepted = fresh != nil && fresh != r.key
             outcome = accepted ? "accepted (re-login issued a key)"
                 : DispatcharrLoginGate.shared.isRejected(serverID: info.id) ? "rejected (login refused)" : "unknown"
         } else {

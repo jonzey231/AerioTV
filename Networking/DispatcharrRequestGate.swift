@@ -94,6 +94,8 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     private var rejected: [String: Set<String>] = [:]
     private var rechecks: [String: Recheck] = [:]
     private var acceptedAt: [String: (at: TimeInterval, mode: String)] = [:]
+    /// Key hash -> the key a silent re-login minted in its place, and when.
+    private var replacedBy: [String: (key: String, at: TimeInterval)] = [:]
     private var pendingPrompt: Prompt?
 
     init() {}
@@ -172,8 +174,13 @@ final class DispatcharrRequestGate: @unchecked Sendable {
 
     /// Paths the server pause covers: Dispatcharr's REST root, minus the
     /// login and token refresh endpoints (DispatcharrLoginGate owns those).
+    /// Foundation's `URL.path` drops the trailing slash ("/api/accounts/token"),
+    /// unlike Android's encodedPath, so the match allows for both; without
+    /// that a login 429 paused every API call and never reached the login gate.
     static func isPausedPath(_ path: String) -> Bool {
-        path.contains("/api/") && !path.contains("/api/accounts/token/")
+        guard path.contains("/api/") else { return false }
+        let slashed = path.hasSuffix("/") ? path : path + "/"
+        return !slashed.contains("/api/accounts/token/")
     }
 
     /// The API key a request carries: X-API-Key, else `Authorization: ApiKey <k>` or `Bearer <k>`.
@@ -188,9 +195,14 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         return key.isEmpty ? nil : key
     }
 
-    /// Dispatcharr's own answer for an unknown key (ApiKeyAuthentication: "Invalid API key").
+    /// Dispatcharr's own refusal of the key itself (apps/accounts/authentication.py,
+    /// ApiKeyAuthentication): "Invalid API key" for an unknown key, "User
+    /// inactive" for a key whose account is disabled. Either is proof that no
+    /// other header shape will fare better, and each further non-Bearer try
+    /// counts toward the server's failed-key lockout (Android parity).
     static func isDispatcharrInvalidKeyBody(_ body: String) -> Bool {
         body.range(of: "Invalid API key", options: .caseInsensitive) != nil
+            || body.range(of: "User inactive", options: .caseInsensitive) != nil
     }
 
     // MARK: Rejected key
@@ -301,6 +313,62 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// A probe proved `key` good in header shape `mode`: no probe again for
     /// `acceptedMemo` seconds, so an endpoint-specific 401 for a good key does
     /// not double every request.
+    // MARK: Keys a silent re-login replaced
+
+    /// How long a replaced key is rewritten to its successor: long enough for
+    /// every request built before the swap to drain.
+    static let replacementMemo: TimeInterval = 600
+
+    /// The silent re-login (stored username and password) minted `new` after
+    /// the server refused `old`: requests still carrying `old` go out with
+    /// `new` (no failed attempt, no probe, no hold), as on Android.
+    func noteKeyReplaced(old: String, new: String) {
+        let o = old.trimmingCharacters(in: .whitespacesAndNewlines)
+        let n = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !o.isEmpty, !n.isEmpty, o != n else { return }
+        let hash = Self.keyHash(o)
+        lock.lock()
+        replacedBy[hash] = (n, clock())
+        lock.unlock()
+    }
+
+    /// The key that replaced `key` within the memo window, or nil.
+    func replacementKey(for key: String) -> String? {
+        let hash = Self.keyHash(key)
+        lock.lock(); defer { lock.unlock() }
+        guard let r = replacedBy[hash] else { return nil }
+        if clock() - r.at > Self.replacementMemo { replacedBy[hash] = nil; return nil }
+        return r.key
+    }
+
+    /// The request's auth headers with a replaced key swapped for its
+    /// successor, or nil when nothing changes. Keeps the header shape:
+    /// X-API-Key, `ApiKey <k>`, or `Bearer <k>`.
+    func rewritingReplacedKey(xApiKey: String?, authorization: String?) -> (xApiKey: String?, authorization: String?)? {
+        guard let old = Self.requestApiKey(xApiKey: xApiKey, authorization: authorization),
+              let new = replacementKey(for: old) else { return nil }
+        var x = xApiKey
+        if let v = x, v.trimmingCharacters(in: .whitespacesAndNewlines) == old { x = new }
+        var auth = authorization
+        if let a = auth {
+            let parts = a.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" })
+            if parts.count == 2, parts[1].trimmingCharacters(in: .whitespacesAndNewlines) == old {
+                auth = "\(parts[0]) \(new)"
+            }
+        }
+        return (x, auth)
+    }
+
+    /// What a 401 that proved the key bad leads to (Android parity): a
+    /// playlist with a stored username and password re-signs in first and
+    /// carries on with the new key; only no password, or a refused login,
+    /// holds the key and asks for Edit Playlist.
+    enum RejectedKeyStep: Equatable, Sendable { case relogin, hold }
+    static func afterRejectedKey(hasStoredPassword: Bool, loginRefused: Bool) -> RejectedKeyStep {
+        hasStoredPassword && !loginRefused ? .relogin : .hold
+    }
+
     func noteKeyAccepted(_ key: String, mode: String) {
         let hash = Self.keyHash(key)
         lock.lock()
@@ -436,6 +504,37 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         pendingPrompt = nil
         lock.unlock()
     }
+}
+
+// MARK: - Single flight
+
+/// One task in flight per key: callers that arrive while it runs await its
+/// result instead of starting their own. Used for the 401 key probe, where
+/// every extra probe of a bad key costs one attempt of the server's
+/// failed-key budget (Android parity). The key is released when the task
+/// finishes, so a later call starts fresh.
+final class SingleFlight<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight: [String: Task<Value, Error>] = [:]
+
+    init() {}
+
+    /// The value of the task in flight for `key`, or of `work` started as the
+    /// new one. `owner` is true only for the caller whose `work` ran.
+    func run(_ key: String,
+             _ work: @escaping @Sendable () async throws -> Value) async throws -> (value: Value, owner: Bool) {
+        let (task, owner): (Task<Value, Error>, Bool) = lock.withLock {
+            if let running = inFlight[key] { return (running, false) }
+            let started = Task { try await work() }
+            inFlight[key] = started
+            return (started, true)
+        }
+        defer { if owner { lock.withLock { inFlight[key] = nil } } }
+        return (try await task.value, owner)
+    }
+
+    /// Tasks in flight right now (tests).
+    var count: Int { lock.withLock { inFlight.count } }
 }
 
 private extension Double {

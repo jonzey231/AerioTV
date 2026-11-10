@@ -319,9 +319,23 @@ final class ServerConnectionViewModel {
         // rate-limit copy (RateLimitRetry, Android 289112b4). The
         // receiver's playlist add passes `onCountdown`/`onRetry` so its own
         // status line counts down too.
+        //
+        // A login 429 (/api/accounts/token/, username and password) counts
+        // down the same way, from the login gate's park for this server
+        // (Android LoginThrottled through RateLimitRetry).
+        let signInBase = normalizedURL
         do {
             try await RateLimitRetry.run(
-                rateLimitSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
+                rateLimitSeconds: { error in
+                    RateLimitRetry.signInWaitSeconds(
+                        error,
+                        apiSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
+                        isLogin429: {
+                            if case .loginRateLimited? = $0 as? DispatcharrDirectConnectError { return true }
+                            return false
+                        },
+                        loginParkedSeconds: { DispatcharrLoginGate.shared.serverParkedSeconds(baseURL: signInBase) })
+                },
                 onCountdown: { left in
                     let line = DispatcharrRateLimitCopy.serverBusyCountdown(left)
                     self.busyMessage = line
@@ -334,12 +348,6 @@ final class ServerConnectionViewModel {
             ) {
                 try await self.verifyWithSilentRetry()
             }
-        } catch DispatcharrDirectConnectError.loginRateLimited {
-            // HTTP 429 from /api/accounts/token/: another login 400ms
-            // later is exactly what the server is throttling, and each
-            // attempt can extend the window. Surface the wait-a-minute
-            // copy immediately instead (Discord 2026-08-16).
-            verificationError = DispatcharrDirectConnectError.loginRateLimited.errorDescription
         } catch let final as RateLimitedFinal {
             // Names the rate limit, never "Could not connect" or "returned
             // the web UI".

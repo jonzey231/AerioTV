@@ -684,7 +684,12 @@ extension DispatcharrAPI {
         for (key, value) in headersForUserDetail() {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        let (data, response) = try await HTTPRouter.data(for: request)
+        // Through the key broker (2026-11-10, Android parity): the
+        // permissions probe re-runs this from the DVR tab's 30 s refresh,
+        // and a 401 here used to count as an ordinary failure, so a dead key
+        // never started the rejected-key hold and spent one of the server's
+        // failed-key attempts on every pass. Bearer auth returns the 401 as is.
+        let (data, response) = try await dataWithJWTRetry(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
             throw DispatcharrDirectConnectError.transport("HTTP \(status) on users/me")

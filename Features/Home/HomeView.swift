@@ -1793,9 +1793,13 @@ final class ChannelStore: ObservableObject {
     /// Called by pull-to-refresh, always re-fetches channels AND EPG.
     /// This is async so the pull-to-refresh spinner stays visible until done.
     /// Pass `modelContext` to persist the rebuilt guide back to SwiftData.
-    func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
+    func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil,
+                      userInitiated: Bool = true) async {
         // A user refresh also re-checks a held API key (at most once a minute).
-        DispatcharrKeyRecheck.shared.userRefresh()
+        // The automatic refreshes (the 5-minute stale-guide sweep, the reload
+        // after a key recovers) are not one: the sweep used to re-check a held
+        // key every 5 minutes, ahead of the slow 1, 5, 15, 30 minute schedule.
+        if userInitiated { DispatcharrKeyRecheck.shared.userRefresh() }
         if let inFlight = forceRefreshTask, !inFlight.isCancelled {
             debugLog("[PULL] forceRefresh already in flight, awaiting it")
             await inFlight.value
@@ -5797,7 +5801,7 @@ struct MainTabView: View {
         debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old), forcing channels + guide refresh")
         let servers = allServers
         let ctx = modelContext
-        Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
+        Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx, userInitiated: false) }
     }
 
     /// Called whenever `initialSyncKey` changes. Dismisses the

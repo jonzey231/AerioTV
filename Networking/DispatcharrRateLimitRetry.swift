@@ -108,6 +108,23 @@ enum RateLimitRetry {
             }
         }
     }
+
+    /// The wait for a sign-in failure (Add Playlist, Test Connection). An API
+    /// 429 carries its own seconds. A login 429 (/api/accounts/token/, Android
+    /// LoginThrottled) waits out the login gate's park for that server, which
+    /// holds the Retry-After; the default when the park has already lapsed.
+    /// nil: not a rate limit, so the caller's normal error copy applies.
+    static func signInWaitSeconds(
+        _ error: Error,
+        apiSeconds: (Error) -> Int?,
+        isLogin429: (Error) -> Bool,
+        loginParkedSeconds: () -> Int
+    ) -> Int? {
+        if let s = apiSeconds(error) { return s }
+        guard isLogin429(error) else { return nil }
+        let left = loginParkedSeconds()
+        return left > 0 ? left : DispatcharrRequestGate.defaultRetryAfter
+    }
 }
 
 // MARK: - Setup sender key check

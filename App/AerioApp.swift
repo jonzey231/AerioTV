@@ -1513,7 +1513,8 @@ struct RootView: View {
                           active.id.uuidString == id else { return }
                     debugLog("[AUTH] held key recovered for \(id.prefix(8)); refreshing the playlist and On Demand")
                     Task { @MainActor in
-                        await ChannelStore.shared.forceRefresh(servers: all, modelContext: modelContext)
+                        await ChannelStore.shared.forceRefresh(servers: all, modelContext: modelContext,
+                                                               userInitiated: false)
                         VODStore.shared.refreshMovies(servers: all)
                         VODStore.shared.refreshSeries(servers: all)
                     }

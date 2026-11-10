@@ -90,6 +90,18 @@ check(DispatcharrRequestGate.isPausedPath("/api/channels/channels/"), "API path 
 check(DispatcharrRequestGate.isPausedPath("/dispatcharr/api/vod/movies/"), "API path under a prefix paused")
 check(!DispatcharrRequestGate.isPausedPath("/api/accounts/token/"), "login excluded")
 check(!DispatcharrRequestGate.isPausedPath("/api/accounts/token/refresh/"), "token refresh excluded")
+// URL.path drops the trailing slash (the login 429 used to pause every API call).
+check(!DispatcharrRequestGate.isPausedPath("/api/accounts/token"), "login excluded without the trailing slash")
+check(!DispatcharrRequestGate.isPausedPath("/api/accounts/token/refresh"), "refresh excluded without the trailing slash")
+check(!DispatcharrRequestGate.isPausedPath(URL(string: "http://127.0.0.1:9191/api/accounts/token/")!.path), "login URL.path excluded")
+check(DispatcharrRequestGate.isPausedPath(URL(string: "http://127.0.0.1:9191/api/accounts/users/me/")!.path), "users/me URL.path paused")
+check(DispatcharrRequestGate.isPausedPath("/api/accounts/tokens"), "a different path that starts alike is still paused")
+// Repeat callers (permissions probe users/me, EPG programs pages) are gated
+// paths: a held key or a 429 pause fails them locally with nothing sent.
+for p in ["/api/accounts/users/me", "/api/epg/programs", "/api/epg/grid", "/api/channels/recordings",
+          "/api/accounts/users/me/app-data"] {
+    check(DispatcharrRequestGate.isPausedPath(p), "repeat caller \(p) is gated")
+}
 check(!DispatcharrRequestGate.isPausedPath("/player_api.php"), "Xtream path not paused")
 check(!DispatcharrRequestGate.isPausedPath("/proxy/ts/stream/abc"), "stream path not paused")
 
@@ -162,6 +174,56 @@ do {
     eq(shown.first, 120, "countdown starts at 120 at most")
     eq(shown.count, 120, "120 ticks")
     eq(shown.last, 1, "ends at 1")
+}
+
+// Sign-in 429 (Add Playlist, Test Connection): a login 429 counts down from
+// the login gate's park, retries twice, then names the rate limit (Android
+// LoginThrottled through RateLimitRetry.run).
+struct Login429: Error {}
+func signInSeconds(_ e: Error, parked: Int) -> Int? {
+    RateLimitRetry.signInWaitSeconds(e,
+                                     apiSeconds: { DispatcharrGateError.rateLimitSeconds($0) },
+                                     isLogin429: { $0 is Login429 },
+                                     loginParkedSeconds: { parked })
+}
+eq(signInSeconds(Login429(), parked: 45), 45, "login 429 waits the park")
+eq(signInSeconds(Login429(), parked: 0), 60, "login 429 with a lapsed park waits the default")
+eq(signInSeconds(DispatcharrGateError.rateLimited(seconds: 7), parked: 45), 7, "API 429 keeps its own seconds")
+eq(signInSeconds(Unauthorized(), parked: 45), nil, "other failures are not a rate limit")
+do {
+    var shown: [Int] = []
+    var retried = 0
+    var attempts = 0
+    var thrown: Error?
+    do {
+        let _: Int = try await RateLimitRetry.run(
+            rateLimitSeconds: { signInSeconds($0, parked: 2) },
+            tick: {},
+            onCountdown: { shown.append($0) },
+            onRetry: { retried += 1 }
+        ) {
+            attempts += 1
+            throw Login429()
+        }
+    } catch { thrown = error }
+    eq(attempts, 3, "login: three attempts")
+    eq(retried, 2, "login: two automatic retries")
+    eq(shown, [2, 1, 2, 1], "login: countdown from the park")
+    eq(shown.map(DispatcharrRateLimitCopy.serverBusyCountdown).first,
+       "The server is busy. Trying again in 2 seconds.", "login: countdown line")
+    eq((thrown as? LocalizedError)?.errorDescription,
+       "The server is rate-limiting requests from this network (HTTP 429). Wait 2 seconds and try again.",
+       "login: final copy")
+}
+do {
+    var attempts = 0
+    let r: Int = try await RateLimitRetry.run(rateLimitSeconds: { signInSeconds($0, parked: 1) }, tick: {}, onCountdown: { _ in }) {
+        attempts += 1
+        if attempts == 1 { throw Login429() }
+        return 5
+    }
+    eq(r, 5, "login: success after one countdown")
+    eq(attempts, 2, "login: two attempts")
 }
 
 // countdownCopy
@@ -250,6 +312,90 @@ eq(DispatcharrRequestGate.requestApiKey(xApiKey: "", authorization: "ApiKey"), n
 check(DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"Invalid API key\"}"), "invalid key body")
 check(!DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"Authentication credentials were not provided.\"}"), "missing credentials body")
 check(!DispatcharrRequestGate.isDispatcharrInvalidKeyBody(""), "empty body")
+// An inactive account's key is refused by the same authentication class:
+// treat it as rejected, no sweep of the other header shapes.
+check(DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"User inactive\"}"), "inactive user body")
+check(DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"user inactive\"}"), "inactive user body, any case")
+check(!DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"User not found\"}"), "other 401 body is not proof")
+
+// A rotated key with a stored password: re-sign in, never hold (Android parity).
+eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: true, loginRefused: false), .relogin, "password: re-login first")
+eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: true, loginRefused: true), .hold, "refused login: hold")
+eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: false, loginRefused: false), .hold, "no password: hold")
+// The key the re-login minted replaces the old one in requests still carrying it.
+do {
+    let g = freshGate()
+    eq(g.replacementKey(for: "old-key"), nil, "nothing replaced yet")
+    check(g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil) == nil, "no rewrite before a re-login")
+    g.noteKeyReplaced(old: "old-key", new: "new-key")
+    eq(g.replacementKey(for: "old-key"), "new-key", "old key maps to the new one")
+    eq(g.replacementKey(for: " old-key "), "new-key", "whitespace ignored")
+    eq(g.replacementKey(for: "other"), nil, "other keys untouched")
+    let x = g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil)
+    eq(x?.xApiKey, "new-key", "X-API-Key swapped")
+    eq(x?.authorization, nil, "no Authorization added")
+    let both = g.rewritingReplacedKey(xApiKey: "old-key", authorization: "ApiKey old-key")
+    eq(both?.xApiKey, "new-key", "dual shape: X-API-Key swapped")
+    eq(both?.authorization, "ApiKey new-key", "dual shape: ApiKey swapped")
+    eq(g.rewritingReplacedKey(xApiKey: nil, authorization: "Bearer old-key")?.authorization, "Bearer new-key", "bearer shape swapped")
+    check(g.rewritingReplacedKey(xApiKey: "new-key", authorization: nil) == nil, "the new key is left alone")
+    g.noteKeyReplaced(old: "same", new: "same")
+    eq(g.replacementKey(for: "same"), nil, "a re-login that returns the same key replaces nothing")
+    now += DispatcharrRequestGate.replacementMemo + 1
+    eq(g.replacementKey(for: "old-key"), nil, "the swap expires after the memo window")
+}
+
+// Key probe single flight: concurrent callers for one key share one probe.
+actor ProbeCounter {
+    var runs = 0
+    func hit() { runs += 1 }
+}
+do {
+    let flight = SingleFlight<Int>()
+    let counter = ProbeCounter()
+    let gate = AsyncStream<Void>.makeStream()
+    nonisolated(unsafe) var release: AsyncStream<Void>.Continuation? = gate.continuation
+    let work: @Sendable () async throws -> Int = {
+        await counter.hit()
+        for await _ in gate.stream { break }
+        return 42
+    }
+    async let a = flight.run("key-hash", work)
+    // Let the first caller start its probe before the others arrive.
+    while await counter.runs == 0 { await Task.yield() }
+    async let b = flight.run("key-hash", work)
+    async let c = flight.run("key-hash", work)
+    for _ in 0..<50 { await Task.yield() }
+    eq(flight.count, 1, "one probe in flight")
+    release?.yield(); release?.finish(); release = nil
+    let results = try await [a, b, c]
+    eq(results.map(\.value), [42, 42, 42], "every caller gets the one result")
+    eq(results.filter(\.owner).count, 1, "exactly one owner")
+    eq(await counter.runs, 1, "the probe ran once")
+    eq(flight.count, 0, "released after it finished")
+    // A later call starts a fresh probe.
+    let again = try await flight.run("key-hash") { await counter.hit(); return 7 }
+    eq(again.value, 7, "fresh probe value")
+    check(again.owner, "fresh probe owner")
+    eq(await counter.runs, 2, "a later call probes again")
+}
+do {
+    let flight = SingleFlight<Int>()
+    let counter = ProbeCounter()
+    async let a = flight.run("k1") { await counter.hit(); return 1 }
+    async let b = flight.run("k2") { await counter.hit(); return 2 }
+    let (ra, rb) = try await (a, b)
+    eq([ra.value, rb.value], [1, 2], "different keys keep their own result")
+    eq(await counter.runs, 2, "different keys probe separately")
+}
+do {
+    struct Boom: Error {}
+    let flight = SingleFlight<Int>()
+    var threw = false
+    do { _ = try await flight.run("k") { throw Boom() } } catch { threw = error is Boom }
+    check(threw, "a failed probe throws to its caller")
+    eq(flight.count, 0, "a failed probe is released")
+}
 
 // keyRejected copy
 eq(DispatcharrGateError.keyRejected.errorDescription,

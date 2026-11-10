@@ -2288,7 +2288,9 @@ struct DispatcharrAPI {
     /// `.refreshExpired` so the next request goes through the
     /// session-warmup path (re-login from Keychain credentials).
     func dataWithJWTRetry(for request: URLRequest,
-                          recoverApiKey: Bool = true) async throws -> (Data, URLResponse) {
+                          recoverApiKey: Bool = true,
+                          using sessionOverride: URLSession? = nil) async throws -> (Data, URLResponse) {
+        let session = sessionOverride ?? self.session
         let (data, response) = try await HTTPRouter.data(for: request, using: session)
 
         // Fast path: not 401. Return verbatim. Both .jwtSession and
@@ -2332,9 +2334,12 @@ struct DispatcharrAPI {
             retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
             return try await HTTPRouter.data(for: retry, using: session)
 
-        case .apiKey(let key):
+        case .apiKey(let builtKey):
             // An explicit key check (verifyConnection) reports its own 401.
             guard recoverApiKey else { return (data, response) }
+            // DispatcharrHTTPGate sends a key the silent re-login replaced as
+            // its successor, so the 401 is about the key that went out.
+            let key = DispatcharrRequestGate.shared.replacementKey(for: builtKey) ?? builtKey
             // 2026-11-09 (Android fd145f3d parity): is the KEY bad, or did
             // only this endpoint refuse it? One /api/core/version/ probe,
             // stopping at Dispatcharr's "Invalid API key" answer, so a bad
@@ -2364,21 +2369,37 @@ struct DispatcharrAPI {
             // credential-based auth. Surfaces the original 401 on
             // any failure so existing error-handling paths stay
             // intact.
-            guard let sid = serverID,
-                  let username = savedUsername,
-                  !username.isEmpty else {
+            //
+            // 2026-11-10 (Android parity): a request built without a
+            // serverID or username (the DVR refresh, guide sweeps) still
+            // re-signs in when the key is proven bad and the saved playlist
+            // that uses it has a stored password. It used to go straight to
+            // the hold, so a rotated key held the playlist and prompted
+            // until a relaunch, while Android re-signed in within a second.
+            let ownTarget: (id: UUID, username: String)? = {
+                guard let sid = serverID, let u = savedUsername, !u.isEmpty else { return nil }
+                return (sid, u)
+            }()
+            var target = ownTarget
+            if target == nil, case .rejected = probe {
+                target = await DispatcharrKeyBroker.reloginTarget(key: key, serverID: serverID, savedUsername: savedUsername)
+            }
+            guard let target else {
                 if case .rejected = probe,
                    await DispatcharrKeyBroker.holdIfProven(key: key, serverID: serverID, baseURL: baseURL) {
                     throw DispatcharrGateError.keyRejected
                 }
                 return (data, response)
             }
+            if ownTarget == nil {
+                debugLog("[AUTH] 401 on an API-key call; key rejected, attempting silent re-login for \(target.id.uuidString.prefix(8))")
+            }
             guard let newKey = await Self.silentRebootstrapApiKey(
-                serverID: sid,
+                serverID: target.id,
                 baseURL: baseURL,
-                username: username,
+                username: target.username,
                 userAgent: userAgent
-            ) else {
+            ), newKey != key else {
                 // A password playlist whose re-login was itself refused
                 // gets the same hold, or the re-login would run again every
                 // minute (DispatcharrLoginGate).
@@ -2388,28 +2409,37 @@ struct DispatcharrAPI {
                 }
                 return (data, response)
             }
-            // Replay with the fresh api_key in whichever header
-            // shape the server's auto-detected `authMode` expects.
-            // Mirrors `headers(for:)` so the retry ends up
-            // byte-identical to a fresh call after a normal
-            // settings-driven api_key swap.
-            var retry = request
-            switch authMode {
-            case .xapikey:
-                retry.setValue(newKey, forHTTPHeaderField: "X-API-Key")
-            case .both:
-                retry.setValue("ApiKey \(newKey)", forHTTPHeaderField: "Authorization")
-                retry.setValue(newKey, forHTTPHeaderField: "X-API-Key")
-            case .bearer:
-                retry.setValue("Bearer \(newKey)", forHTTPHeaderField: "Authorization")
+            // Requests still carrying the old key go out with the new one
+            // (DispatcharrHTTPGate), so nothing else spends a failed attempt.
+            DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey)
+            if ownTarget == nil {
+                debugLog("[AUTH] silent re-login OK for \(target.id.uuidString.prefix(8)); retrying with the new key")
             }
-            return try await HTTPRouter.data(for: retry, using: session)
+            return try await HTTPRouter.data(for: withApiKey(newKey, request), using: session)
 
         case .bearer:
             // Fixed-bearer mode (Test Connection / one-shot probe).
             // No persistence to refresh against, surface the 401.
             return (data, response)
         }
+    }
+
+    /// `request` with `key` in whichever header shape the server's
+    /// auto-detected `authMode` expects. Mirrors `headers(for:)` so the
+    /// retry ends up byte-identical to a fresh call after a normal
+    /// settings-driven api_key swap.
+    private func withApiKey(_ key: String, _ request: URLRequest) -> URLRequest {
+        var retry = request
+        switch authMode {
+        case .xapikey:
+            retry.setValue(key, forHTTPHeaderField: "X-API-Key")
+        case .both:
+            retry.setValue("ApiKey \(key)", forHTTPHeaderField: "Authorization")
+            retry.setValue(key, forHTTPHeaderField: "X-API-Key")
+        case .bearer:
+            retry.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        return retry
     }
 
     // MARK: - Verify
@@ -3154,7 +3184,8 @@ struct DispatcharrAPI {
         guard let url = try? buildURL(path: "/api/epg/programs/?\(query)&page_size=50") else { return [] }
         var request = URLRequest(url: url, timeoutInterval: 8)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        guard let (data, response) = try? await HTTPRouter.data(for: request),
+        // Through the key broker: a 401 starts or honors the rejected-key hold.
+        guard let (data, response) = try? await dataWithJWTRetry(for: request),
               let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return [] }
         if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) { return list }
         return (try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data))?.results ?? []
@@ -3190,8 +3221,10 @@ struct DispatcharrAPI {
         // channel-filtered programs query.
         var request = URLRequest(url: url, timeoutInterval: 15)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(for: request)
+        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work
+        // (dataWithJWTRetry routes through it, and its key broker turns a
+        // 401 into the rejected-key hold instead of an ordinary failure).
+        let (data, response) = try await dataWithJWTRetry(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             return []
         }
@@ -3208,7 +3241,7 @@ struct DispatcharrAPI {
                 var req = URLRequest(url: pageURL)
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
                 // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-                guard let (pageData, pageResp) = try? await HTTPRouter.data(for: req),
+                guard let (pageData, pageResp) = try? await dataWithJWTRetry(for: req),
                       let pageHttp = pageResp as? HTTPURLResponse,
                       (200..<300).contains(pageHttp.statusCode) else { break }
                 let page = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: pageData)
@@ -3249,7 +3282,7 @@ struct DispatcharrAPI {
             var request = URLRequest(url: url)
             headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
             // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-            let (data, response) = try await HTTPRouter.data(for: request, using: Self.bulkEPGSession)
+            let (data, response) = try await dataWithJWTRetry(for: request, using: Self.bulkEPGSession)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { break }
 
             if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
