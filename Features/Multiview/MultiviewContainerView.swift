@@ -39,6 +39,8 @@ struct MultiviewContainerView: View {
     /// Phone-side Multiview composite (2026-10-06): an AirPlay composite is
     /// carried by a hidden tile playing the composite TS.
     @ObservedObject private var mvComposite = MultiviewCompositeSession.shared
+    /// iPhone Duo half folded (tabletop): the fold under the sole player.
+    @ObservedObject private var halfFold = HalfFoldPlayerState.shared
     @StateObject private var compositeProgress = PlayerProgressStore()
     #endif
 
@@ -340,6 +342,12 @@ struct MultiviewContainerView: View {
             #if os(iOS)
             .offset(y: topStripDragOffset)
             .background(compositeAirPlayTile)
+            // The fold comes from the system's reserved regions (Apple:
+            // use the arrangement and region APIs for layout, never hinge
+            // math). Read on the full-screen container, published once per change.
+            .onGeometryChange(for: HalfFoldGeometry?.self) { HalfFoldGeometry.from($0) } action: { g in
+                HalfFoldPlayerState.shared.update(g)
+            }
             #endif
             .channelNumberEntry(
                 scope: .player,
@@ -375,6 +383,12 @@ struct MultiviewContainerView: View {
             VStack(spacing: 0) {
                 gridArea
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    #if os(iOS)
+                    // Half folded: video only, above the fold (aspect fit
+                    // by the tile). Padding, not a new container, so the
+                    // player view is never rebuilt on a posture change.
+                    .padding(.bottom, halfFoldVideoBottomInset)
+                    #endif
                     // Edge-to-edge at every N. The previous
                     // `.padding(.horizontal, 16) / .padding(.top, 4)`
                     // at N>=2 was adding a visible gutter around the
@@ -564,7 +578,7 @@ struct MultiviewContainerView: View {
             // chrome buttons above it keep their taps; when chrome is
             // hidden it unmounts and the container's show-gesture (which
             // now only fires with chrome hidden) takes over.
-            if chromeState.isVisible, !chromeState.isPinned, store.tiles.count == 1 {
+            if chromeState.isVisible, !chromeState.isPinned, store.tiles.count == 1, !isHalfFolded {
                 Color.clear
                     .contentShape(Rectangle())
                     .ignoresSafeArea()
@@ -595,7 +609,34 @@ struct MultiviewContainerView: View {
                 // overlay is empty by design; the actual chrome pills
                 // live in `PlaybackBottomChrome_tvOS` rendered above
                 // and that's where the focus-trap disable is wired.)
+                #if os(iOS)
+                // Half folded: the controls live in the panel under the
+                // fold, so nothing overlays the video.
+                .opacity(isHalfFolded ? 0 : 1)
+                .allowsHitTesting(!isHalfFolded)
+                .accessibilityHidden(isHalfFolded)
+                #endif
             }
+
+            #if os(iOS)
+            if isHalfFolded, let g = halfFold.geometry {
+                // Placed in the same frame the fold was measured in: the
+                // panel starts right under the fold and runs to the bottom.
+                VStack(spacing: 0) {
+                    HalfFoldPlayerPanel(
+                        store: store,
+                        showAddSheet: $showAddSheet,
+                        showTVOptions: $showTVOptions,
+                        sleepTimerEnd: $sleepTimerEnd,
+                        showStreamInfo: $showStreamInfo,
+                        showRecordSheet: $showRecordSheet,
+                        showSwitchStream: $showSwitchStream
+                    )
+                }
+                .padding(.top, g.foldBottom)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+            #endif
 
             #if os(tvOS)
             // Options panel at N=1 on the unified path. Reuses the
@@ -1532,6 +1573,23 @@ struct MultiviewContainerView: View {
         return false
         #endif
     }
+
+    #if os(iOS)
+    /// iPhone Duo half folded with a horizontal fold, under the full-screen
+    /// single player only (not Multiview, not the mini player).
+    private var isHalfFolded: Bool {
+        halfFold.geometry != nil
+            && PlaybackFeatureFlags.useUnifiedPlayback
+            && store.tiles.count == 1
+            && !nowPlaying.isMinimized
+    }
+
+    /// Space under the fold the video stays out of while half folded.
+    private var halfFoldVideoBottomInset: CGFloat {
+        guard isHalfFolded, let g = halfFold.geometry else { return 0 }
+        return max(0, g.height - g.foldTop)
+    }
+    #endif
 
     private var exitConfirmationPrimary: String {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
@@ -3199,6 +3257,75 @@ enum MultiviewRelocateInput {
             }
         }
         return consumed
+    }
+}
+#endif
+
+
+// MARK: - Half-folded player (iPhone Duo tabletop)
+
+/// The order the half-folded player's Guide panel lists channels in: the
+/// Live TV list as it was last filtered (active group and sort). Plain
+/// storage, written by ChannelListView, never published.
+enum PlayerGuideOrder {
+    nonisolated(unsafe) static var ids: [String] = []
+}
+
+#if os(iOS)
+/// The fold under the full-screen player while the device is partially
+/// folded with a horizontal fold: the occlusion reserved region, in the
+/// player container's coordinates.
+struct HalfFoldGeometry: Equatable {
+    nonisolated(unsafe) private static var lastRegionSignature = ""
+    let foldTop: CGFloat
+    let foldBottom: CGFloat
+    let height: CGFloat
+
+    /// The fold as the system reports it: an active `.division` reserved
+    /// region (the HIG's folding region, "where an element should divide
+    /// into two separate regions") that runs across the container in its
+    /// middle band, so a horizontal fold. An `.occlusion` region of that
+    /// shape counts too. nil for anything else (flat, closed, a vertical
+    /// fold, the camera).
+    static func from(_ proxy: GeometryProxy) -> HalfFoldGeometry? {
+        guard #available(iOS 27.1, *) else { return nil }
+        let size = proxy.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let division = proxy.reservedRegions(kind: .division, options: .includeInactive)
+        let occlusion = proxy.reservedRegions(kind: .occlusion, options: .includeInactive)
+        // Logged once per change so the system's fold shape is on record.
+        func describe(_ rs: [ReservedRegion]) -> String {
+            rs.map { "\(Int($0.frame.minX)),\(Int($0.frame.minY)) \(Int($0.frame.width))x\(Int($0.frame.height))\($0.isActive ? "" : " inactive")" }
+                .joined(separator: "; ")
+        }
+        let signature = "division [\(describe(division))] occlusion [\(describe(occlusion))] in \(Int(size.width))x\(Int(size.height))"
+        if signature != lastRegionSignature {
+            lastRegionSignature = signature
+            debugLog("[HALFFOLD] reserved regions: \(signature)")
+        }
+        for region in division + occlusion where region.isActive {
+            let f = region.frame
+            if f.width >= size.width * 0.8, f.height < size.height * 0.3,
+               f.minY > size.height * 0.2, f.maxY < size.height * 0.8 {
+                return HalfFoldGeometry(foldTop: f.minY, foldBottom: f.maxY, height: size.height)
+            }
+        }
+        return nil
+    }
+}
+
+@MainActor
+final class HalfFoldPlayerState: ObservableObject {
+    static let shared = HalfFoldPlayerState()
+    @Published private(set) var geometry: HalfFoldGeometry?
+
+    func update(_ g: HalfFoldGeometry?) {
+        guard g != geometry else { return }
+        if (g == nil) != (geometry == nil) {
+            debugLog("[HALFFOLD] \(g == nil ? "flat or closed" : "half folded") "
+                     + (g.map { "fold=\(Int($0.foldTop))-\(Int($0.foldBottom)) of \(Int($0.height))" } ?? ""))
+        }
+        geometry = g
     }
 }
 #endif

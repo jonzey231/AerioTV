@@ -3266,6 +3266,8 @@ struct ChannelListView: View {
         programHitsPending = false
         #endif
         filteredChannels = result
+        // The half-folded player's Guide panel lists channels in this order.
+        PlayerGuideOrder.ids = result.map(\.id)
         prefetchEPGForVisibleChannels(result)
     }
 

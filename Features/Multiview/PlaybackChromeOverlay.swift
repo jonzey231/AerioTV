@@ -83,6 +83,12 @@ struct PlaybackChromeOverlay: View {
     /// panel drives its own copy in the container.
     @Binding var showSwitchStream: Bool
 
+    /// iPhone Duo half folded (tabletop): the same controls laid out in the
+    /// panel under the fold, always visible (no auto-hide), no scrims, and
+    /// `panelInfo` (the program info card) under the top row.
+    var panelMode: Bool = false
+    var panelInfo: AnyView? = nil
+
     /// Drives the 5-second auto-fade of chrome. Container owns it;
     /// we read `isVisible` to gate opacity + hit-testing, and call
     /// `reportInteraction()` on every button action to bump the
@@ -152,11 +158,13 @@ struct PlaybackChromeOverlay: View {
                         title: soleTileTitle
                     )
                 }
+                // Half folded: always visible in the panel under the fold.
+                let shown = panelMode || chromeState.isVisible
                 soleTileChrome_iOS
-                    .opacity(chromeState.isVisible ? 1 : 0)
-                    .allowsHitTesting(chromeState.isVisible)
-                    .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
-                    .accessibilityHidden(!chromeState.isVisible)
+                    .opacity(shown ? 1 : 0)
+                    .allowsHitTesting(shown)
+                    .animation(.easeInOut(duration: 0.25), value: shown)
+                    .accessibilityHidden(!shown)
             }
             // v1.6.18: explicitly bypass the parent's safe-area
             // handling. v1.6.17's iPhone-only multiview safe-area
@@ -173,7 +181,7 @@ struct PlaybackChromeOverlay: View {
             // hugs the Dynamic Island instead of floating ~130pt
             // below it. Landscape was already fine because
             // dynamicTopInset bottoms out at 20pt there.
-            .ignoresSafeArea(edges: .top)
+            .ignoresSafeArea(edges: panelMode ? [] : .top)
         }
         #else
         EmptyView()
@@ -378,7 +386,13 @@ struct PlaybackChromeOverlay: View {
             // devices that report abnormally small insets (iPad
             // landscape, older home-button iPhones). No device model
             // probing, no manual bumps per form factor.
-            .padding(.top, dynamicTopInset)
+            .padding(.top, panelMode ? 8 : dynamicTopInset)
+
+            if panelMode, let panelInfo {
+                panelInfo
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+            }
 
             // v1.6.15: removed the iPhone-portrait three-line title
             // stack (channel name / program / time range). The new
@@ -432,7 +446,7 @@ struct PlaybackChromeOverlay: View {
             // chrome: solid black at the top fading to transparent
             // below, so controls stay legible over video content.
             LinearGradient(
-                colors: [Color.black.opacity(0.65), Color.clear],
+                colors: [Color.black.opacity(panelMode ? 0 : 0.65), Color.clear],
                 startPoint: .top, endPoint: .bottom
             )
             .frame(maxHeight: 140)
@@ -445,7 +459,7 @@ struct PlaybackChromeOverlay: View {
         // video stays untinted.
         .background(
             LinearGradient(
-                colors: [Color.clear, Color.black.opacity(0.55)],
+                colors: [Color.clear, Color.black.opacity(panelMode ? 0 : 0.55)],
                 startPoint: .top, endPoint: .bottom
             )
             .frame(maxHeight: 110)

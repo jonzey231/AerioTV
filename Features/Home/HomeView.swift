@@ -9576,7 +9576,13 @@ struct MainTabView: View {
 /// starts also wake the chrome, so the banner appears together with
 /// the chrome on every channel-flip, no separate timer.
 private struct ChannelInfoBanner: View {
+    /// The half-folded player's panel shows the card in its own layout:
+    /// always (live, single player), no screen-edge padding, no full frame.
+    var embedded = false
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    #if os(iOS)
+    @ObservedObject private var halfFold = HalfFoldPlayerState.shared
+    #endif
     /// Observes only the playing channel's now/next cell, not the whole map.
     @StateObject private var nowNext = GuideNowNextWatch()
     @ObservedObject private var multiviewStore = MultiviewStore.shared
@@ -9629,6 +9635,11 @@ private struct ChannelInfoBanner: View {
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
         let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
+        #if os(iOS)
+        // Half folded: the card lives in the panel under the fold, never over the video.
+        if embedded { return isSingleStream && isFullscreenActive }
+        if halfFold.geometry != nil && isSingleStream { return false }
+        #endif
         let bannerWindowFresh: Bool = {
             guard bannerWindowActive else { return false }
             guard let openedAt = bannerOpenedAt else { return false }
@@ -9744,7 +9755,7 @@ private struct ChannelInfoBanner: View {
             }
             Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: embedded ? nil : .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
         // v1.6.18: same safe-area carve-out as the chrome and
         // Stream Info overlays, the `iOSDynamicTopInset` formula
@@ -9756,7 +9767,7 @@ private struct ChannelInfoBanner: View {
         // the literal screen top restores the intended ~71pt
         // offset that hugs the Dynamic Island.
         #if os(iOS)
-        .ignoresSafeArea(edges: .top)
+        .ignoresSafeArea(edges: embedded ? [] : .top)
         #endif
         // Open the 5s banner-window every time a new stream starts
         // (live only, token only bumps for live in NowPlayingManager).
@@ -9986,6 +9997,7 @@ private struct ChannelInfoBanner: View {
         #if os(tvOS)
         return 32
         #else
+        if embedded { return 0 }
         // iPhone PORTRAIT: below the chrome's close button row
         // (close button column is too narrow to share with the
         // banner). iPhone LANDSCAPE / iPad / Mac: align with the
@@ -10006,6 +10018,7 @@ private struct ChannelInfoBanner: View {
         #if os(tvOS)
         return 40
         #else
+        if embedded { return 0 }
         // iPhone PORTRAIT: left edge (banner sits below the close
         // button so there's no horizontal conflict). iPhone
         // LANDSCAPE / iPad / Mac: clear the close button,
@@ -11064,6 +11077,214 @@ extension View {
         } else {
             self
         }
+    }
+}
+
+// MARK: - iPhone Duo half-folded player panel
+
+/// The panel under the fold while the device is half folded (tabletop):
+/// "Controls" (the player's own controls, always visible) or, for live TV,
+/// "Guide" (the current channel and the ones after it). Shared spec with
+/// Android (halffold-player-spec.md): same wording and behavior.
+struct HalfFoldPlayerPanel: View {
+    @ObservedObject var store: MultiviewStore
+    @Binding var showAddSheet: Bool
+    @Binding var showTVOptions: Bool
+    @Binding var sleepTimerEnd: Date?
+    @Binding var showStreamInfo: Bool
+    @Binding var showRecordSheet: Bool
+    @Binding var showSwitchStream: Bool
+
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    /// Remembered on this device only (never synced).
+    @AppStorage(HalfFoldPanelTab.defaultsKey) private var tabRaw = HalfFoldPanelTab.controls.rawValue
+
+    /// Live TV only: VOD, recordings, and catch-up show Controls alone.
+    /// Keyed on the tile's kind, which holds steady through a channel
+    /// switch (the live flag drops while the new channel starts, and
+    /// that hid and rebuilt the picker, which reset it to Controls).
+    private var offersGuide: Bool {
+        store.tiles.count == 1 && store.tiles.first?.kind == .live
+    }
+
+    private var tab: HalfFoldPanelTab {
+        offersGuide ? (HalfFoldPanelTab(rawValue: tabRaw) ?? .controls) : .controls
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if offersGuide {
+                Picker("Player panel", selection: $tabRaw) {
+                    Text("Controls").tag(HalfFoldPanelTab.controls.rawValue)
+                    Text("Guide").tag(HalfFoldPanelTab.guide.rawValue)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+            }
+            switch tab {
+            case .controls:
+                PlaybackChromeOverlay(
+                    store: store,
+                    showAddSheet: $showAddSheet,
+                    showTVOptions: $showTVOptions,
+                    sleepTimerEnd: $sleepTimerEnd,
+                    showStreamInfo: $showStreamInfo,
+                    showRecordSheet: $showRecordSheet,
+                    showSwitchStream: $showSwitchStream,
+                    panelMode: true,
+                    panelInfo: AnyView(ChannelInfoBanner(embedded: true)
+                        .fixedSize(horizontal: false, vertical: true))
+                )
+            case .guide:
+                HalfFoldGuideList()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color.black)
+        .onAppear { debugLog("[HALFFOLD] panel shown tab=\(tab.rawValue) guide=\(offersGuide)") }
+        .onChange(of: tabRaw) { _, v in debugLog("[HALFFOLD] panel tab=\(v)") }
+    }
+}
+
+enum HalfFoldPanelTab: String {
+    case controls, guide
+    static let defaultsKey = "playerHalfFoldPanelTab"
+}
+
+/// The Guide panel: the playing channel first (highlighted), then the
+/// channels after it in the Live TV list's order (active group and sort).
+/// A tap switches channels the way the player always does (tuneDirect).
+private struct HalfFoldGuideList: View {
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    @ObservedObject private var channelStore = ChannelStore.shared
+
+    private var rows: [ChannelDisplayItem] {
+        let all = channelStore.channels
+        guard let currentID = nowPlaying.playingItem?.id else { return all }
+        let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var order = PlayerGuideOrder.ids.compactMap { byID[$0] }
+        if !order.contains(where: { $0.id == currentID }) { order = all }
+        guard let i = order.firstIndex(where: { $0.id == currentID }) else { return order }
+        return Array(order[i...]) + Array(order[..<i])
+    }
+
+    var body: some View {
+        let list = rows
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(list, id: \.id) { item in
+                    Button {
+                        guard item.id != nowPlaying.playingItem?.id else { return }
+                        debugLog("[HALFFOLD] guide tap -> \(item.name)")
+                        nowPlaying.tuneDirect(item)
+                    } label: {
+                        HalfFoldGuideRow(item: item, isCurrent: item.id == nowPlaying.playingItem?.id)
+                    }
+                    .buttonStyle(.plain)
+                    Divider().overlay(Color.white.opacity(0.08))
+                }
+            }
+        }
+        .scrollIndicators(.visible)
+    }
+}
+
+private struct HalfFoldGuideRow: View {
+    let item: ChannelDisplayItem
+    let isCurrent: Bool
+    @StateObject private var nowNext = GuideNowNextWatch()
+
+    private var live: (title: String, start: Date, end: Date)? {
+        if let title = item.currentProgram, !title.isEmpty,
+           let start = item.currentProgramStart, let end = item.currentProgramEnd {
+            return (title, start, end)
+        }
+        if let p = nowNext.live(for: item.id) { return (p.title, p.start, p.end) }
+        return nil
+    }
+
+    private var next: GuideProgram? {
+        nowNext.bind(item.id)?.nowNext.next
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            CachedLogoImage(url: item.logoURL, width: 48, height: 48, containerRadius: 10)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if !item.number.isEmpty {
+                        Text(item.number)
+                            .scaledFont(.subheadline.weight(.semibold))
+                            .foregroundColor(.white.opacity(0.55))
+                    }
+                    Text(item.name)
+                        .scaledFont(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                }
+                if let live {
+                    TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(live.title)
+                                    .scaledFont(.footnote)
+                                    .foregroundColor(.white.opacity(0.85))
+                                    .lineLimit(1)
+                                Spacer(minLength: 4)
+                                Text(HalfFoldGuideText.timeLeft(until: live.end, now: ctx.date))
+                                    .scaledFont(.caption)
+                                    .foregroundColor(.white.opacity(0.6))
+                            }
+                            ProgressView(value: HalfFoldGuideText.progress(start: live.start, end: live.end, now: ctx.date))
+                                .tint(.accentPrimary)
+                        }
+                    }
+                    if let next {
+                        Text(HalfFoldGuideText.next(title: next.title, start: next.start))
+                            .scaledFont(.caption)
+                            .foregroundColor(.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                } else {
+                    Text(HalfFoldGuideText.noGuideData)
+                        .scaledFont(.footnote)
+                        .foregroundColor(.white.opacity(0.6))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isCurrent ? Color.accentPrimary.opacity(0.22) : Color.clear)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
+    }
+}
+
+/// Copy for the Guide panel rows (identical on Android).
+enum HalfFoldGuideText {
+    static let noGuideData = "No guide data"
+
+    /// "1h 5m left", "42m left".
+    static func timeLeft(until end: Date, now: Date) -> String {
+        let minutes = max(0, Int((end.timeIntervalSince(now) / 60).rounded(.up)))
+        let h = minutes / 60, m = minutes % 60
+        if h > 0 && m > 0 { return "\(h)h \(m)m left" }
+        if h > 0 { return "\(h)h left" }
+        return "\(m)m left"
+    }
+
+    static func progress(start: Date, end: Date, now: Date) -> Double {
+        let total = end.timeIntervalSince(start)
+        guard total > 0 else { return 0 }
+        return min(1, max(0, now.timeIntervalSince(start) / total))
+    }
+
+    /// "Next: SportsCenter, 9:00 AM".
+    static func next(title: String, start: Date) -> String {
+        "Next: \(title), \(ClockFormat.short().string(from: start))"
     }
 }
 
