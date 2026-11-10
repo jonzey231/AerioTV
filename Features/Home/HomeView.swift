@@ -6482,6 +6482,8 @@ struct MainTabView: View {
         .onChange(of: playerFullscreen, initial: true) { _, full in
             TabBarCollapseState.shared.setPlayerFullscreen(full)
         }
+        // iPhone Duo: the vertical bar is off only while the player is full screen.
+        .aerioVerticalBarOff(playerFullscreen)
         // AirPlay handoff (device test 2026-09-25): the receiver took the
         // channel, the fullscreen player was minimized, so land on Live TV
         // with the remote-session card driving the session (Cast parity).
@@ -11200,6 +11202,29 @@ private struct PhoneNavigationBarHidden: ViewModifier {
     @Environment(\.aerioVerticalBarActive) private var vertical
     func body(content: Content) -> some View {
         content.toolbar(vertical ? .visible : .hidden, for: .navigationBar)
+    }
+}
+
+extension View {
+    /// iPhone Duo: no vertical bar while the full-screen player is up, so the
+    /// status column is not drawn over the video. Apple (UIViewController
+    /// preferredVerticalBarBehavior, iOS 27.1 SDK): disable the vertical bar
+    /// for a fullscreen video player with toolbar controls. Back to automatic
+    /// the moment the player closes or minimizes to the dock. No effect on
+    /// other iPhones, on iPad, or before iOS 27.1.
+    func aerioVerticalBarOff(_ off: Bool) -> some View {
+        modifier(VerticalBarOffForPlayer(off: off))
+    }
+}
+
+private struct VerticalBarOffForPlayer: ViewModifier {
+    let off: Bool
+    func body(content: Content) -> some View {
+        if #available(iOS 27.1, *) {
+            content.toolbarVerticalBehavior(off ? .disabled : .automatic)
+        } else {
+            content
+        }
     }
 }
 
