@@ -345,18 +345,75 @@ final class SetupTvOfferCenter: ObservableObject {
     /// (new key) shows again.
     func completed(_ t: SetupTarget) {
         dismissed.insert(t.id)
+        if t.pk == lastLink?.pk { lastLinkSent = true }
         debugLog("[SETUP] offer cleared after send key=\(t.fingerprint)")
     }
 
     func setUp(_ t: SetupTarget) { presentedTarget = t }
 
-    /// aeriotv://setup from the system camera or a scan outside Set up a TV.
-    func openLink(_ link: String) {
-        guard SetupProtocol.parseLink(link) != nil else {
+    /// A link that arrived behind the launch PIN screen or during a profile
+    /// switch. Opened afterwards only when the profile then active may set up
+    /// another device.
+    private var heldLink: String?
+
+    /// The one-time session (code and key) of the last camera link, in memory
+    /// only, so nothing outlives the process. The same link again is ignored
+    /// while its sheet is open or held, or once its payload went out (the
+    /// other device's session is used up); after Cancel a rescan opens it.
+    private var lastLink: (code: String, pk: Data)?
+    private var lastLinkSent = false
+
+    /// Set by an open Set up sheet while its key check or send runs: a newer
+    /// camera link is ignored then (Android parity), and replaces the
+    /// pending device otherwise.
+    var sheetBusy = false
+
+    /// aeriotv://setup from the system camera. `allowed` is SetupGate.canSetUpTv
+    /// for the active playlist: a profile that cannot set up another device
+    /// (a Child) drops the link silently, as Android does. Never logs the link.
+    func openLink(_ link: String, allowed: Bool, locked: Bool) {
+        guard let parsed = SetupProtocol.parseLink(link) else {
             debugLog("[SETUP] link rejected")
             return
         }
-        debugLog("[SETUP] link opened")
+        let same = lastLink.map { $0.code == parsed.code && $0.pk == parsed.pk } ?? false
+        let action = SetupLinkRules.action(
+            sameAsLast: same,
+            lastStillLive: pendingLink != nil || heldLink != nil || lastLinkSent,
+            sheetBusy: sheetBusy, locked: locked, allowed: allowed)
+        switch action {
+        case .ignoreSame:
+            debugLog("[SETUP] same link again, ignored (\(lastLinkSent ? "already sent" : "already open"))")
+            return
+        case .ignoreBusy:
+            debugLog("[SETUP] newer link ignored: a key check or send is under way")
+            return
+        case .hold, .drop, .open:
+            break
+        }
+        lastLink = (parsed.code, parsed.pk)
+        lastLinkSent = false
+        switch action {
+        case .hold:
+            heldLink = link
+            debugLog("[SETUP] link held until the app is unlocked and the profile settled")
+        case .drop:
+            debugLog("[SETUP] link dropped: this profile cannot set up another device")
+        default:
+            debugLog(pendingLink == nil ? "[SETUP] link opened" : "[SETUP] newer link replaced the pending device")
+            pendingLink = LinkBox(link: link)
+        }
+    }
+
+    /// Unlocked and settled: open a held link only for a profile that may set up another device.
+    func unlocked(allowed: Bool) {
+        guard let link = heldLink else { return }
+        heldLink = nil
+        guard allowed else {
+            debugLog("[SETUP] held link dropped: this profile cannot set up another device")
+            return
+        }
+        debugLog("[SETUP] held link opened after unlock")
         pendingLink = LinkBox(link: link)
     }
 }
@@ -373,6 +430,18 @@ enum SetupGate {
         let pm = ProfileManager.shared
         let active = pm.activeProfile(pid)
         return SetupProfileRules.canSetUpTv(activeRole: active?.effectiveRole.wire, activeIsDefault: active?.isDefault)
+    }
+
+    /// The launch PIN screen covers the app: nothing may be sent from behind it.
+    @MainActor
+    static var isLocked: Bool { ProfileManager.shared.launchGate != nil }
+
+    /// Checked right before a payload leaves this device, on every send path
+    /// (the Set up another device sheet, a system-camera link, a User QR
+    /// source): unlocked, and the active profile may set up another device.
+    @MainActor
+    static func canSend(_ server: ServerConnection?) -> Bool {
+        !isLocked && canSetUpTv(server)
     }
 }
 
@@ -705,10 +774,17 @@ final class UserQrSource: ObservableObject {
 
     func send() {
         guard let p = pending, case .confirm(let name) = phase else { return }
+        // Same gate as Set up another device: unlocked, and a profile that may send.
+        guard SetupGate.canSend(DsyncLocal.server(playlistId)) else {
+            debugLog("[SETUP] user QR source: send blocked for this profile")
+            decline()
+            return
+        }
         timeout?.cancel()
         phase = .sending(name)
         Task {
-            let result: SetupSender.SendResult
+            /// nil: blocked by the profile gate, answered like Don't send.
+            let result: SetupSender.SendResult?
             if let server = DsyncLocal.server(playlistId) {
                 let source = SetupSender.source(server)
                 let ids = Set(source.choices.filter { !$0.isDefault && $0.credentialLabel != nil }.map(\.id))
@@ -718,6 +794,10 @@ final class UserQrSource: ObservableObject {
                 if payload.playlist.type == "dispatcharr", let key = payload.playlist.credential?.apiKey,
                    await SetupKeySender.check(key: key, server: server, onCountdown: { _, _ in }) == .rejected {
                     result = .failed(DispatcharrRateLimitCopy.setupKeyRejectedMessage)
+                } else if !SetupGate.canSend(server) {
+                    // The profile changed or the app locked during the key check.
+                    debugLog("[SETUP] user QR source: send blocked for this profile")
+                    result = nil
                 } else {
                     result = await SetupSender.send(SetupTarget.fromLink(p.link), code: p.link.code, payload: payload)
                 }
@@ -726,6 +806,11 @@ final class UserQrSource: ObservableObject {
             }
             guard pending?.conn === p.conn else { return }
             pending = nil
+            guard let result else {
+                Self.reply(p.conn, 403, "declined")
+                phase = .idle
+                return
+            }
             switch result {
             case .ok:
                 Self.reply(p.conn, 200, nil)

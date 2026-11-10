@@ -284,5 +284,23 @@ do {
     check(!UserQrCrypto.verify(apiKey: "other", link: link, proof: UserQrCrypto.proof(apiKey: "test-key-123", link: link)), "wrong key fails")
 }
 
+// MARK: Camera link rules (Android SetupLinkRules / setupLinkMayReplace, c91a3ad4)
+do {
+    typealias L = SetupLinkRules
+    func act(same: Bool = false, live: Bool = false, busy: Bool = false, locked: Bool = false, allowed: Bool = true) -> L.Action {
+        L.action(sameAsLast: same, lastStillLive: live, sheetBusy: busy, locked: locked, allowed: allowed)
+    }
+    eq(act(), .open, "allowed link opens")
+    eq(act(allowed: false), .drop, "Child profile drops the link")
+    eq(act(locked: true), .hold, "launch PIN screen holds the link")
+    eq(act(locked: true, allowed: false), .hold, "held first, decided after the unlock")
+    eq(act(busy: true), .ignoreBusy, "newer link ignored during the key check or send")
+    eq(act(busy: true, allowed: false), .ignoreBusy, "busy wins over the profile check")
+    eq(act(live: true), .open, "a different link replaces the open sheet when idle")
+    eq(act(same: true, live: true), .ignoreSame, "the same link while its sheet is open is ignored")
+    eq(act(same: true, live: true, busy: true), .ignoreSame, "the same link during its own send is ignored")
+    eq(act(same: true, live: false), .open, "the same link after Cancel opens again")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

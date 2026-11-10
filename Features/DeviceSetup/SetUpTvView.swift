@@ -108,6 +108,16 @@ struct SetUpTvView: View {
         }
         .onAppear(perform: load)
         .onChange(of: center.tvs) { _, tvs in invalidateIfStale(tvs) }
+        // A camera link that arrives during the key check or the send is ignored.
+        .onChange(of: isBusy, initial: true) { _, busy in center.sheetBusy = busy }
+        .onDisappear { center.sheetBusy = false }
+    }
+
+    private var isBusy: Bool {
+        switch step {
+        case .checking, .sending: return true
+        default: return false
+        }
     }
 
     private var isChecking: Bool {
@@ -400,6 +410,13 @@ struct SetUpTvView: View {
     }
 
     private func send(_ t: SetupTarget, _ code: String, _ pl: ServerConnection) {
+        // A Child profile, or an app behind the launch PIN, never sends (any path
+        // into this sheet, the system-camera link included). Nothing is sent.
+        guard SetupGate.canSend(pl) else {
+            debugLog("[SETUP] send blocked for this profile")
+            onClose()
+            return
+        }
         if t.isExpired {
             debugLog("[SETUP] target expired key=\(t.fingerprint)")
             step = .error(Self.noLongerWaiting, .pick)
@@ -428,6 +445,12 @@ struct SetUpTvView: View {
             // Resolve again right before every send: the device may have started a
             // new session (new port and key) since the card or list last saw it.
             let t = await SetupDiscovery.fresh(t)
+            // Again after the awaits: a profile switch or lock may have landed meanwhile.
+            guard SetupGate.canSend(pl) else {
+                debugLog("[SETUP] send blocked for this profile")
+                onClose()
+                return
+            }
             switch await SetupSender.send(t, code: code, payload: payload) {
             case .ok:
                 debugLog("[SETUP] sent, TV finishing setup key=\(t.fingerprint)")
@@ -615,6 +638,10 @@ struct SetupHandoffRoot: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
     @Query private var servers: [ServerConnection]
 
+    /// A setup link waits while the launch PIN screen is up or a profile switch
+    /// is landing: the profile that will be active is not settled yet.
+    private var linkHeld: Bool { SetupGate.isLocked || profiles.switching }
+
     func body(content: Content) -> some View {
         content
             .onChange(of: scenePhase, initial: true) { _, phase in center.setForeground(phase == .active) }
@@ -630,8 +657,20 @@ struct SetupHandoffRoot: ViewModifier {
             }
             .onOpenURL { url in
                 // aeriotv://setup from the system camera. Never log the URL.
-                guard url.scheme?.lowercased() == "aeriotv", url.host?.lowercased() == "setup" else { return }
-                center.openLink(url.absoluteString)
+                guard url.scheme?.lowercased() == "aeriotv" else { return }
+                guard url.host?.lowercased() == "setup" else {
+                    debugLog("[SETUP] aeriotv link ignored (not setup)")
+                    return
+                }
+                // Same gate as Set up in Settings: a Child profile drops the link;
+                // behind the launch PIN, or while a profile switch lands, it waits
+                // and is checked again for the profile then active (Android parity).
+                center.openLink(url.absoluteString,
+                                allowed: SetupGate.canSetUpTv(servers.first(where: \.isActive)),
+                                locked: linkHeld)
+            }
+            .onChange(of: linkHeld) { _, held in
+                if !held { center.unlocked(allowed: SetupGate.canSetUpTv(servers.first(where: \.isActive))) }
             }
             .sheet(item: Binding(get: { center.presentedTarget }, set: { center.presentedTarget = $0 })) { t in
                 SetUpTvView(target: t) { center.presentedTarget = nil }

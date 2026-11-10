@@ -405,6 +405,38 @@ enum UserQrCrypto {
 /// The contract's profile rules for the sender (docs/DeviceSetupHandoff.md,
 /// Android SetupSender.buildPayload and ProfileManager.canSetUpTv). Pure so
 /// Scripts/setup-tests can check them without the app.
+/// What an aeriotv://setup link from the system camera does (Android
+/// SetupLinkRules and setupLinkMayReplace, c91a3ad4). Pure so
+/// Scripts/setup-tests can check it.
+enum SetupLinkRules {
+    enum Action: Equatable, Sendable {
+        /// Open the sender on it (a newer link replaces the open sheet's device).
+        case open
+        /// Keep it until the app is unlocked and the profile settled, then decide again.
+        case hold
+        /// A profile that may not set up another device: forget it without a word.
+        case drop
+        /// The same one-time session again while its sheet is open or held, or after it was sent.
+        case ignoreSame
+        /// The open sheet is checking the key or sending: the newer link is ignored.
+        case ignoreBusy
+    }
+
+    /// - Parameters:
+    ///   - sameAsLast: same code and key as the last link handled.
+    ///   - lastStillLive: that link's sheet is open or held, or its payload went out.
+    ///   - sheetBusy: a Set up sheet is running its key check or its send.
+    ///   - locked: the launch PIN screen is up or a profile switch is landing.
+    ///   - allowed: the active profile may set up another device.
+    static func action(sameAsLast: Bool, lastStillLive: Bool, sheetBusy: Bool,
+                       locked: Bool, allowed: Bool) -> Action {
+        if sameAsLast && lastStillLive { return .ignoreSame }
+        if sheetBusy { return .ignoreBusy }
+        if locked { return .hold }
+        return allowed ? .open : .drop
+    }
+}
+
 enum SetupProfileRules {
     /// One local profile of the playlist, in list order, with what this device stores for it.
     struct Source: Equatable, Sendable {
