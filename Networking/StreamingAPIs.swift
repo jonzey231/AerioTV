@@ -2287,7 +2287,8 @@ struct DispatcharrAPI {
     /// handling stays intact. The token store is cleared on
     /// `.refreshExpired` so the next request goes through the
     /// session-warmup path (re-login from Keychain credentials).
-    func dataWithJWTRetry(for request: URLRequest) async throws -> (Data, URLResponse) {
+    func dataWithJWTRetry(for request: URLRequest,
+                          recoverApiKey: Bool = true) async throws -> (Data, URLResponse) {
         let (data, response) = try await HTTPRouter.data(for: request, using: session)
 
         // Fast path: not 401. Return verbatim. Both .jwtSession and
@@ -2331,7 +2332,24 @@ struct DispatcharrAPI {
             retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
             return try await HTTPRouter.data(for: retry, using: session)
 
-        case .apiKey:
+        case .apiKey(let key):
+            // An explicit key check (verifyConnection) reports its own 401.
+            guard recoverApiKey else { return (data, response) }
+            // 2026-11-09 (Android fd145f3d parity): is the KEY bad, or did
+            // only this endpoint refuse it? One /api/core/version/ probe,
+            // stopping at Dispatcharr's "Invalid API key" answer, so a bad
+            // key costs the server's failed-key budget two attempts here
+            // (this request and the probe), never a sweep of header shapes.
+            let probe = try await DispatcharrKeyBroker.probe(after401: self, key: key)
+            if case .accepted(let mode) = probe, mode != authMode {
+                debugLog("[AUTH] 401 was a header-shape rejection; retrying with mode=\(mode.rawValue)")
+                DispatcharrKeyBroker.persistAuthMode(mode, key: key, serverID: serverID)
+                var retry = request
+                retry.setValue(nil, forHTTPHeaderField: "X-API-Key")
+                retry.setValue(nil, forHTTPHeaderField: "Authorization")
+                headers(for: mode).forEach { retry.setValue($1, forHTTPHeaderField: $0) }
+                return try await HTTPRouter.data(for: retry, using: session)
+            }
             // v1.7.x: silent api_key re-bootstrap. Only fires when:
             //   1. The instance was built with a serverID (production
             //      callers via ServerConnection, static helpers like
@@ -2349,6 +2367,10 @@ struct DispatcharrAPI {
             guard let sid = serverID,
                   let username = savedUsername,
                   !username.isEmpty else {
+                if case .rejected = probe,
+                   await DispatcharrKeyBroker.holdIfProven(key: key, serverID: serverID, baseURL: baseURL) {
+                    throw DispatcharrGateError.keyRejected
+                }
                 return (data, response)
             }
             guard let newKey = await Self.silentRebootstrapApiKey(
@@ -2357,6 +2379,13 @@ struct DispatcharrAPI {
                 username: username,
                 userAgent: userAgent
             ) else {
+                // A password playlist whose re-login was itself refused
+                // gets the same hold, or the re-login would run again every
+                // minute (DispatcharrLoginGate).
+                if case .rejected = probe,
+                   await DispatcharrKeyBroker.holdIfProven(key: key, serverID: serverID, baseURL: baseURL) {
+                    throw DispatcharrGateError.keyRejected
+                }
                 return (data, response)
             }
             // Replay with the fresh api_key in whichever header
@@ -2384,7 +2413,13 @@ struct DispatcharrAPI {
     }
 
     // MARK: - Verify
-    func verifyConnection() async throws -> DispatcharrServerInfo {
+    /// - Parameter keyCheck: an explicit key check (Add Playlist, Edit
+    ///   Playlist save, the setup receiver, the launch header-shape probe):
+    ///   it runs even for a key the rejected-key gate holds (the user may
+    ///   have fixed it on the server) and a pass clears that hold. Playlist
+    ///   Detail's Test Connection passes false, so a held key fails locally
+    ///   and the held-key re-check makes the one request (Android parity).
+    func verifyConnection(keyCheck: Bool = true) async throws -> DispatcharrServerInfo {
         // Dispatcharr doesn't currently document a /api/version endpoint in the changelog,
         // and some deployments return the SPA index.html for unknown routes.
         // So we try a few lightweight endpoints and consider it "verified" if we get JSON back.
@@ -2465,8 +2500,15 @@ struct DispatcharrAPI {
                 lastURL = url
                 var request = URLRequest(url: url)
                 headers(for: mode).forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                if keyCheck { DispatcharrHTTPGate.markKeyCheck(&request) }
 
-                let (data, response) = try await loggedData(for: request)
+                // A 429 throws `DispatcharrGateError.rateLimited` out of
+                // here (HTTPRouter), so verify stops at the FIRST 429 and
+                // reports the rate limit, never "returned the web UI"
+                // after the SPA answered the legacy fallback paths
+                // (measured 2026-11-09 on the receiver: five 429s, then
+                // /api/version/ 200 HTML).
+                let (data, response) = try await loggedData(for: request, recoverApiKey: false)
 
                 if let http = response as? HTTPURLResponse {
                     lastStatus = http.statusCode
@@ -2479,6 +2521,14 @@ struct DispatcharrAPI {
                     lastBodySnippet = String(body.prefix(800))
                     let s = lastStatus ?? 0
                     attemptOutcomes.append(.httpError(s))
+                    // Dispatcharr's own "Invalid API key" answer is proof:
+                    // no other path or header shape will fare better, and
+                    // each would count against the server's failed-key
+                    // throttle (10 per minute per IP).
+                    if s == 401, case .apiKey = auth, DispatcharrRequestGate.isDispatcharrInvalidKeyBody(body) {
+                        debugLog("DispatcharrAPI verify: server answered Invalid API key on \(url.path); stopping")
+                        throw APIError.unauthorized
+                    }
                     if s == 401 || s == 403 {
                         modeAuthRejected = true
                     } else {
@@ -2538,6 +2588,8 @@ struct DispatcharrAPI {
                     var enriched = info
                     enriched.discoveredAuthMode = mode
                     debugLog("DispatcharrAPI verify: success with auth mode .\(mode.rawValue) on \(path)")
+                    // A passing key check lifts any rejected-key hold.
+                    if case .apiKey(let key) = auth { DispatcharrRequestGate.shared.clearKey(key) }
                     return enriched
                 } catch {
                     let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
@@ -4756,7 +4808,8 @@ struct DispatcharrAPI {
     /// URLSession's HSTS layer via Network.framework. URLSession
     /// remains the path for HTTPS, IP literals, and non-preloaded
     /// TLDs.
-    private func loggedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+    private func loggedData(for request: URLRequest,
+                            recoverApiKey: Bool = true) async throws -> (Data, URLResponse) {
         await Self.concurrencyGate.wait()
         defer {
             // `defer` can't `await`, so signal in a fire-and-forget
@@ -4775,7 +4828,7 @@ struct DispatcharrAPI {
             // here (fetchAllPages, validate-and-decode wrappers,
             // recording playback resolution, VOD pagination), so this
             // single migration covers the entire surface.
-            let result   = try await dataWithJWTRetry(for: request)
+            let result   = try await dataWithJWTRetry(for: request, recoverApiKey: recoverApiKey)
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
             DebugLogger.shared.logNetwork(method: method, url: urlStr, statusCode: status,
@@ -7538,6 +7591,126 @@ enum NowAiringSearchParser {
         case let a as [Any]: return !a.isEmpty
         case let d as [String: Any]: return !d.isEmpty
         default: return true
+        }
+    }
+}
+
+// MARK: - API key probes (rejected-key gate, 2026-11-09)
+
+extension DispatcharrAPI {
+    /// Outcome of an API key probe.
+    enum KeyProbe: Equatable, Sendable {
+        /// The key authenticated under this header shape.
+        case accepted(DispatcharrAuthHeaderMode)
+        /// Dispatcharr itself said the key is invalid, or every shape got 401/403.
+        case rejected
+        /// No answer that proves anything (network error, 5xx).
+        case unknown
+    }
+
+    /// Logged single request for the probes below, so every request they
+    /// make shows up in the debug log like any other API call.
+    private func probeRequest(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let start = Date()
+        let urlStr = request.url?.absoluteString ?? "<unknown>"
+        do {
+            let result = try await HTTPRouter.data(for: request, using: session)
+            DebugLogger.shared.logNetwork(method: request.httpMethod ?? "GET", url: urlStr,
+                                          statusCode: (result.1 as? HTTPURLResponse)?.statusCode,
+                                          duration: Date().timeIntervalSince(start),
+                                          bytesReceived: result.0.count)
+            return result
+        } catch {
+            DebugLogger.shared.logNetwork(method: request.httpMethod ?? "GET", url: urlStr,
+                                          duration: Date().timeIntervalSince(start), error: error)
+            throw error
+        }
+    }
+
+    /// After a 401 on an API-key call: is the key itself good?
+    /// /api/core/version/ is AllowAny on Dispatcharr, but an INVALID key is
+    /// still authenticated and refused there (401 "Invalid API key"), while
+    /// a missing key passes. A 2xx proves the key (in that header shape);
+    /// a 401 naming the invalid key proves rejection on the first request,
+    /// with no second or third shape. Other shapes run only when a 401/403
+    /// does not come from Dispatcharr's key check (a reverse proxy). The
+    /// playlist's recorded shape goes first, so a good key never flips the
+    /// stored shape. A 429 propagates as `DispatcharrGateError.rateLimited`.
+    func probeApiKeyShapes() async throws -> KeyProbe {
+        guard case .apiKey = auth else { return .unknown }
+        let url = try buildURL(path: "/api/core/version/")
+        var modes: [DispatcharrAuthHeaderMode] = [authMode]
+        for m in [DispatcharrAuthHeaderMode.xapikey, .both, .bearer] where !modes.contains(m) { modes.append(m) }
+        var sawAuthFailure = false
+        for mode in modes {
+            var request = URLRequest(url: url, timeoutInterval: 15)
+            headers(for: mode).forEach { request.setValue($1, forHTTPHeaderField: $0) }
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await probeRequest(request)
+            } catch let gate as DispatcharrGateError {
+                if case .rateLimited = gate { throw gate }
+                return .rejected
+            } catch {
+                return .unknown
+            }
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200...299).contains(code) { return .accepted(mode) }
+            guard code == 401 || code == 403 else { return .unknown }
+            sawAuthFailure = true
+            if DispatcharrRequestGate.isDispatcharrInvalidKeyBody(String(decoding: data, as: UTF8.self)) {
+                return .rejected
+            }
+        }
+        return sawAuthFailure ? .rejected : .unknown
+    }
+
+    /// The held-key re-check: EXACTLY one request, /api/core/version/ in
+    /// the playlist's recorded header shape, past the rejected-key gate.
+    /// 2xx = accepted, 401/403 = rejected, anything else (network, 5xx, a
+    /// 429, which also pauses the server) = unknown.
+    func probeApiKeyOnce() async -> KeyProbe {
+        guard case .apiKey = auth, let url = try? buildURL(path: "/api/core/version/") else { return .unknown }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        DispatcharrHTTPGate.markKeyCheck(&request)
+        guard let (_, response) = try? await probeRequest(request) else { return .unknown }
+        switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+        case 200...299: return .accepted(authMode)
+        case 401, 403: return .rejected
+        default: return .unknown
+        }
+    }
+
+    /// "Set up another device" sender: one authenticated GET of
+    /// /api/accounts/users/me/ (the lightest call that needs a valid key;
+    /// already in the README path tables) with exactly the key about to be
+    /// sent. Goes through the rejected-key gate: a key it already holds is
+    /// `.rejected` with nothing sent. A 2xx lifts any hold on the key.
+    func checkSetupKey() async -> SetupKeyCheck {
+        guard case .apiKey(let key) = auth, let url = try? buildURL(path: "/api/accounts/users/me/") else {
+            return .unknown(retryAfter: nil)
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        do {
+            let (_, response) = try await probeRequest(request)
+            switch (response as? HTTPURLResponse)?.statusCode ?? 0 {
+            case 200...299:
+                DispatcharrRequestGate.shared.clearKey(key)
+                return .accepted
+            case 401, 403:
+                return .rejected
+            default:
+                return .unknown(retryAfter: nil)
+            }
+        } catch DispatcharrGateError.keyRejected {
+            return .rejected
+        } catch DispatcharrGateError.rateLimited(let seconds) {
+            return .unknown(retryAfter: seconds)
+        } catch {
+            return .unknown(retryAfter: nil)
         }
     }
 }

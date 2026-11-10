@@ -69,7 +69,7 @@ struct AuthPosterImage: View {
             let allowedHosts = ChannelStore.shared.activeServer?.ownHosts ?? []
             VODService.registerOwnHosts(allowedHosts)
             if let host = url.host?.lowercased(), allowedHosts.contains(host) {
-                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+                DispatcharrHTTPGate.strippingRejectedKey(headers).forEach { req.setValue($1, forHTTPHeaderField: $0) }
             } else if !headers.isEmpty, url.host?.lowercased() != "image.tmdb.org" {
                 // Diagnostics for the next covers report: one grep-able line
                 // that says exactly why credentials were withheld. TMDB's

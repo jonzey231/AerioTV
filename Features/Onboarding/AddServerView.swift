@@ -1106,6 +1106,13 @@ struct AddServerView: View {
                 Task { await viewModel.verifyConnection() }
             }
 
+            // A 429 countdown ("The server is busy. Trying again in N seconds.").
+            if let busy = viewModel.busyMessage {
+                Text(busy)
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
+
             if viewModel.verificationSuccess {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill")
@@ -1312,6 +1319,12 @@ struct AddServerView: View {
                 .disabled(viewModel.isVerifying)
             guideHistoryRow
             scannedDvrRow
+            // A 429 countdown ("The server is busy. Trying again in N seconds.").
+            if let busy = viewModel.busyMessage {
+                Text(busy)
+                    .scaledFont(.bodySmall.subtext())
+                    .foregroundColor(Color.contrastText(.textSecondary))
+            }
             if let error = viewModel.verificationError {
                 Text(error)
                     .scaledFont(.bodySmall)

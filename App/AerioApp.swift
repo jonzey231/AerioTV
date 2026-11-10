@@ -553,6 +553,10 @@ struct AerioApp: App {
             // Expose the container so the CarPlay scene can fetch servers
             // and hydrate channels without the phone UI scene running.
             Self.sharedContainer = self.sharedModelContainer
+            // Rejected-key gate: the playlist lookup is in place before the
+            // first launch-time API call can 401 (measured 2026-11-10: the
+            // channel load starts before RootView appears).
+            DispatcharrKeyBroker.install(container: self.sharedModelContainer)
         } catch {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
@@ -761,6 +765,9 @@ struct AerioApp: App {
                 SyncManager.shared.startObserving()
                 // Dispatcharr Sync: foreground pull (5 minutes since the last one).
                 DispatcharrSyncManager.shared.onForeground()
+                // A held (rejected) API key re-checks itself while the app is
+                // in the foreground: timer on, plus one probe now.
+                DispatcharrKeyRecheck.shared.onForeground()
                 // Re-probe LAN on every foreground transition, covers
                 // the "user took the Apple TV / iPad / Mac to a
                 // different network and came back" case that the
@@ -796,6 +803,7 @@ struct AerioApp: App {
                 SyncManager.shared.pushPreferencesImmediate()
                 // Dispatcharr Sync: send queued writes now (Android onStop flush).
                 DispatcharrSyncManager.shared.onBackground()
+                DispatcharrKeyRecheck.shared.onBackground()
                 #if os(tvOS)
                 // Stop playback so audio doesn't continue in the background.
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
@@ -1468,6 +1476,8 @@ struct RootView: View {
             .onChange(of: showOnboarding) { _, on in if on { onboardingShownThisLaunch = true } }
             // The Dispatcharr record vanished after this device's first read: the owner decides.
             .modifier(DsyncRecordMissingHost(onboardingVisible: showOnboarding))
+            // "Sign-in not accepted": the server refused a playlist's API key (once per rejection).
+            .modifier(DispatcharrKeyRejectedPromptHost())
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 
@@ -1492,6 +1502,22 @@ struct RootView: View {
                 // alongside app lifecycle + MPV timing. No-op on iOS
                 // and in release builds.
                 RemoteInputLogger.install()
+
+                // Rejected-key gate (DispatcharrKeyBroker, 2026-11-09): the
+                // playlist lookup for a refused key, the prompt bridge, and
+                // the reload when a held key proves good again.
+                DispatcharrKeyPromptModel.shared.install()
+                DispatcharrKeyRecheck.shared.onRecovered = { [modelContext] id in
+                    let all = (try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
+                    guard let active = all.first(where: { $0.isActive && !$0.isGone }),
+                          active.id.uuidString == id else { return }
+                    debugLog("[AUTH] held key recovered for \(id.prefix(8)); refreshing the playlist and On Demand")
+                    Task { @MainActor in
+                        await ChannelStore.shared.forceRefresh(servers: all, modelContext: modelContext)
+                        VODStore.shared.refreshMovies(servers: all)
+                        VODStore.shared.refreshSeries(servers: all)
+                    }
+                }
 
                 // Share model context with WatchProgressManager for VOD resume tracking
                 WatchProgressManager.modelContext = modelContext

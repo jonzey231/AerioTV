@@ -150,7 +150,13 @@ final class SetupApplyModel: ObservableObject {
             }
             choice = .add
         }
-        phase = .applying("Connecting to your server")
+        let replaceID: UUID? = { if case .replace(let id) = choice { return id } else { return nil } }()
+        let applyingLine = replaceID != nil ? "Updating your playlist" : "Connecting to your server"
+        phase = .applying(applyingLine)
+        // A device setup is an explicit save: lift any local "this key was
+        // rejected" hold for the key it carries and the playlist it replaces.
+        if let id = replaceID { DispatcharrRequestGate.shared.clearPlaylist(id.uuidString) }
+        if let k = cred?.apiKey { DispatcharrRequestGate.shared.clearKey(k) }
         let vm = ServerConnectionViewModel()
         vm.name = pl.name
         vm.baseURL = pl.url
@@ -178,7 +184,18 @@ final class SetupApplyModel: ObservableObject {
             vm.serverType = .m3uPlaylist
             vm.epgURL = pl.xmltvUrl ?? ""
         }
-        await vm.verifyConnection()
+        // A 429 (the server's API-key throttle, tripped by another client on
+        // this network, 2026-11-09) counts down and tries again, twice, then
+        // names the rate limit.
+        await vm.verifyConnection(
+            onCountdown: { [weak self] line, left in
+                if left == DispatcharrRequestGate.maxRetryAfter || left % 10 == 0 {
+                    debugLog("[SETUP] server rate-limited the playlist add; retrying in \(left)s")
+                }
+                self?.phase = .applying(line)
+            },
+            onRetry: { [weak self] in self?.phase = .applying(applyingLine) }
+        )
         guard vm.verificationSuccess else {
             debugLog("[SETUP] receiver: playlist connect failed")
             phase = .failed(vm.verificationError ?? "Could not connect to your server.")

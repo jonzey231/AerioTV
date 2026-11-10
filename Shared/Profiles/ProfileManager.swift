@@ -364,6 +364,9 @@ final class ProfileManager: ObservableObject {
     /// or belongs to someone else.
     private func authenticate(_ server: ServerConnection, username: String, password: String?, apiKey: String?) async throws -> Auth {
         if let stored = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !stored.isEmpty {
+            // The user typed this sign-in on purpose: let it reach the server
+            // even if an earlier copy of the key is held as rejected.
+            DispatcharrRequestGate.shared.clearKey(stored)
             if let me = await fetchMe(server, stored),
                username.isEmpty || me.username.caseInsensitiveCompare(username) == .orderedSame {
                 return Auth(key: stored, me: me)

@@ -750,6 +750,10 @@ final class ServerConnection {
             // just Accept + UA so the calling layer can layer JWT
             // Bearer on top. Otherwise emit the configured shape.
             guard !key.isEmpty else { return h }
+            // A key the server already rejected is left off (stream opens,
+            // logos, posters): each would count against its failed-key
+            // throttle (DispatcharrRequestGate, 2026-11-09).
+            guard !DispatcharrRequestGate.shared.isKeyRejected(key) else { return h }
             switch dispatcharrHeaderMode {
             case .xapikey:
                 h["X-API-Key"] = key

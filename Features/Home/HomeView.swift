@@ -404,11 +404,14 @@ final class VODStore: ObservableObject {
     }
 
     func refreshMovies(servers: [ServerConnection]) {
+        // A user refresh also re-checks a held API key (at most once a minute).
+        DispatcharrKeyRecheck.shared.userRefresh()
         moviesTask?.cancel()
         moviesTask = Task { await loadMovies(servers: servers) }
     }
 
     func refreshSeries(servers: [ServerConnection]) {
+        DispatcharrKeyRecheck.shared.userRefresh()
         seriesTask?.cancel()
         seriesTask = Task { await loadSeries(servers: servers) }
     }
@@ -1137,6 +1140,17 @@ final class VODStore: ObservableObject {
                             debugLog("🎬 [VOD-CAT] page kind=movies cat=\(cat.name) p=\(page) "
                                      + "+\(written) total=\(total) "
                                      + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
+                        } catch let gate as DispatcharrGateError {
+                            // The server is paused after a 429, or the key is
+                            // held as rejected: every other lane would fail
+                            // locally too. Stop with every position kept, so
+                            // the next sweep resumes here (Android 289112b4).
+                            debugLog("🎬 [VOD-CAT] sweep kind=movies stopped: \(gate == .keyRejected ? "key rejected" : "rate-limited"); positions kept")
+                            await catalog.saveLanes(playlistKey: identity, kind: .movie,
+                                                    generation: plan.generation,
+                                                    nextPage: nextPage, done: finished)
+                            isLoadingMovies = false
+                            return
                         } catch let err as APIError {
                             // One category failing must not abort the whole sweep,
                             // and its stored titles must survive the cleanup.
@@ -1456,6 +1470,17 @@ final class VODStore: ObservableObject {
                             debugLog("📺 [VOD-CAT] page kind=series cat=\(cat.name) p=\(page) "
                                      + "+\(written) total=\(total) "
                                      + "serverCount=\(result.serverCount.map(String.init) ?? "?")")
+                        } catch let gate as DispatcharrGateError {
+                            // The server is paused after a 429, or the key is
+                            // held as rejected: every other lane would fail
+                            // locally too. Stop with every position kept, so
+                            // the next sweep resumes here (Android 289112b4).
+                            debugLog("📺 [VOD-CAT] sweep kind=series stopped: \(gate == .keyRejected ? "key rejected" : "rate-limited"); positions kept")
+                            await catalog.saveLanes(playlistKey: identity, kind: .series,
+                                                    generation: plan.generation,
+                                                    nextPage: nextPage, done: finished)
+                            isLoadingSeries = false
+                            return
                         } catch let err as APIError {
                             lastError = err
                             finished.insert(cat.name)
@@ -1769,6 +1794,8 @@ final class ChannelStore: ObservableObject {
     /// This is async so the pull-to-refresh spinner stays visible until done.
     /// Pass `modelContext` to persist the rebuilt guide back to SwiftData.
     func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
+        // A user refresh also re-checks a held API key (at most once a minute).
+        DispatcharrKeyRecheck.shared.userRefresh()
         if let inFlight = forceRefreshTask, !inFlight.isCancelled {
             debugLog("[PULL] forceRefresh already in flight, awaiting it")
             await inFlight.value

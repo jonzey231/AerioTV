@@ -596,6 +596,29 @@ enum SetupSender {
     }
 }
 
+// MARK: - Key check before a send (2026-11-09, Android db6aacb6)
+
+/// The sender once handed over a key the server had already rejected, and
+/// the other device failed with HTTP 429 (the server's failed-key throttle,
+/// tripped by the retries) and then 401. Before a Dispatcharr payload with
+/// an API key goes out, one authenticated GET of /api/accounts/users/me/
+/// with exactly that key, to the sender's effective base URL (LAN when
+/// reachable). 401/403, or a key the local gate already holds: nothing is
+/// sent. A 429 counts down its Retry-After; a network error waits 3 s; up
+/// to two re-checks, then the send goes ahead (the receiver has its own 429
+/// retry).
+enum SetupKeySender {
+    @MainActor
+    static func check(key: String, server: ServerConnection,
+                      onCountdown: (_ secondsLeft: Int, _ rateLimited: Bool) -> Void) async -> SetupKeyVerdict {
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(key),
+                                 userAgent: server.effectiveUserAgent, authMode: server.dispatcharrHeaderMode)
+        let verdict = await SetupKeyPreflight.run(check: { await api.checkSetupKey() }, onCountdown: onCountdown)
+        debugLog("[SETUP] key check before send: \(verdict == .send ? "send" : "rejected, nothing sent")")
+        return verdict
+    }
+}
+
 // MARK: - User QR source (the device showing a User QR Code)
 
 /// While "Show User QR Code" is on screen this device advertises itself as a
@@ -690,7 +713,14 @@ final class UserQrSource: ObservableObject {
                 let source = SetupSender.source(server)
                 let ids = Set(source.choices.filter { !$0.isDefault && $0.credentialLabel != nil }.map(\.id))
                 let payload = SetupSender.buildPayload(server, profileIds: ids, turnOnSync: source.syncOnHere)
-                result = await SetupSender.send(SetupTarget.fromLink(p.link), code: p.link.code, payload: payload)
+                // Same key check as the Set up another device sheet: never
+                // hand over a key the server refuses.
+                if payload.playlist.type == "dispatcharr", let key = payload.playlist.credential?.apiKey,
+                   await SetupKeySender.check(key: key, server: server, onCountdown: { _, _ in }) == .rejected {
+                    result = .failed(DispatcharrRateLimitCopy.setupKeyRejectedMessage)
+                } else {
+                    result = await SetupSender.send(SetupTarget.fromLink(p.link), code: p.link.code, payload: payload)
+                }
             } else {
                 result = .failed("This playlist could not be read.")
             }

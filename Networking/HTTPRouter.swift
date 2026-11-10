@@ -85,6 +85,17 @@ enum HTTPRouter {
 
     static func data(for request: URLRequest,
                      using session: URLSession = .shared) async throws -> (Data, URLResponse) {
+        // Dispatcharr gate (DispatcharrHTTPGate): a rejected key or a server
+        // paused after a 429 fails here with no network request; a 429
+        // answer pauses the server and is thrown as a typed rate limit.
+        let request = try DispatcharrHTTPGate.prepare(request)
+        let result = try await routedData(for: request, using: session)
+        try DispatcharrHTTPGate.inspect(request, response: result.1, body: result.0)
+        return result
+    }
+
+    private static func routedData(for request: URLRequest,
+                                   using session: URLSession) async throws -> (Data, URLResponse) {
         if let url = request.url, shouldUseNWConnection(for: url) {
             return try await NWHTTPClient.data(for: request,
                                                timeout: effectiveNWTimeout(for: request, using: session))
@@ -147,6 +158,25 @@ enum HTTPRouter {
     /// category colour-coding are missing on XC and fine on Dispatcharr.
     static func download(for request: URLRequest,
                          using session: URLSession = .shared) async throws -> (URL, URLResponse) {
+        let request = try DispatcharrHTTPGate.prepare(request)
+        let result = try await routedDownload(for: request, using: session)
+        if (result.1 as? HTTPURLResponse)?.statusCode == 429 {
+            let head = (try? FileHandle(forReadingFrom: result.0)).flatMap { h -> Data? in
+                defer { try? h.close() }
+                return try? h.read(upToCount: 200)
+            }
+            do {
+                try DispatcharrHTTPGate.inspect(request, response: result.1, body: head)
+            } catch {
+                try? FileManager.default.removeItem(at: result.0)
+                throw error
+            }
+        }
+        return result
+    }
+
+    private static func routedDownload(for request: URLRequest,
+                                       using session: URLSession) async throws -> (URL, URLResponse) {
         if let url = request.url, shouldUseNWConnection(for: url) {
             let (data, response) = try await NWHTTPClient.data(for: request,
                                                                timeout: effectiveNWTimeout(for: request, using: session))

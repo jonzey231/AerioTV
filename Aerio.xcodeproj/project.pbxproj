@@ -7,6 +7,16 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		DA7E0A7E0000000000000101 /* DispatcharrRequestGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000001 /* DispatcharrRequestGate.swift */; };
+		DA7E0A7E0000000000000201 /* DispatcharrRequestGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000001 /* DispatcharrRequestGate.swift */; };
+		DA7E0A7E0000000000000102 /* DispatcharrRateLimitRetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000002 /* DispatcharrRateLimitRetry.swift */; };
+		DA7E0A7E0000000000000202 /* DispatcharrRateLimitRetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000002 /* DispatcharrRateLimitRetry.swift */; };
+		DA7E0A7E0000000000000103 /* DispatcharrHTTPGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000003 /* DispatcharrHTTPGate.swift */; };
+		DA7E0A7E0000000000000203 /* DispatcharrHTTPGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000003 /* DispatcharrHTTPGate.swift */; };
+		DA7E0A7E0000000000000104 /* DispatcharrKeyBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000004 /* DispatcharrKeyBroker.swift */; };
+		DA7E0A7E0000000000000204 /* DispatcharrKeyBroker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000004 /* DispatcharrKeyBroker.swift */; };
+		DA7E0A7E0000000000000105 /* DispatcharrKeyRejectedPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000005 /* DispatcharrKeyRejectedPrompt.swift */; };
+		DA7E0A7E0000000000000205 /* DispatcharrKeyRejectedPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA7E0A7E0000000000000005 /* DispatcharrKeyRejectedPrompt.swift */; };
 		56EF1741BB4C83D40D0972A2 /* UserQrViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 122A54C546E39F81E6646747 /* UserQrViews.swift */; };
 		1E52BA0F9DE582AE9E4493F3 /* UserQrViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 122A54C546E39F81E6646747 /* UserQrViews.swift */; };
 		74ABA3546724390FC9E98E47 /* ReceiveSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */; };
@@ -447,6 +457,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		DA7E0A7E0000000000000001 /* DispatcharrRequestGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrRequestGate.swift; sourceTree = "<group>"; };
+		DA7E0A7E0000000000000002 /* DispatcharrRateLimitRetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrRateLimitRetry.swift; sourceTree = "<group>"; };
+		DA7E0A7E0000000000000003 /* DispatcharrHTTPGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrHTTPGate.swift; sourceTree = "<group>"; };
+		DA7E0A7E0000000000000004 /* DispatcharrKeyBroker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrKeyBroker.swift; sourceTree = "<group>"; };
+		DA7E0A7E0000000000000005 /* DispatcharrKeyRejectedPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrKeyRejectedPrompt.swift; sourceTree = "<group>"; };
 		122A54C546E39F81E6646747 /* UserQrViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UserQrViews.swift; sourceTree = "<group>"; };
 		D4DBFFA0536BB2FDC775231B /* ReceiveSetupView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReceiveSetupView.swift; sourceTree = "<group>"; };
 		F4A99C7C2AFF25536FB9F750 /* SetupReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupReceiver.swift; sourceTree = "<group>"; };
@@ -797,6 +812,10 @@
 				6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */,
 				1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */,
 				1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */,
+				DA7E0A7E0000000000000001 /* DispatcharrRequestGate.swift */,
+				DA7E0A7E0000000000000002 /* DispatcharrRateLimitRetry.swift */,
+				DA7E0A7E0000000000000003 /* DispatcharrHTTPGate.swift */,
+				DA7E0A7E0000000000000004 /* DispatcharrKeyBroker.swift */,
 				876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */,
 			);
 			path = Networking;
@@ -1076,6 +1095,7 @@
 				5E7AC29D180954F5DB932FF1 /* TVSettingsSplitView.swift */,
 				5E791F286A06CD88BBA7B4C9 /* SettingsDestination.swift */,
 				5EAA00DL1000000000000001 /* SettingsDeepLink.swift */,
+				DA7E0A7E0000000000000005 /* DispatcharrKeyRejectedPrompt.swift */,
 				5E7754FE5E34995DE10F87DF /* Components */,
 				5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */,
 				5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */,
@@ -1645,6 +1665,11 @@
 				1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */,
 				2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */,
 				2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */,
+				DA7E0A7E0000000000000101 /* DispatcharrRequestGate.swift in Sources */,
+				DA7E0A7E0000000000000102 /* DispatcharrRateLimitRetry.swift in Sources */,
+				DA7E0A7E0000000000000103 /* DispatcharrHTTPGate.swift in Sources */,
+				DA7E0A7E0000000000000104 /* DispatcharrKeyBroker.swift in Sources */,
+				DA7E0A7E0000000000000105 /* DispatcharrKeyRejectedPrompt.swift in Sources */,
 				1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */,
 				7A7218D999F2EBB150A606A1 /* ReminderBannerView.swift in Sources */,
 				A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */,
@@ -1842,6 +1867,11 @@
 				98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */,
 				3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */,
 				3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */,
+				DA7E0A7E0000000000000201 /* DispatcharrRequestGate.swift in Sources */,
+				DA7E0A7E0000000000000202 /* DispatcharrRateLimitRetry.swift in Sources */,
+				DA7E0A7E0000000000000203 /* DispatcharrHTTPGate.swift in Sources */,
+				DA7E0A7E0000000000000204 /* DispatcharrKeyBroker.swift in Sources */,
+				DA7E0A7E0000000000000205 /* DispatcharrKeyRejectedPrompt.swift in Sources */,
 				3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */,
 				8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */,
 				000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */,

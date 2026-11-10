@@ -749,6 +749,13 @@ enum PlaylistSaveRunner {
                     progress: PlaylistSaveProgress,
                     commitStaged: () -> Void) async -> String? {
         progress.reset()
+        // An explicit save is the user acting on the key or credentials:
+        // lift any local "this key was rejected" hold so the save really
+        // asks the server once (DispatcharrRequestGate, Android fd145f3d).
+        if server.type == .dispatcharrAPI {
+            DispatcharrRequestGate.shared.clearPlaylist(server.id.uuidString)
+            DispatcharrRequestGate.shared.clearKey(server.apiKey.isEmpty ? server.baseApiKey : server.apiKey)
+        }
 
         let credentialsChanged = ServerCredentialChange.credentialsChanged(
             server: server,

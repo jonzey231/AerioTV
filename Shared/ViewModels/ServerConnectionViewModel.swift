@@ -63,6 +63,8 @@ final class ServerConnectionViewModel {
     var pendingJWTPair: DispatcharrJWTPair? = nil
 
     var isVerifying: Bool = false
+    /// While a 429 counts down: "The server is busy. Trying again in N seconds."
+    var busyMessage: String? = nil
     var verificationSuccess: Bool = false
     var verificationError: String? = nil
     var verifiedServerName: String? = nil
@@ -281,9 +283,11 @@ final class ServerConnectionViewModel {
     /// Foundation's "The data couldn't be read because it is missing".
     private var verifyStep = "server info"
 
-    func verifyConnection() async {
+    func verifyConnection(onCountdown: ((_ line: String, _ secondsLeft: Int) -> Void)? = nil,
+                          onRetry: (() -> Void)? = nil) async {
         guard isFormValid else { return }
         isVerifying = true
+        busyMessage = nil
         verificationError = nil
         verificationSuccess = false
         verifiedServerName = nil
@@ -309,25 +313,63 @@ final class ServerConnectionViewModel {
         // We deliberately retry on ALL errors: the 400ms extra wait on a
         // genuinely-bad configuration is a tiny price compared to the
         // frustration of a false-negative on a good one.
+        //
+        // HTTP 429 from the API (Dispatcharr's per-IP failed-key throttle,
+        // 2026-11-09): the countdown line, two automatic retries, then the
+        // rate-limit copy (RateLimitRetry, Android 289112b4). The
+        // receiver's playlist add passes `onCountdown`/`onRetry` so its own
+        // status line counts down too.
         do {
-            try await runVerifyAttempt()
+            try await RateLimitRetry.run(
+                rateLimitSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
+                onCountdown: { left in
+                    let line = DispatcharrRateLimitCopy.serverBusyCountdown(left)
+                    self.busyMessage = line
+                    onCountdown?(line, left)
+                },
+                onRetry: {
+                    self.busyMessage = nil
+                    onRetry?()
+                }
+            ) {
+                try await self.verifyWithSilentRetry()
+            }
         } catch DispatcharrDirectConnectError.loginRateLimited {
             // HTTP 429 from /api/accounts/token/: another login 400ms
             // later is exactly what the server is throttling, and each
             // attempt can extend the window. Surface the wait-a-minute
             // copy immediately instead (Discord 2026-08-16).
             verificationError = DispatcharrDirectConnectError.loginRateLimited.errorDescription
+        } catch let final as RateLimitedFinal {
+            // Names the rate limit, never "Could not connect" or "returned
+            // the web UI".
+            verificationError = final.errorDescription
         } catch {
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            do {
-                try await runVerifyAttempt()
-            } catch {
-                verificationError = DispatcharrDirectConnectError.userMessage(
-                    for: error, step: verifyStep)
-            }
+            verificationError = DispatcharrDirectConnectError.userMessage(
+                for: error, step: verifyStep)
         }
 
+        busyMessage = nil
         isVerifying = false
+    }
+
+    /// One verify attempt plus the silent 400 ms retry. Never retried
+    /// silently: a login 429, an API 429 (RateLimitRetry above owns that),
+    /// a held key, or Dispatcharr's "Invalid API key" (each retry would
+    /// cost the server's failed-key budget another attempt).
+    private func verifyWithSilentRetry() async throws {
+        do {
+            try await runVerifyAttempt()
+        } catch DispatcharrDirectConnectError.loginRateLimited {
+            throw DispatcharrDirectConnectError.loginRateLimited
+        } catch let gate as DispatcharrGateError {
+            throw gate
+        } catch APIError.unauthorized where serverType == .dispatcharrAPI {
+            throw APIError.unauthorized
+        } catch {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            try await runVerifyAttempt()
+        }
     }
 
     /// One verify pass. Throws on failure so `verifyConnection()` can decide

@@ -139,6 +139,24 @@ final class SettingsDeepLink {
         hasPending || Self.pageFromLaunchEnvironment() != nil
     }
 
+    /// Edit Playlist for a specific playlist, active or not (the rejected-key
+    /// prompt and the setup sender name the one they are about; Android
+    /// deep page "edit-playlist:<id>").
+    private var editPlaylistID: UUID?
+
+    static func openEditPlaylist(_ id: UUID) {
+        shared.editPlaylistID = id
+        if let url = URL(string: "aerio://settings/\(SettingsDeepLinkPage.editPlaylist.rawValue)") {
+            handle(url)
+        }
+    }
+
+    /// The playlist an Edit Playlist link names, cleared on read; nil = the active one.
+    func takeEditPlaylistID() -> UUID? {
+        defer { editPlaylistID = nil }
+        return editPlaylistID
+    }
+
     /// Takes the pending page, clearing it so a later mount does not
     /// re-navigate.
     func consumePending() -> SettingsDeepLinkPage? {

@@ -953,8 +953,9 @@ final class DispatcharrLoginGate: @unchecked Sendable {
 
     /// Record a 429 from the login (or refresh) endpoint.
     func parkServer(baseURL: String, retryAfterHeader: String?) {
-        let secs = retryAfterHeader.flatMap { TimeInterval($0.trimmingCharacters(in: .whitespaces)) }
-            .flatMap { $0 > 0 ? $0 : nil } ?? Self.defaultRetryAfter
+        // Same parser as the API-call pause (seconds or HTTP date, 60 s
+        // default, 120 s cap; DispatcharrRequestGate).
+        let secs = TimeInterval(DispatcharrRequestGate.parseRetryAfter(retryAfterHeader))
         lock.lock()
         serverParkedUntil[Self.hostKey(baseURL)] = Date(timeIntervalSinceNow: secs)
         lock.unlock()

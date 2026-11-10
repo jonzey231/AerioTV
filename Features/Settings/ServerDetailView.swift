@@ -151,6 +151,8 @@ struct ServerDetailView: View {
     @State private var isTestingConnection = false
     @State private var connectionResult: String? = nil
     @State private var connectionSuccess = false
+    /// While a 429 counts down: "The server is busy. Trying again in N seconds."
+    @State private var connectionWaiting: String? = nil
     /// Per-playlist EPG-purge UX. v1.6.8: replaces the global
     /// "Refresh EPG Data" action that used to live on
     /// `AppearanceSettingsView`. Each playlist now owns its own
@@ -459,6 +461,13 @@ struct ServerDetailView: View {
                         }
                     }
                     .tvActionRowChrome()
+
+                    if let waiting = connectionWaiting {
+                        Text(waiting)
+                            .scaledFont(.bodySmall.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                            .listRowBackground(Color.cardBackground)
+                    }
 
                     if let result = connectionResult {
                         HStack(spacing: 8) {
@@ -781,6 +790,14 @@ struct ServerDetailView: View {
                 Task { await testConnection() }
             }
             .disabled(isTestingConnection)
+
+            if let waiting = connectionWaiting {
+                Text(waiting)
+                    .scaledFont(.system(size: SettingsMetrics.tvEyebrowSize))
+                    .foregroundColor(Color.contrastText(.textSecondary))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 2)
+            }
 
             if let result = connectionResult {
                 HStack(spacing: 10) {
@@ -1297,66 +1314,27 @@ struct ServerDetailView: View {
     }
 
     private func testConnection() async {
+        // A user refresh also re-checks a held API key (at most once a minute).
+        DispatcharrKeyRecheck.shared.userRefresh()
         isTestingConnection = true
         connectionResult = nil
+        connectionWaiting = nil
         do {
-            switch server.type {
-            case .xtreamCodes:
-                let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL, username: server.username, password: server.effectivePassword)
-                _ = try await api.verifyConnection()
-            case .dispatcharrAPI:
-                // Re-verify with the persisted auth mode as the
-                // starting hint, verifyConnection auto-falls-back if
-                // the server now wants a different shape (e.g. user
-                // upgraded Dispatcharr to a build with stricter auth).
-                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                         auth: .apiKey(server.effectiveApiKey),
-                                         userAgent: server.effectiveUserAgent,
-                                         authMode: server.dispatcharrHeaderMode)
-                let info = try await api.verifyConnection()
-                // Playlist deleted while the request ran (2026-10-14 delete
-                // crash audit): never write to the deleted model.
-                guard !server.isGone else { isTestingConnection = false; return }
-                // v1.6.20: persist the discovered auth shape so
-                // subsequent API calls and stream playback use it.
-                if let mode = info.discoveredAuthMode,
-                   mode.rawValue != server.dispatcharrAuthMode {
-                    server.dispatcharrAuthMode = mode.rawValue
-                    debugLog("SettingsView Test Connection: persisting auth mode .\(mode.rawValue) for \(server.name)")
-                    // Immediate cross-device push so other devices on
-                    // the same iCloud account inherit the working
-                    // shape without waiting for the next debounce.
-                    SyncManager.shared.pushServers(servers, immediate: true)
-                }
-                // v1.7.x: refresh the connected user's permission tier
-                // so the server-side Record / DVR affordances stay
-                // accurate if the account was promoted/demoted in
-                // Dispatcharr since it was first saved. Best-effort: a
-                // failed users/me fetch leaves the stored level
-                // unchanged. Re-fetch with the (possibly newly)
-                // discovered header shape.
-                // Test Connection re-probes the FULL per-user capability
-                // snapshot, not just the level, through the one shared
-                // probe so this path can never drift from the launch /
-                // foreground / 403 paths. A failed probe keeps the last
-                // good snapshot.
-                let probed = await DispatcharrCapabilityProbe.refresh(server, reason: "Test Connection")
-                guard !server.isGone else { isTestingConnection = false; return }
-                if probed {
-                    SyncManager.shared.pushServers(servers.filter { !$0.isGone }, immediate: true)
-                }
-                if let version = info.version, !version.isEmpty {
-                    server.dispatcharrServerVersion = version
-                }
-            case .m3uPlaylist:
-                guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
-                let (_, response) = try await URLSession.shared.data(from: url)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
-                }
+            // A 429: countdown, two automatic retries, then the rate-limit
+            // copy (RateLimitRetry, Android 289112b4).
+            try await RateLimitRetry.run(
+                rateLimitSeconds: { DispatcharrHTTPGate.rateLimitSeconds(in: $0) },
+                onCountdown: { connectionWaiting = DispatcharrRateLimitCopy.serverBusyCountdown($0) },
+                onRetry: { connectionWaiting = nil }
+            ) {
+                try await testConnectionOnce()
             }
+            guard !server.isGone else { isTestingConnection = false; return }
             connectionSuccess = true
             connectionResult = "Connection successful"
+        } catch let final as RateLimitedFinal {
+            connectionSuccess = false
+            connectionResult = final.errorDescription
         } catch let error as APIError {
             connectionSuccess = false
             connectionResult = error.errorDescription ?? "Unknown error"
@@ -1364,7 +1342,70 @@ struct ServerDetailView: View {
             connectionSuccess = false
             connectionResult = error.localizedDescription
         }
+        connectionWaiting = nil
         isTestingConnection = false
+    }
+
+    /// One Test Connection pass; throws on failure.
+    private func testConnectionOnce() async throws {
+        switch server.type {
+        case .xtreamCodes:
+            let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL, username: server.username, password: server.effectivePassword)
+            _ = try await api.verifyConnection()
+        case .dispatcharrAPI:
+            // Re-verify with the persisted auth mode as the
+            // starting hint, verifyConnection auto-falls-back if
+            // the server now wants a different shape (e.g. user
+            // upgraded Dispatcharr to a build with stricter auth).
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode)
+            // Not an explicit key check: a key the gate holds fails
+            // locally here, and the held-key re-check above makes the
+            // one request (Android Test Connection parity).
+            let info = try await api.verifyConnection(keyCheck: false)
+            // Playlist deleted while the request ran (2026-10-14 delete
+            // crash audit): never write to the deleted model.
+            guard !server.isGone else { return }
+            // v1.6.20: persist the discovered auth shape so
+            // subsequent API calls and stream playback use it.
+            if let mode = info.discoveredAuthMode,
+               mode.rawValue != server.dispatcharrAuthMode {
+                server.dispatcharrAuthMode = mode.rawValue
+                debugLog("SettingsView Test Connection: persisting auth mode .\(mode.rawValue) for \(server.name)")
+                // Immediate cross-device push so other devices on
+                // the same iCloud account inherit the working
+                // shape without waiting for the next debounce.
+                SyncManager.shared.pushServers(servers, immediate: true)
+            }
+            // v1.7.x: refresh the connected user's permission tier
+            // so the server-side Record / DVR affordances stay
+            // accurate if the account was promoted/demoted in
+            // Dispatcharr since it was first saved. Best-effort: a
+            // failed users/me fetch leaves the stored level
+            // unchanged. Re-fetch with the (possibly newly)
+            // discovered header shape.
+            // Test Connection re-probes the FULL per-user capability
+            // snapshot, not just the level, through the one shared
+            // probe so this path can never drift from the launch /
+            // foreground / 403 paths. A failed probe keeps the last
+            // good snapshot.
+            let probed = await DispatcharrCapabilityProbe.refresh(server, reason: "Test Connection")
+            guard !server.isGone else { return }
+            if probed {
+                SyncManager.shared.pushServers(servers.filter { !$0.isGone }, immediate: true)
+            }
+            if let version = info.version, !version.isEmpty {
+                server.dispatcharrServerVersion = version
+            }
+        case .m3uPlaylist:
+            guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
+            let (_, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
+            }
+        }
     }
 }
 

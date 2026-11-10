@@ -31,6 +31,10 @@ struct SetUpTvView: View {
         case credential(SetupTarget, String?, DispatcharrProfile)
         case code(SetupTarget, String?)
         case choose(SetupTarget, String)
+        /// Checking the key about to be sent; the line is the status (or a 429 countdown).
+        case checking(String)
+        /// The server refused the key that would be sent: nothing was sent.
+        case keyRejected(UUID, Back)
         case sending
         case sent
         case error(String, Back)
@@ -68,7 +72,7 @@ struct SetUpTvView: View {
                     header
                     VStack(alignment: .leading, spacing: 14) {
                         stepView
-                        if step != .sent && step != .sending {
+                        if step != .sent && step != .sending && !isChecking {
                             HStack(spacing: 12) {
                                 if step != .pick { SetupSheetButton("Back", primary: false) { back() } }
                                 SetupSheetButton("Cancel", primary: false) { onClose() }
@@ -104,6 +108,11 @@ struct SetUpTvView: View {
         }
         .onAppear(perform: load)
         .onChange(of: center.tvs) { _, tvs in invalidateIfStale(tvs) }
+    }
+
+    private var isChecking: Bool {
+        if case .checking = step { return true }
+        return false
     }
 
     private var needsKeyboard: Bool {
@@ -165,6 +174,19 @@ struct SetUpTvView: View {
             }
         case .code(let t, let err): codeStep(t, err)
         case .choose(let t, let c): chooseStep(t, c)
+        case .checking(let line):
+            HStack(spacing: 12) {
+                ProgressView()
+                Text(line).foregroundColor(.textPrimary)
+            }
+        case .keyRejected(let playlistID, _):
+            Text(DispatcharrRateLimitCopy.setupKeyRejectedMessage)
+                .scaledFont(.bodyLarge)
+                .foregroundColor(.statusLive)
+            SetupSheetButton("Edit Playlist") {
+                onClose()
+                SettingsDeepLink.openEditPlaylist(playlistID)
+            }
         case .sending:
             HStack(spacing: 12) {
                 ProgressView()
@@ -362,7 +384,7 @@ struct SetUpTvView: View {
             if t.code != nil { step = playlist?.type == .dispatcharrAPI ? .scope(t, c) : .pick } else { step = .code(t, nil) }
         case .code(let t, _): step = playlist?.type == .dispatcharrAPI ? .scope(t, nil) : .pick
         case .credential(let t, let c, _): step = .scope(t, c)
-        case .error(_, let b):
+        case .error(_, let b), .keyRejected(_, let b):
             switch b {
             case .pick: step = .pick
             case .choose(let t, let c): step = .choose(t, c)
@@ -388,6 +410,21 @@ struct SetUpTvView: View {
             : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
         step = .sending
         Task { @MainActor in
+            // Never hand over a key the server refuses (2026-11-09, Android
+            // db6aacb6): one authenticated request with exactly the key in
+            // the payload (for "Import this user only", the profile's key).
+            if payload.playlist.type == "dispatcharr", let key = payload.playlist.credential?.apiKey {
+                step = .checking(DispatcharrRateLimitCopy.checkingLine)
+                let verdict = await SetupKeySender.check(key: key, server: pl) { left, limited in
+                    step = .checking(limited ? DispatcharrRateLimitCopy.serverBusyCountdown(left)
+                                             : DispatcharrRateLimitCopy.checkingLine)
+                }
+                if verdict == .rejected {
+                    step = .keyRejected(pl.id, .choose(t, code))
+                    return
+                }
+                step = .sending
+            }
             // Resolve again right before every send: the device may have started a
             // new session (new port and key) since the card or list last saw it.
             let t = await SetupDiscovery.fresh(t)

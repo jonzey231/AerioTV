@@ -852,7 +852,8 @@ final class PlayerSession: ObservableObject {
         }
         if let server, server.type == .dispatcharrAPI {
             let key = server.effectiveApiKey
-            if !key.isEmpty {
+            // A key the server already rejected is left off the stream open.
+            if !key.isEmpty, !DispatcharrRequestGate.shared.isKeyRejected(key) {
                 headers["X-API-Key"] = key
                 headers["Authorization"] = "ApiKey \(key)"
             }
