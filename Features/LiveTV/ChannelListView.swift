@@ -2428,11 +2428,28 @@ struct ChannelListView: View {
             // loop that produced the v1.6.17 oscillation can't
             // form. iPad / tvOS still render the pills above the
             // List in the VStack at the top of `channelListContent`.
+            // Reveal during deceleration (Logan 2026-11-09: the header hung
+            // about 0.5 to 0.8 s after a flick reached the top): the rows
+            // slide down by the header's height with a transform and the
+            // header comes in as an overlay at once; the inset itself still
+            // lands at scroll idle (see ListScrollChrome), swapped in for the
+            // transform in one frame.
+            .modifier(PhoneChromeRevealShift(chrome: chrome))
             .safeAreaInset(edge: .top, spacing: 0) {
                 // The collapse flag is read INSIDE this leaf view, never in
                 // ChannelListView's body, so a flick re-renders the inset
                 // alone instead of every row. See `chrome`.
                 PhoneChromeInset(chrome: chrome) {
+                    phoneHeaderRow
+                        .background(Color.appBackground)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                            chrome.headerHeight = h
+                        }
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .overlay(alignment: .top) {
+                PhoneChromeRevealOverlay(chrome: chrome) {
                     phoneHeaderRow
                         .background(Color.appBackground)
                         .transition(.move(edge: .top).combined(with: .opacity))
@@ -6509,6 +6526,13 @@ final class ListScrollChrome {
     // so the inset change never competes with deceleration. A flip while the
     // finger is still down (tracking) is applied immediately as before.
     @ObservationIgnored var pendingCollapsed: Bool?
+    /// A reveal decided during deceleration shows at once (Logan
+    /// 2026-11-09): the header as an overlay and the rows shifted by a
+    /// transform, neither of which relayouts the List. The inset change
+    /// itself still waits for idle, where it replaces both in one frame.
+    var revealShown: Bool = false
+    /// Last measured height of the header row (the shift distance).
+    @ObservationIgnored var headerHeight: CGFloat = 0
     @ObservationIgnored var pendingTabBarAway: Bool?
     /// True between the finger lifting and the scroll coming to rest.
     @ObservationIgnored var isDecelerating = false
@@ -6520,10 +6544,28 @@ final class ListScrollChrome {
 
     func applyCollapsed(_ value: Bool, deferred: Bool) {
         debugLog("[CHROME] collapse=\(value)\(deferred ? " (deferred to idle)" : "")")
-        guard !deferred else { pendingCollapsed = value; return }
+        guard !deferred else {
+            pendingCollapsed = value
+            // Reveal now (overlay plus shift), hide stays deferred; a hide
+            // decided before idle takes the pending reveal back.
+            let show = !value && isCollapsed
+            if revealShown != show {
+                ChromeEventTrace.note("reveal=\(show)")
+                withAnimation(.easeInOut(duration: 0.2)) { revealShown = show }
+            }
+            return
+        }
         pendingCollapsed = nil
-        guard isCollapsed != value else { return }
+        guard isCollapsed != value else {
+            if revealShown { revealShown = false }
+            return
+        }
         ChromeEventTrace.note("collapse=\(value)")
+        if !value && revealShown {
+            // The overlay already shows the header: swap without animation.
+            swapRevealForInset()
+            return
+        }
         withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = value }
     }
 
@@ -6539,6 +6581,18 @@ final class ListScrollChrome {
         isTabBarAway = value
     }
 
+    /// The header is already on screen (overlay) and the rows already sit
+    /// below it (shift): replace both with the real inset in one frame, so
+    /// nothing moves.
+    private func swapRevealForInset() {
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            isCollapsed = false
+            revealShown = false
+        }
+    }
+
     /// Scroll came to rest: publish anything held back during deceleration.
     func flushPending() {
         isDecelerating = false
@@ -6547,7 +6601,13 @@ final class ListScrollChrome {
             if isCollapsed != value {
                 debugLog("[CHROME] collapse=\(value) applied at scroll idle")
                 ChromeEventTrace.note("collapse=\(value)-idle")
-                withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = value }
+                if !value && revealShown {
+                    swapRevealForInset()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) { isCollapsed = value }
+                }
+            } else if revealShown {
+                revealShown = false
             }
         }
         if let value = pendingTabBarAway {
@@ -6595,6 +6655,27 @@ private struct PhoneChromeInset<Content: View>: View {
         if usesPhoneLiveTVLayout && !chrome.isCollapsed {
             content()
         }
+    }
+}
+
+/// The header shown over the list while a reveal waits for scroll idle.
+private struct PhoneChromeRevealOverlay<Content: View>: View {
+    let chrome: ListScrollChrome
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if usesPhoneLiveTVLayout && chrome.isCollapsed && chrome.revealShown {
+            content()
+        }
+    }
+}
+
+/// Moves the list down by the header's height while the reveal overlay is
+/// up, so the header covers no row; a transform, so no relayout.
+private struct PhoneChromeRevealShift: ViewModifier {
+    let chrome: ListScrollChrome
+    func body(content: Content) -> some View {
+        content.offset(y: chrome.isCollapsed && chrome.revealShown ? chrome.headerHeight : 0)
     }
 }
 #endif
