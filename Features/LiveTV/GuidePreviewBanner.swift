@@ -122,6 +122,15 @@ struct GuidePreviewBanner: View {
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// Identity for GuidePreviewArtAnchor ownership.
     @State private var anchorOwner = UUID()
+    /// The program focus has rested on long enough for art lookups to
+    /// start. Resolving art on every focus change started a Dispatcharr
+    /// program-detail request for every row scrolled past, and each answer
+    /// re-rendered the banner while the user was still moving (JCBird1012,
+    /// 2026-11-05). The text still updates at once; until a program settles
+    /// the slot shows only art this session already resolved.
+    @State private var artSettledID: String?
+    /// How long focus must rest on a program before its art is resolved.
+    private static let artSettleNanos: UInt64 = 120_000_000
     /// Last measured art bottom, re-published on appear: the anchor may have
     /// been cleared (layout toggled off and back on) while the geometry is
     /// unchanged, so onGeometryChange never fires again.
@@ -225,9 +234,19 @@ struct GuidePreviewBanner: View {
         }
     }
 
+    /// Art for the slot: the full lookup (which may start network requests)
+    /// only once focus has settled on the program, otherwise art already in
+    /// the session cache, otherwise the empty pending slot.
+    private var artState: GuidePreviewArtCache.ArtState {
+        guard let program else { return .pending }
+        if artSettledID == program.id { return artCache.state(for: program) }
+        return artCache.cachedArt(title: program.title, programID: program.programID)
+            .map(GuidePreviewArtCache.ArtState.art) ?? .pending
+    }
+
     private var leadingBlock: some View {
         VStack(spacing: 8) {
-            switch program.map(artCache.state(for:)) ?? .pending {
+            switch artState {
             case .art(let url):
                 // Shared slot: height-locked, width from the art's own
                 // aspect, same as the Program Info sheet (Logan 2026-09-15).
@@ -257,6 +276,14 @@ struct GuidePreviewBanner: View {
                 // channels. Empty space keeps the copy from shifting.
                 ProgramArtSlot(url: nil, containerRadius: 0)
             }
+        }
+        // Restarts on every program change, so a fast scroll cancels each
+        // wait before it ends and only the program focus stops on resolves.
+        .task(id: program?.id) {
+            guard let id = program?.id, artSettledID != id else { return }
+            try? await Task.sleep(nanoseconds: Self.artSettleNanos)
+            guard !Task.isCancelled else { return }
+            artSettledID = id
         }
     }
 
@@ -439,6 +466,7 @@ final class GuidePreviewArtCache: ObservableObject {
             return false
         }
         detailInFlight.insert(pid)
+        debugLog("[PREVIEW-ART] detail lookup start pid=\(pid) \(title)")
         let baseURL = server.effectiveBaseURL
         let api = DispatcharrAPI(baseURL: baseURL,
                                  auth: .apiKey(server.effectiveApiKey),

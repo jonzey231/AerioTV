@@ -5247,9 +5247,15 @@ final class GuideFocusScratch {
     /// vertical-move corrective snap can tell a channel change from a
     /// same-row change (our own snap / restore, which must not loop).
     var lastFocusedChannel: String?
-    /// Task #185: guards the corrective snap's own focus writes from
-    /// re-triggering a second snap while the first is still asserting.
+    /// Stands the vertical column snap down while a programmatic jump owns
+    /// focus (Menu to the top channel), so the jump is the only writer.
     var verticalSnapInFlight = false
+    /// The column snap asserting focus onto the anchor-time cell, and the
+    /// cell it is writing. Any other landing cancels it: the user moved on,
+    /// and a retry from here would pull focus back up the grid (JCBird1012,
+    /// 2026-11-05: a held or fast Down rubber-banded a row or two).
+    var columnSnapTask: Task<Void, Never>?
+    var columnSnapTarget: String?
     /// When focus last moved; the Left handler uses it to tell a real move
     /// from a press that the engine refused at the edge.
     var lastFocusChangeAt = Date.distantPast
@@ -6308,6 +6314,16 @@ struct EPGGuideView: View {
                 }
                 guard let pid = newValue else { focusScratch.lastFocusedChannel = nil; return }
                 let chID = channelID(ofProgram: pid)
+                debugLog("[FOCUS] guide cell row=\(chID.flatMap { c in channels.firstIndex(where: { $0.id == c }) }.map(String.init) ?? "?") pid=\(pid)")
+                // Focus landed somewhere other than the pending column snap's
+                // target: the user moved on (a held or fast Down/Up, a page
+                // move, a jump). Stop that snap so it cannot pull focus back.
+                if let snapTarget = focusScratch.columnSnapTarget, snapTarget != pid {
+                    focusScratch.columnSnapTask?.cancel()
+                    focusScratch.columnSnapTask = nil
+                    focusScratch.columnSnapTarget = nil
+                    debugLog("🧭 [GuideFocus] column snap stood down: focus moved on to \(pid)")
+                }
                 #if os(tvOS)
                 // Channel Preview: report from the guide's own focus binding,
                 // which changes only after the engine has settled. Reporting
@@ -6360,15 +6376,42 @@ struct EPGGuideView: View {
                 #if os(tvOS)
                 reportPreview(target)
                 #endif
-                focusScratch.verticalSnapInFlight = true
                 debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
-                Task { @MainActor in
-                    for _ in 0..<4 {
+                // A single write can be dropped while the row is still laying
+                // out, so the snap retries, but ONLY while focus still sits on
+                // the cell the engine landed on. The old loop retried whenever
+                // focus was not on the target, which could not tell a dropped
+                // write from the user having moved on: during a held or fast
+                // Down it wrote the target back up to 240 ms later and focus
+                // jumped up a row or two, and its in-flight flag skipped the
+                // snap for every row passed meanwhile (JCBird1012 video,
+                // 2026-11-05). Now each landing gets its own snap, and a later
+                // landing cancels this one (see the top of this handler).
+                let landedID = pid
+                focusScratch.columnSnapTarget = target
+                focusScratch.columnSnapTask = Task { @MainActor in
+                    defer {
+                        // A superseding landing owns the fields now.
+                        if !Task.isCancelled {
+                            focusScratch.columnSnapTask = nil
+                            focusScratch.columnSnapTarget = nil
+                        }
+                    }
+                    for attempt in 0..<4 {
+                        if Task.isCancelled { return }
+                        guard focusedProgramID == landedID else {
+                            debugLog("🧭 [GuideFocus] column snap stopped: focus is on \(focusedProgramID ?? "nil"), not the landed cell (attempt \(attempt))")
+                            return
+                        }
                         Slow.time("focus.columnSnapWrite") { focusedProgramID = target }
                         try? await Task.sleep(nanoseconds: 60_000_000)
-                        if focusedProgramID == target { break }
+                        if Task.isCancelled { return }
+                        if focusedProgramID == target {
+                            if attempt > 0 { debugLog("🧭 [GuideFocus] column snap landed on attempt \(attempt)") }
+                            return
+                        }
                     }
-                    focusScratch.verticalSnapInFlight = false
+                    debugLog("🧭 [GuideFocus] column snap gave up after 4 writes, focus=\(focusedProgramID ?? "nil")")
                 }
             }
             #endif
@@ -6534,6 +6577,9 @@ struct EPGGuideView: View {
                     }
                     debugLog("🧭 [GuideFocus] scrollToTop(epg) → prog=\(target) count=\(channels.count)")
                     focusScratch.verticalSnapInFlight = true
+                    focusScratch.columnSnapTask?.cancel()
+                    focusScratch.columnSnapTask = nil
+                    focusScratch.columnSnapTarget = nil
                     defer {
                         // A superseding jump owns the flag now; only the live
                         // task clears it.
