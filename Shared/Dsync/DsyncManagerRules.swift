@@ -246,6 +246,11 @@ enum DsyncRosterPause {
     /// Push: the `profiles` category itself is not written while paused (the change stays pending).
     static func writes(_ key: DsyncKey, paused: Bool) -> Bool { !(paused && key == .profiles) }
 
+    /// A successful PUT clears the roster's pending (dirty) mark only when it
+    /// wrote `profiles` outside a pause; edits made while paused go out with
+    /// the first PUT after it ends.
+    static func clearsRosterPending(afterPutOf key: DsyncKey, paused: Bool) -> Bool { key == .profiles && !paused }
+
     /// The bucket a PUT of another category starts from. While paused,
     /// `profiles` goes out exactly as the server has it: [previous] is the
     /// copy this PUT's refresh just read when [serverHasBucket]; otherwise

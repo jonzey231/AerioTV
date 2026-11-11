@@ -875,6 +875,8 @@ final class ProfileManager: ObservableObject {
             // Keep the row's own stamp: the server row stays authoritative for every field this device did not change.
             mutated(id, "roster-add", seed.updatedAt)
         } else {
+            // The roster is paused (a held profile): the first pull after the pause checks it against the roster.
+            if rosterSyncPaused(playlistId) { holds.markAddedDuringPause(id) }
             mutated(id, "add")
         }
         debugLog("[PROFILE] added \(Self.tag(id)) on \(Self.tag(playlistId)) level=\(ProfileLevel.of(profile.userLevel).rawValue) role=\(profile.effectiveRole.label)")
@@ -911,6 +913,7 @@ final class ProfileManager: ObservableObject {
         let plan = ProfileRoster.plan(rows, store.forPlaylist(playlistId).map(\.username))
         debugLog("[DSYNC] profiles: \(plan.available.count) roster rows available, not added (opt-in)")
         guard RoleRules.canWriteProfilesKey(activeRole(playlistId)) else { return 0 }
+        adoptRowsForPauseAdds(playlistId, rows, adopted: adopted)
         for r in plan.merge {
             guard var local = store.forPlaylist(playlistId).first(where: { $0.username.caseInsensitiveCompare(r.username) == .orderedSame }) else { continue }
             let id = local.id
@@ -968,6 +971,24 @@ final class ProfileManager: ObservableObject {
         }
         refreshActiveRole()
         return 0
+    }
+
+    /// The first pull after a roster pause: a profile added during it takes its
+    /// username's roster row, if any, the way a manual add of a roster user
+    /// does (row applied, PIN imported, the row's stamp kept). Otherwise it
+    /// stays a plain add. Either way its mark is cleared.
+    private func adoptRowsForPauseAdds(_ playlistId: String, _ rows: [ProfileRow], adopted: (String, Int64) -> Void) {
+        for p in store.forPlaylist(playlistId) where !p.isDefault && holds.addedDuringPause(p.id) {
+            holds.clearAddedDuringPause(p.id)
+            guard let row = ProfileHostHoldRules.rowAfterPause(p.username, rows: rows) else { continue }
+            store.upsert(ProfileRoster.applyRow(p, row))
+            if let type = PinRules.typeFromWire(row.pinType), row.pinHash.count == 64, row.pinSalt.count == 32 {
+                pinStore.importSynced(p.id, type, hash: row.pinHash, salt: row.pinSalt)
+                pendingPinAdds.remove(p.id)
+            }
+            adopted(p.username, row.updatedAt)
+            debugLog("[DSYNC] profiles: \(Self.tag(p.id)) added during the roster pause takes its roster row (row and stamp kept)")
+        }
     }
 
     /// Add a profile from a roster suggestion (an explicit choice).
@@ -1205,7 +1226,10 @@ final class ProfileManager: ObservableObject {
         if RoleRules.removeNeedsPin(p.effectiveRole) {
             guard consumeAdminTicket(p.playlistId) else { throw fail("Enter a PIN from an Admin or Standard profile") }
         }
-        await deleteLocal(p, fromSync: false)
+        // A held profile (server address change) goes from this device only, with no tombstone.
+        let held = holds.isHeld(p.id)
+        await deleteLocal(p, fromSync: false, tombstone: ProfileHostHoldRules.removeWritesTombstone(isHeld: held))
+        if held { debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(p.playlistId)) profile=\(Self.tag(p.id)) (removed; this device only)") }
     }
 
     /// A synced removal tombstone beat this local profile: the same cleanup, no PIN, no new tombstone.

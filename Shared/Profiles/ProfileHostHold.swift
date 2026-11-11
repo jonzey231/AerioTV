@@ -181,6 +181,20 @@ enum ProfileHostHoldRules {
     static func onPick(isHeld: Bool, hasStoredSignIn: Bool) -> Pick {
         isHeld ? .signInAgain : .switchNow
     }
+
+    /// Removing a profile (Remove Profile): a HELD profile goes from this
+    /// device only, with no tombstone. Its row was never part of the new
+    /// server's roster, and a tombstone sent there once the roster sync
+    /// resumes could delete a same-named profile on that server's devices.
+    static func removeWritesTombstone(isHeld: Bool) -> Bool { !isHeld }
+
+    /// A profile added while the playlist's roster sync was paused could not
+    /// see the roster. On the first pull after the pause it takes the roster
+    /// row for its username, if there is one, the way a manual add of a
+    /// roster user does (same match, the row's stamp kept); nil keeps it a plain add.
+    static func rowAfterPause(_ username: String, rows: [ProfileRow]) -> ProfileRow? {
+        ProfileRoster.rowForManualAdd(username, rows: rows, localUsernames: [])
+    }
 }
 
 /// The holds, the default profile's recorded identity, and each profile's
@@ -190,11 +204,14 @@ final class ProfileHostHoldStore {
     static let KEY_HOLDS = "aerio.profiles.host_hold.v1"
     static let KEY_IDENTITY = "aerio.profiles.default_identity.v1"
     static let KEY_TAGS = "aerio.profiles.signin_tag.v1"
+    static let KEY_PAUSE_ADDS = "aerio.profiles.added_during_pause.v1"
 
     private let defaults: UserDefaults
     private var holds: [String: HostHoldRecord] = [:]
     private var identities: [String: DefaultIdentity] = [:]
     private var tags: [String: SignInTag] = [:]
+    /// Profiles added while their playlist's roster sync was paused.
+    private var pauseAdds = Set<String>()
     /// Playlists in the middle of a route change (memory only).
     private var changing = Set<String>()
 
@@ -216,6 +233,8 @@ final class ProfileHostHoldStore {
     func identity(_ playlistId: String) -> DefaultIdentity? { identities[playlistId] }
 
     func tag(_ profileId: String) -> SignInTag? { tags[profileId] }
+
+    func addedDuringPause(_ profileId: String) -> Bool { pauseAdds.contains(profileId) }
 
     /// Whether a users/me answer may update [playlistId]'s record now.
     /// Never during a route change (SNAPSHOT: the change's own users/me,
@@ -305,10 +324,24 @@ final class ProfileHostHoldStore {
         return true
     }
 
-    /// A profile was removed: its hold and tag go.
+    /// A plain add while the playlist's roster sync is paused (rowAfterPause runs on it later).
+    func markAddedDuringPause(_ profileId: String) {
+        guard pauseAdds.insert(profileId).inserted else { return }
+        save()
+    }
+
+    /// The first pull after the pause checked it.
+    func clearAddedDuringPause(_ profileId: String) {
+        guard pauseAdds.remove(profileId) != nil else { return }
+        save()
+    }
+
+    /// A profile was removed: its hold, tag, and pause mark go.
     func forgetProfile(_ profileId: String) {
         lift(profileId: profileId)
-        if tags.removeValue(forKey: profileId) != nil { save() }
+        let hadTag = tags.removeValue(forKey: profileId) != nil
+        let hadMark = pauseAdds.remove(profileId) != nil
+        if hadTag || hadMark { save() }
     }
 
     /// A playlist merged into another: its holds go with its profiles.
@@ -363,6 +396,7 @@ final class ProfileHostHoldStore {
         for (profileId, v) in object(Self.KEY_TAGS) {
             if let id = Self.identity(from: v) { tags[profileId] = .identity(id) } else { tags[profileId] = .unknown }
         }
+        pauseAdds = Set(defaults.stringArray(forKey: Self.KEY_PAUSE_ADDS) ?? [])
     }
 
     private func write(_ o: [String: Any], _ key: String) {
@@ -388,6 +422,7 @@ final class ProfileHostHoldStore {
             }
         }
         write(t, Self.KEY_TAGS)
+        defaults.set(pauseAdds.sorted(), forKey: Self.KEY_PAUSE_ADDS)
     }
 }
 

@@ -434,5 +434,48 @@ do {
     eq(DsyncRosterPause.base(stale, serverHasBucket: false, paused: paused("P")), stale, "not paused: the bucket is built as today")
 }
 
+// MARK: - Pause refinements: held removal, the pending mark, adds during the pause
+
+do {
+    let (ud, suite) = freshDefaults("pause-refine")
+    defer { ud.removePersistentDomain(forName: suite) }
+    // Removing a held profile writes no tombstone; any other removal as today.
+    check(!ProfileHostHoldRules.removeWritesTombstone(isHeld: true), "removing a held profile: this device only, no tombstone")
+    check(ProfileHostHoldRules.removeWritesTombstone(isHeld: false), "removing a profile that is not held: as today")
+
+    // A PUT during the pause keeps the roster's pending mark; after it, a roster PUT clears it as today.
+    for key in DsyncKey.allCases {
+        check(!DsyncRosterPause.clearsRosterPending(afterPutOf: key, paused: true), "a PUT of \(key.suffix) during the pause keeps the dirty mark")
+    }
+    check(DsyncRosterPause.clearsRosterPending(afterPutOf: .profiles, paused: false), "after the pause, the roster PUT clears it")
+    check(!DsyncRosterPause.clearsRosterPending(afterPutOf: .favorites, paused: false), "another category never clears it")
+
+    // A roster user added during the pause takes its roster row once the pause ends.
+    let holds = ProfileHostHoldStore(defaults: ud)
+    holds.hold("P", profileIds: ["held"], trustedHosts: [], route: "r")
+    holds.markAddedDuringPause("kid2")
+    holds.markAddedDuringPause("plain")
+    check(ProfileHostHoldStore(defaults: ud).addedDuringPause("kid2"), "the mark survives a relaunch")
+    let salt = String(repeating: "b2", count: 16)
+    let row = ProfileRow(userId: 9, username: "Kid2", displayName: "Little One", pinType: "numbers",
+                         pinHash: PinRules.hashV2(saltHex: salt, normalized: "1357")!, pinSalt: salt,
+                         role: "child", updatedAt: 1_792_000_000, avatar: AvatarSpec(icon: "star", color: "green"), order: 1)
+    let rows = [ProfileRow(userId: 1, username: "owner", displayName: "owner", pinType: "none", pinHash: "", pinSalt: ""), row]
+    holds.liftMatching("P"); holds.lift(profileId: "held")
+    check(holds.record("P") == nil, "the pause ended")
+    let found = ProfileHostHoldRules.rowAfterPause("kid2", rows: rows)
+    eq(found, row, "the profile added during the pause finds its roster row (same match as a manual add)")
+    check(ProfileHostHoldRules.rowAfterPause("plain", rows: rows) == nil, "a user not in the roster stays a plain add")
+    var added = DispatcharrProfile(id: "kid2", playlistId: "P", displayName: "kid2", username: "kid2", userLevel: 1)
+    added.role = .user   // the plain add during the pause
+    let adopted = ProfileRoster.applyRow(added, found!)
+    check(adopted.effectiveRole == .child && adopted.displayName == "Little One" && adopted.order == 1, "the row's role, name, and order apply")
+    check(!DsyncGate.profileRowWins(localUpdatedAt: found!.updatedAt, remote: row), "the row's stamp is kept, so the next push changes nothing")
+    holds.clearAddedDuringPause("kid2"); holds.clearAddedDuringPause("plain")
+    check(!holds.addedDuringPause("kid2") && !ProfileHostHoldStore(defaults: ud).addedDuringPause("plain"), "checked once, then unmarked")
+    holds.markAddedDuringPause("gone"); holds.forgetProfile("gone")
+    check(!holds.addedDuringPause("gone"), "a removed profile's mark goes")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

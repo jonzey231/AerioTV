@@ -1570,7 +1570,7 @@ final class DispatcharrSyncManager: ObservableObject {
             if force { clearForced(s, key) }
             markSent(s, key)
             clearAwaiting(s, key)
-            if key == .profiles { profilesAcked(s, data) }
+            if DsyncRosterPause.clearsRosterPending(afterPutOf: key, paused: rosterPaused) { profilesAcked(s, data) }
             return
         }
         if s.serverFull && s.serverBytes[wire(s, b)] == nil {
@@ -1598,7 +1598,7 @@ final class DispatcharrSyncManager: ObservableObject {
                 if force { clearForced(s, key) }
                 markSent(s, key)
                 clearAwaiting(s, key)
-                if key == .profiles { profilesAcked(s, data) }
+                if DsyncRosterPause.clearsRosterPending(afterPutOf: key, paused: rosterPaused) { profilesAcked(s, data) }
                 s.retries.removeValue(forKey: key)
                 s.tooLarge.remove(key)
             case .tooLarge:
