@@ -477,5 +477,43 @@ do {
     check(!holds.addedDuringPause("gone"), "a removed profile's mark goes")
 }
 
+// MARK: - Saved server copies discarded on a route change (follow-up 6)
+
+do {
+    let pl = "11111111-AAAA-BBBB-CCCC-000000000001", other = "22222222-AAAA-BBBB-CCCC-000000000002"
+    // What the sync state holds for the playlist: copies for two profiles, plus things that must stay.
+    let keys = ["braw|\(pl)|default|app.molinete.aerio", "raw|\(pl)|default|favorites", "data|\(pl)|kid-profile|progress",
+                "raw|\(pl)|kid-profile|profiles",
+                "at|\(pl)|default|favorites", "dev|\(pl)|default|favorites", "dirty|\(pl)|default|favorites",
+                "pdirty|\(pl)", "rstamp|\(pl)|default", "braw|\(other)|default|app.molinete.aerio"]
+    let copies = keys.filter { DsyncServerCopy.isCopy($0, playlistId: pl) }
+    eq(copies.count, 4, "every profile's bucket, category, and last-data copies are server copies")
+    check(!copies.contains { $0.hasPrefix("at|") || $0.hasPrefix("dev|") || $0.hasPrefix("dirty|") || $0.hasPrefix("pdirty|") || $0.hasPrefix("rstamp|") },
+          "stamps, pending marks, and local recents stamps stay")
+    check(!copies.contains { $0.contains(other) }, "another playlist's copy stays")
+
+    // The old server's bucket copy (with data merged from the user's other devices) and a local change.
+    func cat(_ dev: String, _ data: DsyncObject) -> DsyncObject { DsyncV2.encodeCategory(nil, deviceId: dev, updatedAt: 10, data: data) }
+    let oldCopy = DsyncV2.encodeBucket(nil, deviceId: "old", appVersion: "t", updatedAt: 1,
+                                       replace: [(.progress, cat("other-device", DsyncObject([("rows", .array([.string("old server row")]))]))),
+                                                 (.watchlist, cat("other-device", DsyncObject([("rows", .array([.string("old list row")]))])))])
+    let mine = cat("me", DsyncObject([("ids", .array([.int(7)]))]))
+    func put(from copy: DsyncObject?) -> Set<String> {
+        let v = DsyncV2.encodeBucket(copy, deviceId: "me", appVersion: "t", updatedAt: 2, replace: [(.favorites, mine)])
+        return Set(v[DsyncV2.CATEGORIES]?.asObject?.keys ?? [])
+    }
+    // A route change: the copy is discarded; the new server has no record (404): only this device's data goes.
+    check(R.changed(oldBase: "https://a.example", newBase: "https://b.example", oldLocal: "", newLocal: ""), "host change: discard")
+    eq(put(from: nil), [DsyncKey.favorites.suffix], "after a route change, a PUT to an empty server carries nothing from the old copy")
+    eq(put(from: oldCopy), [DsyncKey.favorites.suffix, DsyncKey.progress.suffix, DsyncKey.watchlist.suffix],
+       "(without the discard it would have carried the old server's categories)")
+    // A path-only change keeps the copy, and the PUT is built as today.
+    check(!R.changed(oldBase: "https://a.example/x", newBase: "https://a.example/y", oldLocal: "", newLocal: ""), "path-only: keep the copy")
+    // A read at the new address rebuilds the copy from what that server has.
+    let newServer = DsyncV2.encodeBucket(nil, deviceId: "srv", appVersion: "t", updatedAt: 3,
+                                         replace: [(.recents, cat("srv-device", DsyncObject([("rows", .array([]))])))])
+    eq(put(from: newServer), [DsyncKey.favorites.suffix, DsyncKey.recents.suffix], "after a read at the new address, the PUT carries that server's categories only")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

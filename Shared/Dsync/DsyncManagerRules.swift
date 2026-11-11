@@ -263,3 +263,22 @@ enum DsyncRosterPause {
         return out
     }
 }
+
+/// The saved server copies a playlist's Dispatcharr Sync keeps for each
+/// profile (follow-up 6): the bucket a PUT starts from (`braw`), each
+/// category's last server copy (`raw`), and the last copy sent or read
+/// (`data`). They are kept per playlist and profile, not per server, so a
+/// route change discards them for every profile before anything is sent to
+/// the new address: a read there rebuilds them, and on a 404 a PUT carries
+/// only this device's own data. The consumed stamps, pending marks, and local
+/// data stay.
+enum DsyncServerCopy {
+    static let NAMES = ["braw", "raw", "data"]
+
+    /// State-key prefixes of [playlistId]'s copies, every profile.
+    static func prefixes(_ playlistId: String) -> [String] { NAMES.map { "\($0)|\(playlistId)|" } }
+
+    static func isCopy(_ stateKey: String, playlistId: String) -> Bool {
+        prefixes(playlistId).contains { stateKey.hasPrefix($0) }
+    }
+}

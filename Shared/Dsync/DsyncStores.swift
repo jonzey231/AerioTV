@@ -55,6 +55,18 @@ final class DsyncStateStore {
         return dir.appendingPathComponent(String(safe) + ".json")
     }
 
+    /// Delete every JSON blob whose key starts with [p]. Returns how many went.
+    @discardableResult
+    func removeObjects(withPrefix p: String) -> Int {
+        let name = file(p).deletingPathExtension().lastPathComponent
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        var n = 0
+        for f in files where f.lastPathComponent.hasPrefix(name) {
+            if (try? FileManager.default.removeItem(at: f)) != nil { n += 1 }
+        }
+        return n
+    }
+
     func object(_ k: String) -> DsyncObject? {
         guard let data = try? Data(contentsOf: file(k)) else { return nil }
         return DsyncJSONParser.parse(data)?.asObject

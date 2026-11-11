@@ -44,6 +44,8 @@ final class DsyncSession {
     var client: DispatcharrAppDataClient?
     /// Buckets the last read before a PUT found absent or unreadable on the server.
     var noServerBucket = Set<DsyncBucket>()
+    /// Ended by a route change: nothing it still reads from the old address is saved.
+    var discarded = false
 
     /// Keys deferred because their id cache was not built, with the local row count waiting.
     var awaitingCache: [DsyncKey: Int] = [:]
@@ -221,6 +223,9 @@ final class DispatcharrSyncManager: ObservableObject {
             s.client = nil
             debugLog("[DSYNC] session for a held profile stopped sending (server address changed)")
         }
+        // A route change: the saved server copies go before anything reaches the new address.
+        pm.onRouteWillChange = { [weak self] pid in self?.discardServerCopies(pid) }
+        pm.onRouteChangeEnded = { [weak self] _ in self?.evaluateTarget() }
         // Nothing on the playlist is held any more: merge the roster now, as a picker open does.
         pm.onRosterSyncResumed = { [weak self] pid in
             guard let self, self.isEnabled, DsyncLocal.server(pid) != nil else { return }
@@ -300,6 +305,8 @@ final class DispatcharrSyncManager: ObservableObject {
     private func target() -> Target? {
         guard isEnabled, let s = DsyncLocal.activeDispatcharrPlaylist() else { return nil }
         let pid = s.id.uuidString
+        // No session while the playlist's address is being changed (it would bind to the old one).
+        if ProfileManager.shared.routeChanging(pid) { return nil }
         return Target(playlistId: pid, token: currentToken(pid))
     }
 
@@ -333,6 +340,22 @@ final class DispatcharrSyncManager: ObservableObject {
             let now = self.target()
             if now?.playlistId != self.session?.playlistId || now?.token != self.session?.token { self.targetChanging = false; self.evaluateTarget() }
         }
+    }
+
+    /// A playlist's route is about to change (follow-up 6): a live session for
+    /// it ends without a flush (its client points at the old address, and its
+    /// pending marks stay for the next session), then every profile's saved
+    /// server copies go. A new session starts once the change has finished.
+    private func discardServerCopies(_ playlistId: String) {
+        if let s = session, s.playlistId == playlistId {
+            s.discarded = true
+            endSession(s)
+            session = nil
+        }
+        var n = 0
+        for p in DsyncServerCopy.prefixes(playlistId) { n += state.removeObjects(withPrefix: p) }
+        debugLog("[PROFILE-HOST] sync copy discarded playlist=\(playlistId.prefix(8)) (\(n) files)")
+        Task { self.evaluateTarget() }
     }
 
     private func endSession(_ s: DsyncSession) {
@@ -817,6 +840,7 @@ final class DispatcharrSyncManager: ObservableObject {
     private func lastDataOf(_ s: DsyncSession, _ key: DsyncKey) -> DsyncObject? { state.object(k("data", s, key)) }
 
     private func saveAfter(_ s: DsyncSession, _ key: DsyncKey, raw: DsyncObject, at: Int64, dev: String, data: DsyncObject) {
+        guard !s.discarded else { return }
         state.setObject(k("raw", s, key), raw)
         state.set(k("at", s, key), at)
         state.set(k("dev", s, key), dev)
@@ -860,6 +884,7 @@ final class DispatcharrSyncManager: ObservableObject {
 
     private func bucketRaw(_ s: DsyncSession, _ b: DsyncBucket) -> DsyncObject? { state.object(k("braw", s) + "|" + b.rawValue) }
     private func saveBucketRaw(_ s: DsyncSession, _ b: DsyncBucket, _ raw: DsyncObject) {
+        guard !s.discarded else { return }
         state.setObject(k("braw", s) + "|" + b.rawValue, raw)
         foldProviders(s, raw)
     }
@@ -1387,7 +1412,7 @@ final class DispatcharrSyncManager: ObservableObject {
             saveAfter(s, key, raw: raw, at: env.updatedAt, dev: env.deviceId, data: env.data)
             debugLog("[DSYNC] pull \(key.suffix) bytes=\(bytes) applied (setup choice, stamp not newer)")
         case .keepLocal:
-            state.setObject(k("raw", s, key), raw)
+            if !s.discarded { state.setObject(k("raw", s, key), raw) }
             debugLog("[DSYNC] pull \(key.suffix) bytes=\(bytes) kept local (local change newer)")
         case .apply:
             if isDirty(s, key) { setDirty(s, key, false) }
@@ -1406,7 +1431,7 @@ final class DispatcharrSyncManager: ObservableObject {
                 return
             }
         case .notNewer:
-            state.setObject(k("raw", s, key), raw)
+            if !s.discarded { state.setObject(k("raw", s, key), raw) }
             debugLog("[DSYNC] pull \(key.suffix) bytes=\(bytes) not newer")
             if key == .progress { await retryHeldProgress(s, env) }
             if await healIfLocalDiffers(s, key, env) == .notReady { return }
@@ -1665,7 +1690,7 @@ final class DispatcharrSyncManager: ObservableObject {
         guard DsyncEnvelopeCodec.remoteWins(localAt: at, localDevice: dev, remoteAt: env.updatedAt, remoteDevice: env.deviceId) else { return .ok }
         switch DsyncGate.onNewerPull(key, dirty: isDirty(s, key), dirtyAt: dirtyAt(s, key), remoteAt: env.updatedAt) {
         case .keepLocal:
-            state.setObject(k("raw", s, key), env.raw)
+            if !s.discarded { state.setObject(k("raw", s, key), env.raw) }
             return .ok
         default:
             guard await apply(s, key, env) == .applied else { return .unreachable }

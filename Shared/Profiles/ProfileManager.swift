@@ -91,6 +91,10 @@ final class ProfileManager: ObservableObject {
     var onSignInsHeld: ((_ playlistId: String, _ profileIds: Set<String>) -> Void)?
     /// Dispatcharr Sync: nothing on the playlist is held any more; the `profiles` category syncs again.
     var onRosterSyncResumed: ((_ playlistId: String) -> Void)?
+    /// Dispatcharr Sync: the playlist's route is about to change (discard its saved server copies).
+    var onRouteWillChange: ((_ playlistId: String) -> Void)?
+    /// Dispatcharr Sync: a route change finished (a session may start at the new address).
+    var onRouteChangeEnded: ((_ playlistId: String) -> Void)?
     /// True while anything is playing (main player, mini player, background audio).
     var isPlaying: () -> Bool = { false }
     /// The stop-playback confirmation ("Switching profiles stops playback"); true = go ahead.
@@ -1281,7 +1285,13 @@ final class ProfileManager: ObservableObject {
     /// users/me) or ends: in between, nothing users/me answers is recorded,
     /// so the snapshot is the record from before the change.
     func beginRouteChange(_ playlistId: String) { holds.beginChange(playlistId) }
-    func endRouteChange(_ playlistId: String) { holds.endChange(playlistId) }
+    func endRouteChange(_ playlistId: String) {
+        holds.endChange(playlistId)
+        onRouteChangeEnded?(playlistId)
+    }
+
+    /// True between beginRouteChange and endRouteChange: no sync session starts for the playlist.
+    func routeChanging(_ playlistId: String) -> Bool { holds.isChanging(playlistId) }
 
     /// [profileId] signed in or was verified at the playlist's current
     /// address: tag it with the default account users/me answers there now
@@ -1309,6 +1319,8 @@ final class ProfileManager: ObservableObject {
     /// change does nothing. The caller writes the address, then runs
     /// recheckHostHold.
     func routeWillChange(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) async {
+        guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return }
+        onRouteWillChange?(playlistId)
         guard holdForRouteChange(playlistId, oldBase: oldBase, oldLocal: oldLocal, newBase: newBase, newLocal: newLocal) else { return }
         await leaveHeldProfile(playlistId)
     }
@@ -1318,6 +1330,7 @@ final class ProfileManager: ObservableObject {
     /// same-server check follow once the caller has written the address.
     func routeWillChangeNow(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) {
         guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return }
+        onRouteWillChange?(playlistId)
         let leave = holdForRouteChange(playlistId, oldBase: oldBase, oldLocal: oldLocal, newBase: newBase, newLocal: newLocal)
         guard holds.record(playlistId) != nil else { return }
         Task {

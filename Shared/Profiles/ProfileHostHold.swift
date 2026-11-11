@@ -249,6 +249,7 @@ final class ProfileHostHoldStore {
     /// snapshot until endChange.
     func beginChange(_ playlistId: String) { changing.insert(playlistId) }
     func endChange(_ playlistId: String) { changing.remove(playlistId) }
+    func isChanging(_ playlistId: String) -> Bool { changing.contains(playlistId) }
 
     /// Record the default profile's users/me answer for [playlistId]. False
     /// when frozen: once nothing is held and no change is under way it
