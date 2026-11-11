@@ -383,5 +383,56 @@ do {
        "The server address for Home changed. Sign in again to use this profile.", "the line above the fields")
 }
 
+// MARK: - Roster sync paused while a profile is held (follow-up B13)
+
+do {
+    let (ud, suite) = freshDefaults("pause")
+    defer { ud.removePersistentDomain(forName: suite) }
+    let holds = ProfileHostHoldStore(defaults: ud)
+    func paused(_ pid: String) -> Bool { holds.record(pid) != nil }   // ProfileManager.rosterSyncPaused
+    holds.recordIdentity("P", DefaultIdentity(userId: 1, username: "owner")!)
+    holds.setTag("kid", .identity(DefaultIdentity(userId: 1, username: "owner")!))
+    check(!paused("P"), "nothing held: not paused")
+    holds.hold("P", profileIds: ["kid"], trustedHosts: [], route: "new")
+    check(paused("P") && holds.heldPlaylistIds == ["P"], "a held profile pauses the playlist's roster sync")
+
+    // Push: the profiles category itself is never written; every other category still is.
+    check(!DsyncRosterPause.writes(.profiles, paused: true), "while held, profiles is not written")
+    for key in DsyncKey.allCases where key != .profiles {
+        check(DsyncRosterPause.writes(key, paused: true), "while held, \(key.suffix) still syncs")
+    }
+
+    // A PUT of another category never carries local roster rows.
+    let localRoster = DsyncV2.encodeCategory(nil, deviceId: "me", updatedAt: 1_794_000_000,
+                                             data: DsyncObject([("rows", .array([.string("local roster row with a PIN hash")]))]))
+    let fav = DsyncV2.encodeCategory(nil, deviceId: "me", updatedAt: 1_794_000_001, data: DsyncObject([("ids", .array([]))]))
+    let stale = DsyncV2.encodeBucket(nil, deviceId: "me", appVersion: "t", updatedAt: 1, replace: [(.profiles, localRoster)])
+    let sentNoServer = DsyncV2.encodeBucket(DsyncRosterPause.base(stale, serverHasBucket: false, paused: true),
+                                            deviceId: "me", appVersion: "t", updatedAt: 2, replace: [(.favorites, fav)])
+    let catsNoServer = sentNoServer[DsyncV2.CATEGORIES]?.asObject
+    check(catsNoServer?[DsyncKey.profiles.suffix] == nil, "no server copy: profiles is left out, never the local rows")
+    check(catsNoServer?[DsyncKey.favorites.suffix] != nil, "the other category goes out")
+    // The server's copy (what this PUT's refresh read) goes back unchanged, whatever its value and type.
+    for serverValue: DsyncJSON in [.object(DsyncV2.encodeCategory(nil, deviceId: "srv", updatedAt: 5, data: DsyncObject([("rows", .array([]))]))),
+                                   .string("not an object")] {
+        let server = DsyncObject([(DsyncV2.CATEGORIES, .object(DsyncObject([(DsyncKey.profiles.suffix, serverValue)])))])
+        let sent = DsyncV2.encodeBucket(DsyncRosterPause.base(server, serverHasBucket: true, paused: true),
+                                        deviceId: "me", appVersion: "t", updatedAt: 3, replace: [(.favorites, fav)])
+        eq(sent[DsyncV2.CATEGORIES]?.asObject?[DsyncKey.profiles.suffix], serverValue, "the server's profiles value goes back unchanged")
+    }
+
+    // Pull: a pulled tombstone that would delete the held profile is not applied.
+    let tomb = ProfileTombstone(username: "kid", removedAt: 1_794_000_100, userId: 5)
+    check(ProfileTombstones.kills([tomb], "kid", 1_794_000_000), "the new server's tombstone would delete kid")
+    check(!DsyncRosterPause.appliesPulledProfiles(paused: paused("P")), "while held, pulled rows and tombstones are not applied")
+
+    // The hold clears (same server, or each held profile signed in or removed): as today.
+    holds.liftMatching("P")
+    check(!paused("P") && holds.heldPlaylistIds.isEmpty, "nothing held: resumed")
+    check(DsyncRosterPause.appliesPulledProfiles(paused: paused("P")), "after the hold clears, pulled rows merge again")
+    check(DsyncRosterPause.writes(.profiles, paused: paused("P")), "after the hold clears, the roster is written again")
+    eq(DsyncRosterPause.base(stale, serverHasBucket: false, paused: paused("P")), stale, "not paused: the bucket is built as today")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

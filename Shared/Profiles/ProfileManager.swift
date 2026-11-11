@@ -89,6 +89,8 @@ final class ProfileManager: ObservableObject {
     var beforeSwitch: ((_ playlistId: String) async -> Void)?
     /// Dispatcharr Sync: these profiles' sign-ins were just held (a server address change).
     var onSignInsHeld: ((_ playlistId: String, _ profileIds: Set<String>) -> Void)?
+    /// Dispatcharr Sync: nothing on the playlist is held any more; the `profiles` category syncs again.
+    var onRosterSyncResumed: ((_ playlistId: String) -> Void)?
     /// True while anything is playing (main player, mini player, background audio).
     var isPlaying: () -> Bool = { false }
     /// The stop-playback confirmation ("Switching profiles stops playback"); true = go ahead.
@@ -124,11 +126,34 @@ final class ProfileManager: ObservableObject {
         var act: [String: String] = [:]
         for pid in by.keys { if let a = activeProfileIdNow(pid) { act[pid] = a } }
         if act != activeProfileIds { activeProfileIds = act }
+        refreshRosterPause()
         var s: [String: [ProfileRow]] = [:]
-        for (pid, rows) in rosterRows { s[pid] = ProfileRoster.suggestions(rows, store.forPlaylist(pid).map(\.username)) }
+        for (pid, rows) in rosterRows {
+            // No suggestions while the playlist's roster sync is paused (a held profile).
+            s[pid] = rosterSyncPaused(pid) ? [] : ProfileRoster.suggestions(rows, store.forPlaylist(pid).map(\.username))
+        }
         if s != rosterSuggestions { rosterSuggestions = s }
         refreshActiveRole()
         refreshOverlay(act)
+    }
+
+    /// True while any profile of [playlistId] is held after a server address
+    /// change: Dispatcharr Sync pauses the `profiles` category in both
+    /// directions (DsyncRosterPause), and no roster suggestions are offered.
+    func rosterSyncPaused(_ playlistId: String) -> Bool { holds.record(playlistId) != nil }
+
+    private var rosterPaused = Set<String>()
+
+    /// Logs the pause and the resume once each; a resume asks Dispatcharr Sync to merge the roster again.
+    private func refreshRosterPause() {
+        let now = holds.heldPlaylistIds
+        for pid in now.subtracting(rosterPaused).sorted() { debugLog("[PROFILE-HOST] roster sync paused playlist=\(Self.tag(pid))") }
+        let resumed = rosterPaused.subtracting(now).sorted()
+        rosterPaused = now
+        for pid in resumed {
+            debugLog("[PROFILE-HOST] roster sync resumed playlist=\(Self.tag(pid))")
+            onRosterSyncResumed?(pid)
+        }
     }
 
     /// The request overlay (ProfileOverlay): every playlist whose active profile is not the default.
@@ -783,6 +808,8 @@ final class ProfileManager: ObservableObject {
 
     /// The synced roster row a manual add must finish with (ProfileRoster.rowForManualAdd).
     private func rosterRowForManualAdd(_ playlistId: String, _ username: String) -> ProfileRow? {
+        // A paused roster (a held profile) is not used: its rows may be another server's.
+        guard !rosterSyncPaused(playlistId) else { return nil }
         let row = ProfileRoster.rowForManualAdd(username, rows: rosterRows[playlistId] ?? [],
                                                 localUsernames: store.forPlaylist(playlistId).map(\.username))
         if row != nil { debugLog("[DSYNC] profiles: manual add of a roster user; finishing it as a roster add (row kept)") }
@@ -1383,7 +1410,10 @@ final class ProfileManager: ObservableObject {
     }
 
     /// The playlist was deleted: its hold and recorded identity go with it.
-    func playlistDeleted(_ playlistId: String) { holds.forgetPlaylist(playlistId) }
+    func playlistDeleted(_ playlistId: String) {
+        holds.forgetPlaylist(playlistId)
+        publish()
+    }
 
     // MARK: Switch
 

@@ -42,6 +42,8 @@ final class DsyncSession {
     let token: String
     let mutex = DsyncMutex()
     var client: DispatcharrAppDataClient?
+    /// Buckets the last read before a PUT found absent or unreadable on the server.
+    var noServerBucket = Set<DsyncBucket>()
 
     /// Keys deferred because their id cache was not built, with the local row count waiting.
     var awaitingCache: [DsyncKey: Int] = [:]
@@ -218,6 +220,11 @@ final class DispatcharrSyncManager: ObservableObject {
             guard let s = self?.session, s.playlistId == pid, ids.contains(s.token) else { return }
             s.client = nil
             debugLog("[DSYNC] session for a held profile stopped sending (server address changed)")
+        }
+        // Nothing on the playlist is held any more: merge the roster now, as a picker open does.
+        pm.onRosterSyncResumed = { [weak self] pid in
+            guard let self, self.isEnabled, DsyncLocal.server(pid) != nil else { return }
+            Task { await self.pickerPull(pid, "roster sync resumed") }
         }
         pm.$switching.removeDuplicates()
             .sink { [weak self] _ in Task { @MainActor in self?.evaluateTarget() } }
@@ -1328,6 +1335,12 @@ final class DispatcharrSyncManager: ObservableObject {
     private func processCategory(_ s: DsyncSession, _ key: DsyncKey, _ env: DsyncEnvelope, _ bytes: Int) async {
         let raw = env.raw
         if key == .profiles {
+            // Paused while a profile of the playlist is held after a server change: the
+            // server's rows and tombstones are not applied (nor saved as consumed).
+            guard DsyncRosterPause.appliesPulledProfiles(paused: ProfileManager.shared.rosterSyncPaused(s.playlistId)) else {
+                s.read.insert(key)
+                return
+            }
             // Merged per row on every pull (the rows carry their own updatedAt); never added automatically.
             let r = await apply(s, key, env)
             if r == .malformed { debugLog(DsyncLogLines.malformedCategory(key)) }
@@ -1507,6 +1520,9 @@ final class DispatcharrSyncManager: ObservableObject {
 
     private func writeLocked(_ s: DsyncSession, _ key: DsyncKey) async {
         guard !s.paused, session === s else { return }
+        // A held profile on the playlist (server change): the local roster is not sent; the change stays pending.
+        let rosterPaused = ProfileManager.shared.rosterSyncPaused(s.playlistId)
+        guard DsyncRosterPause.writes(key, paused: rosterPaused) else { return }
         if DsyncCoexistence.FORCE_KEYS.contains(key) && choiceHeld() {
             setDirty(s, key, true)
             return
@@ -1563,7 +1579,9 @@ final class DispatcharrSyncManager: ObservableObject {
         }
         let sub = DsyncV2.encodeCategory(raw, deviceId: deviceId, updatedAt: now, data: data)
         // No byte guard before the PUT: send the full value; trim only on a 413.
-        var value = withProviders(s, DsyncV2.encodeBucket(bucketRaw(s, b), deviceId: deviceId, appVersion: appVersion, updatedAt: now, replace: [(key, sub)]))
+        // While the roster is paused, `profiles` goes out exactly as the server has it, or not at all.
+        let previous = DsyncRosterPause.base(bucketRaw(s, b), serverHasBucket: !s.noServerBucket.contains(b), paused: rosterPaused)
+        var value = withProviders(s, DsyncV2.encodeBucket(previous, deviceId: deviceId, appVersion: appVersion, updatedAt: now, replace: [(key, sub)]))
         var step = 0
         while true {
             let (status, _) = await c.put(wire(s, b), key: key, value: value)
@@ -1609,12 +1627,15 @@ final class DispatcharrSyncManager: ObservableObject {
         let got: (DsyncV2.Bucket, Int)
         switch await c.fetchBucket(wire(s, b)) {
         case .failed: return .unreachable
-        case .absent, .malformed: return .ok
+        case .absent, .malformed:
+            s.noServerBucket.insert(b)
+            return .ok
         case .tooNew:
             s.blocked.formUnion(b.keys)
             return .remoteTook
         case .got(let bucket, let bytes): got = (bucket, bytes)
         }
+        s.noServerBucket.remove(b)
         saveBucketRaw(s, b, got.0.raw)
         s.serverBytes[wire(s, b)] = Int64(got.1)
         guard let env = DsyncV2.category(got.0, key)?.envelope else { return .ok }
@@ -1625,6 +1646,7 @@ final class DispatcharrSyncManager: ObservableObject {
         if DsyncPullRules.sameAsConsumed(remoteAt: env.updatedAt, remoteDevice: env.deviceId, remoteData: env.data,
                                          localAt: at, localDevice: dev, localData: rawOf(s, key)?["data"]?.asObject) { return .ok }
         if key == .profiles {
+            guard DsyncRosterPause.appliesPulledProfiles(paused: ProfileManager.shared.rosterSyncPaused(s.playlistId)) else { return .ok }
             // profiles merges per row on every pull; the rows carry their own updatedAt.
             _ = await apply(s, key, env)
             saveAfter(s, key, raw: env.raw, at: env.updatedAt, dev: env.deviceId, data: env.data)

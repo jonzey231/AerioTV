@@ -232,3 +232,29 @@ enum DsyncRemindersRules {
         return Plan(removeKeys: remove, add: add)
     }
 }
+
+/// Profile-list sync while a profile of the playlist is held after a server
+/// address change (ProfileHostHold; follow-up B13, 2026-11-11). The `profiles`
+/// category pauses in both directions until nothing on the playlist is held:
+/// the local roster (names, roles, avatars, PIN hashes) never goes to the new
+/// server, and that server's rows and tombstones never apply here (a
+/// tombstone could delete a held profile). Every other category syncs as usual.
+enum DsyncRosterPause {
+    /// Pull: pulled `profiles` rows and tombstones apply, and are offered as suggestions, only when not paused.
+    static func appliesPulledProfiles(paused: Bool) -> Bool { !paused }
+
+    /// Push: the `profiles` category itself is not written while paused (the change stays pending).
+    static func writes(_ key: DsyncKey, paused: Bool) -> Bool { !(paused && key == .profiles) }
+
+    /// The bucket a PUT of another category starts from. While paused,
+    /// `profiles` goes out exactly as the server has it: [previous] is the
+    /// copy this PUT's refresh just read when [serverHasBucket]; otherwise
+    /// [previous] is an older local copy, and `profiles` is left out.
+    static func base(_ previous: DsyncObject?, serverHasBucket: Bool, paused: Bool) -> DsyncObject? {
+        guard paused, !serverHasBucket, var out = previous,
+              var cats = out[DsyncV2.CATEGORIES]?.asObject, cats[DsyncKey.profiles.suffix] != nil else { return previous }
+        cats[DsyncKey.profiles.suffix] = nil
+        out[DsyncV2.CATEGORIES] = .object(cats)
+        return out
+    }
+}

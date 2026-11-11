@@ -207,6 +207,9 @@ final class ProfileHostHoldStore {
 
     func record(_ playlistId: String) -> HostHoldRecord? { holds[playlistId] }
 
+    /// Playlists with any profile held.
+    var heldPlaylistIds: Set<String> { Set(holds.keys) }
+
     func isHeld(_ profileId: String) -> Bool { holds.values.contains { $0.profileIds.contains(profileId) } }
 
     /// The default profile's identity this device last recorded for [playlistId].

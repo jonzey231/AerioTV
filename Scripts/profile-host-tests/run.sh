@@ -3,7 +3,8 @@
 # (Shared/Profiles/ProfileHostHold.swift, review finding A-APP-1): route-change
 # detection, the same-server decision, the hold in front of every outbound
 # use of a profile's sign-in, the hold surviving a relaunch, the snapshot and
-# per-profile tags, and the sign-in form's line (KeySignInCopy). The repo has
+# per-profile tags, the sign-in form's line (KeySignInCopy), and the roster
+# sync pause while a profile is held (DsyncRosterPause). The repo has
 # no unit-test target, so this compiles the shipping sources with swiftc
 # (ProfileStore and its Dispatcharr Sync dependencies, as the dsync tests do)
 # and runs on macOS. Must end with ALL TESTS PASSED.
