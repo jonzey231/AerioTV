@@ -1482,7 +1482,52 @@ struct OnboardingPadCentered: ViewModifier {
     }
 }
 
+/// Apple TV onboarding pages (Logan 2026-11-11, Android parity): the content
+/// block sits in the middle with equal space above and below when it fits,
+/// and scrolls as one page from the top when it does not. Widths and sizes
+/// are unchanged. Two halves: `onboardingTVCentered()` on the ScrollView
+/// measures the visible height, `onboardingTVPage()` on the page inside it
+/// takes at least that height and centers in it. A page that grows (a list
+/// opening) keeps its top in place; scroll anchors were tried first and
+/// jumped to the middle of the opened list (measured on the simulator).
+/// No-op on iPhone and iPad.
+struct OnboardingTVCentered: ViewModifier {
+    @State private var height: CGFloat = 0
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+        content
+            .onScrollGeometryChange(for: CGFloat.self, of: { $0.containerSize.height }) { _, h in
+                if abs(h - height) > 0.5 { height = h }
+            }
+            .environment(\.onboardingTVPageHeight, height)
+        #else
+        content
+        #endif
+    }
+}
+
+struct OnboardingTVPage: ViewModifier {
+    @Environment(\.onboardingTVPageHeight) private var height
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+        content.frame(minHeight: height > 0 ? height : nil, alignment: .center)
+        #else
+        content
+        #endif
+    }
+}
+
+extension EnvironmentValues {
+    /// The visible height of the onboarding page's ScrollView (OnboardingTVCentered).
+    @Entry var onboardingTVPageHeight: CGFloat = 0
+}
+
 extension View {
+    /// See OnboardingTVCentered. On the ScrollView.
+    func onboardingTVCentered() -> some View { modifier(OnboardingTVCentered()) }
+    /// See OnboardingTVCentered. On the page inside the ScrollView, after its padding.
+    func onboardingTVPage() -> some View { modifier(OnboardingTVPage()) }
+
     /// Caps width at `pad` on iPad; `other` (nil = no cap) elsewhere.
     func onboardingPadWidth(_ pad: CGFloat = 560, other: CGFloat? = nil) -> some View {
         modifier(OnboardingPadWidth(pad: pad, other: other))

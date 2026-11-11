@@ -151,8 +151,10 @@ struct ProfileRoleStepView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, stepIsTV ? 80 : 20)
                     .padding(.vertical, stepIsTV ? 60 : 24)
+                    .onboardingTVPage()
                 }
                 .onboardingPadCentered()
+                .onboardingTVCentered()
             }
         }
         .navigationBarHidden(true)
@@ -581,7 +583,9 @@ struct AddProfilesStepView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, 80)
                 .padding(.vertical, 48)
+                .onboardingTVPage()
             }
+            .onboardingTVCentered()
         } else {
             VStack(spacing: 12) {
                 ScrollView {
@@ -734,7 +738,9 @@ struct AddProfilesStepView: View {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, stepIsTV ? 80 : 20)
             .padding(.vertical, stepIsTV ? 48 : 24)
+            .onboardingTVPage()
         }
         .onboardingPadCentered()
+        .onboardingTVCentered()
     }
 }

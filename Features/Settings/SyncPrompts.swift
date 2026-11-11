@@ -280,7 +280,10 @@ struct SetupSourcePromptView: View {
                 .frame(maxWidth: tv ? 900 : 560)
                 .frame(maxWidth: .infinity)
                 .padding(tv ? 60 : 24)
+                // Apple TV: centered with equal space above and below when it fits.
+                .onboardingTVPage()
             }
+            .onboardingTVCentered()
         }
         #if os(tvOS)
         .defaultFocus($focus, .dispatcharr)
