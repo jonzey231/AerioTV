@@ -233,7 +233,7 @@ final class ProfileManager: ObservableObject {
     }
 
     /// Every Dispatcharr playlist has exactly one default profile.
-    private func ensureDefaultProfile(_ server: ServerConnection) async {
+    private func ensureDefaultProfile(_ server: ServerConnection, preferredId: String? = nil) async {
         guard server.type == .dispatcharrAPI else { return }
         let pid = server.id.uuidString
         if store.forPlaylist(pid).contains(where: \.isDefault) { return }
@@ -243,7 +243,9 @@ final class ProfileManager: ObservableObject {
             username = (await fetchMe(server, server.baseApiKey))?.username ?? ""
         }
         if store.forPlaylist(pid).contains(where: \.isDefault) { return }
-        var p = DispatcharrProfile(id: UUID().uuidString, playlistId: pid,
+        // A setup handoff passes the sender's profile id (kept when free here).
+        let newId = preferredId.flatMap { store.byId($0) == nil ? $0 : nil } ?? UUID().uuidString
+        var p = DispatcharrProfile(id: newId, playlistId: pid,
                                    displayName: username.isEmpty ? server.name : username,
                                    username: username, isDefault: true)
         p.userLevel = server.dispatcharrUserLevel
@@ -775,12 +777,13 @@ final class ProfileManager: ObservableObject {
 
     /// Add Profile step 2: validate by signing in as [user] once, then store the credential. Never changes the server.
     func addProfile(_ playlistId: String, user: DispatcharrUserSummary, password: String?, apiKey: String?,
-                    role: ProfileRole? = nil, seed: ProfileRow? = nil) async throws -> DispatcharrProfile {
+                    role: ProfileRole? = nil, seed: ProfileRow? = nil, id preferredId: String? = nil) async throws -> DispatcharrProfile {
         // Same rule as setRole (assumption A): before a Child is added, every Admin and Standard profile holds a PIN.
         if role == .child, !(adminHasPin(playlistId) && pinsMissingForChild(playlistId).isEmpty) { throw fail(RoleRules.KEEP_PIN_REASON) }
         guard canAdd(playlistId) else { throw fail("Only an Admin or Standard profile can add profiles.") }
         guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
-        let id = UUID().uuidString
+        // A setup handoff passes the sender's profile id (kept when free here).
+        let id = preferredId.flatMap { store.byId($0) == nil ? $0 : nil } ?? UUID().uuidString
         // The admin users list carries each user's api_key: use it directly,
         // and only fall back to a typed password or key when the server has none.
         let listed = user.apiKey.flatMap { $0.isEmpty ? nil : $0 }
@@ -913,9 +916,27 @@ final class ProfileManager: ObservableObject {
     /// Android ProfileManager.applySetupProfile): the default profile takes the
     /// sent name, role, avatar, order, and PIN; any other profile goes through
     /// the roster add path (one sign-in with the sent credential), then its PIN.
-    func applySetupProfile(_ playlistId: String, row: ProfileRow, isDefault: Bool, password: String?, apiKey: String?) async throws {
+    /// One playlist across devices (2026-11-10): a playlist merged into
+    /// another hands its profiles over when the winner has none here (the
+    /// active choice follows); otherwise the loser's are removed.
+    func movePlaylistProfiles(from loser: String, to winner: String) {
+        guard loser != winner else { return }
+        let mine = store.forPlaylist(loser)
+        guard !mine.isEmpty else { return }
+        if store.forPlaylist(winner).isEmpty {
+            for p in mine { store.update(p.id) { var c = $0; c.playlistId = winner; return c } }
+            if let a = store.activeProfileId(loser) { store.setActiveProfileId(winner, a) }
+        } else {
+            store.removeForPlaylist(loser)
+        }
+        store.setActiveProfileId(loser, nil)
+        publish()
+    }
+
+    func applySetupProfile(_ playlistId: String, row: ProfileRow, isDefault: Bool, password: String?, apiKey: String?,
+                           profileId: String? = nil) async throws {
         guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
-        await ensureDefaultProfile(server)
+        await ensureDefaultProfile(server, preferredId: isDefault ? profileId : nil)
         let id: String
         if isDefault {
             guard let base = store.forPlaylist(playlistId).first(where: \.isDefault) else { throw fail("Profile not found") }
@@ -926,7 +947,8 @@ final class ProfileManager: ObservableObject {
             id = existing.id
         } else {
             let added = try await addProfile(playlistId, user: DispatcharrUserSummary(id: 0, username: row.username),
-                                             password: password, apiKey: apiKey, role: ProfileRole.fromWire(row.role), seed: row)
+                                             password: password, apiKey: apiKey, role: ProfileRole.fromWire(row.role), seed: row,
+                                             id: profileId)
             id = added.id
         }
         if let type = PinRules.typeFromWire(row.pinType), row.pinHash.count == 64, !row.pinSalt.isEmpty {
@@ -1189,6 +1211,8 @@ final class ProfileManager: ObservableObject {
         // re-read on the same notice a Dispatcharr Sync or iCloud apply posts.
         // Android re-keys every settings Flow on the token change instead.
         NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
+        // iCloud: the next push waits for a fresh read-and-merge.
+        NotificationCenter.default.post(name: .aerioProfileDidSwitch, object: nil)
         debugLog("[PROFILE] settings swap -> \(Self.tag(target.id)) slot=\(sw.loaded) keys=\(sw.keys); stores re-read")
         if !DispatcharrSyncManager.shared.isEnabled {
             debugLog("[PROFILE] switch: Dispatcharr Sync is off; no pull for this profile (local slots only)")

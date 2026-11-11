@@ -196,6 +196,7 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
 ```json
 {
   "playlist": {
+    "id": "<the sender's playlist UUID>",
     "type": "dispatcharr | xtream | m3u",
     "name": "Home",
     "url": "https://server.example",
@@ -210,6 +211,7 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
   },
   "profiles": [
     {
+      "id": "<the sender's profile id>",
       "username": "alex",
       "displayName": "Alex",
       "role": "admin | user | child",
@@ -250,6 +252,15 @@ Notes:
   sync that has not been re-entered yet is sent as `none`.
 - XC and M3U playlists send `playlist` only.
 - `sync` is present only when the user chose to turn it on.
+- `playlist.id` and `profiles[].id` (added 2026-11-10, both optional) are
+  the sender's ids. The receiver creates the playlist (and its profiles)
+  with these ids when no row here has them, so the same playlist has one id
+  on every device and iCloud or Drive sync sees one playlist. A row here
+  that already has `playlist.id` IS that playlist: it is updated in place
+  (Replace), never added twice. The receive-time duplicate check still runs
+  for rows with a different id. Older senders omit both ids and receivers
+  keep the earlier behavior. A "this user only" handoff whose sign-in is a
+  different account than the sender's playlist omits `playlist.id`.
 
 ## Receiver apply
 

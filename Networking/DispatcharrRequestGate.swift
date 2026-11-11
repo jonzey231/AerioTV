@@ -648,3 +648,160 @@ final class SingleFlight<Value: Sendable>: @unchecked Sendable {
 private extension Double {
     func clamped(_ lo: Double, _ hi: Double) -> Double { Swift.min(Swift.max(self, lo), hi) }
 }
+
+// MARK: - Stream opens and 401s (2026-11-10)
+
+/// Stream opens (live and catch-up ingest, Multiview tiles, MKV VOD and DVR,
+/// the Cast proxy) carry the playlist's API key as headers. A Google TV
+/// on an older build sent a dead key on every stream retry (60 401s, then
+/// 180 lockout 429s in three minutes). Every open now re-reads its headers
+/// through the gate, and a 401 goes through the key broker exactly as an
+/// API call does. Pure logic; the gate tests check it.
+enum StreamKeyGate {
+    enum Open: Equatable {
+        /// Open with these headers (a replaced key already swapped for its successor).
+        case send([String: String])
+        /// The key is held as rejected: no open, no request.
+        case held
+    }
+
+    static func header(_ h: [String: String], _ name: String) -> String? {
+        h.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
+    }
+
+    private static func set(_ h: inout [String: String], _ name: String, _ value: String?) {
+        let existing = h.keys.first { $0.caseInsensitiveCompare(name) == .orderedSame }
+        if let existing { h[existing] = value } else if let value { h[name] = value }
+    }
+
+    /// The API key a stream open carries (nil when none).
+    static func apiKey(in h: [String: String]) -> String? {
+        DispatcharrRequestGate.requestApiKey(xApiKey: header(h, "X-API-Key"), authorization: header(h, "Authorization"))
+    }
+
+    /// Re-read before every open, retry, and reconnect: a key the silent
+    /// re-login replaced goes out as its successor; a key held as rejected
+    /// never goes out again.
+    static func headersForOpen(_ headers: [String: String], gate: DispatcharrRequestGate = .shared) -> Open {
+        var h = headers
+        if let swapped = gate.rewritingReplacedKey(xApiKey: header(h, "X-API-Key"), authorization: header(h, "Authorization")) {
+            set(&h, "X-API-Key", swapped.xApiKey)
+            set(&h, "Authorization", swapped.authorization)
+        }
+        if let key = apiKey(in: h), gate.isKeyRejected(key) { return .held }
+        return .send(h)
+    }
+
+    enum Probe: Equatable, Sendable { case accepted, rejected, unknown }
+
+    enum After401: Equatable, Sendable {
+        /// Open once more: with the re-login's new key, or (nil) the same
+        /// key the probe proved good (the stream refused something else).
+        case retry(newKey: String?)
+        /// The key is held; the playlist prompts. No further opens with it.
+        case held
+        /// Nothing proven (no answer): the normal failure path, never a
+        /// loop on the key (the next open re-reads the headers).
+        case unchanged
+    }
+
+    /// What a stream 401 leads to: the probe's answer, then a silent
+    /// re-login when the playlist stores a password, else the hold.
+    static func after401(probe: Probe, reloginTried: Bool, newKey: String?, oldKey: String) -> After401 {
+        switch probe {
+        case .accepted: return .retry(newKey: nil)
+        case .unknown: return .unchanged
+        case .rejected:
+            if reloginTried, let n = newKey, !n.isEmpty, n != oldKey { return .retry(newKey: n) }
+            return .held
+        }
+    }
+
+    /// One broker round per open: a second 401 right after a retry is not
+    /// probed again (the next open re-reads, and a held key never opens).
+    static let retriesPerOpen = 1
+}
+
+// MARK: - Launch credential barrier (2026-11-10)
+
+/// At launch iCloud may carry a newer key than this device's for a
+/// playlist. A Dispatcharr API call carrying such a key waits (bounded) for
+/// the iCloud credential merge, so a stale device adopts iCloud's key
+/// instead of spending failed attempts on its own. A call carrying any other
+/// key, and every call once the merge ran or the bound passed, goes out at
+/// once, so a launch whose keys agree with iCloud never waits.
+final class CredentialMergeBarrier: @unchecked Sendable {
+    static let shared = CredentialMergeBarrier()
+
+    /// Bound on the wait, from arming. Measured 2026-11-10 on an Apple TV:
+    /// the iCloud merge lands 3.2 to 3.3 s after launch.
+    static let maxWait: TimeInterval = 4
+
+    /// Monotonic clock in seconds (tests replace it).
+    var clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+
+    private let lock = NSLock()
+    /// Hashes of the local keys the merge may replace.
+    private var doubtful: Set<String> = []
+    private var deadline: TimeInterval = 0
+
+    struct Entry: Equatable, Sendable {
+        let localKey: String
+        let localChangedAt: TimeInterval
+        let cloudKey: String
+        let cloudChangedAt: TimeInterval
+    }
+
+    /// The local keys the iCloud merge may replace: iCloud carries a
+    /// different, non-empty key for the playlist, and this device's key is
+    /// not known to be the newer one (CredentialSyncRule).
+    static func doubtfulKeys(_ entries: [Entry]) -> [String] {
+        entries.compactMap { e in
+            let l = e.localKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let c = e.cloudKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !l.isEmpty, !c.isEmpty, l != c else { return nil }
+            if e.localChangedAt > 0, e.localChangedAt >= e.cloudChangedAt { return nil }
+            return l
+        }
+    }
+
+    /// Arm at launch with the keys the merge may replace (empty: nothing waits).
+    func arm(doubtfulKeys keys: [String]) {
+        lock.lock()
+        doubtful = Set(keys.map(DispatcharrRequestGate.keyHash))
+        deadline = clock() + Self.maxWait
+        lock.unlock()
+    }
+
+    /// The iCloud credential merge ran: every waiter goes now.
+    func release() {
+        lock.lock(); doubtful = []; lock.unlock()
+    }
+
+    var isArmed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !doubtful.isEmpty && clock() < deadline
+    }
+
+    /// Seconds a call carrying `key` should still wait (0 = send now).
+    func remainingWait(forKey key: String?) -> TimeInterval {
+        guard let key, !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return 0 }
+        let hash = DispatcharrRequestGate.keyHash(key)
+        lock.lock(); defer { lock.unlock() }
+        guard doubtful.contains(hash) else { return 0 }
+        let left = deadline - clock()
+        if left <= 0 { doubtful = []; return 0 }
+        return left
+    }
+
+    /// Wait until released or the bound passes. Returns the seconds waited.
+    @discardableResult
+    func wait(forKey key: String?) async -> TimeInterval {
+        guard remainingWait(forKey: key) > 0 else { return 0 }
+        let start = clock()
+        while remainingWait(forKey: key) > 0 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return clock() - start
+    }
+}

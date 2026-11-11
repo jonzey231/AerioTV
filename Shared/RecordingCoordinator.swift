@@ -347,6 +347,7 @@ final class RecordingCoordinator: ObservableObject {
         var request = URLRequest(url: playbackURL)
         api.streamAuthHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         // A rejected key or a 429 pause fails here with nothing sent.
+        await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         request = try DispatcharrHTTPGate.prepare(request)
         let (tempURL, response) = try await URLSession.shared.download(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {

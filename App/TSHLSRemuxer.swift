@@ -202,8 +202,9 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
 
     private static func fetch(_ url: URL, headers: [String: String],
                               from start: Int64, to end: Int64) async -> (Data, Int64?)? {
+        guard let sendHeaders = StreamFetchAuth.headers(headers) else { return nil }
         var req = URLRequest(url: url)
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in sendHeaders { req.setValue(v, forHTTPHeaderField: k) }
         req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
         req.timeoutInterval = 15
         // bytes(for:) so a server that ignores Range (200 with the whole
@@ -211,6 +212,7 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
         guard let (stream, resp) = try? await URLSession.shared.bytes(for: req) else { return nil }
         guard let http = resp as? HTTPURLResponse, http.statusCode == 206 else {
             stream.task.cancel()
+            if (resp as? HTTPURLResponse)?.statusCode == 401 { StreamFetchAuth.note401(sendHeaders) }
             return nil
         }
         var data = Data()
@@ -374,8 +376,12 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
             ? probeResult.contentLength - 1
             : min(dr.requestedOffset + Int64(dr.requestedLength), probeResult.contentLength) - 1
         guard end >= start else { loadingRequest.finishLoading(); return true }
+        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+            loadingRequest.finishLoading(with: StreamFetchAuth.heldError)
+            return true
+        }
         var req = URLRequest(url: realURL)
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in sendHeaders { req.setValue(v, forHTTPHeaderField: k) }
         req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
         let task = session.dataTask(with: req)
         active[task.taskIdentifier] = (loadingRequest, start)
@@ -415,6 +421,11 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
 
     fileprivate func completed(task: URLSessionTask, error: Error?) {
         guard let (request, _) = active.removeValue(forKey: task.taskIdentifier) else { return }
+        if (task.response as? HTTPURLResponse)?.statusCode == 401 {
+            StreamFetchAuth.note401(task.originalRequest?.allHTTPHeaderFields ?? [:])
+            request.finishLoading(with: StreamFetchAuth.heldError)
+            return
+        }
         if let error, (error as NSError).code != NSURLErrorCancelled {
             request.finishLoading(with: error)
         } else if error == nil {
@@ -546,8 +557,12 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
                         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
         guard let url = loadingRequest.request.url, let real = Self.realURL(for: url) else { return false }
+        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+            loadingRequest.finishLoading(with: StreamFetchAuth.heldError)
+            return true
+        }
         var req = URLRequest(url: real, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in sendHeaders { req.setValue(v, forHTTPHeaderField: k) }
         URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
             guard let self else { return }
             if let error {
@@ -556,6 +571,7 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
                 return
             }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 401 { StreamFetchAuth.note401(sendHeaders) }
             guard status == 200, let data, let text = String(data: data, encoding: .utf8),
                   text.hasPrefix("#EXTM3U") else {
                 // Not a playlist (finalized recording answering with the
@@ -1630,6 +1646,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             return
         }
+        // Headers re-read on every open, retry, and reconnect (2026-11-10):
+        // a key the silent re-login replaced goes out as its successor, and
+        // a key held as rejected never goes out (no request at all).
+        let openHeaders: [String: String]
+        switch StreamKeyGate.headersForOpen(headers) {
+        case .send(let h): openHeaders = h
+        case .held:
+            debugLog("[AUTH] stream open skipped: this API key is held as rejected; waiting for Edit Playlist")
+            queue.async { [weak self] in self?.fail(.ingestFailed("HTTP 401 | held")) }
+            return
+        }
         let config = URLSessionConfiguration.default
         // First-bytes patience (Freyguy, 2026-09-03): a Dispatcharr behind a
         // slow provider can take 20-30 s to deliver the first TS bytes; at
@@ -1644,7 +1671,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         urlSession = session
         firstByteLock.lock(); activeSession = session; firstByteLock.unlock()
         var request = URLRequest(url: sourceURL)
-        for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
+        for (key, value) in openHeaders { request.setValue(value, forHTTPHeaderField: key) }
         redirectSniffPending = false
         redirectSniffBuffer.removeAll()
         redirectCrossHost = false
@@ -4523,6 +4550,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// NSError domain/code, the underlying error, and the newest errorLog
     /// event of a failed AVPlayerItem, on one line. Shared with
     /// AirPlayTileDelivery's LAN item failure log.
+    /// The item's last error was an HTTP 401 (AVFoundation reports it as
+    /// the status itself, or as CoreMedia's authentication error -12937
+    /// with "HTTP 401" in the comment).
+    nonisolated static func itemSaw401(_ item: AVPlayerItem) -> Bool {
+        guard let ev = item.errorLog()?.events.last else { return false }
+        if ev.errorStatusCode == 401 || ev.errorStatusCode == -12937 { return true }
+        return ev.errorComment?.contains("HTTP 401") == true
+    }
+
     nonisolated static func itemFailureDetail(_ item: AVPlayerItem) -> String {
         var out = "error=-"
         if let e = item.error as NSError? {
@@ -6351,6 +6387,8 @@ struct AVPlayerMultiviewTile: View {
     /// out the shared pause with a countdown; past RateLimitRetry's budget
     /// the tile shows the rate-limit card instead.
     @State private var streamLockoutRetries = 0
+    /// Broker rounds this open took after a stream 401 (StreamKeyGate.retriesPerOpen).
+    @State private var streamAuthRetries = 0
     /// Guide channel id of a live stream that failed (standing retry or
     /// the terminal card) and has not shown a frame since. stop() never
     /// hands that channel to Keep Recent Channels Live.
@@ -6641,6 +6679,7 @@ struct AVPlayerMultiviewTile: View {
             statusText = nil
             // Playing: a later rate limit earns the full retry budget again.
             streamLockoutRetries = 0
+            streamAuthRetries = 0
             #if os(iOS)
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
@@ -6741,6 +6780,7 @@ struct AVPlayerMultiviewTile: View {
             channelStoppingWaited = 0
             standingRetries = 0
             streamLockoutRetries = 0
+            streamAuthRetries = 0
             selfReleasedAt = nil
             teardownToken = UUID()
             // The failed-channel id stays for stop()'s Kept Live check (it
@@ -6878,7 +6918,8 @@ struct AVPlayerMultiviewTile: View {
             let err = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
             let lastEvent = failed.errorLog()?.events.last
             debugLog("[AVP-MV] tile playback failed channel=\(channelName) error=\(err?.domain ?? "none")/\(err?.code ?? 0) log=\(lastEvent?.errorDomain ?? "none")/\(lastEvent?.errorStatusCode ?? 0) \(lastEvent?.errorComment ?? ""); falling back to mpv tile")
-            failOrFallback("playback failed")
+            failOrFallback(TSHLSRemuxer.itemSaw401(failed) && StreamKeyGate.apiKey(in: headers) != nil
+                           ? "playback failed HTTP 401" : "playback failed")
         }
     }
 
@@ -7189,6 +7230,46 @@ struct AVPlayerMultiviewTile: View {
 
 
 
+    /// A 401 from the ingest, an MKV range read, or a resource-loader read.
+    static func isStream401(_ reason: String) -> Bool {
+        reason.contains("HTTP 401") || reason.contains("range fetch HTTP 401")
+    }
+
+    /// Stream 401: one broker round (DispatcharrKeyBroker.after401), then
+    /// one retry (its open re-reads the headers), or the hold.
+    private func handleStream401(_ reason: String) {
+        if reason.contains("| held") { stopForHeldKey(reason); return }
+        streamAuthRetries += 1
+        let sent = headers
+        stop()
+        statusText = "Connecting..."
+        let token = teardownToken
+        Task { @MainActor in
+            let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+            guard token == teardownToken else { return }
+            switch outcome {
+            case .retry:
+                debugLog("[AUTH] stream 401: retrying once channel=\(channelName)")
+                start()
+            case .held:
+                stopForHeldKey(reason)
+            case .unchanged:
+                // No answer: the normal failure path (its next open re-reads the headers).
+                failOrFallback(reason)
+            }
+        }
+    }
+
+    /// The key is held as rejected: stop, no standing retry; the playlist prompts.
+    private func stopForHeldKey(_ reason: String) {
+        debugLog("[AUTH] stream stopped: API key held as rejected channel=\(channelName)")
+        if isVOD || isDVR || catchup != nil {
+            failOrFallbackTerminal(reason, message: DispatcharrRateLimitCopy.keyRejectedErrorMessage)
+        } else {
+            showLiveStopNotice(.keyRejected, reason: reason)
+        }
+    }
+
     private func handleStreamLockout(_ reason: String, wait: Int, why: RateLimitReason) {
         if streamLockoutRetries >= RateLimitRetry.maxAutoRetries {
             debugLog("[RATE] stream still rate-limited (\(why.rawValue)) after \(streamLockoutRetries) retries; stopping channel=\(channelName)")
@@ -7275,6 +7356,7 @@ struct AVPlayerMultiviewTile: View {
         channelStoppingWaited = 0
         standingRetries = 0
         streamLockoutRetries = 0
+        streamAuthRetries = 0
         start()
     }
 
@@ -7712,6 +7794,15 @@ struct AVPlayerMultiviewTile: View {
         if tileError == nil, progressStore.liveStopNotice == nil,
            let lockout = Self.streamLockoutWait(reason) {
             handleStreamLockout(reason, wait: lockout.seconds, why: lockout.why)
+            return
+        }
+        // Stream 401 (2026-11-10): the key broker decides once per open: a
+        // silent re-login (one retry with the new key), the key proven good
+        // (one retry), or the hold (the sign-in card, no further opens).
+        // Never a standing retry that resends a dead key.
+        if tileError == nil, progressStore.liveStopNotice == nil, Self.isStream401(reason),
+           reason.contains("| held") || streamAuthRetries < StreamKeyGate.retriesPerOpen {
+            handleStream401(reason)
             return
         }
         // Stream-limit 429: stop trying this stream, no retry or failover
@@ -9074,6 +9165,17 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func startPlayer(url: URL, requestHeaders: [String: String], adoptedPlayer: AVPlayer? = nil) {
+        // Direct opens re-read the key on every open: a replaced key is
+        // swapped for its successor, a held one is never sent.
+        var requestHeaders = requestHeaders
+        if adoptedPlayer == nil, !requestHeaders.isEmpty {
+            switch StreamKeyGate.headersForOpen(requestHeaders) {
+            case .send(let h): requestHeaders = h
+            case .held:
+                stopForHeldKey("direct HTTP 401 | held")
+                return
+            }
+        }
         // Segments exist by now, so the remuxer has already decided
         // whether this program is audio-only (GH #90).
         let audioOnlyNow = remuxer?.isAudioOnlyProgram ?? false
@@ -9311,6 +9413,7 @@ struct AVPlayerMultiviewTile: View {
         // inventory): the log had no discrete line for it, only the
         // layer's isReadyForDisplay, so "how long did AVPlayer take to
         // accept the playlist" was guesswork.
+        let authToken = teardownToken
         var itemReadyObs: NSKeyValueObservation?
         itemReadyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
             guard item.status != .unknown else { return }
@@ -9363,6 +9466,14 @@ struct AVPlayerMultiviewTile: View {
                 }
             } else {
                 debugLog("[AVP-ITEM] AVPlayerItem status=failed (\(item.error?.localizedDescription ?? "unknown")) \(TSHLSRemuxer.itemFailureDetail(item))")
+                // A direct open the server refused with 401: the key broker
+                // decides (one retry, or the hold), not the fallback ladder.
+                if TSHLSRemuxer.itemSaw401(item), StreamKeyGate.apiKey(in: requestHeaders) != nil {
+                    Task { @MainActor in
+                        guard authToken == teardownToken else { return }
+                        failOrFallback("direct HTTP 401")
+                    }
+                }
             }
             itemReadyObs?.invalidate()
             itemReadyObs = nil
@@ -10747,3 +10858,25 @@ enum Stream429Marker {
         }
     }
 }
+
+/// Stream fetches outside the live ingest (resource-loader reads, probes,
+/// the DVR playlist rewrite), 2026-11-10: the same key rules as every open.
+enum StreamFetchAuth {
+    /// The headers to send now (a replaced key swapped for its successor),
+    /// or nil when the key is held as rejected (no request at all).
+    static func headers(_ h: [String: String]) -> [String: String]? {
+        if case .send(let s) = StreamKeyGate.headersForOpen(h) { return s }
+        return nil
+    }
+
+    /// A 401 on a stream fetch: the broker decides once (probe, silent
+    /// re-login, or the hold); later fetches re-read and never resend a dead key.
+    static func note401(_ h: [String: String]) {
+        guard StreamKeyGate.apiKey(in: h) != nil else { return }
+        Task { _ = await DispatcharrKeyBroker.after401(streamHeaders: h) }
+    }
+
+    static let heldError = NSError(domain: NSURLErrorDomain, code: NSURLErrorUserAuthenticationRequired,
+                                   userInfo: [NSLocalizedDescriptionKey: "HTTP 401"])
+}
+

@@ -86,6 +86,15 @@ struct CloudFavoriteEntry: Equatable, Sendable {
     var displayOrder: Int64
     var addedAt: Int64
     var dispatcharrChannelId: Int? = nil
+    /// When this favorite (or its order) last changed on the writer (Android
+    /// 2026-11-10). Nil in older files: `addedAt` stands in.
+    var updatedAt: Int64? = nil
+    /// Tombstone: the favorite was removed at this time.
+    var removedAt: Int64? = nil
+
+    var isLive: Bool { removedAt == nil }
+    /// Newest of its add, change, and removal (Android DriveMerge.favoriteStamp).
+    var stamp: Int64 { max(addedAt, updatedAt ?? 0, removedAt ?? 0) }
 
     var json: DsyncJSON {
         var o = DsyncObject()
@@ -94,13 +103,16 @@ struct CloudFavoriteEntry: Equatable, Sendable {
         o["displayOrder"] = .long(displayOrder)
         o["addedAt"] = .long(addedAt)
         o.put("dispatcharrChannelId", dispatcharrChannelId)
+        o.put("updatedAt", updatedAt)
+        o.put("removedAt", removedAt)
         return .object(o)
     }
 
     static func from(_ v: DsyncJSON) -> CloudFavoriteEntry? {
         guard let o = v.asObject, let id = o.str("channelId") else { return nil }
         return CloudFavoriteEntry(channelId: id, channelName: o.str("channelName") ?? "", displayOrder: o.long("displayOrder") ?? 0,
-                                  addedAt: o.long("addedAt") ?? 0, dispatcharrChannelId: o.int("dispatcharrChannelId"))
+                                  addedAt: o.long("addedAt") ?? 0, dispatcharrChannelId: o.int("dispatcharrChannelId"),
+                                  updatedAt: o.long("updatedAt"), removedAt: o.long("removedAt"))
     }
 }
 
@@ -119,6 +131,13 @@ struct CloudProgressEntry: Equatable, Sendable {
     var dispatcharrVodId: Int? = nil
     /// Apple only: the playlist id the row belongs to (nil: unscoped). Android ignores it.
     var serverId: String? = nil
+    /// Tombstone: the row was removed at this time (newest of updatedAt and removedAt wins).
+    var removedAt: Int64? = nil
+
+    var isLive: Bool { removedAt == nil }
+    var stamp: Int64 { max(updatedAt, removedAt ?? 0) }
+    /// Apple's identity for the per-item merge (rows are per playlist here).
+    var mergeId: String { "\(serverId ?? "")|\(videoId)" }
 
     var json: DsyncJSON {
         var o = DsyncObject()
@@ -135,6 +154,7 @@ struct CloudProgressEntry: Equatable, Sendable {
         o["isFinished"] = .bool(isFinished)
         o.put("dispatcharrVodId", dispatcharrVodId)
         if let s = serverId { o["serverId"] = .string(s) }
+        o.put("removedAt", removedAt)
         return .object(o)
     }
 
@@ -145,7 +165,8 @@ struct CloudProgressEntry: Equatable, Sendable {
                                   updatedAt: o.long("updatedAt") ?? 0, vodType: o.str("vodType") ?? "movie",
                                   seriesId: o.str("seriesId"), seasonNumber: o.int("seasonNumber") ?? 0,
                                   episodeNumber: o.int("episodeNumber") ?? 0, isFinished: o.bool("isFinished") ?? false,
-                                  dispatcharrVodId: o.int("dispatcharrVodId"), serverId: o.str("serverId"))
+                                  dispatcharrVodId: o.int("dispatcharrVodId"), serverId: o.str("serverId"),
+                                  removedAt: o.long("removedAt"))
     }
 }
 
@@ -155,17 +176,28 @@ struct CloudReminderEntry: Equatable, Sendable {
     var programTitle: String
     var startMillis: Int64
     var endMillis: Int64
+    /// When the reminder was set on the writer. Nil in older files (0).
+    var updatedAt: Int64? = nil
+    /// Tombstone: the reminder was cancelled at this time.
+    var removedAt: Int64? = nil
+
+    var isLive: Bool { removedAt == nil }
+    var stamp: Int64 { max(updatedAt ?? 0, removedAt ?? 0) }
 
     var json: DsyncJSON {
-        .object(DsyncObject([("reminderKey", .string(reminderKey)), ("channelName", .string(channelName)),
+        var o = DsyncObject([("reminderKey", .string(reminderKey)), ("channelName", .string(channelName)),
                              ("programTitle", .string(programTitle)), ("startMillis", .long(startMillis)),
-                             ("endMillis", .long(endMillis))]))
+                             ("endMillis", .long(endMillis))])
+        o.put("updatedAt", updatedAt)
+        o.put("removedAt", removedAt)
+        return .object(o)
     }
 
     static func from(_ v: DsyncJSON) -> CloudReminderEntry? {
         guard let o = v.asObject, let k = o.str("reminderKey"), let s = o.long("startMillis") else { return nil }
         return CloudReminderEntry(reminderKey: k, channelName: o.str("channelName") ?? "", programTitle: o.str("programTitle") ?? "",
-                                  startMillis: s, endMillis: o.long("endMillis") ?? s)
+                                  startMillis: s, endMillis: o.long("endMillis") ?? s,
+                                  updatedAt: o.long("updatedAt"), removedAt: o.long("removedAt"))
     }
 }
 
@@ -268,6 +300,11 @@ struct CloudFavorites: CloudSnapshot {
     }
 }
 
+extension CloudFavorites {
+    /// The rows without tombstones, for readers that count or replace.
+    var live: CloudFavorites { var s = self; s.entries = entries.filter(\.isLive); return s }
+}
+
 struct CloudProgress: CloudSnapshot {
     var envelope: CloudEnvelope
     var entries: [CloudProgressEntry]
@@ -280,6 +317,10 @@ struct CloudProgress: CloudSnapshot {
     }
 }
 
+extension CloudProgress {
+    var live: CloudProgress { var s = self; s.entries = entries.filter(\.isLive); return s }
+}
+
 struct CloudReminders: CloudSnapshot {
     var envelope: CloudEnvelope
     var entries: [CloudReminderEntry]
@@ -290,6 +331,10 @@ struct CloudReminders: CloudSnapshot {
         guard let e = CloudEnvelope.from(o["envelope"]) else { return nil }
         return CloudReminders(envelope: e, entries: (o["entries"]?.asArray ?? []).compactMap(CloudReminderEntry.from))
     }
+}
+
+extension CloudReminders {
+    var live: CloudReminders { var s = self; s.entries = entries.filter(\.isLive); return s }
 }
 
 struct CloudWatchlist: CloudSnapshot {
@@ -316,6 +361,9 @@ struct CloudPreferences: CloudSnapshot {
     var mobile: [String: String] = [:]
     /// Local channel id to Dispatcharr channel id for every channel recents and collections reference.
     var dispatcharrChannelIds: [String: Int]? = nil
+    /// Per-key change times ("v:key", "tv:key", "mobile:key" to epoch ms,
+    /// Android 2026-11-10). Empty in older files: the envelope time stands in.
+    var times: [String: Int64] = [:]
 
     var body: DsyncObject {
         var o = DsyncObject()
@@ -327,6 +375,7 @@ struct CloudPreferences: CloudSnapshot {
         } else {
             o["dispatcharrChannelIds"] = .null
         }
+        o["times"] = .object(DsyncObject(times.sorted { $0.key < $1.key }.map { ($0.key, DsyncJSON.long($0.value)) }))
         return o
     }
 
@@ -338,8 +387,10 @@ struct CloudPreferences: CloudSnapshot {
             for (k, v) in m { if let i = v.asLong { out[k] = Int(i) } }
             ids = out
         }
+        var times: [String: Int64] = [:]
+        if let m = o["times"]?.asObject { for (k, v) in m { if let t = v.asLong { times[k] = t } } }
         return CloudPreferences(envelope: e, keys: stringMap(o["keys"]), tv: stringMap(o["tv"]), mobile: stringMap(o["mobile"]),
-                                dispatcharrChannelIds: ids)
+                                dispatcharrChannelIds: ids, times: times)
     }
 
     /// The settings lanes (schema names only), the data keys left out.

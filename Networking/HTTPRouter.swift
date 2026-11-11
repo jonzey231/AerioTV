@@ -88,6 +88,7 @@ enum HTTPRouter {
         // Dispatcharr gate (DispatcharrHTTPGate): a rejected key or a server
         // paused after a 429 fails here with no network request; a 429
         // answer pauses the server and is thrown as a typed rate limit.
+        await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         let request = try DispatcharrHTTPGate.prepare(request)
         let result = try await routedData(for: request, using: session)
         try DispatcharrHTTPGate.inspect(request, response: result.1, body: result.0)
@@ -158,6 +159,7 @@ enum HTTPRouter {
     /// category colour-coding are missing on XC and fine on Dispatcharr.
     static func download(for request: URLRequest,
                          using session: URLSession = .shared) async throws -> (URL, URLResponse) {
+        await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         let request = try DispatcharrHTTPGate.prepare(request)
         let result = try await routedDownload(for: request, using: session)
         if (result.1 as? HTTPURLResponse)?.statusCode == 429 {

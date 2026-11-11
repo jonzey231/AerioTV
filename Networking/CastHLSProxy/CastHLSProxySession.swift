@@ -119,6 +119,8 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var ingest: IngestConnection?
     /// Retries after a stream 429 lockout this session (stream-429-spec.md).
     private var lockoutRetries = 0
+    /// Broker rounds this cast took after an ingest 401 (StreamKeyGate.retriesPerOpen).
+    private var authRetries = 0
     private var remuxer: CastFMP4Remuxer?
     /// Terminal ingest failure (unsupported codec, connect exhaustion),
     /// observed by `startChannel`'s ready wait. First error wins.
@@ -452,6 +454,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.liveSessionStartedAt = Date()
             self.consecutiveFailures = 0
             self.lockoutRetries = 0
+            self.authRetries = 0
             self.everConnected = false
             self.lastIngestConnectAt = nil
             self.currentGeneration = store.beginGeneration()
@@ -604,6 +607,16 @@ final class CastHLSProxySession: @unchecked Sendable {
             }
             return
         }
+        // Headers re-read on every open and reconnect (2026-11-10): a replaced
+        // key goes out as its successor; a key held as rejected never opens.
+        let openHeaders: [String: String]
+        switch StreamKeyGate.headersForOpen(headers) {
+        case .send(let h): openHeaders = h
+        case .held:
+            log("[AUTH] ingest open skipped: this API key is held as rejected")
+            stopForNoticeLocked(.keyRejected)
+            return
+        }
         let epoch = ingestEpoch
         let gen = currentGeneration
         segmentsLogged = 0
@@ -725,7 +738,7 @@ final class CastHLSProxySession: @unchecked Sendable {
 
         let connection = IngestConnection(
             url: url,
-            headers: headers,
+            headers: openHeaders,
             queue: queue,
             onConnected: { [weak self] in
                 guard let self, self.ingestEpoch == epoch else { return }
@@ -737,6 +750,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                 self.everConnected = true
                 self.consecutiveFailures = 0
                 self.lockoutRetries = 0
+                self.authRetries = 0
                 self.lastIngestConnectAt = Date()
             },
             onData: { [weak self] data in
@@ -799,6 +813,36 @@ final class CastHLSProxySession: @unchecked Sendable {
                             self.stopIngestLocked()
                             // startIngestLocked itself waits out the pause.
                             self.startIngestLocked(url: url, headers: headers)
+                        }
+                    }
+                    return
+                }
+                // Ingest 401 (2026-11-10): the key broker decides once (probe,
+                // silent re-login, or the hold). Never the reconnect ladder,
+                // which resent the dead key five times.
+                if failureReason == "http=401", StreamKeyGate.apiKey(in: headers) != nil {
+                    self.stopIngestLocked()
+                    guard self.authRetries < StreamKeyGate.retriesPerOpen else {
+                        self.log("[AUTH] ingest 401 again after the broker's retry; stopping")
+                        self.stopForNoticeLocked(.keyRejected)
+                        return
+                    }
+                    self.authRetries += 1
+                    let sent = headers
+                    let waitEpoch = self.ingestEpoch
+                    Task {
+                        let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+                        self.queue.async {
+                            guard self.ingestEpoch == waitEpoch, self.activeURL == url, self.terminalError == nil else { return }
+                            switch outcome {
+                            case .retry:
+                                self.log("[AUTH] ingest 401: retrying once")
+                                self.startIngestLocked(url: url, headers: sent)
+                            case .held:
+                                self.stopForNoticeLocked(.keyRejected)
+                            case .unchanged:
+                                self.scheduleReconnectLocked(url: url, headers: sent, closingEpoch: self.ingestEpoch)
+                            }
                         }
                     }
                     return

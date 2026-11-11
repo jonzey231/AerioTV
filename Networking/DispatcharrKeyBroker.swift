@@ -88,6 +88,13 @@ enum DispatcharrKeyBroker {
         return (info.id, info.username)
     }
 
+    /// A key the probe proved rejected: iCloud's key for its playlist comes
+    /// first (no network), before a silent re-login or the hold.
+    @MainActor static func adoptCloudKey(replacing key: String, serverID: UUID?) -> String? {
+        guard let info = playlist(forKey: key, serverID: serverID) else { return nil }
+        return SyncManager.shared.adoptCloudApiKey(playlistID: info.id, rejectedKey: key)
+    }
+
     @MainActor static func playlist(id: String) -> PlaylistInfo? {
         guard let container, let uuid = UUID(uuidString: id) else { return nil }
         let descriptor = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == uuid })
@@ -119,6 +126,58 @@ enum DispatcharrKeyBroker {
             debugLog("[AUTH] 401 on an API-key call to \(host); key probe: \(result.logName)")
         }
         return result
+    }
+
+    // MARK: Stream 401 (2026-11-10)
+
+    /// A stream open (live or catch-up ingest, a Multiview tile, MKV VOD or
+    /// DVR, the Cast proxy) answered 401 with an API key: the same steps an
+    /// API call takes. One probe (single flight per key, shared with API
+    /// calls); a rejected key with a stored password re-signs in silently
+    /// and the stream opens once more with the new key; otherwise the key is
+    /// held, the playlist prompts, and no stream opens with it again
+    /// (StreamKeyGate.headersForOpen). Never a retry loop on a dead key.
+    static func after401(streamHeaders headers: [String: String], serverID: UUID? = nil) async -> StreamKeyGate.After401 {
+        guard let key = StreamKeyGate.apiKey(in: headers) else { return .unchanged }
+        let gate = DispatcharrRequestGate.shared
+        if let newer = gate.replacementKey(for: key) { return .retry(newKey: newer) }
+        if gate.isKeyRejected(key) { return .held }
+        guard let info = await MainActor.run(body: { playlist(forKey: key, serverID: serverID) }) else {
+            debugLog("[AUTH] stream 401 with a key no saved playlist uses; no probe")
+            return .unchanged
+        }
+        let api = DispatcharrAPI(baseURL: info.baseURL, auth: .apiKey(key), userAgent: info.userAgent, authMode: info.authMode)
+        let probe: StreamKeyGate.Probe
+        switch (try? await self.probe(after401: api, key: key)) ?? .unknown {
+        case .accepted: probe = .accepted
+        case .rejected: probe = .rejected
+        case .unknown: probe = .unknown
+        }
+        var reloginTried = false
+        var newKey: String?
+        if probe == .rejected,
+           let cloudKey = await MainActor.run(body: { adoptCloudKey(replacing: key, serverID: info.id) }) {
+            // iCloud's key: the open retries once with it (noteKeyReplaced is done).
+            reloginTried = true
+            newKey = cloudKey
+        } else if probe == .rejected,
+           let target = await MainActor.run(body: { reloginTarget(key: key, serverID: info.id, savedUsername: nil) }) {
+            reloginTried = true
+            newKey = await DispatcharrAPI.silentRebootstrapApiKey(serverID: target.id, baseURL: info.baseURL,
+                                                                  username: target.username, userAgent: info.userAgent)
+            if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
+        }
+        let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
+        if outcome == .held { _ = await holdIfProven(key: key, serverID: info.id, baseURL: info.baseURL) }
+        let word: String = {
+            switch outcome {
+            case .retry(let n): return n == nil ? "key good, one retry" : "one retry with the new key"
+            case .held: return "key held, playlist prompts, no further opens"
+            case .unchanged: return "no answer, normal failure path"
+            }
+        }()
+        debugLog("[AUTH] stream 401 for \(info.id.uuidString.prefix(8)): probe=\(probe) -> \(word)")
+        return outcome
     }
 
     /// The probe proved the key rejected: hold it when that is the end of

@@ -479,15 +479,15 @@ do {
 
 // keyRejected copy
 eq(DispatcharrGateError.keyRejected.errorDescription,
-   "The server did not accept this playlist's API key. Enter a new key in Edit Playlist.", "key rejected error copy")
-eq(DispatcharrRateLimitCopy.keyRejectedTitle, "Sign-in not accepted", "prompt title")
+   "Dispatcharr no longer accepts this playlist's API key. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key rejected error copy")
+eq(DispatcharrRateLimitCopy.keyRejectedTitle, "API key no longer valid", "prompt title")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: false),
-   "The server did not accept the API key for Home. Enter a new key in Edit Playlist to reconnect.", "key-only body")
+   "Dispatcharr no longer accepts the API key for Home. It may have been changed or removed on the server. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key-only body")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: true),
-   "The server did not accept the API key or the password for Home. Enter a new key or password in Edit Playlist to reconnect.",
+   "Dispatcharr no longer accepts the API key or password for Home. They may have been changed on the server. Enter the current details in Edit Playlist, or ask your Dispatcharr administrator.",
    "password body")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "  ", passwordToo: false),
-   "The server did not accept the API key for this playlist. Enter a new key in Edit Playlist to reconnect.", "blank name")
+   "Dispatcharr no longer accepts the API key for this playlist. It may have been changed or removed on the server. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "blank name")
 
 // accepted memo
 do {
@@ -703,8 +703,85 @@ do {
 }
 eq(DispatcharrRateLimitCopy.checkingLine, "Checking the playlist sign-in", "checking line")
 eq(DispatcharrRateLimitCopy.setupKeyRejectedMessage,
-   "The server did not accept this playlist's API key, so it was not sent. Enter a new key in Edit Playlist, then try again.",
+   "Dispatcharr no longer accepts this playlist's API key, so it was not sent. Enter the current key in Edit Playlist, then try again.",
    "sender rejected copy")
+
+// MARK: - Stream opens and 401s (2026-11-10)
+do {
+    let g = DispatcharrRequestGate()
+    let h = ["X-API-Key": "dead", "Authorization": "ApiKey dead", "User-Agent": "UA"]
+    eq(StreamKeyGate.apiKey(in: h), "dead", "stream open carries its key")
+    eq(StreamKeyGate.headersForOpen(h, gate: g), .send(h), "a good key opens as it is")
+    // A key the silent re-login replaced goes out as its successor, in both header shapes.
+    g.noteKeyReplaced(old: "dead", new: "fresh")
+    if case .send(let s) = StreamKeyGate.headersForOpen(h, gate: g) {
+        eq(s["X-API-Key"], "fresh", "replaced key swapped in X-API-Key")
+        eq(s["Authorization"], "ApiKey fresh", "replaced key swapped in Authorization")
+        eq(s["User-Agent"], "UA", "other headers kept")
+    } else { check(false, "replaced key should open") }
+    // A key held as rejected never opens (no request at all).
+    let g2 = DispatcharrRequestGate()
+    _ = g2.markKeyRejected(playlistID: "P", key: "dead")
+    eq(StreamKeyGate.headersForOpen(h, gate: g2), .held, "held key: no open")
+    eq(StreamKeyGate.headersForOpen(["Authorization": "Bearer dead"], gate: g2), .held, "held key in Bearer shape: no open")
+    eq(StreamKeyGate.headersForOpen(["User-Agent": "UA"], gate: g2), .send(["User-Agent": "UA"]), "no key: opens (M3U)")
+    // What a 401 leads to.
+    eq(StreamKeyGate.after401(probe: .rejected, reloginTried: true, newKey: "fresh", oldKey: "dead"), .retry(newKey: "fresh"),
+       "rejected key with a stored password: re-login, one retry with the new key")
+    eq(StreamKeyGate.after401(probe: .rejected, reloginTried: false, newKey: nil, oldKey: "dead"), .held,
+       "rejected key, no password: hold and prompt")
+    eq(StreamKeyGate.after401(probe: .rejected, reloginTried: true, newKey: nil, oldKey: "dead"), .held,
+       "re-login refused: hold")
+    eq(StreamKeyGate.after401(probe: .rejected, reloginTried: true, newKey: "dead", oldKey: "dead"), .held,
+       "re-login gave the same key: hold")
+    eq(StreamKeyGate.after401(probe: .accepted, reloginTried: false, newKey: nil, oldKey: "k"), .retry(newKey: nil),
+       "key proven good: one retry as it is")
+    eq(StreamKeyGate.after401(probe: .unknown, reloginTried: false, newKey: nil, oldKey: "k"), .unchanged,
+       "no answer: the normal failure path")
+    eq(StreamKeyGate.retriesPerOpen, 1, "one broker round per open")
+}
+
+// MARK: - Launch credential barrier (2026-11-10)
+
+do {
+    typealias E = CredentialMergeBarrier.Entry
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "same", localChangedAt: 0, cloudKey: "same", cloudChangedAt: 0)]), [],
+       "keys agree with iCloud: nothing waits")
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "old", localChangedAt: 0, cloudKey: "new", cloudChangedAt: 0)]), ["old"],
+       "iCloud carries a different key, neither stamped: the local key waits for the merge")
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "old", localChangedAt: 100, cloudKey: "new", cloudChangedAt: 900)]), ["old"],
+       "iCloud's key is newer: the local key waits")
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "mine", localChangedAt: 900, cloudKey: "older", cloudChangedAt: 100)]), [],
+       "this device's key is the newer one: no wait")
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "", localChangedAt: 0, cloudKey: "new", cloudChangedAt: 0)]), [],
+       "no local key: nothing to hold back")
+    eq(CredentialMergeBarrier.doubtfulKeys([E(localKey: "k", localChangedAt: 0, cloudKey: " ", cloudChangedAt: 0)]), [],
+       "an empty iCloud key never holds a call")
+
+    final class Clock: @unchecked Sendable { var t: TimeInterval = 1000 }
+    let c = Clock()
+    let b = CredentialMergeBarrier()
+    b.clock = { c.t }
+    eq(b.remainingWait(forKey: "old"), 0, "unarmed: no wait")
+    b.arm(doubtfulKeys: [])
+    check(!b.isArmed, "armed with nothing: not armed")
+    b.arm(doubtfulKeys: ["old"])
+    check(b.isArmed, "armed with a doubtful key")
+    eq(b.remainingWait(forKey: "old"), CredentialMergeBarrier.maxWait, "a doubtful key waits up to the bound")
+    eq(b.remainingWait(forKey: " old "), CredentialMergeBarrier.maxWait, "the key is matched trimmed")
+    eq(b.remainingWait(forKey: "other"), 0, "any other key goes at once")
+    eq(b.remainingWait(forKey: nil), 0, "a call without a key goes at once")
+    c.t += 1.5
+    eq(b.remainingWait(forKey: "old"), CredentialMergeBarrier.maxWait - 1.5, "the bound runs from arming, not per call")
+    b.release()
+    eq(b.remainingWait(forKey: "old"), 0, "the merge ran: the call goes")
+    check(!b.isArmed, "released: not armed")
+    b.arm(doubtfulKeys: ["old"])
+    c.t += CredentialMergeBarrier.maxWait + 0.1
+    eq(b.remainingWait(forKey: "old"), 0, "past the bound the call goes without the merge")
+    check(!b.isArmed, "past the bound: not armed")
+    check(CredentialMergeBarrier.maxWait <= 5, "the wait is bounded to a few seconds")
+}
 
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

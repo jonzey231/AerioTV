@@ -902,8 +902,18 @@ extension DispatcharrAPI {
             // locally as if it were the regular slot, which Apple
             // documents as benign).
             let apiKeyKey = "apiKey_\(serverID.uuidString)"
+            // A key that changed gets its change time, so iCloud never lets
+            // an older copy from another device replace it (CredentialSyncRule).
+            if user.apiKey != ServerConnection.resolveCredential(key: apiKeyKey, fallback: "") {
+                SyncManager.setCredentialChangedAt(.apiKey, serverID, Date().timeIntervalSince1970)
+            }
             KeychainHelper.save(user.apiKey, for: apiKeyKey)
-            KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
+            // iCloud Keychain only as saveCredentialsSynced does: iCloud sync
+            // and the Credentials category on, and never a key held as rejected.
+            if UserDefaults.standard.bool(forKey: "iCloudSyncEnabled"), SyncCategory.credentials.isEnabled,
+               !DispatcharrRequestGate.shared.isKeyRejected(user.apiKey) {
+                KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
+            }
             debugLog("📺 silentRebootstrapApiKey: SUCCESS, fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
             return .key(user.apiKey)
         } catch DispatcharrDirectConnectError.invalidCredentials {

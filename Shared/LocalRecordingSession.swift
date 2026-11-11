@@ -790,6 +790,8 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     /// handler: it must show the notice instead of opening the direct
     /// stream. Taken (cleared) by `takeStopNotice()`.
     private var stopNotice: LiveStopNotice?
+    /// Key-broker rounds since data last flowed (StreamKeyGate.retriesPerOpen).
+    private var authRetries = 0
 
     /// The notice the engine stopped on, once. Nil for any other close.
     func takeStopNotice() -> LiveStopNotice? {
@@ -937,6 +939,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         liveURL = streamURL
         liveHeaders = headers
         reconnectAttempts = 0
+        authRetries = 0
         everReceivedData = false
         errorStatus = nil
         errorBody = Data()
@@ -1004,6 +1007,15 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         let buffer0 = activeBuffer
         stateLock.unlock()
         guard let url = url0, let buffer = buffer0, !buffer.closed else { return }
+        // Every open re-reads the key (StreamKeyGate): a replaced key goes
+        // out as its successor; a key held as rejected is never sent.
+        let headers: [String: String]
+        switch StreamKeyGate.headersForOpen(withStateLock { liveHeaders }) {
+        case .send(let h): headers = h
+        case .held:
+            stopForNotice(.keyRejected, reason: "HTTP 401 | held")
+            return
+        }
         buffer.markDiscontinuity()
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForResource = 0
@@ -1019,7 +1031,6 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         // one every cycle without invalidating it.
         urlSession?.invalidateAndCancel()
         urlSession = session
-        let headers = liveHeaders
         stateLock.unlock()
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         if headers["User-Agent"] == nil {
@@ -1131,6 +1142,31 @@ extension LiveRewindEngine: URLSessionDataDelegate {
             completionHandler(.allow)
             return
         }
+        // A 401: the key broker decides once (probe, silent re-login, or
+        // the hold) before any reconnect; the reconnect re-reads the key.
+        if let http = response as? HTTPURLResponse, http.statusCode == 401,
+           let sent = dataTask.originalRequest?.allHTTPHeaderFields,
+           StreamKeyGate.apiKey(in: sent) != nil,
+           withStateLock({ () -> Bool in
+               guard session === urlSession, authRetries < StreamKeyGate.retriesPerOpen else { return false }
+               authRetries += 1
+               return true
+           }) {
+            completionHandler(.cancel)
+            Task {
+                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+                debugLog("[AUTH] rewind stream 401: \(outcome)")
+                switch outcome {
+                case .held:
+                    if self.withStateLock({ session === self.urlSession }) {
+                        self.stopForNotice(.keyRejected, reason: "HTTP 401 | held")
+                    }
+                case .retry, .unchanged:
+                    self.handleConnectionDrop(session: session, reason: "HTTP 401")
+                }
+            }
+            return
+        }
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             debugLog("[REWIND] live connect HTTP \(http.statusCode); treating as drop")
             completionHandler(.cancel)
@@ -1153,9 +1189,10 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         // 20-attempt cap only counts CONSECUTIVE failures. Without this
         // a long session on a drop-prone provider hit the cap hours
         // later and silently closed mid-watch.
-        if reconnectAttempts != 0 || !everReceivedData {
+        if reconnectAttempts != 0 || !everReceivedData || authRetries != 0 {
             stateLock.lock()
             reconnectAttempts = 0
+            authRetries = 0
             everReceivedData = true
             stateLock.unlock()
         }

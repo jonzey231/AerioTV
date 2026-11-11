@@ -8578,6 +8578,15 @@ struct NativeHLSPlayerScreen: View {
     }
 
     private func startPlayer(with url: URL, headers: [String: String]) {
+        // Every open re-reads the key (StreamKeyGate): a replaced key goes
+        // out as its successor; a key held as rejected is never sent.
+        var headers = headers
+        switch StreamKeyGate.headersForOpen(headers) {
+        case .send(let h): headers = h
+        case .held:
+            stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")
+            return
+        }
         var options: [String: Any] = [:]
         if !headers.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers

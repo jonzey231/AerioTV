@@ -94,6 +94,91 @@ func performServerCascadeDelete(_ server: ServerConnection,
     }
 }
 
+/// One server account is one playlist (playlist-identity-spec.md, Logan
+/// 2026-11-10). The losing row's data moves to the winner first: watch
+/// progress, My List, server-side recordings, hidden titles, recents,
+/// profiles, account facts, the active flag, the catch-up offset, the DVR
+/// destination, and a working sign-in the winner lacks. Then the loser goes
+/// through the normal delete cleanup; that removes only its own keychain
+/// items (keyed by its id), never the winner's. Rebuildable caches (guide,
+/// VOD catalog) are not moved: the winner fetches its own.
+/// `winnerPendingApiKey`: a key the merge adopted for the winner and has not
+/// written to the keychain yet.
+@MainActor
+func performPlaylistMerge(loser: ServerConnection, into winner: ServerConnection,
+                          servers: [ServerConnection], modelContext: ModelContext,
+                          winnerPendingApiKey: String = "") {
+    let lid = loser.id.uuidString, wid = winner.id.uuidString
+    let ud = UserDefaults.standard
+    let gate = DispatcharrRequestGate.shared
+    let lKey = loser.baseApiKey
+    let wKey = winner.baseApiKey.isEmpty ? winnerPendingApiKey : winner.baseApiKey
+    func offset(_ s: ServerConnection) -> Int? { ud.object(forKey: CatchupSupport.timeOffsetKey(serverID: s.id)) as? Int }
+    let plan = PlaylistMergePlan.plan(
+        loser: .init(active: loser.isActive, apiKey: lKey, apiKeyRejected: !lKey.isEmpty && gate.isKeyRejected(lKey),
+                     password: loser.effectivePassword, catchupOffset: offset(loser),
+                     recordingDestination: loser.defaultRecordingDestinationRaw,
+                     apiKeyChangedAt: SyncManager.credentialChangedAt(.apiKey, loser.id)),
+        winner: .init(active: winner.isActive, apiKey: wKey, apiKeyRejected: !wKey.isEmpty && gate.isKeyRejected(wKey),
+                      password: winner.effectivePassword, catchupOffset: offset(winner),
+                      recordingDestination: winner.defaultRecordingDestinationRaw,
+                      apiKeyChangedAt: SyncManager.credentialChangedAt(.apiKey, winner.id)),
+        defaultDestination: RecordingDestination.dispatcharrServer.rawValue)
+
+    // Watch progress and My List: rows only the loser has move; a shared row keeps the newer copy.
+    var movedProgress = 0, movedList = 0, movedRecordings = 0
+    if let rows = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+        let l = rows.filter { $0.serverID == lid && !$0.isDeleted }
+        let w = Dictionary(rows.filter { $0.serverID == wid && !$0.isDeleted }.map { ($0.vodID, $0) }, uniquingKeysWith: { a, b in a.updatedAt >= b.updatedAt ? a : b })
+        let r = PlaylistMergePlan.rows(loser: Dictionary(l.map { ($0.vodID, $0.updatedAt.timeIntervalSince1970) }, uniquingKeysWith: max),
+                                       winner: w.mapValues { $0.updatedAt.timeIntervalSince1970 })
+        for row in l {
+            if r.move.contains(row.vodID) { row.serverID = wid; movedProgress += 1 }
+            else if r.loserNewer.contains(row.vodID), let target = w[row.vodID] {
+                target.positionMs = row.positionMs; target.durationMs = row.durationMs; target.isFinished = row.isFinished
+                target.updatedAt = row.updatedAt; target.title = row.title; target.posterURL = row.posterURL
+                target.streamURL = row.streamURL; target.seriesID = row.seriesID
+                modelContext.delete(row); movedProgress += 1
+            } else { modelContext.delete(row) }
+        }
+    }
+    if let rows = try? modelContext.fetch(FetchDescriptor<WatchlistEntry>()) {
+        let have = Set(rows.filter { $0.serverID == wid }.map(\.vodID))
+        for row in rows where row.serverID == lid {
+            if have.contains(row.vodID) { modelContext.delete(row) } else { row.serverID = wid; movedList += 1 }
+        }
+    }
+    if let rows = try? modelContext.fetch(FetchDescriptor<Recording>()) {
+        for row in rows where row.serverID == lid && row.localFilePath == nil { row.serverID = wid; movedRecordings += 1 }
+    }
+    let movedHidden = HiddenVODStore.shared.moveServer(from: lid, to: wid)
+    RecentChannelsStore.moveList(from: lid, to: wid)
+    ProfileManager.shared.movePlaylistProfiles(from: lid, to: wid)
+    if DispatcharrAccountFactsStore.load(winner.id).username.isEmpty {
+        let facts = DispatcharrAccountFactsStore.load(loser.id)
+        if !facts.username.isEmpty { DispatcharrAccountFactsStore.save(facts, for: winner.id) }
+    }
+    if plan.copyCatchupOffset, let o = offset(loser) { ud.set(o, forKey: CatchupSupport.timeOffsetKey(serverID: winner.id)) }
+    if plan.copyRecordingDestination { winner.defaultRecordingDestinationRaw = loser.defaultRecordingDestinationRaw }
+    if plan.makeWinnerActive {
+        for s in servers where s.id != winner.id { s.isActive = false }
+        winner.isActive = true
+    }
+    if plan.copyApiKey || plan.copyPassword {
+        if plan.copyApiKey { winner.apiKey = lKey }
+        if plan.copyPassword { winner.password = loser.effectivePassword }
+        SyncManager.shared.saveCredentialsSynced(for: winner)
+    }
+    DispatcharrTokenStore.shared.clear(serverID: loser.id)
+    try? modelContext.save()
+    SyncManager.shared.notePlaylistMergedAway(lid, into: wid)
+    debugLog("[SYNC] playlists merged into one (\(lid.prefix(8)) into \(wid.prefix(8))): progress=\(movedProgress) "
+             + "myList=\(movedList) recordings=\(movedRecordings) hidden=\(movedHidden) active=\(plan.makeWinnerActive) "
+             + "key=\(plan.copyApiKey) password=\(plan.copyPassword)")
+    // The normal delete cleanup (the loser's own keychain items, caches, guide rows).
+    performServerCascadeDelete(loser, servers: servers, modelContext: modelContext)
+}
+
 /// Background half of `performServerCascadeDelete`. Plain values only: the
 /// server row is already deleted, and this runs on its own ModelContext.
 nonisolated private func purgeOrphanRows(forDeletedServerID sid: String,

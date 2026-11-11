@@ -342,7 +342,7 @@ struct SyncSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This replaces the snapshot in iCloud with this device's playlists and settings.")
+            Text("This merges this device's changes into iCloud.")
         }
         .alert("Push to Dispatcharr?", isPresented: $dsyncPushConfirm) {
             Button("Push") { runDispatcharrPush() }

@@ -463,6 +463,10 @@ struct AerioApp: App {
         DeviceInfo.recordLaunch()
         // Profiles: the request overlay (the active profile's API key) is in place before any load.
         _ = ProfileManager.shared
+        // Before any load: calls carrying a key iCloud may replace wait for
+        // the iCloud credential merge (bounded), so a stale device adopts
+        // iCloud's key instead of spending failed attempts on its own.
+        SyncManager.armLaunchCredentialBarrier()
         // Carries a pre-split "Rounded corners on logos and artwork" choice
         // into the List key before any view reads it, so nobody's current
         // setting changes (Logan 2026-09-16).
@@ -799,8 +803,10 @@ struct AerioApp: App {
                 // theme, etc.) made in the last 60 seconds get dropped when
                 // the user force-closes the app, the push is still sitting
                 // on the main queue waiting out its asyncAfter debounce. See
-                // GitHub issue #2.
-                SyncManager.shared.pushPreferencesImmediate()
+                // GitHub issue #2. Only a pending local change is sent: an
+                // unconditional push used to re-stamp unchanged (possibly
+                // stale) data as newest on every trip to the background.
+                SyncManager.shared.flushPendingPreferences()
                 // Dispatcharr Sync: send queued writes now (Android onStop flush).
                 DispatcharrSyncManager.shared.onBackground()
                 DispatcharrKeyRecheck.shared.onBackground()
@@ -2073,13 +2079,22 @@ struct RootView: View {
         /// and the entire MainTabView tree (measured: 2426 ms and 2363 ms main
         /// thread blocks, one per launch, plus a fresh MainTabView instance).
         var didMutate = false
+        // Per playlist (Logan 2026-11-10, stale never beats newer): newest
+        // change or deletion wins, a tie keeps iCloud's, a playlist deleted
+        // here is not re-added, and absence deletes only once a pull recorded
+        // what iCloud had (SyncManager.serverMergePlan). A replace mirrors the cloud.
+        let plan = SyncManager.shared.serverMergePlan(remote: remoteServers, local: servers)
+        var liveAfter = Set(servers.filter { !$0.isGone }.map { $0.id.uuidString })
+        var removedApplied: [String: TimeInterval] = [:]
+        var inserted: [ServerConnection] = []
 
         for remote in remoteServers {
+            let pick = plan.picks[remote.id.uuidString]
             if let local = localByID[remote.id] {
-                // Existing server, update if remote is newer
+                // Existing server: copy the fields when iCloud's record is newer.
                 let localDate = local.lastConnected ?? local.createdAt
                 let remoteDate = remote.lastConnected ?? remote.createdAt
-                if replace || remoteDate > localDate {
+                if replace || (pick == .remote && plan.newer.contains(remote.id.uuidString)) {
                     didMutate = true
                     local.name = remote.name
                     local.baseURL = remote.baseURL
@@ -2155,17 +2170,21 @@ struct RootView: View {
                     if replace {
                         local.isActive = remote.isActive
                     }
-                    // Queue credential writes for after the merge
-                    if !remote.password.isEmpty {
-                        pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
-                    }
-                    if !remote.apiKey.isEmpty {
-                        pendingCredentials.append(("apiKey_\(remote.id.uuidString)", remote.apiKey))
-                    }
+                    SyncManager.shared.noteServerAdopted(local, changedAt: remote.knownChangedAt)
                     DebugLogger.shared.log("SyncManager: updated server \(remote.name) from iCloud",
                                            category: "Sync", level: .info)
                 }
+                // Credentials go by their own change time, not the playlist
+                // record's: never empty, never a rejected key, never older
+                // than this device's (SyncManager.credentialsToAdopt).
+                pendingCredentials += SyncManager.shared.credentialsToAdopt(
+                    remote, local: local, legacyRemoteNewer: replace || remoteDate > localDate, replace: replace)
             } else {
+                // Deleted here (or by its deletion time elsewhere): not re-added.
+                guard replace || pick == .remote else {
+                    debugLog("[SYNC] playlist \(remote.id.uuidString.prefix(8)) from iCloud not added: deleted here after its last change")
+                    continue
+                }
                 // New server from another device, insert locally.
                 // Respect isActive from remote only on initial import of a fresh install,
                 // so the user's previously-active server is ready without manual selection.
@@ -2227,15 +2246,15 @@ struct RootView: View {
                 // Catch-up: inherit the guide-history retention setting.
                 newServer.epgRetentionDays = remote.epgRetentionDays
                 remote.applyPlaylistSettings(to: newServer)
-                // Queue credential writes for after the merge
-                if !remote.password.isEmpty {
-                    pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
-                }
-                if !remote.apiKey.isEmpty {
-                    pendingCredentials.append(("apiKey_\(remote.id.uuidString)", remote.apiKey))
-                }
+                // Queue credential writes for after the merge (never empty,
+                // never a rejected key).
+                pendingCredentials += SyncManager.shared.credentialsToAdopt(
+                    remote, local: nil, legacyRemoteNewer: true, replace: replace)
                 didMutate = true
                 modelContext.insert(newServer)
+                inserted.append(newServer)
+                liveAfter.insert(remote.id.uuidString)
+                SyncManager.shared.noteServerAdopted(newServer, changedAt: remote.knownChangedAt)
                 DebugLogger.shared.log("SyncManager: added server \(remote.name) from iCloud (active=\(shouldActivate), hasCreds=\(!remote.password.isEmpty || !remote.apiKey.isEmpty))",
                                        category: "Sync", level: .info)
             }
@@ -2271,26 +2290,66 @@ struct RootView: View {
         // not from when this merge runs.
         let remoteIDs = Set(remoteServers.map { $0.id })
         let now = Date()
-        for local in servers where !remoteIDs.contains(local.id) {
-            // Only delete if sync has been active (i.e., remote has servers but this one is missing)
-            if !remoteServers.isEmpty {
-                let ageSeconds = now.timeIntervalSince(local.createdAt)
-                if ageSeconds < 10 && !replace {
-                    // v1.7.x: caught a near-miss. The race we're guarding
-                    // against (FINDING 1 in the v1.7.0 multi-server-add
-                    // bug investigation): a foreign KVS notification fires
-                    // during the local push debounce, the bounce-back
-                    // guard fails because lastPushTime is stale, and we
-                    // arrive here with a JUST-ADDED local server about
-                    // to be wrongly deleted. File-backed log so users
-                    // who hit this can ship us a forensic trail.
-                    DebugLogger.shared.log(
-                        "SyncManager: SKIPPED delete of server \(local.name) (too young: \(String(format: "%.1f", ageSeconds))s old, threshold 10s, remoteCount=\(remoteServers.count)). Race-guard prevented data loss; the push debounce will catch up.",
-                        category: "Sync",
-                        level: .warning
-                    )
-                    continue
-                }
+        // One server account is one playlist (playlist-identity-spec.md): a
+        // row's identity from its own facts, else from its iCloud record or
+        // the key this merge adopted for it (fingerprints only, never keys).
+        let remoteByID = Dictionary(remoteServers.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { a, _ in a })
+        var pendingKeys: [String: String] = [:]
+        for c in pendingCredentials where c.key.hasPrefix("apiKey_") { pendingKeys[String(c.key.dropFirst(7))] = c.value }
+        func identity(_ s: ServerConnection) -> PlaylistIdentity.Row {
+            var r = SyncManager.shared.playlistIdentityRow(s)
+            if let rem = remoteByID[r.id] {
+                if r.username.isEmpty { r.username = rem.accountUsername.isEmpty ? rem.username : rem.accountUsername }
+                if r.apiKeyFP.isEmpty { r.apiKeyFP = PlaylistIdentity.keyFingerprint(rem.apiKey) }
+            }
+            if r.apiKeyFP.isEmpty, let k = pendingKeys[r.id] { r.apiKeyFP = PlaylistIdentity.keyFingerprint(k) }
+            return r
+        }
+        var goneIDs = Set<String>()
+
+        var toDelete: [(ServerConnection, TimeInterval?, Double)] = []
+        for local in servers where !remoteIDs.contains(local.id) && !local.isGone {
+            // A replace mirrors the cloud. Otherwise only a newer deletion time,
+            // or an older build's absence after a pull recorded what iCloud
+            // had, deletes; with no record yet nothing is deleted for being absent.
+            let removedAt: TimeInterval? = {
+                if case .removed(let t)? = plan.picks[local.id.uuidString] { return t }
+                return nil
+            }()
+            let deletes = replace ? !remoteServers.isEmpty
+                : (removedAt != nil || plan.picks[local.id.uuidString] == .gone)
+            guard deletes else { continue }
+            let ageSeconds = now.timeIntervalSince(local.createdAt)
+            if ageSeconds < 10 && !replace {
+                // v1.7.x: caught a near-miss. The race we're guarding
+                // against (FINDING 1 in the v1.7.0 multi-server-add
+                // bug investigation): a foreign KVS notification fires
+                // during the local push debounce, the bounce-back
+                // guard fails because lastPushTime is stale, and we
+                // arrive here with a JUST-ADDED local server about
+                // to be wrongly deleted. File-backed log so users
+                // who hit this can ship us a forensic trail.
+                DebugLogger.shared.log(
+                    "SyncManager: SKIPPED delete of server \(local.name) (too young: \(String(format: "%.1f", ageSeconds))s old, threshold 10s, remoteCount=\(remoteServers.count)). Race-guard prevented data loss; the push debounce will catch up.",
+                    category: "Sync",
+                    level: .warning
+                )
+                continue
+            }
+            // Another device merged away the playlist this one merged into: keep it.
+            if !replace, SyncManager.shared.keepMergedWinner(local.id.uuidString) { continue }
+            toDelete.append((local, removedAt, ageSeconds))
+        }
+        let deletingIDs = Set(toDelete.map { $0.0.id })
+        var live = servers.filter { !$0.isGone && !deletingIDs.contains($0.id) } + inserted
+        for (local, removedAt, ageSeconds) in toDelete {
+            let id = local.id.uuidString
+            let row = identity(local)
+            if !replace, let twin = live.first(where: { PlaylistIdentity.sameAccount(identity($0), row) }) {
+                // Deleted elsewhere because it was merged into its twin: its data moves here too.
+                performPlaylistMerge(loser: local, into: twin, servers: servers, modelContext: modelContext,
+                                     winnerPendingApiKey: pendingKeys[twin.id.uuidString] ?? "")
+            } else {
                 local.deleteCredentialsFromKeychain()
                 modelContext.delete(local)
                 DebugLogger.shared.log(
@@ -2299,7 +2358,32 @@ struct RootView: View {
                     level: .info
                 )
             }
+            didMutate = true
+            goneIDs.insert(id)
+            liveAfter.remove(id)
+            if let removedAt { removedApplied[id] = removedAt }
         }
+        // Duplicates left (the same account under two ids) collapse into one:
+        // the newest change time wins, a tie keeps the smaller id.
+        if !replace {
+            let losers = PlaylistIdentity.losers(live.map(identity))
+            for (lid, wid) in losers.sorted(by: { $0.key < $1.key }) {
+                guard let l = live.first(where: { $0.id.uuidString == lid }),
+                      let w = live.first(where: { $0.id.uuidString == wid }) else { continue }
+                performPlaylistMerge(loser: l, into: w, servers: servers, modelContext: modelContext,
+                                     winnerPendingApiKey: pendingKeys[wid] ?? "")
+                live.removeAll { $0.id.uuidString == lid }
+                didMutate = true
+                goneIDs.insert(lid)
+                liveAfter.remove(lid)
+                removedApplied[lid] = now.timeIntervalSince1970
+            }
+            if !losers.isEmpty { debugLog("[SYNC] playlists: \(losers.count) duplicate(s) of one server account merged") }
+        }
+        // A merged-away or deleted playlist's adopted credentials are never written.
+        pendingCredentials.removeAll { c in goneIDs.contains { c.key.hasSuffix("_\($0)") } }
+
+        SyncManager.shared.noteServersMerged(remote: remoteServers, liveAfter: liveAfter, removedApplied: removedApplied)
 
         // Equal-value guard: no write, no save, no @Query republish, so the
         // server merge can no longer rebuild the tab tree.
@@ -2326,11 +2410,28 @@ struct RootView: View {
         // in v1.7.x once the v1.6.7 install base has rolled forward.
         for cred in pendingCredentials {
             debugLog("🔑 Saving credential: \(cred.key)")
+            // A key from iCloud replaces this device's: calls still carrying
+            // the old key (built earlier, or waiting at launch) go out with
+            // the new one, and a hold on the old key is lifted.
+            if cred.key.hasPrefix("apiKey_") {
+                let old = ServerConnection.resolveCredential(key: cred.key, fallback: "")
+                if !old.isEmpty, old != cred.value {
+                    DispatcharrRequestGate.shared.noteKeyReplaced(old: old, new: cred.value)
+                    if DispatcharrRequestGate.shared.isKeyRejected(old) {
+                        DispatcharrRequestGate.shared.clearPlaylist(String(cred.key.dropFirst("apiKey_".count)))
+                    }
+                }
+            }
             KeychainHelper.save(cred.value, for: cred.key)
             KeychainHelper.save(cred.value, for: cred.key, synchronizable: true)
         }
         if !pendingCredentials.isEmpty {
             debugLog("🔑 All \(pendingCredentials.count) credentials saved (local + iCloud)")
+        }
+        // Launch: the iCloud credential merge ran; API calls held for it go.
+        if CredentialMergeBarrier.shared.isArmed {
+            CredentialMergeBarrier.shared.release()
+            debugLog("[SYNC] launch credential merge done; held API calls go now")
         }
     }
 }

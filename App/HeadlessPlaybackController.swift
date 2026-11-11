@@ -351,14 +351,20 @@ final class HeadlessPlaybackController: ObservableObject {
                 debugLog("[CARPLAY] error: \(item.name) needs the mpv fallback but the mpv engine is disabled; nothing to play")
                 return
             }
+            // Every open re-reads the key (StreamKeyGate): a key held as
+            // rejected is never sent.
+            guard case .send(let openHeaders) = StreamKeyGate.headersForOpen(resolved.headers) else {
+                debugLog("[CARPLAY] error: \(item.name) API key held as rejected; not opening")
+                return
+            }
             if case .mpv(let e)? = engine {
-                e.play(url: resolved.routeURL, headers: resolved.headers)
+                e.play(url: resolved.routeURL, headers: openHeaders)
             } else {
                 engine?.stop()
                 let e = HeadlessMPVAudioEngine()
                 engine = .mpv(e)
                 debugLog("[CARPLAY] engine: mpv audio-only (fallback) channel=\(item.name)")
-                e.play(url: resolved.routeURL, headers: resolved.headers)
+                e.play(url: resolved.routeURL, headers: openHeaders)
             }
             return
         }
@@ -704,6 +710,15 @@ final class HeadlessAVPlayerEngine {
     }
 
     private func startPlayer(url: URL, headers: [String: String], allowsVideo: Bool) {
+        // Every open re-reads the key (StreamKeyGate): a replaced key goes
+        // out as its successor; a key held as rejected is never sent.
+        var headers = headers
+        switch StreamKeyGate.headersForOpen(headers) {
+        case .send(let h): headers = h
+        case .held:
+            fail(.playback(DispatcharrRateLimitCopy.keyRejectedErrorMessage))
+            return
+        }
         var options: [String: Any] = [:]
         if !headers.isEmpty {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers
@@ -788,6 +803,12 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
                 self.setup(headers: headers)
             }
             guard let mpv = self.mpv else { return }
+            // This open's headers (a replaced key reaches a running engine).
+            let custom = headers.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            if !custom.isEmpty {
+                let list = custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
+                mpv_set_property_string(mpv, "http-header-fields", list)
+            }
             self.currentURL = url
             self.retriedCurrentLoad = false
             self.command(mpv, ["loadfile", url.absoluteString, "replace"])

@@ -217,13 +217,17 @@ enum SetupProtocol {
         var channelProfileIds: [Int] = []
         /// The playlist's own sign-in (the default profile on Dispatcharr; the XC login).
         var credential: Credential? = nil
+        /// The sender's playlist id (2026-11-10): the receiver keeps it, so the
+        /// same playlist has one id on every device. Absent from older senders.
+        var id: String? = nil
 
         init(type: String, name: String, url: String, xmltvUrl: String? = nil, localUrl: String? = nil,
              userAgent: String? = nil, guideDays: Int = 7, catchupOffsetMinutes: Int = 0, vodEnabled: Bool = true,
-             channelProfileIds: [Int] = [], credential: Credential? = nil) {
+             channelProfileIds: [Int] = [], credential: Credential? = nil, id: String? = nil) {
             self.type = type; self.name = name; self.url = url; self.xmltvUrl = xmltvUrl; self.localUrl = localUrl
             self.userAgent = userAgent; self.guideDays = guideDays; self.catchupOffsetMinutes = catchupOffsetMinutes
             self.vodEnabled = vodEnabled; self.channelProfileIds = channelProfileIds; self.credential = credential
+            self.id = id
         }
 
         init(from decoder: Decoder) throws {
@@ -239,6 +243,7 @@ enum SetupProtocol {
             vodEnabled = try c.decodeIfPresent(Bool.self, forKey: .vodEnabled) ?? true
             channelProfileIds = try c.decodeIfPresent([Int].self, forKey: .channelProfileIds) ?? []
             credential = try c.decodeIfPresent(Credential.self, forKey: .credential)
+            id = try c.decodeIfPresent(String.self, forKey: .id)
         }
     }
 
@@ -257,13 +262,16 @@ enum SetupProtocol {
         var pinType: String = "none"
         var pinHash: String = ""
         var pinSalt: String = ""
+        /// The sender's profile id (2026-11-10), kept by the receiver. Absent from older senders.
+        var id: String? = nil
 
         init(username: String, displayName: String, role: String = "", avatar: Avatar? = nil, order: Int = -1,
              isDefault: Bool = false, credential: Credential? = nil, pinType: String = "none",
-             pinHash: String = "", pinSalt: String = "") {
+             pinHash: String = "", pinSalt: String = "", id: String? = nil) {
             self.username = username; self.displayName = displayName; self.role = role; self.avatar = avatar
             self.order = order; self.isDefault = isDefault; self.credential = credential
             self.pinType = pinType; self.pinHash = pinHash; self.pinSalt = pinSalt
+            self.id = id
         }
 
         init(from decoder: Decoder) throws {
@@ -278,6 +286,7 @@ enum SetupProtocol {
             pinType = try c.decodeIfPresent(String.self, forKey: .pinType) ?? "none"
             pinHash = try c.decodeIfPresent(String.self, forKey: .pinHash) ?? ""
             pinSalt = try c.decodeIfPresent(String.self, forKey: .pinSalt) ?? ""
+            id = try c.decodeIfPresent(String.self, forKey: .id)
         }
     }
 
@@ -499,7 +508,8 @@ enum SetupProfileRules {
                 credential: cred,
                 pinType: pinOk ? s.pinType! : "none",
                 pinHash: pinOk ? s.pinHash : "",
-                pinSalt: pinOk ? s.pinSalt : "")
+                pinSalt: pinOk ? s.pinSalt : "",
+                id: s.id)
         }
     }
 }

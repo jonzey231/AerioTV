@@ -138,6 +138,14 @@ final class SetupApplyModel: ObservableObject {
         guard let ctx = modelContext else { phase = .failed("Setup is not ready. Try again."); return }
         let pl = p.playlist
         let cred = pl.credential
+        // The sender's playlist id (2026-11-10): a row here with that id IS this
+        // playlist, so it is updated in place, never added a second time.
+        let senderID = pl.id.flatMap { UUID(uuidString: $0) }
+        if choice == nil, let senderID,
+           ((try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []).contains(where: { $0.id == senderID }) {
+            debugLog("[SETUP] receiver: the received playlist is already here (same id); updating it in place")
+            choice = .replace(senderID)
+        }
         if choice == nil {
             let all = (try? ctx.fetch(FetchDescriptor<ServerConnection>(sortBy: [SortDescriptor(\.sortOrder)]))) ?? []
             let incoming = SetupPlaylistMatch.Candidate(type: SetupPlaylistMatch.kind(payloadType: pl.type), url: pl.url,
@@ -215,7 +223,16 @@ final class SetupApplyModel: ObservableObject {
             server = target
             replaced = true
         } else {
+            let jwt = vm.pendingJWTPair
+            vm.pendingJWTPair = nil
             server = vm.buildServerConnection()
+            // Keep the sender's id when no row here has it, so iCloud sees one
+            // playlist on both devices (the sign-in token follows the id).
+            if let senderID, !existing.contains(where: { $0.id == senderID }) {
+                server.id = senderID
+                debugLog("[SETUP] receiver: kept the sender's playlist id")
+            }
+            if let jwt { DispatcharrTokenStore.shared.store(serverID: server.id, access: jwt.access, refresh: jwt.refresh) }
         }
         server.isActive = true
         server.isVerified = true
@@ -250,7 +267,8 @@ final class SetupApplyModel: ObservableObject {
                                      avatar: pp.avatar.map { AvatarSpec(icon: $0.icon, color: $0.color) }, order: pp.order)
                 do {
                     try await ProfileManager.shared.applySetupProfile(pid, row: row, isDefault: pp.isDefault,
-                                                                      password: pp.credential?.password, apiKey: pp.credential?.apiKey)
+                                                                      password: pp.credential?.password, apiKey: pp.credential?.apiKey,
+                                                                      profileId: pp.id)
                 } catch {
                     skipped += 1
                     debugLog("[SETUP] receiver: a profile was not added (\(type(of: error)))")

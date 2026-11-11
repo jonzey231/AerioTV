@@ -59,6 +59,66 @@ final class SyncManager: ObservableObject {
     /// Snapshot of the last pushed blob, to tell a real synced change from
     /// a non-synced UserDefaults write inside the post-stamp quiet window.
     private var lastPushedPrefs: NSDictionary?
+    /// Fingerprint of the blob last pushed or applied, so "unchanged" still
+    /// reads unchanged after a relaunch (PrefsSyncClock.fingerprint).
+    private static let prefsBaselineFingerprintKey = "syncPrefsBaselineFingerprint"
+
+    // MARK: - Read before push (2026-11-10)
+    /// Logan: stale data never beats newer data. No lane pushes until a
+    /// read-and-merge of iCloud ran since launch (or since the last profile
+    /// switch); a push asked for earlier starts one and runs after it.
+    private var mergedBeforePushes = false
+    private enum PushLane: Hashable { case serversAndProgress, preferences, reminders }
+    private var deferredPushLanes: Set<PushLane> = []
+    private var deferredPrefsImmediate = false
+    private var mergeBeforePushRunning = false
+    private var profileObserver: NSObjectProtocol?
+
+    // MARK: - Per item records and deletion times (2026-11-10)
+    /// This device's change and removal times per item (SyncStamps). The
+    /// favorites, watch progress, and reminders records are shared with the
+    /// iCloud snapshots (CloudSnapshotSync).
+    static let progressStamps = SyncStamps("watchProgress")
+    static let reminderStamps = SyncStamps("reminders")
+    static let serverStamps = SyncStamps("playlists")
+    static let favoriteStamps = SyncStamps("favorites")
+    /// Deletion times ride side keys older builds ignore (their lists only
+    /// ever carry live rows).
+    static let progressRemovedKVSKey = "syncedWatchProgress.removed.v1"
+    static let remindersRemovedKVSKey = "syncedReminders.removed.v1"
+    static let serversRemovedKVSKey = "syncedServers.removed.v1"
+    /// Favorites' change and removal times inside the preferences payload.
+    static let favoritesSyncKey = "favorites.sync.v1"
+    private static let favoriteKeys: Set<String> = ["favoriteChannelIDs", "favoriteOrder"]
+    private static let favoritesKnownOrderKey = "syncFavoritesKnownOrder.v1"
+    private static let favoriteOrderStamp = "__order"
+    private static let serverFingerprintsKey = "syncServerFingerprints.v1"
+    /// Per-key preferences (PrefsLaneMerge): the values this device last saw
+    /// and when each last changed here.
+    private static let prefsSeenKey = "syncPrefsSeenValues.v1"
+    private static let prefsKeyTimesKey = "syncPrefsKeyTimes.v1"
+    private static var prefsLanes: [String: String] { [SyncScope.tvLaneKey: "tv", SyncScope.mobileLaneKey: "mobile"] }
+    /// Keys merged their own way (per favorite, per row) or carrying the merge itself.
+    private static var prefsSkipKeys: Set<String> {
+        [prefsModifiedAtKey, PrefsLaneMerge.timesKey, favoritesSyncKey, "favoriteChannelIDs", "favoriteOrder",
+         HiddenVODStore.syncKey, watchlistSyncKey]
+    }
+
+    // MARK: - First download (2026-11-10)
+    /// A fresh device never writes to iCloud before iCloud's copy has
+    /// reached it (FirstDownloadGate). Remembered once confirmed.
+    private static let firstDownloadKey = "syncFirstDownloadDone.v1"
+    private var firstDownloadWaitStarted = false
+    /// The empty-iCloud probe (FirstDownloadGate.probeSurvived): a key only
+    /// this install writes, never data.
+    private static let launchID = UUID().uuidString
+    private static var probeKVSKey: String {
+        let ud = UserDefaults.standard
+        if let id = ud.string(forKey: "syncProbeInstallID") { return "syncProbe.\(id)" }
+        let id = UUID().uuidString
+        ud.set(id, forKey: "syncProbeInstallID")
+        return "syncProbe.\(id)"
+    }
 
     /// True while waiting for the initial import after the user first enables sync.
     @Published private(set) var isImporting = false
@@ -187,6 +247,18 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.startObserving: sync disabled, skipping")
             return
         }
+        // Pushes waiting on iCloud's first download look again on every foreground.
+        if isSyncEnabled, !isImporting, firstDownloadDone {
+            if UserDefaults.standard.bool(forKey: Self.initialPushPendingKey) {
+                UserDefaults.standard.removeObject(forKey: Self.initialPushPendingKey)
+                debugLog("[SYNC] iCloud's copy confirmed; sending the first push that waited")
+                scheduleInitialPush()
+            } else if !deferredPushLanes.isEmpty {
+                startMergeBeforePush()
+            }
+        }
+        // A setting's change time is stamped when it changes, not at the next push.
+        startObservingDefaults()
         // Skip if already observing, avoids remove-then-re-add churn on every foreground.
         guard kvsObserver == nil else { return }
         debugLog("🔵 SyncManager.startObserving: registering KVS observer")
@@ -216,6 +288,20 @@ final class SyncManager: ObservableObject {
             debugLog("[SYNC] iCloud identity changed; available=\(CloudAccount.isAvailable)")
             NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
         }
+        }
+
+        // A profile switch swaps this device's data: the next push waits for
+        // a fresh read-and-merge.
+        if profileObserver == nil {
+            profileObserver = NotificationCenter.default.addObserver(
+                forName: .aerioProfileDidSwitch, object: nil, queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    let mgr = SyncManager.shared
+                    mgr.mergedBeforePushes = false
+                    debugLog("[SYNC] profile switched; the next push waits for a read-and-merge")
+                }
+            }
         }
 
         // Observe local reminder changes to push to iCloud
@@ -262,7 +348,149 @@ final class SyncManager: ObservableObject {
             NotificationCenter.default.removeObserver(obs)
             reminderObserver = nil
         }
+        if let obs = profileObserver {
+            NotificationCenter.default.removeObserver(obs)
+            profileObserver = nil
+        }
         isObservingDefaults = false
+    }
+
+    /// True once a read-and-merge ran; otherwise remembers `lane`, starts
+    /// one (unless the enable import is already reading), and returns false.
+    private func mergedBeforePush(_ lane: PushLane, immediate: Bool = false) -> Bool {
+        let downloaded = firstDownloadDone
+        if mergedBeforePushes, downloaded { return true }
+        deferredPushLanes.insert(lane)
+        if lane == .preferences, immediate { deferredPrefsImmediate = true }
+        guard downloaded else {
+            waitForFirstDownload()
+            return false
+        }
+        debugLog("[SYNC] \(lane) push waits for a read-and-merge of iCloud first")
+        if !isImporting { startMergeBeforePush() }
+        return false
+    }
+
+    /// The same read and merges as a pull, without the Settings indicator.
+    private func startMergeBeforePush() {
+        guard !mergeBeforePushRunning else { return }
+        mergeBeforePushRunning = true
+        let sKey = kvsKey, pKey = prefKVSKey, wpKey = watchProgressKVSKey, rKey = reminderKVSKey
+        Task { @MainActor in
+            let mgr = SyncManager.shared
+            defer { mgr.mergeBeforePushRunning = false }
+            guard mgr.isSyncEnabled else { return }
+            let store = NSUbiquitousKeyValueStore.default
+            let servers   = store.array(forKey: sKey) as? [[String: Any]]
+            let prefs     = store.dictionary(forKey: pKey)
+            let wp        = store.array(forKey: wpKey) as? [[String: Any]]
+            let reminders = store.array(forKey: rKey) as? [[String: Any]]
+            mgr.doMerge(servers: servers, isInitial: false)
+            await Task.yield()
+            CloudSnapshotSync.shared.foldProviders()
+            mgr.doApplyPreferences(prefs: prefs)
+            await Task.yield()
+            mgr.mergeRemoteWatchProgress(wp)
+            await Task.yield()
+            mgr.mergeRemoteReminders(reminders)
+            mgr.noteMerged("before the first push")
+        }
+    }
+
+    /// A read-and-merge of iCloud finished: pushes may go, and the ones
+    /// that waited go now.
+    private func noteMerged(_ how: String) {
+        if !mergedBeforePushes { debugLog("[SYNC] read-and-merge done (\(how)); pushes open") }
+        mergedBeforePushes = true
+        // Still waiting for iCloud's copy: the deferred pushes keep waiting.
+        guard firstDownloadDone else { return }
+        CloudSnapshotSync.shared.releaseDownloadHold()
+        if UserDefaults.standard.bool(forKey: Self.initialPushPendingKey) {
+            UserDefaults.standard.removeObject(forKey: Self.initialPushPendingKey)
+            scheduleInitialPush()
+        }
+        let lanes = deferredPushLanes
+        let prefsImmediate = deferredPrefsImmediate
+        deferredPushLanes = []
+        deferredPrefsImmediate = false
+        if lanes.contains(.serversAndProgress) {
+            NotificationCenter.default.post(name: .syncManagerNeedsPush, object: nil, userInfo: ["immediate": false])
+        }
+        if lanes.contains(.preferences) { doPushPreferences(immediate: prefsImmediate, localChange: false) }
+        if lanes.contains(.reminders) { pushReminders() }
+    }
+
+    /// What this device last saw live in iCloud for a list (key to change
+    /// time), so an older build's absence can count as a deletion. Nil until
+    /// a pull recorded it: then nothing is deleted for being absent.
+    static func loadSeen(_ lane: String) -> [String: TimeInterval]? {
+        UserDefaults.standard.dictionary(forKey: "syncSeen.\(lane).v1") as? [String: TimeInterval]
+    }
+
+    static func saveSeen(_ lane: String, _ seen: [String: TimeInterval]?) {
+        if let seen { UserDefaults.standard.set(seen, forKey: "syncSeen.\(lane).v1") }
+        else { UserDefaults.standard.removeObject(forKey: "syncSeen.\(lane).v1") }
+    }
+
+    private static let seenLanes = ["watchProgress", "reminders", "playlists", "favorites"]
+
+    /// iCloud no longer holds what this device saw there (cleared, turned
+    /// off, another account).
+    private static func forgetSeen(_ lanes: [String] = seenLanes) {
+        for lane in lanes { saveSeen(lane, nil) }
+    }
+
+    /// Whether iCloud's copy has reached this device (or it synced before).
+    /// Once true it stays true until the iCloud account changes.
+    var firstDownloadDone: Bool {
+        let ud = UserDefaults.standard
+        if ud.bool(forKey: Self.firstDownloadKey) { return true }
+        let kvs = NSUbiquitousKeyValueStore.default
+        let dataKeys = [kvsKey, prefKVSKey, watchProgressKVSKey, reminderKVSKey,
+                        Self.progressRemovedKVSKey, Self.remindersRemovedKVSKey, Self.serversRemovedKVSKey]
+            + CloudCanon.SHARED_FILES.map { CloudSnapshotSync.kvsKey($0) }
+        let state = FirstDownloadGate.state(
+            alreadyDone: false,
+            deliveredFromCloud: ud.bool(forKey: CloudAccount.seenKey),
+            cloudHasData: dataKeys.contains { kvs.object(forKey: $0) != nil },
+            syncedBefore: ud.double(forKey: "syncLastDate") > 0,
+            probeSurvived: FirstDownloadGate.probeSurvived(
+                written: ud.string(forKey: "syncProbeValue"), writtenInLaunch: ud.string(forKey: "syncProbeLaunch"),
+                currentLaunch: Self.launchID, readBack: kvs.string(forKey: Self.probeKVSKey)))
+        guard state == .done else { return false }
+        ud.set(true, forKey: Self.firstDownloadKey)
+        debugLog("[SYNC] iCloud's copy has reached this device; pushes may write")
+        return true
+    }
+
+    /// Pushes wait for the first download. The timeout only logs and looks
+    /// again: it never forces a push over a copy that has not arrived.
+    private func waitForFirstDownload() {
+        guard !firstDownloadWaitStarted else { return }
+        firstDownloadWaitStarted = true
+        debugLog("[SYNC] pushes wait: iCloud's copy has not reached this device yet")
+        // The empty-iCloud probe: written once, checked after a relaunch.
+        let ud = UserDefaults.standard
+        if ud.string(forKey: "syncProbeValue") == nil {
+            let value = "\(Self.launchID)@\(Int(Date().timeIntervalSince1970))"
+            ud.set(value, forKey: "syncProbeValue")
+            ud.set(Self.launchID, forKey: "syncProbeLaunch")
+            let key = Self.probeKVSKey
+            DispatchQueue.main.async { NSUbiquitousKeyValueStore.default.set(value, forKey: key) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + FirstDownloadGate.timeout) {
+            MainActor.assumeIsolated {
+                let mgr = SyncManager.shared
+                mgr.firstDownloadWaitStarted = false
+                guard !mgr.deferredPushLanes.isEmpty else { return }
+                if mgr.firstDownloadDone {
+                    mgr.startMergeBeforePush()
+                } else {
+                    debugLog("[SYNC] iCloud's copy still not here after \(Int(FirstDownloadGate.timeout)) s; pushes keep waiting (never forced)")
+                    mgr.waitForFirstDownload()
+                }
+            }
+        }
     }
 
     // MARK: - Enable / Disable Sync
@@ -312,28 +540,27 @@ final class SyncManager: ObservableObject {
                     debugLog("🔵 SyncManager: import timeout, pushing local state")
                     self.isImporting = false
                     self.startObservingDefaults()
+                    self.noteMerged("import timeout, iCloud had nothing")
                     self.scheduleInitialPush()
                 }
             }
             importTimeoutWork = timeout
             DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: timeout)
         } else {
+            // Turning iCloud Sync off stops syncing on THIS device only (Logan
+            // 2026-11-10). It used to erase the iCloud copy for every device;
+            // erasing is the separate "Clear iCloud Data" action with its own
+            // confirmation. Pending pushes are cancelled so nothing writes after.
             isImporting = false
             importTimeoutWork?.cancel()
             stopObserving()
-
-            // KVS clear on main dispatch queue.
-            let sKey = kvsKey
-            let pKey = prefKVSKey
-            let wpKey = watchProgressKVSKey
-            let rKey = reminderKVSKey
-            DispatchQueue.main.async {
-                NSUbiquitousKeyValueStore.default.removeObject(forKey: sKey)
-                NSUbiquitousKeyValueStore.default.removeObject(forKey: pKey)
-                NSUbiquitousKeyValueStore.default.removeObject(forKey: wpKey)
-                NSUbiquitousKeyValueStore.default.removeObject(forKey: rKey)
-                debugLog("🔵 SyncManager: cleared KVS data")
-            }
+            mergedBeforePushes = false
+            deferredPushLanes = []
+            pushDebounce?.cancel(); pushDebounce = nil
+            prefPushDebounce?.cancel(); prefPushDebounce = nil
+            watchProgressPushDebounce?.cancel(); watchProgressPushDebounce = nil
+            reminderPushDebounce?.cancel(); reminderPushDebounce = nil
+            debugLog("🔵 SyncManager: iCloud Sync off on this device; the iCloud copy is left as it is")
         }
     }
 
@@ -396,10 +623,15 @@ final class SyncManager: ObservableObject {
             kvs.removeObject(forKey: pKey)
             kvs.removeObject(forKey: wpKey)
             kvs.removeObject(forKey: rKey)
+            for k in [SyncManager.progressRemovedKVSKey, SyncManager.remindersRemovedKVSKey, SyncManager.serversRemovedKVSKey] {
+                kvs.removeObject(forKey: k)
+            }
             kvs.removeObject(forKey: "lastSyncPing")
             kvs.synchronize()
             debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
         }
+        // iCloud holds nothing now: the next pushes send everything.
+        Self.forgetSeen()
 
         // iCloud Keychain, only the synchronizable copies. Local
         // copies are intentionally preserved so this device keeps
@@ -437,30 +669,37 @@ final class SyncManager: ObservableObject {
         switch category {
         case .servers:
             pushDebounce?.cancel(); pushDebounce = nil
+            Self.forgetSeen(["playlists"])
             let key = kvsKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.serversRemovedKVSKey)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared servers KVS")
             }
         case .watchProgress:
             watchProgressPushDebounce?.cancel(); watchProgressPushDebounce = nil
+            Self.forgetSeen(["watchProgress"])
             let key = watchProgressKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.progressRemovedKVSKey)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared watch progress KVS")
             }
         case .reminders:
             reminderPushDebounce?.cancel(); reminderPushDebounce = nil
+            Self.forgetSeen(["reminders"])
             let key = reminderKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.remindersRemovedKVSKey)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared reminders KVS")
             }
         case .preferences:
             prefPushDebounce?.cancel(); prefPushDebounce = nil
+            Self.forgetSeen(["favorites"])
             let key = prefKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
@@ -556,11 +795,13 @@ final class SyncManager: ObservableObject {
             isImporting = false
             startObservingDefaults()
             debugLog("🔵 SyncManager: import complete from initial check")
+            noteMerged("enable import")
         } else {
             importTimeoutWork?.cancel()
             isImporting = false
             startObservingDefaults()
             debugLog("🔵 SyncManager: no remote data, will push local state")
+            noteMerged("enable import, iCloud had nothing")
             // Schedule push for next run-loop iteration so KVS writes
             // happen in a clean GCD context (via DispatchQueue.main.async).
             scheduleInitialPush()
@@ -569,7 +810,11 @@ final class SyncManager: ObservableObject {
 
     /// Schedules the first push (servers + preferences) on the next main-queue
     /// iteration, ensuring KVS writes are on the literal main dispatch queue.
+    private static let initialPushPendingKey = "syncInitialPushPending.v1"
+
     private func scheduleInitialPush() {
+        // Remembered across launches until iCloud's copy has reached this device.
+        if !firstDownloadDone { UserDefaults.standard.set(true, forKey: Self.initialPushPendingKey) }
         Task { @MainActor [weak self] in
             guard let self, self.isSyncEnabled else { return }
             debugLog("🔵 SyncManager: initial push, posting syncManagerNeedsPush")
@@ -578,7 +823,8 @@ final class SyncManager: ObservableObject {
                 object: nil,
                 userInfo: ["immediate": true]
             )
-            self.doPushPreferences(immediate: true)
+            // Seeding: no local change, so the blob keeps its own stamp.
+            self.doPushPreferences(immediate: true, localChange: false)
             self.pushReminders(immediate: true)
         }
     }
@@ -598,6 +844,11 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.pushServers: category disabled by user")
             return
         }
+        // A playlist deleted here since the last look gets its deletion time
+        // now, before any wait.
+        Self.serverStamps.observe(live: Set(servers.filter { !$0.isGone }.map { $0.id.uuidString }),
+                                  now: Date().timeIntervalSince1970)
+        guard mergedBeforePush(.serversAndProgress) else { return }
 
         // Snapshot server data on the calling thread (SwiftData requires main-actor access)
         // but keep it lightweight, defer Keychain reads to the async block.
@@ -633,8 +884,26 @@ final class SyncManager: ObservableObject {
                 // skipped, never read (2026-10-14 delete crash audit).
                 let payload = capturedServers.filter { !$0.isGone }.map { mgr.serialize($0) }
                 mgr.lastPushTime = ProcessInfo.processInfo.systemUptime
-                NSUbiquitousKeyValueStore.default.set(payload, forKey: key)
-                debugLog("🔵 SyncManager: pushed \(payload.count) servers")
+                // Re-read and merge per playlist (newest change or deletion
+                // wins, a tie keeps iCloud's): a playlist another device added
+                // in between is never dropped, and the "deleted on another
+                // device" path elsewhere never fires for it.
+                let store = NSUbiquitousKeyValueStore.default
+                let now = Date().timeIntervalSince1970
+                func byID(_ list: [[String: Any]]) -> [String: [String: Any]] {
+                    WatchProgressSyncMerge.byKey(list, key: { $0["id"] as? String }, stamp: SyncManager.serverRowStamp)
+                }
+                let remoteRemoved = store.dictionary(forKey: SyncManager.serversRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+                let stamps = SyncManager.serverStamps
+                stamps.prune(now: now)
+                let r = LaneMerge.forPush(local: byID(payload), localRemoved: stamps.removed,
+                                          remote: byID(store.array(forKey: key) as? [[String: Any]] ?? []),
+                                          remoteRemoved: remoteRemoved, base: SyncManager.loadSeen("playlists"),
+                                          stamp: SyncManager.serverRowStamp, now: now)
+                store.set(r.rows, forKey: key)
+                store.set(r.removed, forKey: SyncManager.serversRemovedKVSKey)
+                SyncManager.saveSeen("playlists", r.base)
+                debugLog("🔵 SyncManager: pushed \(r.rows.count) servers (local=\(payload.count) keptFromCloud=\(r.keptFromCloud) deletions=\(r.removed.count))")
                 mgr.stampSyncDate()
             }
         }
@@ -662,46 +931,92 @@ final class SyncManager: ObservableObject {
 
     // MARK: - Push Preferences (Local → iCloud)
 
+    /// A synced setting just changed here (callers are user actions).
     func pushPreferences() {
-        doPushPreferences(immediate: false)
+        doPushPreferences(immediate: false, localChange: true)
     }
 
     func pushPreferencesImmediate() {
-        doPushPreferences(immediate: true)
+        doPushPreferences(immediate: true, localChange: true)
     }
 
-    private func doPushPreferences(immediate: Bool) {
+    /// Going to the background: send an unpushed local change now. With
+    /// none pending nothing is written, so a device that only opened the
+    /// app never re-stamps its (possibly stale) data as newest.
+    func flushPendingPreferences() {
+        guard prefsDirtySince != nil else { return }
+        doPushPreferences(immediate: true, localChange: false)
+    }
+
+    /// Whether the blob differs from what this device last pushed or
+    /// applied; nil when it has no record of either.
+    private func prefsChanged(_ built: [String: Any]) -> Bool? {
+        if let last = lastPushedPrefs, (built as NSDictionary).isEqual(last) { return false }
+        guard let saved = UserDefaults.standard.string(forKey: Self.prefsBaselineFingerprintKey) else {
+            return lastPushedPrefs == nil ? nil : true
+        }
+        let same = PrefsSyncClock.fingerprint(built) == saved
+        if same { lastPushedPrefs = built as NSDictionary }
+        return !same
+    }
+
+    /// The blob this device just pushed or applied is the new baseline.
+    private func recordPrefsBaseline(_ plain: [String: Any]) {
+        lastPushedPrefs = plain as NSDictionary
+        UserDefaults.standard.set(PrefsSyncClock.fingerprint(plain), forKey: Self.prefsBaselineFingerprintKey)
+    }
+
+    /// `localChange`: a synced value changed here just now (a user action).
+    /// Only that sets the change time; every other push carries the stamp
+    /// the data already had (PrefsSyncClock), and the write re-reads iCloud
+    /// first so a newer blob there is applied, never overwritten.
+    private func doPushPreferences(immediate: Bool, localChange: Bool) {
         if ProfileManager.shared.nonDefaultActive() { return }  // iCloud carries the default profile only
         guard isSyncEnabled, !isMerging else {
             debugLog("🔵 SyncManager.pushPrefs: skipped (enabled=\(isSyncEnabled), merging=\(isMerging))")
             return
         }
+        let built = buildPreferencesDict()
+        let changed = prefsChanged(built)
+        // Recorded before the read-before-push gate: a change made before the
+        // first merge keeps its time, so that merge cannot overwrite it with
+        // older iCloud data.
+        if localChange, changed != false { prefsDirtySince = Date() }
+        // Each value's change time (a value that changed here since the last look: now).
+        let local = localPrefKeys(built, now: Date().timeIntervalSince1970)
+        guard mergedBeforePush(.preferences, immediate: immediate) else { return }
 
         debugLog("🔵 SyncManager.pushPrefs: building snapshot")
         // Rule 5 follow: the iCloud snapshots of the files the preferences payload carries.
         for c in [DsyncCategory.favorites, .watchlist, .preferences] { CloudSnapshotSync.shared.follow(c, "\(c.rawValue) local") }
-        var built = buildPreferencesDict()
-        let modifiedAt = (prefsDirtySince ?? Date()).timeIntervalSince1970
-        built[Self.prefsModifiedAtKey] = modifiedAt
         nonisolated(unsafe) let snapshot = built
+        nonisolated(unsafe) let flat = local.flat
+        let times = local.times
         let key = prefKVSKey
-        if prefsDirtySince == nil { prefsDirtySince = Date(timeIntervalSince1970: modifiedAt) }
 
         prefPushDebounce?.cancel()
         let work = DispatchWorkItem {
             MainActor.assumeIsolated {
                 let mgr = SyncManager.shared
                 mgr.lastPushTime = ProcessInfo.processInfo.systemUptime
+                // Re-read right before the write and merge per key, per
+                // favorite, and per row: nothing iCloud has that is newer is
+                // overwritten, and nothing is written when nothing here is newer.
                 let cloud = NSUbiquitousKeyValueStore.default.dictionary(forKey: key)
-                let merged = mgr.mergeWithCloudPreferences(snapshot, cloud: cloud)
-                NSUbiquitousKeyValueStore.default.set(merged, forKey: key)
-                debugLog("🔵 SyncManager: pushed preferences")
+                let r = mgr.mergeWithCloudPreferences(snapshot, flat: flat, times: times, cloud: cloud)
                 mgr.prefsDirtySince = nil
-                var plain = snapshot
-                plain[SyncManager.prefsModifiedAtKey] = nil
-                mgr.lastPushedPrefs = plain as NSDictionary
-                UserDefaults.standard.set(modifiedAt, forKey: SyncManager.prefsLocalModifiedAtDefaultsKey)
-                mgr.stampSyncDate()
+                if r.write {
+                    NSUbiquitousKeyValueStore.default.set(r.blob, forKey: key)
+                    let stamp = r.blob[SyncManager.prefsModifiedAtKey] as? TimeInterval ?? 0
+                    debugLog("🔵 SyncManager: pushed preferences (newest change=\(Int(stamp)) newer keys here=\(r.localNewer))")
+                    UserDefaults.standard.set(stamp, forKey: SyncManager.prefsLocalModifiedAtDefaultsKey)
+                    mgr.stampSyncDate()
+                } else {
+                    debugLog("[SYNC] prefs not pushed: nothing here is newer than iCloud's copy")
+                }
+                mgr.recordPrefsBaseline(snapshot)
+                // iCloud had keys newer than this device's: bring them here now.
+                if r.remoteNewer { mgr.doApplyPreferences(prefs: r.blob) }
             }
         }
         prefPushDebounce = work
@@ -726,31 +1041,175 @@ final class SyncManager: ObservableObject {
         debugLog("🔵 SyncManager.pushPrefs: scheduled (immediate=\(immediate))")
     }
 
-    /// Keeps what this device does not own in the cloud blob: values of
-    /// items scoped Off, TVs only, or Phones and tablets only on the
-    /// shared map, the other form factor's lane, keys of this lane this
-    /// device no longer writes, and data blobs whose item is off here.
-    private func mergeWithCloudPreferences(_ local: [String: Any], cloud: [String: Any]?) -> [String: Any] {
-        guard let cloud else { return local }
-        var out = local
-        for k in syncPlistKeys + syncHiddenGroupKeys where !SyncItemCatalog.allows(k) {
-            if let v = cloud[k] { out[k] = v }
+    /// This device's blob merged onto iCloud's (re-read right before the
+    /// write): per key by change time (PrefsLaneMerge, a tie keeps iCloud's),
+    /// per favorite, and per row for My List and hidden titles (iCloud's rows
+    /// come here first, then the union goes up). Keys this device does not
+    /// write (items scoped Off, the other device class's lane) stay as iCloud
+    /// has them. `write` is false when nothing here is newer.
+    private func mergeWithCloudPreferences(_ local: [String: Any], flat: [String: Any], times: [String: TimeInterval],
+                                           cloud: [String: Any]?)
+        -> (blob: [String: Any], write: Bool, remoteNewer: Bool, localNewer: Int) {
+        let lanes = Self.prefsLanes
+        let skip = Self.prefsSkipKeys
+        guard let cloud else {
+            var out = local
+            out[PrefsLaneMerge.timesKey] = times
+            out[Self.prefsModifiedAtKey] = max(times.values.max() ?? 0, 1)
+            return (out, true, false, flat.count)
         }
-        let blobs: [(String, String)] = [
-            (SyncItemCatalog.hiddenTitlesID, HiddenVODStore.syncKey),
-            (SyncItemCatalog.recentsID, Self.recentsSyncKey),
-            (SyncItemCatalog.watchlistID, Self.watchlistSyncKey)
-        ]
-        for (id, k) in blobs where !SyncItemCatalog.isEnabled(id) {
-            if let v = cloud[k] { out[k] = v }
+        let cloudTimes = cloud[PrefsLaneMerge.timesKey] as? [String: TimeInterval] ?? [:]
+        let cloudStamp = cloud[Self.prefsModifiedAtKey] as? TimeInterval ?? 0
+        let m = PrefsLaneMerge.merge(local: flat, localTimes: times,
+                                     remote: PrefsLaneMerge.flatten(cloud, lanes: lanes, skip: skip),
+                                     remoteTimes: cloudTimes, remoteStamp: cloudStamp)
+        var out = cloud.filter { skip.contains($0.key) }
+        for (k, v) in PrefsLaneMerge.unflatten(m.values, lanes: lanes) { out[k] = v }
+        out[PrefsLaneMerge.timesKey] = m.times
+        // An older build's blob gains its times once.
+        var write = !m.localNewer.isEmpty || cloud[PrefsLaneMerge.timesKey] == nil
+
+        // Favorites merge per favorite with iCloud's (never by blob time).
+        if Self.favoritesSynced, let mine = FavoritesSyncMerge.state(from: local) {
+            let remote = FavoritesSyncMerge.state(from: cloud)
+            let base = Self.loadSeen("favorites")
+            let f = FavoritesSyncMerge.merge(local: mine, remote: remote, base: base, now: Date().timeIntervalSince1970)
+            out["favoriteChannelIDs"] = f.order
+            out["favoriteOrder"] = f.order
+            out[Self.favoritesSyncKey] = FavoritesSyncMerge.blob(f.state)
+            Self.saveSeen("favorites", LaneMerge.baseAfterPush(local: mine.side, remote: remote?.side ?? .init(),
+                                                               base: base, plan: f.plan))
+            if f.plan.values.contains(.local) || f.state.side.removed != (remote?.side.removed ?? [:])
+                || (cloud["favoriteChannelIDs"] as? [String]) != f.order { write = true }
         }
-        let own = SyncScope.deviceLane.laneKey ?? SyncScope.mobileLaneKey
-        let other = own == SyncScope.tvLaneKey ? SyncScope.mobileLaneKey : SyncScope.tvLaneKey
-        if let v = cloud[other] { out[other] = v }
-        var ownLane = cloud[own] as? [String: Any] ?? [:]
-        for (k, v) in (local[own] as? [String: Any] ?? [:]) { ownLane[k] = v }
-        if !ownLane.isEmpty { out[own] = ownLane }
-        return out
+        // My List and hidden titles: iCloud's rows first (newest per row,
+        // deletions kept), then the union. Never iCloud's rows dropped.
+        func same(_ a: Any?, _ b: Any?) -> Bool {
+            switch (a, b) {
+            case (nil, nil): return true
+            case let (x?, y?): return PrefsLaneMerge.valueID(x) == PrefsLaneMerge.valueID(y)
+            default: return false
+            }
+        }
+        if SyncCategory.preferences.isEnabled, SyncItemCatalog.isEnabled(SyncItemCatalog.watchlistID) {
+            if let blob = cloud[Self.watchlistSyncKey] as? Data {
+                isMerging = true
+                WatchlistManager.mergeSyncBlob(blob, replace: false)
+                isMerging = false
+            }
+            if let mine = WatchlistManager.syncBlob() {
+                out[Self.watchlistSyncKey] = mine
+                if !same(mine, cloud[Self.watchlistSyncKey]) { write = true }
+            }
+        }
+        if SyncCategory.preferences.isEnabled, SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID) {
+            if let blob = cloud[HiddenVODStore.syncKey] as? Data {
+                isMerging = true
+                HiddenVODStore.shared.mergeRemote(blob)
+                isMerging = false
+            }
+            if let mine = HiddenVODStore.shared.syncBlob() {
+                out[HiddenVODStore.syncKey] = mine
+                if !same(mine, cloud[HiddenVODStore.syncKey]) { write = true }
+            }
+        }
+        // The blob's time older builds read: the newest change it carries, never the push time.
+        out[Self.prefsModifiedAtKey] = max(cloudStamp, m.times.values.max() ?? 0, 1)
+        return (out, write, !m.remoteNewer.isEmpty, m.localNewer.count)
+    }
+
+    /// This device's synced values per key ("lane:key") and when each last
+    /// changed here. The first look only records (unknown age). A non-default
+    /// profile's swapped-in values are never read as changes.
+    private func localPrefKeys(_ blob: [String: Any], now: TimeInterval) -> (flat: [String: Any], times: [String: TimeInterval]) {
+        let flat = PrefsLaneMerge.flatten(blob, lanes: Self.prefsLanes, skip: Self.prefsSkipKeys)
+        let ud = UserDefaults.standard
+        let prev = ud.dictionary(forKey: Self.prefsKeyTimesKey) as? [String: TimeInterval] ?? [:]
+        if ProfileManager.shared.nonDefaultActive() { return (flat, prev) }
+        let seen = ud.dictionary(forKey: Self.prefsSeenKey) as? [String: String]
+        let r = PrefsLaneMerge.observe(flat: flat, seen: seen, times: prev, now: now)
+        if seen != r.seen { ud.set(r.seen, forKey: Self.prefsSeenKey) }
+        if prev != r.times { ud.set(r.times, forKey: Self.prefsKeyTimesKey) }
+        return (flat, r.times)
+    }
+
+    /// What a pull applied: iCloud's values and their times are this device's now.
+    private func settlePrefKeys(_ keys: [String], values: [String: Any], times: [String: TimeInterval], stamp: TimeInterval) {
+        guard !keys.isEmpty else { return }
+        let ud = UserDefaults.standard
+        var seen = ud.dictionary(forKey: Self.prefsSeenKey) as? [String: String] ?? [:]
+        var mine = ud.dictionary(forKey: Self.prefsKeyTimesKey) as? [String: TimeInterval] ?? [:]
+        for k in keys {
+            if let v = values[k] { seen[k] = PrefsLaneMerge.valueID(v) }
+            mine[k] = PrefsLaneMerge.remoteTime(times, key: k, blobStamp: stamp)
+        }
+        ud.set(seen, forKey: Self.prefsSeenKey)
+        ud.set(mine, forKey: Self.prefsKeyTimesKey)
+    }
+
+    // MARK: - Favorites per favorite (2026-11-10)
+
+    /// Favorites ride the shared map when their item is on (never a lane).
+    private static var favoritesSynced: Bool {
+        SyncCategory.preferences.isEnabled && SyncItemCatalog.allows("favoriteChannelIDs")
+    }
+
+    /// This device's favorites with their times. Looks first: a favorite
+    /// added or removed here since the last look gets its time now, and a
+    /// reorder stamps the order.
+    private func localFavoritesState(now: TimeInterval) -> FavoritesSyncMerge.State {
+        let ud = UserDefaults.standard
+        let ids = ud.stringArray(forKey: "favoriteChannelIDs") ?? []
+        let order = ud.stringArray(forKey: "favoriteOrder") ?? []
+        let st = Self.favoriteStamps
+        // A non-default profile's favorites are swapped in: never read them
+        // as changes to the default profile's (iCloud carries the default only).
+        if !ProfileManager.shared.nonDefaultActive() {
+            st.observe(live: Set(ids), now: now)
+            let known = ud.stringArray(forKey: Self.favoritesKnownOrderKey)
+            if let known, FavoritesSyncMerge.reordered(known, order) { st.touch(Self.favoriteOrderStamp, at: now) }
+            if known != order { ud.set(order, forKey: Self.favoritesKnownOrderKey) }
+        }
+        var live: [String: TimeInterval] = [:]
+        for id in ids { live[id] = st.touched[id] ?? 0 }
+        return .init(side: .init(live: live, removed: st.removed), order: order,
+                     orderAt: st.touched[Self.favoriteOrderStamp] ?? 0)
+    }
+
+    /// Pull: merge iCloud's favorites into this device's per favorite.
+    /// Returns true when this device holds something iCloud lacks (push it).
+    private func applyFavorites(from cloud: [String: Any]) -> Bool {
+        guard let remote = FavoritesSyncMerge.state(from: cloud) else { return false }
+        let now = Date().timeIntervalSince1970
+        let mine = localFavoritesState(now: now)
+        let m = FavoritesSyncMerge.merge(local: mine, remote: remote, base: Self.loadSeen("favorites"), now: now)
+        let ud = UserDefaults.standard
+        let curIDs = ud.stringArray(forKey: "favoriteChannelIDs") ?? []
+        let curOrder = ud.stringArray(forKey: "favoriteOrder") ?? []
+        if Set(curIDs) != Set(m.order) || curOrder != m.order {
+            isMerging = true
+            defer { isMerging = false }
+            ud.set(m.order, forKey: "favoriteChannelIDs")
+            ud.set(m.order, forKey: "favoriteOrder")
+            FavoritesStore.shared.applySynced(order: m.order, items: ChannelStore.shared.channels)
+            debugLog("[SYNC] favorites merged per favorite: \(m.order.count) (was \(curIDs.count))")
+        }
+        var removedApplied: [String: TimeInterval] = [:]
+        var touched: [String: TimeInterval] = [:]
+        for (k, p) in m.plan {
+            switch p {
+            case .removed(let t): removedApplied[k] = t
+            case .remote: if let t = remote.side.live[k], t > 0 { touched[k] = t }
+            default: break
+            }
+        }
+        Self.favoriteStamps.settle(live: Set(m.order), removed: removedApplied, touched: touched)
+        if remote.orderAt > mine.orderAt { Self.favoriteStamps.touch(Self.favoriteOrderStamp, at: remote.orderAt) }
+        ud.set(m.order, forKey: Self.favoritesKnownOrderKey)
+        Self.saveSeen("favorites", remote.side.live)
+        // Something here is newer than iCloud's copy (or iCloud lacks it).
+        return m.plan.values.contains(.local) || Set(remote.side.live.keys) != Set(m.order)
+            || m.state.side.removed != remote.side.removed
     }
 
     /// Property-list types KVS accepts.
@@ -758,7 +1217,9 @@ final class SyncManager: ObservableObject {
         v is String || v is NSNumber || v is Data || v is Date || v is [Any] || v is [String: Any]
     }
 
-    private func buildPreferencesDict() -> [String: Any] {
+    /// `includeBlobs`: false for the settings-only look the defaults observer
+    /// runs (no My List fetch, hidden titles, or favorites; those carry their own times).
+    private func buildPreferencesDict(includeBlobs: Bool = true) -> [String: Any] {
         var dict: [String: Any] = [:]
         let ud = UserDefaults.standard
 
@@ -805,6 +1266,10 @@ final class SyncManager: ObservableObject {
             if scope == .all { dict[k] = v } else { lane[k] = v }
         }
         if !lane.isEmpty, let laneKey = deviceLane.laneKey { dict[laneKey] = lane }
+        // Favorites' change and removal times (FavoritesSyncMerge).
+        if includeBlobs, Self.favoritesSynced {
+            dict[Self.favoritesSyncKey] = FavoritesSyncMerge.blob(localFavoritesState(now: Date().timeIntervalSince1970))
+        }
         // The remote button map is carved out under its own category
         // (Discord: Glitzbr) and handled above the preferences gate.
         for k in syncHiddenGroupKeys where SyncItemCatalog.allows(k) {
@@ -817,7 +1282,7 @@ final class SyncManager: ObservableObject {
         // (playlist, title) entry with its hidden flag and timestamp, so the
         // merge on the other side is entry-wise last writer wins and an
         // unhide survives as a tombstone. Older clients ignore the key.
-        if SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID),
+        if includeBlobs, SyncItemCatalog.isEnabled(SyncItemCatalog.hiddenTitlesID),
            let blob = HiddenVODStore.shared.syncBlob() {
             dict[HiddenVODStore.syncKey] = blob
         }
@@ -825,7 +1290,7 @@ final class SyncManager: ObservableObject {
             let recents = RecentChannelsStore.syncSnapshot()
             if !recents.isEmpty { dict[Self.recentsSyncKey] = recents }
         }
-        if SyncItemCatalog.isEnabled(SyncItemCatalog.watchlistID),
+        if includeBlobs, SyncItemCatalog.isEnabled(SyncItemCatalog.watchlistID),
            let blob = WatchlistManager.syncBlob() {
             dict[Self.watchlistSyncKey] = blob
         }
@@ -877,6 +1342,11 @@ final class SyncManager: ObservableObject {
             case NSUbiquitousKeyValueStoreAccountChange:
                 DebugLogger.shared.log("SyncManager: iCloud account changed",
                                        category: "Sync", level: .info)
+                // A different iCloud: what this device saw there no longer
+                // applies, and its copy has to arrive before any push.
+                Self.forgetSeen()
+                UserDefaults.standard.set(false, forKey: Self.firstDownloadKey)
+                UserDefaults.standard.removeObject(forKey: "syncProbeValue")
             default: break
             }
         }
@@ -894,6 +1364,7 @@ final class SyncManager: ObservableObject {
         doApplyPreferences(prefs: prefs)
         mergeRemoteWatchProgress(watchProgress)
         mergeRemoteReminders(reminders)
+        noteMerged("iCloud change")
     }
 
     private func doMerge(servers: [[String: Any]]?, isInitial: Bool, replace: Bool = false) {
@@ -952,21 +1423,39 @@ final class SyncManager: ObservableObject {
             return
         }
 
-        // Last writer wins. An explicit Replace pull is a confirmed user
-        // action and always applies.
-        let cloudT = dict[Self.prefsModifiedAtKey] as? TimeInterval ?? 0
-        if !replace {
-            if let dirty = prefsDirtySince {
-                debugLog("[SYNC] prefs skipped: local blob newer (local=\(dirty.timeIntervalSince1970) cloud=\(cloudT)), unpushed change")
-                doPushPreferences(immediate: true)
-                return
-            }
-            let localT = UserDefaults.standard.double(forKey: Self.prefsLocalModifiedAtDefaultsKey)
-            if cloudT > 0, cloudT <= localT {
-                debugLog("[SYNC] prefs skipped: local blob newer (local=\(localT) cloud=\(cloudT))")
-                return
-            }
+        // Favorites merge per favorite on every pull, whatever the blob's time.
+        var needsPush = false
+        if !replace, Self.favoritesSynced, !cloudPullBlocked(.favorites, ignoreOwnership: ignoreOwnership) {
+            needsPush = applyFavorites(from: dict)
         }
+        defer { if needsPush { doPushPreferences(immediate: false, localChange: false) } }
+
+        // Per key (PrefsLaneMerge, Logan 2026-11-10): a change made here gets
+        // its time first, then only the keys that changed elsewhere after they
+        // changed here apply. An explicit Replace pull applies every key.
+        let cloudT = dict[Self.prefsModifiedAtKey] as? TimeInterval ?? 0
+        let cloudTimes = dict[PrefsLaneMerge.timesKey] as? [String: TimeInterval] ?? [:]
+        let cloudFlat = PrefsLaneMerge.flatten(dict, lanes: Self.prefsLanes, skip: Self.prefsSkipKeys)
+        let local = localPrefKeys(buildPreferencesDict(), now: Date().timeIntervalSince1970)
+        let newer: Set<String> = replace ? Set(cloudFlat.keys)
+            : Set(PrefsLaneMerge.newerRemote(local: local.flat, localTimes: local.times, remote: cloudFlat,
+                                             remoteTimes: cloudTimes, remoteStamp: cloudT))
+        if !replace, !PrefsLaneMerge.merge(local: local.flat, localTimes: local.times, remote: cloudFlat,
+                                           remoteTimes: cloudTimes, remoteStamp: cloudT).localNewer.isEmpty {
+            // This device holds newer values iCloud lacks: send them after.
+            needsPush = true
+        }
+        // Only what actually applied is settled (a key a category gate kept
+        // out stays this device's own, with its own time).
+        var applied: [String] = []
+        func applies(_ flatKey: String) -> Bool {
+            guard replace || newer.contains(flatKey) else { return false }
+            applied.append(flatKey)
+            return true
+        }
+        let laneName = SyncScope.deviceLane.laneKey.flatMap { Self.prefsLanes[$0] } ?? "mobile"
+        defer { settlePrefKeys(applied, values: cloudFlat, times: cloudTimes, stamp: cloudT) }
+        if !replace { debugLog("[SYNC] prefs pull: \(newer.count) key(s) newer in iCloud") }
 
         isMerging = true
         defer { isMerging = false }
@@ -977,7 +1466,7 @@ final class SyncManager: ObservableObject {
         // owns them only the Sync category toggles apply (iCloud's own configuration).
         let blocked = [DsyncCategory.favorites, .watchlist, .preferences].filter { cloudPullBlocked($0, ignoreOwnership: ignoreOwnership) }
         if !blocked.isEmpty {
-            for k in SyncCategory.allDefaultsKeys {
+            for k in SyncCategory.allDefaultsKeys where applies("v:\(k)") {
                 if let v = dict[k] as? Bool { ud.set(v, forKey: k) }
             }
             return
@@ -988,19 +1477,19 @@ final class SyncManager: ObservableObject {
         // when the user has "App Preferences" sync turned off. Otherwise a
         // user who disabled "App Preferences" sync on iPhone could never
         // re-enable it from iPad (the iPhone would never receive the flip).
-        for k in SyncCategory.allDefaultsKeys {
+        for k in SyncCategory.allDefaultsKeys where applies("v:\(k)") {
             if let v = dict[k] as? Bool { ud.set(v, forKey: k) }
         }
 
         // Remote button map rides its own category - applied before the
         // preferences gate so the two toggles stay independent (mirrors the
         // carve-out on the push side).
-        if SyncCategory.remoteControl.isEnabled,
+        if SyncCategory.remoteControl.isEnabled, applies("v:\(RemoteControlStore.mapKey)"),
            let v = dict[RemoteControlStore.mapKey] as? Data {
             ud.set(v, forKey: RemoteControlStore.mapKey)
         }
         // "Radio Mode by Default": applied only when this device opted in.
-        if SyncCategory.radioModeDefault.isEnabled,
+        if SyncCategory.radioModeDefault.isEnabled, applies("v:\(RadioModeSession.byDefaultKey)"),
            let v = dict[RadioModeSession.byDefaultKey] as? Bool {
             ud.set(v, forKey: RadioModeSession.byDefaultKey)
         }
@@ -1016,11 +1505,13 @@ final class SyncManager: ObservableObject {
         let deviceLane = SyncScope.deviceLane
         let laneDict = deviceLane.laneKey.flatMap { dict[$0] as? [String: Any] } ?? [:]
         for k in syncPlistKeys {
+            // Favorites merged per favorite above (a Replace takes iCloud's).
+            if !replace, Self.favoriteKeys.contains(k) { continue }
             switch SyncItemCatalog.scope(of: k) {
             case .all:
-                if let v = dict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
+                if applies("v:\(k)"), let v = dict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
             case deviceLane:
-                if let v = laneDict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
+                if applies("\(laneName):\(k)"), let v = laneDict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
             default:
                 break
             }
@@ -1028,7 +1519,7 @@ final class SyncManager: ObservableObject {
         for k in legacyReadOnlyKeys where ud.object(forKey: k) == nil {
             if let v = dict[k], Self.isPlistValue(v) { ud.set(v, forKey: k) }
         }
-        for k in syncHiddenGroupKeys where SyncItemCatalog.allows(k) {
+        for k in syncHiddenGroupKeys where SyncItemCatalog.allows(k) && applies("v:\(k)") {
             if let arr = dict[k] as? [String],
                let data = try? JSONEncoder().encode(arr.sorted()) {
                 ud.set(data, forKey: k)
@@ -1055,7 +1546,7 @@ final class SyncManager: ObservableObject {
         }
         // Recently watched rides the blob last writer wins, like every
         // other preference; My List merges row-wise with tombstones.
-        if SyncItemCatalog.isEnabled(SyncItemCatalog.recentsID),
+        if SyncItemCatalog.isEnabled(SyncItemCatalog.recentsID), applies("v:\(Self.recentsSyncKey)"),
            let recents = dict[Self.recentsSyncKey] as? [String: [String]] {
             RecentChannelsStore.applySyncSnapshot(recents, replace: replace)
         }
@@ -1063,40 +1554,59 @@ final class SyncManager: ObservableObject {
            let blob = dict[Self.watchlistSyncKey] as? Data {
             WatchlistManager.mergeSyncBlob(blob, replace: replace)
         }
+        if replace, Self.favoritesSynced {
+            // The cloud's favorites are now this device's synced state.
+            let ids = ud.stringArray(forKey: "favoriteChannelIDs") ?? []
+            let order = ud.stringArray(forKey: "favoriteOrder") ?? []
+            let st = FavoritesSyncMerge.state(from: dict)
+            Self.favoriteStamps.settle(live: Set(ids), removed: st?.side.removed ?? [:],
+                                       touched: (st?.side.live ?? [:]).filter { $0.value > 0 })
+            ud.set(order, forKey: Self.favoritesKnownOrderKey)
+            FavoritesStore.shared.applySynced(order: order.isEmpty ? ids : order, items: ChannelStore.shared.channels)
+        }
         // Stores that cache their keys in memory reload from defaults.
         ChannelCollectionsStore.shared.reloadFromDefaults()
         HiddenVODStore.shared.reloadCategoryVisibility()
 
         // What was just applied is the cloud state, not a local change.
-        lastPushedPrefs = buildPreferencesDict() as NSDictionary
+        recordPrefsBaseline(buildPreferencesDict())
         prefsDirtySince = nil
         NotificationCenter.default.post(name: .syncManagerDidApplyPreferences, object: nil)
-        debugLog("[SYNC] prefs applied from cloud (\(dict.count - (cloudT > 0 ? 1 : 0)) keys)")
+        debugLog("[SYNC] prefs applied from cloud (\(newer.count) keys)")
     }
 
     // MARK: - UserDefaults Observer
 
     private var udChangeCount = 0
 
-    /// Called on the main queue by the block-based UserDefaults notification observer.
+    /// Called on the main queue by the block-based UserDefaults notification
+    /// observer, for every defaults write. Coalesced: a short moment later the
+    /// synced settings are looked at once, and each value that changed gets
+    /// its change time then (PrefsLaneMerge), so a setting carries the time
+    /// the user changed it, not the time of the next push.
+    private var settingsLookPending = false
+
     private func handleUserDefaultsChange() {
-        guard isSyncEnabled, !isMerging else { return }
-
-        let now = ProcessInfo.processInfo.systemUptime
-        // Only a change to a SYNCED value counts. This observer fires for
-        // every UserDefaults write; marking those dirty would block cloud
-        // changes for nothing. Inside the quiet window after our own stamp
-        // write a real synced change still counts (it used to be dropped).
-        let current = buildPreferencesDict() as NSDictionary
-        if let last = lastPushedPrefs, current.isEqual(last) { return }
-        if lastPushedPrefs == nil, now - lastStampTime < 3.0 { return }
-        if prefsDirtySince == nil { prefsDirtySince = Date() }
-
-        udChangeCount += 1
-        if udChangeCount <= 3 || udChangeCount % 50 == 0 {
-            debugLog("🔵 SyncManager.userDefaultsDidChange: #\(udChangeCount)")
+        guard isSyncEnabled, !isMerging, !settingsLookPending else { return }
+        settingsLookPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            MainActor.assumeIsolated {
+                let mgr = SyncManager.shared
+                mgr.settingsLookPending = false
+                guard mgr.isSyncEnabled, !mgr.isMerging, !ProfileManager.shared.nonDefaultActive() else { return }
+                let before = UserDefaults.standard.dictionary(forKey: SyncManager.prefsKeyTimesKey) as? [String: TimeInterval] ?? [:]
+                let now = Date().timeIntervalSince1970
+                let after = mgr.localPrefKeys(mgr.buildPreferencesDict(includeBlobs: false), now: now).times
+                let changed = after.filter { before[$0.key] != $0.value }.count
+                guard changed > 0 else { return }
+                mgr.udChangeCount += 1
+                if mgr.udChangeCount <= 3 || mgr.udChangeCount % 50 == 0 {
+                    debugLog("[SYNC] settings changed here: \(changed) key(s) stamped")
+                }
+                if mgr.prefsDirtySince == nil { mgr.prefsDirtySince = Date(timeIntervalSince1970: now) }
+                mgr.doPushPreferences(immediate: false, localChange: false)
+            }
         }
-        pushPreferences()
     }
 
     // MARK: - Credential Sync
@@ -1115,7 +1625,107 @@ final class SyncManager: ObservableObject {
         }
         let id = server.id.uuidString
         KeychainHelper.migrateToSynchronizable(key: "password_\(id)")
-        KeychainHelper.migrateToSynchronizable(key: "apiKey_\(id)")
+        // A key the server refused never goes to iCloud.
+        if let key = KeychainHelper.load(key: "apiKey_\(id)"), DispatcharrRequestGate.shared.isKeyRejected(key) {
+            debugLog("[SYNC] API key for \(id.prefix(8)) is held as rejected; not copied to iCloud Keychain")
+        } else {
+            KeychainHelper.migrateToSynchronizable(key: "apiKey_\(id)")
+        }
+    }
+
+    // MARK: - Credential change times (2026-11-10)
+
+    enum CredentialKind: String { case password, apiKey }
+
+    /// When this device last changed (or adopted) the credential; 0 = unknown.
+    nonisolated static func credentialChangedAt(_ kind: CredentialKind, _ serverID: UUID) -> TimeInterval {
+        UserDefaults.standard.double(forKey: "syncCredentialChangedAt.\(kind.rawValue).\(serverID.uuidString)")
+    }
+
+    nonisolated static func setCredentialChangedAt(_ kind: CredentialKind, _ serverID: UUID, _ t: TimeInterval) {
+        UserDefaults.standard.set(t, forKey: "syncCredentialChangedAt.\(kind.rawValue).\(serverID.uuidString)")
+    }
+
+    /// The credentials from an iCloud server record this device should
+    /// store (CredentialSyncRule): never empty, never a rejected key, never
+    /// older than this device's. Records the adopted change times.
+    /// `local`: nil for a playlist new to this device.
+    /// Launch (2026-11-10): when iCloud carries a different key for a
+    /// playlist and this device's is not known to be newer, that key's first
+    /// API calls wait for the merge (CredentialMergeBarrier, bounded).
+    static func armLaunchCredentialBarrier() {
+        guard UserDefaults.standard.bool(forKey: "iCloudSyncEnabled"),
+              SyncCategory.servers.isEnabled, SyncCategory.credentials.isEnabled else { return }
+        let records = NSUbiquitousKeyValueStore.default.array(forKey: "syncedServers") as? [[String: Any]] ?? []
+        let entries = records.compactMap { d -> CredentialMergeBarrier.Entry? in
+            guard let id = d["id"] as? String, let uuid = UUID(uuidString: id),
+                  let cloud = d["_apiKey"] as? String, !cloud.isEmpty else { return nil }
+            return CredentialMergeBarrier.Entry(
+                localKey: ServerConnection.resolveCredential(key: "apiKey_\(id)", fallback: ""),
+                localChangedAt: credentialChangedAt(.apiKey, uuid),
+                cloudKey: cloud, cloudChangedAt: d["_apiKeyChangedAt"] as? Double ?? 0)
+        }
+        let keys = CredentialMergeBarrier.doubtfulKeys(entries)
+        guard !keys.isEmpty else { return }
+        CredentialMergeBarrier.shared.arm(doubtfulKeys: keys)
+        debugLog("[SYNC] launch: iCloud carries a different API key for \(keys.count) playlist(s); "
+                 + "their first calls wait for the merge (at most \(Int(CredentialMergeBarrier.maxWait)) s)")
+    }
+
+    /// A key the server just proved rejected (DispatcharrKeyBroker): when
+    /// iCloud carries a different key for that playlist that the server has
+    /// not refused, adopt it now (CredentialSyncRule: a rejected key never
+    /// beats one the server has not refused) instead of waiting for the next
+    /// pull. No network. Returns the adopted key.
+    func adoptCloudApiKey(playlistID: UUID, rejectedKey: String) -> String? {
+        guard isSyncEnabled, SyncCategory.credentials.isEnabled else { return nil }
+        let records = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]] ?? []
+        guard let d = records.first(where: { ($0["id"] as? String).flatMap(UUID.init(uuidString:)) == playlistID }),
+              let cloud = (d["_apiKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              CredentialSyncRule.adoptRemote(remote: cloud, remoteStamp: 0, local: rejectedKey, localStamp: 0,
+                                             legacyRemoteNewer: false, replace: false,
+                                             rejected: DispatcharrRequestGate.shared.isKeyRejected(cloud),
+                                             localRejected: true)
+        else { return nil }
+        let slot = "apiKey_\(playlistID.uuidString)"
+        KeychainHelper.save(cloud, for: slot)
+        KeychainHelper.save(cloud, for: slot, synchronizable: true)
+        let t = d["_apiKeyChangedAt"] as? Double ?? 0
+        if t > 0 { Self.setCredentialChangedAt(.apiKey, playlistID, t) }
+        DispatcharrRequestGate.shared.noteKeyReplaced(old: rejectedKey, new: cloud)
+        debugLog("[SYNC] adopting iCloud's apiKey for \(playlistID.uuidString.prefix(8)): the server rejected this device's key")
+        return cloud
+    }
+
+    func credentialsToAdopt(_ remote: SyncedServer, local: ServerConnection?,
+                            legacyRemoteNewer: Bool, replace: Bool) -> [(key: String, value: String)] {
+        var out: [(key: String, value: String)] = []
+        let id = remote.id
+        let pairs: [(CredentialKind, String, TimeInterval, String)] = [
+            (.password, remote.password, remote.passwordChangedAt, local?.effectivePassword ?? ""),
+            (.apiKey, remote.apiKey, remote.apiKeyChangedAt, local?.baseApiKey ?? "")
+        ]
+        for (kind, value, remoteStamp, localValue) in pairs {
+            let rejected = kind == .apiKey && !value.isEmpty && DispatcharrRequestGate.shared.isKeyRejected(value)
+            let localRejected = kind == .apiKey && !localValue.isEmpty && DispatcharrRequestGate.shared.isKeyRejected(localValue)
+            let localStamp = local == nil ? 0 : Self.credentialChangedAt(kind, id)
+            guard CredentialSyncRule.adoptRemote(remote: value, remoteStamp: remoteStamp,
+                                                 local: localValue, localStamp: localStamp,
+                                                 legacyRemoteNewer: legacyRemoteNewer, replace: replace,
+                                                 rejected: rejected, localRejected: localRejected) else {
+                if rejected { debugLog("[SYNC] iCloud carries a rejected API key for \(id.uuidString.prefix(8)); not stored") }
+                else if !value.isEmpty, value != localValue {
+                    debugLog("[SYNC] kept this device's \(kind.rawValue) for \(id.uuidString.prefix(8)): iCloud's is not newer (cloud=\(Int(remoteStamp)) local=\(Int(localStamp)))")
+                }
+                continue
+            }
+            if localRejected {
+                debugLog("[SYNC] adopting iCloud's apiKey for \(id.uuidString.prefix(8)): the server rejected this device's key")
+            }
+            if remoteStamp > 0 { Self.setCredentialChangedAt(kind, id, remoteStamp) }
+            out.append(("\(kind.rawValue)_\(id.uuidString)", value))
+        }
+        return out
     }
 
     func saveCredentialsSynced(for server: ServerConnection) {
@@ -1137,6 +1747,16 @@ final class SyncManager: ObservableObject {
         let pw  = server.password.isEmpty ? server.effectivePassword : server.password
         let key = server.apiKey.isEmpty ? server.baseApiKey : server.apiKey
         let id  = server.id.uuidString
+        // A changed value records its change time, so iCloud never lets an
+        // older copy from another device replace it (CredentialSyncRule).
+        let now = Date().timeIntervalSince1970
+        if !pw.isEmpty, pw != ServerConnection.resolveCredential(key: "password_\(id)", fallback: "") {
+            Self.setCredentialChangedAt(.password, server.id, now)
+        }
+        if !key.isEmpty, key != ServerConnection.resolveCredential(key: "apiKey_\(id)", fallback: "") {
+            Self.setCredentialChangedAt(.apiKey, server.id, now)
+        }
+        let keyRejected = !key.isEmpty && DispatcharrRequestGate.shared.isKeyRejected(key)
 
         // Only drop the in-memory copy AFTER the credential is safely
         // persisted to the LOCAL keychain (the canonical store that
@@ -1156,7 +1776,11 @@ final class SyncManager: ObservableObject {
         }
         if !key.isEmpty {
             let localOK = KeychainHelper.save(key, for: "apiKey_\(id)")
-            KeychainHelper.save(key, for: "apiKey_\(id)", synchronizable: true)
+            if keyRejected {
+                debugLog("[SYNC] API key for \(id.prefix(8)) is held as rejected; saved on this device only, not to iCloud Keychain")
+            } else {
+                KeychainHelper.save(key, for: "apiKey_\(id)", synchronizable: true)
+            }
             if localOK {
                 server.apiKey = ""
             } else {
@@ -1169,6 +1793,131 @@ final class SyncManager: ObservableObject {
 
     private func serialize(_ server: ServerConnection) -> [String: Any] {
         debugLog("🔵 SyncManager.serialize: \(server.name), thread=\(Thread.current)")
+        var dict = serializeRecord(server)
+        let changed = Self.serverChangedAt(server.id.uuidString, record: dict)
+        if changed > 0 { dict["_changedAt"] = changed }
+        appendCredentials(server, to: &dict)
+        return dict
+    }
+
+    // MARK: - Playlist change times (2026-11-10)
+
+    /// Fields that change without the playlist changing (or have their own rule).
+    private static let volatileServerKeys: Set<String> = [
+        "lastConnected", "isActive", "_password", "_apiKey", "_passwordChangedAt", "_apiKeyChangedAt", "_changedAt",
+        "dispatcharrAccountUsername"
+    ]
+
+    nonisolated static func legacyServerStamp(_ row: [String: Any]) -> TimeInterval {
+        row["lastConnected"] as? TimeInterval ?? row["createdAt"] as? TimeInterval ?? 0
+    }
+
+    /// A row's change time: its own, else the shipped rule's date for an older build's row.
+    nonisolated static func serverRowStamp(_ row: [String: Any]) -> TimeInterval {
+        if let t = row["_changedAt"] as? TimeInterval, t > 0 { return t }
+        return legacyServerStamp(row)
+    }
+
+    /// When this playlist's synced fields last changed here (0: unknown), from
+    /// the record's fingerprint against the one last recorded. A first
+    /// sighting is of unknown age: 0, never "now" (the merge then uses the
+    /// shipped rule's date, `serverRowStamp`).
+    private static func serverChangedAt(_ id: String, record: [String: Any]) -> TimeInterval {
+        let fp = PrefsSyncClock.fingerprint(record.filter { !volatileServerKeys.contains($0.key) })
+        var fps = UserDefaults.standard.dictionary(forKey: serverFingerprintsKey) as? [String: String] ?? [:]
+        let stamps = serverStamps
+        if fps[id] == fp, let t = stamps.touched[id] { return t }
+        let t: TimeInterval = fps[id] == nil ? (stamps.touched[id] ?? 0) : Date().timeIntervalSince1970
+        fps[id] = fp
+        UserDefaults.standard.set(fps, forKey: serverFingerprintsKey)
+        stamps.touch(id, at: t)
+        return t
+    }
+
+    /// A playlist record just adopted from iCloud: its fields are the synced
+    /// state at the sender's change time, not a local change.
+    func noteServerAdopted(_ server: ServerConnection, changedAt: TimeInterval) {
+        let record = serializeRecord(server)
+        let fp = PrefsSyncClock.fingerprint(record.filter { !Self.volatileServerKeys.contains($0.key) })
+        var fps = UserDefaults.standard.dictionary(forKey: Self.serverFingerprintsKey) as? [String: String] ?? [:]
+        fps[server.id.uuidString] = fp
+        UserDefaults.standard.set(fps, forKey: Self.serverFingerprintsKey)
+        Self.serverStamps.touch(server.id.uuidString, at: changedAt)
+    }
+
+    /// The playlist's identity for the one-playlist rule (PlaylistIdentity):
+    /// never the key itself, only its fingerprint.
+    func playlistIdentityRow(_ s: ServerConnection) -> PlaylistIdentity.Row {
+        let type = s.type == .dispatcharrAPI ? "dispatcharr" : (s.type == .xtreamCodes ? "xtream" : "m3u")
+        var user = s.username
+        if s.type == .dispatcharrAPI, user.trimmingCharacters(in: .whitespaces).isEmpty {
+            user = DispatcharrAccountFactsStore.load(s.id).username
+        }
+        let key = s.type == .dispatcharrAPI ? s.baseApiKey : ""
+        return .init(id: s.id.uuidString, type: type, url: s.baseURL, username: user,
+                     apiKeyFP: PlaylistIdentity.keyFingerprint(key),
+                     changedAt: Self.serverStamps.touched[s.id.uuidString] ?? 0,
+                     createdAt: s.createdAt.timeIntervalSince1970)
+    }
+
+    /// A playlist merged into another here: its deletion time is now, so
+    /// every device converges. The winner is remembered: if another device
+    /// picked the opposite (their stamps briefly differed) and sends a
+    /// deletion time for it, it is kept and re-sent live, never lost.
+    func notePlaylistMergedAway(_ id: String, into winner: String) {
+        let st = Self.serverStamps
+        var live = st.known ?? []
+        live.remove(id)
+        st.settle(live: live, removed: [id: Date().timeIntervalSince1970])
+        var map = UserDefaults.standard.dictionary(forKey: Self.playlistMergedIntoKey) as? [String: String] ?? [:]
+        map[id] = winner
+        UserDefaults.standard.set(map, forKey: Self.playlistMergedIntoKey)
+    }
+
+    private static let playlistMergedIntoKey = "syncPlaylistMergedInto.v1"
+
+    /// True when this device merged another playlist into [id]: a deletion
+    /// time for it is the other device's opposite pick. It stays, with a
+    /// fresh change time so it wins and every device converges on it.
+    func keepMergedWinner(_ id: String) -> Bool {
+        let map = UserDefaults.standard.dictionary(forKey: Self.playlistMergedIntoKey) as? [String: String] ?? [:]
+        guard map.values.contains(id) else { return false }
+        Self.serverStamps.touch(id, at: Date().timeIntervalSince1970)
+        debugLog("[SYNC] kept playlist \(id.prefix(8)): another device merged it away while this one merged into it")
+        return true
+    }
+
+    /// The pull plan for playlists (AerioApp mergeRemoteServers): per
+    /// playlist, newest change or deletion wins, a tie keeps iCloud's.
+    /// `newer`: the playlists whose iCloud record is strictly newer than
+    /// this device's (the only ones whose fields are copied).
+    func serverMergePlan(remote: [SyncedServer], local: [ServerConnection]) -> (picks: [String: LaneMerge.Pick], newer: Set<String>) {
+        let now = Date().timeIntervalSince1970
+        let stamps = Self.serverStamps
+        var localStamps: [String: TimeInterval] = [:]
+        for s in local where !s.isGone {
+            let record = serializeRecord(s)
+            let t = Self.serverChangedAt(s.id.uuidString, record: record)
+            localStamps[s.id.uuidString] = t > 0 ? t : Self.legacyServerStamp(record)
+        }
+        stamps.observe(live: Set(localStamps.keys), now: now)
+        let remoteStamps = Dictionary(remote.map { ($0.id.uuidString, $0.stamp) }, uniquingKeysWith: { max($0, $1) })
+        let removed = NSUbiquitousKeyValueStore.default.dictionary(forKey: Self.serversRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+        let picks = LaneMerge.plan(local: .init(live: localStamps, removed: stamps.removed),
+                                   remote: .init(live: remoteStamps, removed: removed),
+                                   base: Self.loadSeen("playlists"), now: now)
+        let newer = Set(remoteStamps.filter { k, t in localStamps[k].map { t > $0 } ?? true }.keys)
+        return (picks, newer)
+    }
+
+    /// After the playlist merge: settle what it applied and record what iCloud had.
+    func noteServersMerged(remote: [SyncedServer], liveAfter: Set<String>, removedApplied: [String: TimeInterval]) {
+        Self.serverStamps.settle(live: liveAfter, removed: removedApplied)
+        Self.saveSeen("playlists", Dictionary(remote.map { ($0.id.uuidString, $0.stamp) }, uniquingKeysWith: { max($0, $1) }))
+    }
+
+    /// The playlist's own fields (no credentials, no change time).
+    private func serializeRecord(_ server: ServerConnection) -> [String: Any] {
         var dict: [String: Any] = [
             "id": server.id.uuidString,
             "name": server.name,
@@ -1272,6 +2021,16 @@ final class SyncManager: ObservableObject {
         dict["defaultRecordingDestination"] = server.defaultRecordingDestinationRaw
         dict["vodEnabled"] = server.vodEnabled
         dict["catchupTimeOffsetMinutes"] = CatchupSupport.timeOffsetMinutes(serverID: server.id)
+        // The Dispatcharr account (users/me) so another device can tell this
+        // is the same playlist (one-playlist rule); not a secret.
+        if server.type == .dispatcharrAPI {
+            let u = DispatcharrAccountFactsStore.load(server.id).username
+            if !u.isEmpty { dict["dispatcharrAccountUsername"] = u }
+        }
+        return dict
+    }
+
+    private func appendCredentials(_ server: ServerConnection, to dict: inout [String: Any]) {
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -1305,10 +2064,18 @@ final class SyncManager: ObservableObject {
         if SyncCategory.credentials.isEnabled {
             let pw  = server.effectivePassword
             let key = server.baseApiKey
-            if !pw.isEmpty  { dict["_password"] = pw }
-            if !key.isEmpty { dict["_apiKey"]   = key }
+            if !pw.isEmpty {
+                dict["_password"] = pw
+                let t = Self.credentialChangedAt(.password, server.id)
+                if t > 0 { dict["_passwordChangedAt"] = t }
+            }
+            // A key the server refused is never carried to iCloud.
+            if !key.isEmpty, !DispatcharrRequestGate.shared.isKeyRejected(key) {
+                dict["_apiKey"] = key
+                let t = Self.credentialChangedAt(.apiKey, server.id)
+                if t > 0 { dict["_apiKeyChangedAt"] = t }
+            }
         }
-        return dict
     }
 
     private nonisolated func deserialize(_ dict: [String: Any]) -> SyncedServer? {
@@ -1380,7 +2147,13 @@ final class SyncManager: ObservableObject {
             epgRetentionDays: dict["epgRetentionDays"] as? Int ?? 7,
             defaultRecordingDestinationRaw: dict["defaultRecordingDestination"] as? String,
             vodEnabled: dict["vodEnabled"] as? Bool,
-            catchupTimeOffsetMinutes: dict["catchupTimeOffsetMinutes"] as? Int
+            catchupTimeOffsetMinutes: dict["catchupTimeOffsetMinutes"] as? Int,
+            // Absent (older sender, or never changed since this rule): 0.
+            passwordChangedAt: dict["_passwordChangedAt"] as? TimeInterval ?? 0,
+            apiKeyChangedAt: dict["_apiKeyChangedAt"] as? TimeInterval ?? 0,
+            changedAt: Self.serverRowStamp(dict),
+            knownChangedAt: dict["_changedAt"] as? TimeInterval ?? 0,
+            accountUsername: dict["dispatcharrAccountUsername"] as? String ?? ""
         )
     }
 
@@ -1455,18 +2228,40 @@ final class SyncManager: ObservableObject {
             return
         }
 
-        let payload = entries.map { serializeWatchProgress($0) }
+        let payload = entries.filter { !$0.isDeleted }.map { serializeWatchProgress($0) }
+        let localRows = WatchProgressSyncMerge.byKey(payload, key: WatchProgressSyncMerge.key, stamp: WatchProgressSyncMerge.stamp)
+        // A row removed here since the last look gets its deletion time now,
+        // before any wait, so the removal is never mistaken for an absence.
+        Self.progressStamps.observe(live: Set(localRows.keys), now: Date().timeIntervalSince1970)
+        guard mergedBeforePush(.serversAndProgress) else { return }
+
         CloudSnapshotSync.shared.follow(.watchProgress, "progress local")
-        nonisolated(unsafe) let capturedPayload = payload
+        nonisolated(unsafe) let capturedRows = localRows
+        // What this device had seen in iCloud when it took this snapshot.
+        let seen = Self.loadSeen("watchProgress")
 
         watchProgressPushDebounce?.cancel()
         let key = watchProgressKVSKey
-        let work = DispatchWorkItem { [weak self] in
+        let work = DispatchWorkItem {
             MainActor.assumeIsolated {
-                self?.lastPushTime = ProcessInfo.processInfo.systemUptime
+                SyncManager.shared.lastPushTime = ProcessInfo.processInfo.systemUptime
+                // Re-read right before the write and merge per entry (newest
+                // wins, a tie keeps iCloud's, deletions by their time), so
+                // nothing another device changed in between is lost.
+                let store = NSUbiquitousKeyValueStore.default
+                let now = Date().timeIntervalSince1970
+                let remote = WatchProgressSyncMerge.byKey(store.array(forKey: key) as? [[String: Any]] ?? [],
+                                                          key: WatchProgressSyncMerge.key, stamp: WatchProgressSyncMerge.stamp)
+                let remoteRemoved = store.dictionary(forKey: SyncManager.progressRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+                let stamps = SyncManager.progressStamps
+                stamps.prune(now: now)
+                let r = LaneMerge.forPush(local: capturedRows, localRemoved: stamps.removed, remote: remote,
+                                          remoteRemoved: remoteRemoved, base: seen, stamp: WatchProgressSyncMerge.stamp, now: now)
+                store.set(r.rows, forKey: key)
+                store.set(r.removed, forKey: SyncManager.progressRemovedKVSKey)
+                SyncManager.saveSeen("watchProgress", r.base)
+                debugLog("🔵 SyncManager: pushed \(r.rows.count) watch progress entries to KVS (local=\(capturedRows.count) keptFromCloud=\(r.keptFromCloud) deletions=\(r.removed.count))")
             }
-            NSUbiquitousKeyValueStore.default.set(capturedPayload, forKey: key)
-            debugLog("🔵 SyncManager: pushed \(capturedPayload.count) watch progress entries to KVS")
         }
         watchProgressPushDebounce = work
         // Manual (immediate) pushes drive the Settings > Sync progress
@@ -1512,8 +2307,9 @@ final class SyncManager: ObservableObject {
         // apply in either mode. An EMPTY array during a replace is meaningful
         // ("the authoritative device has no progress"), so it falls through
         // to the delete pass below instead of returning early.
-        guard let remoteEntries else { return }
-        guard replace || !remoteEntries.isEmpty else { return }
+        let remoteRemoved = NSUbiquitousKeyValueStore.default.dictionary(forKey: Self.progressRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+        guard let remoteEntries = remoteEntries ?? (remoteRemoved.isEmpty ? nil : []) else { return }
+        guard replace || !remoteEntries.isEmpty || !remoteRemoved.isEmpty else { return }
         guard !cloudPullBlocked(.watchProgress, ignoreOwnership: ignoreOwnership) else { return }
         guard let context = WatchProgressManager.modelContext else { return }
         // v1.6.17, granular per-category gate. Local watch progress
@@ -1553,9 +2349,26 @@ final class SyncManager: ObservableObject {
             uniquingKeysWith: { a, b in a.updatedAt >= b.updatedAt ? a : b }
         )
 
+        // Per entry (LaneMerge): the newest change or deletion wins, a tie
+        // keeps iCloud's; an entry added here and not pushed yet survives; one
+        // deleted here is not re-inserted. Absence deletes only once a pull
+        // recorded what iCloud had. A replace keeps the cloud authoritative.
+        let now = Date().timeIntervalSince1970
+        let stamps = Self.progressStamps
+        let localStamps = localByID.mapValues { $0.updatedAt.timeIntervalSince1970 }
+        let remoteStamps = remoteByID.mapValues { $0.updatedAt.timeIntervalSince1970 }
+        stamps.observe(live: Set(localStamps.keys), now: now)
+        let plan = LaneMerge.plan(local: .init(live: localStamps, removed: stamps.removed),
+                                  remote: .init(live: remoteStamps, removed: remoteRemoved),
+                                  base: Self.loadSeen("watchProgress"), now: now)
+        var liveAfter = Set(localStamps.keys)
+
         // Upsert remote → local
-        for remote in remotes {
-            if let local = localByID[compositeKey(remote.vodID, remote.serverID)] {
+        for remote in remoteByID.values {
+            let ck = compositeKey(remote.vodID, remote.serverID)
+            if !replace, plan[ck] != .remote { continue }
+            liveAfter.insert(ck)
+            if let local = localByID[ck] {
                 // Conflict: most recent updatedAt wins. A replace is the user
                 // declaring the cloud authoritative, so remote wins outright.
                 if replace || remote.updatedAt > local.updatedAt {
@@ -1584,15 +2397,35 @@ final class SyncManager: ObservableObject {
             }
         }
 
-        // Delete locals that are absent from remote (deleted on other device)
+        // Delete locals deleted on another device: absent from remote, seen
+        // there before, and not changed here since.
+        var deleted = 0
+        var applied: [String: TimeInterval] = [:]
         for local in locals {
-            if !remoteKeys.contains(compositeKey(local.vodID, local.serverID)) {
+            let ck = compositeKey(local.vodID, local.serverID)
+            let drop: Bool
+            if replace {
+                drop = !remoteKeys.contains(ck)
+            } else {
+                switch plan[ck] {
+                case .removed(let t)?: drop = true; applied[ck] = t
+                case .gone?: drop = true
+                default: drop = false
+                }
+            }
+            if drop {
                 context.delete(local)
+                liveAfter.remove(ck)
+                deleted += 1
             }
         }
+        // What this merge applied is the synced state, not a local change.
+        for (k, p) in plan { if case .removed(let t) = p { applied[k] = max(applied[k] ?? 0, t) } }
+        stamps.settle(live: liveAfter, removed: applied)
+        Self.saveSeen("watchProgress", remoteStamps)
 
         try? context.save()
-        debugLog("🔵 SyncManager: merged \(remotes.count) remote watch progress entries")
+        debugLog("🔵 SyncManager: merged \(remotes.count) remote watch progress entries (deleted here=\(deleted))")
 
         NotificationCenter.default.post(name: .syncManagerDidUpdateWatchProgress, object: nil)
     }
@@ -1608,29 +2441,48 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.pushReminders: category disabled by user")
             return
         }
-
         let reminders = ReminderManager.shared.syncableReminders
+        // A reminder cancelled here since the last look gets its deletion time now.
+        Self.reminderStamps.observe(live: Set(reminders.keys), now: Date().timeIntervalSince1970)
+        guard mergedBeforePush(.reminders) else { return }
+
         CloudSnapshotSync.shared.follow(.reminders, "reminders local")
-        var payload: [[String: Any]] = []
+        var localRows: [String: [String: Any]] = [:]
         for (key, r) in reminders {
-            payload.append([
+            localRows[key] = [
                 "key": key,
                 "programTitle": r.programTitle,
                 "channelName": r.channelName,
                 "startTime": r.startTime.timeIntervalSince1970,
                 "updatedAt": r.updatedAt.timeIntervalSince1970
-            ])
+            ]
         }
-        nonisolated(unsafe) let capturedPayload = payload
+        nonisolated(unsafe) let capturedRows = localRows
+        let seen = Self.loadSeen("reminders")
 
         reminderPushDebounce?.cancel()
         let key = reminderKVSKey
         let work = DispatchWorkItem {
             MainActor.assumeIsolated {
                 SyncManager.shared.lastPushTime = ProcessInfo.processInfo.systemUptime
+                // Re-read and merge per reminder, like watch progress.
+                let store = NSUbiquitousKeyValueStore.default
+                let now = Date().timeIntervalSince1970
+                let remote = SyncManager.reminderRows(store.array(forKey: key) as? [[String: Any]] ?? [])
+                let remoteRemoved = store.dictionary(forKey: SyncManager.remindersRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+                let stamps = SyncManager.reminderStamps
+                stamps.prune(now: now)
+                let r = LaneMerge.forPush(local: capturedRows, localRemoved: stamps.removed, remote: remote,
+                                          remoteRemoved: remoteRemoved, base: seen, stamp: SyncManager.reminderStamp, now: now)
+                // A reminder whose program started over a day ago is spent.
+                let live = r.rows.filter {
+                    SyncMerge.keepReminder(removedAt: nil, endMs: Int64(($0["startTime"] as? TimeInterval ?? 0) * 1000), nowMs: Int64(now * 1000))
+                }
+                store.set(live, forKey: key)
+                store.set(r.removed, forKey: SyncManager.remindersRemovedKVSKey)
+                SyncManager.saveSeen("reminders", r.base)
+                debugLog("🔵 SyncManager: pushed \(live.count) reminders to KVS (local=\(capturedRows.count) keptFromCloud=\(r.keptFromCloud) deletions=\(r.removed.count))")
             }
-            NSUbiquitousKeyValueStore.default.set(capturedPayload, forKey: key)
-            debugLog("🔵 SyncManager: pushed \(capturedPayload.count) reminders to KVS")
         }
         reminderPushDebounce = work
         // Manual (immediate) pushes drive the Settings > Sync progress
@@ -1654,7 +2506,9 @@ final class SyncManager: ObservableObject {
 
     /// Merge remote reminders from iCloud into local ReminderManager.
     private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?, ignoreOwnership: Bool = false) {
-        guard let remoteEntries else { return }
+        // Deletion times alone (every reminder cancelled) still apply.
+        let hasRemovals = NSUbiquitousKeyValueStore.default.dictionary(forKey: Self.remindersRemovedKVSKey) != nil
+        guard let remoteEntries = remoteEntries ?? (hasRemovals ? [] : nil) else { return }
         guard !cloudPullBlocked(.reminders, ignoreOwnership: ignoreOwnership) else { return }
         // v1.6.17, granular per-category gate.
         guard SyncCategory.reminders.isEnabled else {
@@ -1680,8 +2534,40 @@ final class SyncManager: ObservableObject {
             )
         }
 
-        ReminderManager.shared.mergeRemote(remoteReminders)
-        debugLog("🔵 SyncManager: merged \(remoteReminders.count) remote reminders")
+        // Per reminder (LaneMerge): newest change or cancel wins, a tie keeps
+        // iCloud's; one set here and not pushed yet survives; one cancelled
+        // here is not re-added. ReminderManager then makes the device match.
+        let now = Date().timeIntervalSince1970
+        let stamps = Self.reminderStamps
+        let local = ReminderManager.shared.syncableReminders
+        stamps.observe(live: Set(local.keys), now: now)
+        let remoteRemoved = NSUbiquitousKeyValueStore.default.dictionary(forKey: Self.remindersRemovedKVSKey) as? [String: TimeInterval] ?? [:]
+        let remoteStamps = remoteReminders.mapValues { $0.updatedAt.timeIntervalSince1970 }
+        let plan = LaneMerge.plan(local: .init(live: local.mapValues { $0.updatedAt.timeIntervalSince1970 }, removed: stamps.removed),
+                                  remote: .init(live: remoteStamps, removed: remoteRemoved),
+                                  base: Self.loadSeen("reminders"), now: now)
+        var wanted: [String: SyncableReminder] = [:]
+        var applied: [String: TimeInterval] = [:]
+        for (k, p) in plan {
+            switch p {
+            case .local: wanted[k] = local[k]
+            case .remote: wanted[k] = remoteReminders[k]
+            case .removed(let t): applied[k] = t
+            case .gone: break
+            }
+        }
+        ReminderManager.shared.mergeRemote(wanted)
+        stamps.settle(live: Set(wanted.keys), removed: applied)
+        Self.saveSeen("reminders", remoteStamps)
+        debugLog("🔵 SyncManager: merged \(remoteReminders.count) remote reminders (kept=\(wanted.count) deletions=\(applied.count))")
+    }
+
+    nonisolated static func reminderRows(_ list: [[String: Any]]) -> [String: [String: Any]] {
+        WatchProgressSyncMerge.byKey(list, key: { $0["key"] as? String }, stamp: reminderStamp)
+    }
+
+    nonisolated static func reminderStamp(_ row: [String: Any]) -> TimeInterval {
+        row["updatedAt"] as? TimeInterval ?? 0
     }
 
     // MARK: - Active Pull (foreground resume)
@@ -1747,6 +2633,7 @@ final class SyncManager: ObservableObject {
                 SyncManager.shared.endActivity(
                     failure: "Nothing to pull yet. iCloud has no data from your other devices."
                 )
+                SyncManager.shared.noteMerged("pull, iCloud had nothing")
                 return
             }
 
@@ -1761,6 +2648,7 @@ final class SyncManager: ObservableObject {
             await Task.yield()
             SyncManager.shared.mergeRemoteReminders(reminders, ignoreOwnership: ignoreOwnership)
             debugLog("🔵 SyncManager.pullFromCloud: \(replace ? "replace" : "merge") complete")
+            SyncManager.shared.noteMerged("pull")
         }
     }
 
@@ -1850,6 +2738,18 @@ struct SyncedServer: Sendable {
     let defaultRecordingDestinationRaw: String?
     let vodEnabled: Bool?
     let catchupTimeOffsetMinutes: Int?
+    /// When the sending device last changed each credential (0 = unknown),
+    /// so an older copy never replaces a newer one (CredentialSyncRule).
+    var passwordChangedAt: TimeInterval = 0
+    var apiKeyChangedAt: TimeInterval = 0
+    /// The record's change time (its own, else lastConnected or createdAt
+    /// for an older build's row).
+    var changedAt: TimeInterval = 0
+    var stamp: TimeInterval { changedAt }
+    /// Its own change time only (0 unknown), for the one-playlist winner pick.
+    var knownChangedAt: TimeInterval = 0
+    /// The Dispatcharr account username, when the sender knew it.
+    var accountUsername: String = ""
 
     /// Applies the optional per-playlist fields to a local server record.
     @MainActor func applyPlaylistSettings(to server: ServerConnection) {
@@ -1866,6 +2766,8 @@ extension Notification.Name {
     static let syncManagerDidReceiveRemoteServers = Notification.Name("syncManagerDidReceiveRemoteServers")
     static let syncManagerDidApplyPreferences = Notification.Name("syncManagerDidApplyPreferences")
     static let syncManagerNeedsPush = Notification.Name("syncManagerNeedsPush")
+    /// ProfileManager finished switching a playlist's profile (data swapped).
+    static let aerioProfileDidSwitch = Notification.Name("aerioProfileDidSwitch")
     static let stopPlaybackForBackground = Notification.Name("stopPlaybackForBackground")
     static let watchProgressDidChange = Notification.Name("watchProgressDidChange")
     static let syncManagerDidUpdateWatchProgress = Notification.Name("syncManagerDidUpdateWatchProgress")

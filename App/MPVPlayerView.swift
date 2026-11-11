@@ -2282,6 +2282,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var limitProbeFired = false
         private var limitProbeGate: DispatchSemaphore?
 
+        /// The headers for the next open: a replaced key swapped for its
+        /// successor (StreamKeyGate). nil while the key is held as
+        /// rejected: play() stops before any load, and probes skip.
+        private var openHeaders: [String: String]? {
+            if case .send(let h) = StreamKeyGate.headersForOpen(headers) { return h }
+            return nil
+        }
+
+        /// Re-sets mpv's request headers before a load (key replaced).
+        private func applyHeaderFields(_ h: [String: String], to mpv: OpaquePointer) {
+            let custom = h.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            let list = custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
+            mpv_set_property_string(mpv, "http-header-fields", list)
+        }
+
         /// Stop mpv for good and hand the notice to the tile. No retry,
         /// no failover, no reconnect; Retry is `liveStopRetryAction`.
         private func stopForLiveNotice(_ notice: LiveStopNotice, reason: String) {
@@ -2318,11 +2333,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// server that ignores Range still gets cut off by the small
         /// timeout + immediate cancel after the first chunk.
         private func probeStreamResponse(url: URL) {
-            guard !streamProbeFired else { return }
+            guard !streamProbeFired, let sendHeaders = openHeaders else { return }
             streamProbeFired = true
             var request = URLRequest(url: url, timeoutInterval: 5)
             request.setValue("bytes=0-511", forHTTPHeaderField: "Range")
-            for (key, value) in headers {
+            for (key, value) in sendHeaders {
                 request.setValue(value, forHTTPHeaderField: key)
             }
             let tag = streamTag
@@ -5843,7 +5858,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 checkError(mpv_set_option_string(mpv, "user-agent", ua))
             }
-            let preInitCustomHeaders = headers.filter {
+            let preInitCustomHeaders = (openHeaders ?? headers).filter {
                 $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame &&
                 $0.key.caseInsensitiveCompare(startFromBeginningHeader) != .orderedSame
             }
@@ -6273,7 +6288,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 mpv_set_property_string(mpv, "user-agent", ua)
             }
-            let customHeaders = headers.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            let customHeaders = (openHeaders ?? headers).filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
             if !customHeaders.isEmpty {
                 let headerList = customHeaders.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
                 mpv_set_property_string(mpv, "http-header-fields", headerList)
@@ -6364,7 +6379,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 channelID: url.absoluteString,
                 channelName: nowPlayingTitle,
                 streamURL: url,
-                headers: headers)
+                headers: openHeaders ?? headers)
             if started {
                 liveRewindActive = true
                 liveRewindTailRetuneUsed = false
@@ -6486,6 +6501,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func play(url: URL) {
             guard let mpv = activeMPVHandle() else { return }
 
+            // Every open re-reads the key (StreamKeyGate, 2026-11-10): a
+            // replaced key goes out as its successor, and a key held as
+            // rejected is never sent again (the playlist prompts).
+            if StreamKeyGate.apiKey(in: headers) != nil {
+                switch StreamKeyGate.headersForOpen(headers) {
+                case .held:
+                    stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")
+                    return
+                case .send(let h):
+                    if h != headers { applyHeaderFields(h, to: mpv) }
+                }
+            }
+
             // Live Rewind: route fullscreen single live playback through
             // the app-owned buffer connection. The engine opens the ONE
             // provider stream and mpv consumes the buffer via aeriots://,
@@ -6499,7 +6527,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // Task #149: remember the live session URL for seek
                 // re-mints and the teardown revoke (native path only).
                 if cu.nativeChannelUUID != nil { catchupCurrentURL = url }
-                CatchupRelay.currentHeaders = headers
+                CatchupRelay.currentHeaders = openHeaders ?? headers
                 url = CatchupRelay.wrap(url)
                 debugLog("[CATCHUP] playing via aeriocu relay")
             }
@@ -7427,16 +7455,32 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if endFile.error == MPV_ERROR_LOADING_FAILED.rawValue,
                    isLive, catchup == nil, !isDVR, !limitProbeFired,
                    DispatcharrConnectionLimit.directConnectActive,
-                   currentIndex < urls.count {
+                   currentIndex < urls.count, let probeHeaders = openHeaders {
                     limitProbeFired = true
                     let gate = DispatchSemaphore(value: 0)
                     limitProbeGate = gate
                     let tag = streamTag
-                    DispatcharrLimitProbe.run(url: urls[currentIndex], headers: headers,
+                    DispatcharrLimitProbe.run(url: urls[currentIndex], headers: probeHeaders,
                                               owner: "mpv-limit-probe") { [weak self] notice, summary in
                         debugLog("[LIMIT] mpv load-failure probe \(tag): \(summary)\(notice.map { " -> \($0.kind.rawValue)" } ?? "")")
                         if let notice {
                             self?.stopForLiveNotice(notice, reason: summary)
+                        }
+                        // A 401: the key broker decides (one probe, silent
+                        // re-login, or the hold) before the retry below,
+                        // which re-reads the headers in play().
+                        if notice == nil, summary == "HTTP 401",
+                           StreamKeyGate.apiKey(in: probeHeaders) != nil {
+                            let coordinator = self
+                            Task {
+                                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: probeHeaders)
+                                debugLog("[AUTH] mpv stream 401 \(tag): \(outcome)")
+                                if outcome == .held {
+                                    coordinator?.stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")
+                                }
+                                gate.signal()
+                            }
+                            return
                         }
                         gate.signal()
                     }
@@ -7495,8 +7539,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     DispatchQueue.global(qos: .userInitiated)
                         .asyncAfter(deadline: .now() + delay) { [weak self] in
                             // Never retry beside the limit probe, nor after
-                            // it found a refusal.
-                            _ = probeGate?.wait(timeout: .now() + 5)
+                            // it found a refusal. The bound covers a 401's
+                            // key-broker round (probe plus silent re-login).
+                            _ = probeGate?.wait(timeout: .now() + 20)
                             guard let self, !self.liveStopped else { return }
                             self.play(url: retryURL)
                         }

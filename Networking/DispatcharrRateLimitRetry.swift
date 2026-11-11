@@ -49,10 +49,10 @@ enum DispatcharrRateLimitCopy {
 
     /// Error text for a call the rejected-key gate held locally.
     static let keyRejectedErrorMessage =
-        "The server did not accept this playlist's API key. Enter a new key in Edit Playlist."
+        "Dispatcharr no longer accepts this playlist's API key. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one."
 
     /// Title of the rejected-key prompt.
-    static let keyRejectedTitle = "Sign-in not accepted"
+    static let keyRejectedTitle = "API key no longer valid"
 
     /// Body of the rejected-key prompt (key-only playlist, or a password
     /// playlist whose re-login was refused too). Blank name: "this playlist".
@@ -60,10 +60,12 @@ enum DispatcharrRateLimitCopy {
         let trimmed = playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "this playlist" : playlistName
         if passwordToo {
-            return "The server did not accept the API key or the password for \(name). "
-                + "Enter a new key or password in Edit Playlist to reconnect."
+            return "Dispatcharr no longer accepts the API key or password for \(name). "
+                + "They may have been changed on the server. Enter the current details in Edit Playlist, "
+                + "or ask your Dispatcharr administrator."
         }
-        return "The server did not accept the API key for \(name). Enter a new key in Edit Playlist to reconnect."
+        return "Dispatcharr no longer accepts the API key for \(name). It may have been changed or removed on the server. "
+            + "Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one."
     }
 
     /// Sender status line while it checks the key it is about to send.
@@ -71,8 +73,8 @@ enum DispatcharrRateLimitCopy {
 
     /// Sender copy when the key it would send is refused.
     static let setupKeyRejectedMessage =
-        "The server did not accept this playlist's API key, so it was not sent. "
-            + "Enter a new key in Edit Playlist, then try again."
+        "Dispatcharr no longer accepts this playlist's API key, so it was not sent. "
+            + "Enter the current key in Edit Playlist, then try again."
 }
 
 // MARK: - Countdown retry (interactive flows)

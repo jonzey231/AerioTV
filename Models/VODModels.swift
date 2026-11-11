@@ -1772,6 +1772,23 @@ final class HiddenVODStore: ObservableObject {
         }
     }
 
+    /// One playlist across devices (2026-11-10): a playlist merged into
+    /// another hands its hidden titles over, newest per title. Returns the count moved.
+    @discardableResult
+    func moveServer(from loser: String, to winner: String) -> Int {
+        guard loser != winner, let from = entries[loser], !from.isEmpty else { return 0 }
+        var into = entries[winner] ?? [:]
+        var moved = 0
+        for (k, e) in from where (into[k]?.updatedAt ?? .distantPast) < e.updatedAt {
+            into[k] = e
+            moved += 1
+        }
+        entries[winner] = into
+        entries.removeValue(forKey: loser)
+        persist()
+        return moved
+    }
+
     /// Pull from iCloud (replace): the cloud blob becomes the whole table.
     /// A nil blob means the cloud has nothing hidden, so local clears.
     func replaceWithRemote(_ blob: Data?) {

@@ -382,6 +382,8 @@ struct LiveStopNotice: Equatable, Sendable {
         case streamEnded
         /// A stream 429 lockout that outlasted the automatic retries.
         case rateLimited
+        /// A stream 401 whose key the broker holds as rejected (2026-11-10).
+        case keyRejected
     }
     let kind: Kind
     /// Empty for the rate-limit card: its one line is the message.
@@ -404,6 +406,13 @@ struct LiveStopNotice: Equatable, Sendable {
                        title: "",
                        message: DispatcharrRateLimitCopy.rateLimitedMessage(seconds, reason: reason))
     }
+
+    /// A stream 401 whose key is held as rejected: no further opens with it;
+    /// the playlist's Edit Playlist prompt carries the fix.
+    static let keyRejected = LiveStopNotice(
+        kind: .keyRejected,
+        title: DispatcharrRateLimitCopy.keyRejectedTitle,
+        message: DispatcharrRateLimitCopy.keyRejectedErrorMessage)
 
     /// Stream-limit 429 (no retry): the spec's sentence with the server's count.
     static func streamLimit(count: Int?) -> LiveStopNotice {
@@ -2381,6 +2390,13 @@ struct DispatcharrAPI {
             // that uses it has a stored password. It used to go straight to
             // the hold, so a rotated key held the playlist and prompted
             // until a relaunch, while Android re-signed in within a second.
+            // 2026-11-10: a key proven rejected yields to iCloud's key for
+            // the playlist first (no network), before a re-login or the hold.
+            if case .rejected = probe,
+               let cloudKey = await DispatcharrKeyBroker.adoptCloudKey(replacing: key, serverID: serverID) {
+                debugLog("[AUTH] 401 on an API-key call; key rejected, retrying once with iCloud's key")
+                return try await HTTPRouter.data(for: withApiKey(cloudKey, request), using: session)
+            }
             let ownTarget: (id: UUID, username: String)? = {
                 guard let sid = serverID, let u = savedUsername, !u.isEmpty else { return nil }
                 return (sid, u)

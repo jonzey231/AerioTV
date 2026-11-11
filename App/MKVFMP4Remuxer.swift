@@ -84,8 +84,13 @@ final class MKVRangeFetcher: @unchecked Sendable {
             let why = DispatcharrRequestGate.shared.pausedReason(DispatcharrRequestGate.serverKey(url.absoluteString))
             throw MKVRemuxError(reason: "range fetch HTTP 429 | refusal=lockout | wait=\(paused) | why=\(why.rawValue) | paused")
         }
+        // Headers re-read per request (2026-11-10): a replaced key goes out as
+        // its successor; a key held as rejected is never sent (no request).
+        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+            throw MKVRemuxError(reason: "range fetch HTTP 401 | held")
+        }
         var request = URLRequest(url: url)
-        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in sendHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-\(offset + Int64(length) - 1)", forHTTPHeaderField: "Range")
         var result: Data?
         var error: Error?
@@ -100,6 +105,7 @@ final class MKVRangeFetcher: @unchecked Sendable {
                     reason += MKVStream429.note(url: self.url, body: data,
                                                 retryAfter: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"))
                 }
+                // The tile hands a 401 to the key broker once (TSHLSRemuxer handleStream401).
                 error = MKVRemuxError(reason: reason)
                 return
             }
@@ -323,8 +329,14 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             cond.broadcast()
             return
         }
+        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+            failed = "HTTP 401 on media range | held"
+            debugLog("[AUTH] VOD stream open skipped: this API key is held as rejected")
+            cond.broadcast()
+            return
+        }
         var request = URLRequest(url: url)
-        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        for (k, v) in sendHeaders { request.setValue(v, forHTTPHeaderField: k) }
         request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
         let t = session.dataTask(with: request)
         // Assign INSIDE the lock. The first cut set `task` after unlock,

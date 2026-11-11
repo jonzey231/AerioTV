@@ -129,6 +129,33 @@ eq(SetupProtocol.decodePayload(SetupProtocol.encodePayload(payload)), payload, "
 check(SetupProtocol.decodePayload(Data("not json".utf8)) == nil, "bad payload json")
 check(!String(decoding: SetupProtocol.encodePayload(.init(playlist: .init(type: "m3u", name: "a", url: "b"))), as: UTF8.self).contains("null"),
       "absent optionals are omitted, never null")
+
+// MARK: - Playlist and profile ids (one playlist across devices, 2026-11-10)
+do {
+    let withIds = SetupProtocol.Payload(
+        playlist: .init(type: "dispatcharr", name: "Home", url: "https://tv.example.com", credential: .init(apiKey: "k1"),
+                        id: "0A1B2C3D-0000-4000-8000-000000000001"),
+        profiles: [.init(username: "admin", displayName: "Admin", isDefault: true, id: "P-1")])
+    let json = String(decoding: SetupProtocol.encodePayload(withIds), as: UTF8.self)
+    check(json.contains("\"id\":\"0A1B2C3D-0000-4000-8000-000000000001\""), "playlist.id is sent")
+    check(json.contains("\"id\":\"P-1\""), "profiles[].id is sent")
+    eq(SetupProtocol.decodePayload(SetupProtocol.encodePayload(withIds)), withIds, "ids round trip")
+    // An older sender omits them: the receiver keeps today's behavior.
+    let old = #"{"playlist":{"type":"m3u","name":"a","url":"b"},"profiles":[{"username":"u","displayName":"U"}]}"#
+    let decoded = SetupProtocol.decodePayload(Data(old.utf8))
+    check(decoded?.playlist.id == nil, "older sender: no playlist id")
+    check(decoded?.profiles.first?.id == nil, "older sender: no profile id")
+    // Android's field names are the same ("id" in both objects).
+    let android = #"{"playlist":{"type":"dispatcharr","name":"a","url":"b","id":"X"},"profiles":[{"username":"u","displayName":"U","id":"Y"}]}"#
+    let a2 = SetupProtocol.decodePayload(Data(android.utf8))
+    eq(a2?.playlist.id, "X", "playlist.id read")
+    eq(a2?.profiles.first?.id, "Y", "profiles[].id read")
+    // The sender's profile parts carry each profile's id.
+    let parts = SetupProfileRules.parts([.init(id: "def", username: "a", displayName: "A", role: "admin", isDefault: true),
+                                         .init(id: "kid", username: "k", displayName: "K", role: "child", apiKey: "kk")],
+                                        selected: ["kid"])
+    eq(parts.map(\.id), ["def", "kid"], "profile parts carry the sender's ids")
+}
 do {
     let tv = KA.PrivateKey()
     let env = try SetupProtocol.sealForTv(payload, tvPk: tv.publicKey.rawRepresentation, code: "042917")

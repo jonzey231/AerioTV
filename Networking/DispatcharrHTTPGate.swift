@@ -29,6 +29,18 @@ enum DispatcharrHTTPGate {
         request.setValue("1", forHTTPHeaderField: keyCheckHeader)
     }
 
+    /// Launch: a call carrying a key the iCloud credential merge may
+    /// replace waits for that merge, bounded (CredentialMergeBarrier). The
+    /// gate below then sends the adopted key in its place.
+    static func awaitLaunchCredentialMerge(_ request: URLRequest) async {
+        let key = DispatcharrRequestGate.requestApiKey(xApiKey: request.value(forHTTPHeaderField: "X-API-Key"),
+                                                       authorization: request.value(forHTTPHeaderField: "Authorization"))
+        let waited = await CredentialMergeBarrier.shared.wait(forKey: key)
+        if waited > 0 {
+            debugLog("[SYNC] \(request.httpMethod ?? "GET") \(request.url?.path ?? "?") waited \(Int(waited * 1000)) ms for the iCloud credential merge")
+        }
+    }
+
     /// Gate `request` before it is sent. Returns the request to send (the
     /// marker header removed) or throws without touching the network.
     static func prepare(_ request: URLRequest) throws -> URLRequest {

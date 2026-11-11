@@ -170,13 +170,25 @@ final class CloudSnapshotSync: ObservableObject {
         return ordered + members.filter { !placed.contains($0) }.sorted()
     }
 
-    func buildFavorites() -> CloudFavorites { favoritesSnapshot(favoritesFrom(Self.localPrefs)) }
+    func buildFavorites() -> CloudFavorites { favoritesSnapshot(favoritesFrom(Self.localPrefs), local: true) }
 
-    private func favoritesSnapshot(_ ids: [String]) -> CloudFavorites {
+    private func favoritesSnapshot(_ ids: [String], local: Bool = false) -> CloudFavorites {
         var names: [String: String] = [:]
         for c in ChannelStore.shared.channels where names[c.id] == nil { names[c.id] = c.name }
-        let entries = ids.enumerated().map {
-            CloudFavoriteEntry(channelId: $0.element, channelName: names[$0.element] ?? "", displayOrder: Int64($0.offset), addedAt: 0)
+        // This device's change and removal times (SyncManager.favoriteStamps;
+        // the order's time counts for every favorite, as a reorder moves them).
+        let st = SyncManager.favoriteStamps
+        let orderAt = st.touched["__order"] ?? 0
+        func ms(_ t: TimeInterval) -> Int64? { t > 0 ? Int64(t * 1000) : nil }
+        var entries = ids.enumerated().map {
+            CloudFavoriteEntry(channelId: $0.element, channelName: names[$0.element] ?? "", displayOrder: Int64($0.offset), addedAt: 0,
+                               updatedAt: local ? ms(max(st.touched[$0.element] ?? 0, orderAt)) : nil)
+        }
+        if local {
+            let live = Set(ids)
+            for (id, t) in st.removed.sorted(by: { $0.key < $1.key }) where !live.contains(id) {
+                entries.append(CloudFavoriteEntry(channelId: id, channelName: "", displayOrder: 0, addedAt: 0, removedAt: Int64(t * 1000)))
+            }
         }
         let s = CloudFavorites(envelope: envelope(), entries: entries)
         guard lookup().pid != nil else { return s }
@@ -216,7 +228,15 @@ final class CloudSnapshotSync: ObservableObject {
         let (pid, extra) = dsync.cloudProgressRows()
         let active = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString
         let held = pid != nil && (active == nil || active == pid) ? extra : []
-        let out = CloudCanon.progressSnapshot(enriched, extra: held) { t, id in self.dsync.cachedUuid(t, id) }
+        var out = CloudCanon.progressSnapshot(enriched, extra: held) { t, id in self.dsync.cachedUuid(t, id) }
+        // Rows removed here carry their deletion time (SyncManager.progressStamps, `serverID|vodID`).
+        let live = Set(out.entries.map(\.mergeId))
+        for (k, t) in SyncManager.progressStamps.removed.sorted(by: { $0.key < $1.key }) where !live.contains(k) {
+            let parts = k.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            guard parts.count == 2, !parts[1].contains("://") else { continue }
+            out.entries.append(CloudProgressEntry(videoId: parts[1], title: "", positionMs: 0, durationMs: 0, updatedAt: 0,
+                                                  serverId: parts[0].isEmpty ? nil : parts[0], removedAt: Int64(t * 1000)))
+        }
         if let why {
             let canonical = CloudCanon.progress(out, .init(), nowMs: Self.nowMs()).rows
             let ph = out.entries.filter { DsyncHeld.isPlaceholder($0.videoId) }.count
@@ -226,11 +246,19 @@ final class CloudSnapshotSync: ObservableObject {
     }
 
     func buildReminders() -> CloudReminders {
-        let entries = DsyncLocal.reminders().map { e -> CloudReminderEntry in
+        let set = ReminderManager.shared.syncableReminders
+        var entries = DsyncLocal.reminders().map { e -> CloudReminderEntry in
             let start = Int64(e.info.startTime.timeIntervalSince1970 * 1000)
             // Apple reminders carry no end time: the start stands in (as the Dispatcharr build does).
             return CloudReminderEntry(reminderKey: e.key, channelName: e.info.channelName, programTitle: e.info.programTitle,
-                                      startMillis: start, endMillis: start)
+                                      startMillis: start, endMillis: start,
+                                      updatedAt: set[e.key].map { Int64($0.updatedAt.timeIntervalSince1970 * 1000) })
+        }
+        // Reminders cancelled here carry their deletion time (SyncManager.reminderStamps).
+        let live = Set(entries.map(\.reminderKey))
+        for (k, t) in SyncManager.reminderStamps.removed.sorted(by: { $0.key < $1.key }) where !live.contains(k) {
+            entries.append(CloudReminderEntry(reminderKey: k, channelName: "", programTitle: "", startMillis: 0, endMillis: 0,
+                                              removedAt: Int64(t * 1000)))
         }
         return CloudReminders(envelope: envelope(), entries: entries)
     }
@@ -454,9 +482,9 @@ final class CloudSnapshotSync: ObservableObject {
         var out: [(String, SetupSourceChoice.Category)] = []
         let host = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString
         switch c {
-        case .favorites: if let s = CloudFavorites.decode(text: text) { out.append(("favorites", CloudCanon.favorites(s, .init()))) }
-        case .watchProgress: if let s = CloudProgress.decode(text: text) { out.append(("progress", CloudCanon.progress(s, .init(), nowMs: now))) }
-        case .reminders: if let s = CloudReminders.decode(text: text) { out.append(("reminders", CloudCanon.reminders(s, nowMs: now))) }
+        case .favorites: if let s = CloudFavorites.decode(text: text)?.live { out.append(("favorites", CloudCanon.favorites(s, .init()))) }
+        case .watchProgress: if let s = CloudProgress.decode(text: text)?.live { out.append(("progress", CloudCanon.progress(s, .init(), nowMs: now))) }
+        case .reminders: if let s = CloudReminders.decode(text: text)?.live { out.append(("reminders", CloudCanon.reminders(s, nowMs: now))) }
         case .watchlist:
             if let s = CloudWatchlist.decode(text: text) {
                 out.append(("watchlist", CloudCanon.watchlist(s, .init(), host: host)))
@@ -479,9 +507,9 @@ final class CloudSnapshotSync: ObservableObject {
 
     private func snapshotRows(_ c: DsyncCategory, _ text: String) -> Int {
         switch c {
-        case .favorites: return CloudFavorites.decode(text: text)?.entries.count ?? -1
-        case .watchProgress: return CloudProgress.decode(text: text)?.entries.count ?? -1
-        case .reminders: return CloudReminders.decode(text: text)?.entries.count ?? -1
+        case .favorites: return CloudFavorites.decode(text: text)?.live.entries.count ?? -1
+        case .watchProgress: return CloudProgress.decode(text: text)?.live.entries.count ?? -1
+        case .reminders: return CloudReminders.decode(text: text)?.live.entries.count ?? -1
         case .watchlist: return CloudWatchlist.decode(text: text).map { $0.entries.count + $0.hidden.count } ?? -1
         case .preferences: return CloudPreferences.decode(text: text).map { $0.keys.count + $0.tv.count + $0.mobile.count } ?? -1
         case .playlists, .credentials: return -1
@@ -502,6 +530,12 @@ final class CloudSnapshotSync: ObservableObject {
         // iCloud backs up the default profile only (Android Drive sync runs under defaultOnly).
         if shared && ProfileManager.shared.nonDefaultActive() {
             debugLog("[CLOUD] push \(file) held: a non-default profile is active")
+            return true
+        }
+        // A fresh device never writes before iCloud's copy has reached it.
+        if !SyncManager.shared.firstDownloadDone {
+            heldForDownload.insert(c)
+            debugLog(CloudPushRules.heldLine(file, "iCloud's copy has not reached this device yet"))
             return true
         }
         // Rule 4: never push this device's (not yet chosen) shared data over the backup.
@@ -526,10 +560,148 @@ final class CloudSnapshotSync: ObservableObject {
                 clearReplaceWait(c)
             }
         }
-        guard let text = payload(c, label ?? (waiting ? "replace" : (follows.pending.contains(c) ? "follow" : nil))) else { return false }
+        guard let built = payload(c, label ?? (waiting ? "replace" : (follows.pending.contains(c) ? "follow" : nil))) else { return false }
+        // Merge on write (Logan 2026-11-10, Android mergedPayload): re-read iCloud's copy and merge
+        // per item, newest change time wins, a tie keeps iCloud's; nothing newer here, nothing
+        // written. The explicit replace (the user chose Dispatcharr) writes this device's copy as is.
+        let isReplace = (label ?? (waiting ? "replace" : nil)) == "replace"
+        let text: String
+        if isReplace {
+            text = built
+        } else {
+            switch mergedForWrite(c, built) {
+            case .write(let t): text = t
+            case .nothingNewer:
+                _ = follows.take(c)
+                debugLog("[CLOUD] push \(file): nothing newer than iCloud's copy; not written")
+                return true
+            case .unreadable:
+                debugLog("[CLOUD] push \(file) held: iCloud's copy does not decode (never overwritten unread)")
+                return true
+            }
+        }
         // Atomic file commit: the write, the follow bookkeeping, and the push line run together,
         // with no suspension point in between; turning iCloud off stops only the next file.
-        return commit(c, text, why: label ?? (waiting ? "replace" : nil), follows: follows.take(c))
+        let ok = commit(c, text, why: label ?? (waiting ? "replace" : nil), follows: follows.take(c))
+        if ok, c == .preferences, let p = CloudPreferences.decode(text: text) {
+            UserDefaults.standard.set(PrefKeyMerge.flat(.init(v: p.keys, tv: p.tv, mobile: p.mobile, times: p.times)),
+                                      forKey: Self.prefsBaselineKey)
+        }
+        return ok
+    }
+
+    // MARK: - Merge on write (2026-11-10)
+
+    private var heldForDownload = Set<DsyncCategory>()
+
+    /// iCloud's copy reached this device: the files held for it go out (merged) now.
+    func releaseDownloadHold() {
+        let held = heldForDownload
+        heldForDownload = []
+        for c in CloudCanon.SHARED_FILES where held.contains(c) { follow(c, "first iCloud download") }
+    }
+
+    enum MergedWrite { case write(String), nothingNewer, unreadable }
+
+    /// Preferences: the values last written (per "lane:key") and their change times.
+    private static let prefsBaselineKey = "syncSnapshotPrefsBaseline.v1"
+    private static let prefsTimesKey = "syncSnapshotPrefsTimes.v1"
+
+    /// This device's copy of [c] ([localText]) merged onto iCloud's: what to write, or why not.
+    func mergedForWrite(_ c: DsyncCategory, _ localText: String) -> MergedWrite {
+        let remoteText = readSnapshot(c)
+        let nowMs = Self.nowMs()
+        func env(_ local: CloudEnvelope, _ remote: CloudEnvelope?, _ times: [Int64]) -> CloudEnvelope {
+            var e = local
+            e.lastModified = SyncMerge.mergedTime(remote: remote?.lastModified, items: times)
+            e.format = SyncMerge.mergedFormat(remoteExists: remote != nil, remoteFormat: remote?.format, current: CloudCanon.FORMAT)
+            return e
+        }
+        switch c {
+        case .favorites:
+            guard let local = CloudFavorites.decode(text: localText) else { return .unreadable }
+            let remote = remoteText.flatMap(CloudFavorites.decode(text:))
+            if remoteText != nil && remote == nil { return .unreadable }
+            let merged = SyncMerge.byStamp(remote: remote?.entries ?? [], local: local.entries, id: \.channelId, stamp: \.stamp) { l, r in
+                var x = l
+                if l.isLive, r.isLive, l.dispatcharrChannelId == nil { x.dispatcharrChannelId = r.dispatcharrChannelId }
+                return x
+            }.filter { SyncMerge.keepTombstone(removedAt: $0.removedAt, nowMs: nowMs) }
+            if let remote, merged == remote.entries { return .nothingNewer }
+            return .write(CloudFavorites(envelope: env(local.envelope, remote?.envelope, merged.map(\.stamp)), entries: merged).text)
+        case .watchProgress:
+            guard let local = CloudProgress.decode(text: localText) else { return .unreadable }
+            let remote = remoteText.flatMap(CloudProgress.decode(text:))
+            if remoteText != nil && remote == nil { return .unreadable }
+            let merged = SyncMerge.byStamp(remote: remote?.entries ?? [], local: local.entries, id: \.mergeId, stamp: \.stamp) { l, r in
+                var x = l
+                if l.isLive, r.isLive, l.dispatcharrVodId == nil { x.dispatcharrVodId = r.dispatcharrVodId }
+                return x
+            }.filter { SyncMerge.keepTombstone(removedAt: $0.removedAt, nowMs: nowMs) }
+            if let remote, merged == remote.entries { return .nothingNewer }
+            return .write(CloudProgress(envelope: env(local.envelope, remote?.envelope, merged.map(\.stamp)), entries: merged).text)
+        case .reminders:
+            guard let local = CloudReminders.decode(text: localText) else { return .unreadable }
+            let remote = remoteText.flatMap(CloudReminders.decode(text:))
+            if remoteText != nil && remote == nil { return .unreadable }
+            func keep(_ list: [CloudReminderEntry]) -> [CloudReminderEntry] {
+                list.filter { SyncMerge.keepReminder(removedAt: $0.removedAt, endMs: $0.endMillis, nowMs: nowMs) }
+            }
+            let merged = keep(SyncMerge.byStamp(remote: remote?.entries ?? [], local: local.entries, id: \.reminderKey, stamp: \.stamp))
+            // Spent reminders dropping out alone is no reason to write.
+            if let remote, merged == keep(remote.entries) { return .nothingNewer }
+            return .write(CloudReminders(envelope: env(local.envelope, remote?.envelope, merged.map(\.stamp)), entries: merged).text)
+        case .watchlist:
+            guard let local = CloudWatchlist.decode(text: localText) else { return .unreadable }
+            let remote = remoteText.flatMap(CloudWatchlist.decode(text:))
+            if remoteText != nil && remote == nil { return .unreadable }
+            func key(_ t: String, _ id: String, _ s: String?) -> String { "\(t)|\(id)|\(s ?? "")" }
+            let entries = SyncMerge.byStamp(remote: remote?.entries ?? [], local: local.entries,
+                                            id: { key($0.vodType, $0.vodId, $0.serverId) }, stamp: { max($0.addedAt, $0.removedAt ?? 0) }) { l, r in
+                var x = l
+                if l.dispatcharrVodId == nil { x.dispatcharrVodId = r.dispatcharrVodId }
+                return x
+            }
+            let hidden = SyncMerge.byStamp(remote: remote?.hidden ?? [], local: local.hidden,
+                                           id: { key($0.vodType, $0.vodId, $0.serverId) }, stamp: { max($0.hiddenAt, $0.unhiddenAt ?? 0) }) { l, r in
+                var x = l
+                if l.dispatcharrVodId == nil { x.dispatcharrVodId = r.dispatcharrVodId }
+                return x
+            }
+            if let remote, entries == remote.entries, hidden == remote.hidden { return .nothingNewer }
+            let times = entries.map { max($0.addedAt, $0.removedAt ?? 0) } + hidden.map { max($0.hiddenAt, $0.unhiddenAt ?? 0) }
+            var out = local
+            out.entries = entries
+            out.hidden = hidden
+            out.envelope = env(local.envelope, remote?.envelope, times)
+            return .write(out.text)
+        case .preferences:
+            guard let local = CloudPreferences.decode(text: localText) else { return .unreadable }
+            let remote = remoteText.flatMap(CloudPreferences.decode(text:))
+            if remoteText != nil && remote == nil { return .unreadable }
+            let ud = UserDefaults.standard
+            var localState = PrefKeyMerge.State(v: local.keys, tv: local.tv, mobile: local.mobile, times: [:])
+            let baseline = ud.dictionary(forKey: Self.prefsBaselineKey) as? [String: String]
+            // First run of this build: today's values are of unknown age (stamp nothing).
+            if baseline == nil { ud.set(PrefKeyMerge.flat(localState), forKey: Self.prefsBaselineKey) }
+            let previous = (ud.dictionary(forKey: Self.prefsTimesKey) as? [String: NSNumber] ?? [:]).mapValues { $0.int64Value }
+            let times = PrefKeyMerge.localTimes(localState, baseline: baseline, previous: previous, nowMs: nowMs)
+            if times != previous { ud.set(times.mapValues { NSNumber(value: $0) }, forKey: Self.prefsTimesKey) }
+            localState.times = times
+            let remoteState = remote.map { PrefKeyMerge.State(v: $0.keys, tv: $0.tv, mobile: $0.mobile, times: $0.times) }
+            let merged = PrefKeyMerge.merge(remote: remoteState, remoteEnvelope: remote?.envelope.lastModified ?? 0, local: localState)
+            let ids = local.dispatcharrChannelIds ?? remote?.dispatcharrChannelIds
+            if let remote, merged.v == remote.keys, merged.tv == remote.tv, merged.mobile == remote.mobile,
+               merged.times == remote.times, ids == remote.dispatcharrChannelIds {
+                ud.set(PrefKeyMerge.flat(merged), forKey: Self.prefsBaselineKey)
+                return .nothingNewer
+            }
+            return .write(CloudPreferences(envelope: env(local.envelope, remote?.envelope, Array(merged.times.values)),
+                                           keys: merged.v, tv: merged.tv, mobile: merged.mobile,
+                                           dispatcharrChannelIds: ids, times: merged.times).text)
+        case .playlists, .credentials:
+            return .unreadable
+        }
     }
 
     /// Pushes [files] in order; a newer push or iCloud turned off stops before the next file.
@@ -834,11 +1006,11 @@ final class CloudSnapshotSync: ObservableObject {
             return nil
         }
         if let b = backupBody(.favorites) {
-            guard let f = CloudFavorites.decode(text: b) else { return fail(.favorites) }
+            guard let f = CloudFavorites.decode(text: b)?.live else { return fail(.favorites) }
             out["favorites"] = CloudCanon.favorites(f, ids)
         }
         if let b = backupBody(.watchProgress) {
-            guard let w0 = CloudProgress.decode(text: b) else { return fail(.watchProgress) }
+            guard let w0 = CloudProgress.decode(text: b)?.live else { return fail(.watchProgress) }
             let w = CloudCanon.progressInScope(w0, host: pid)
             // Snapshots older than the update resolve their local ids here.
             let c = CloudCanon.progressCandidates(w).filter { !DsyncHeld.isPlaceholder($0.videoId) }
@@ -849,7 +1021,7 @@ final class CloudSnapshotSync: ObservableObject {
             carriedP = w
         }
         if let b = backupBody(.reminders) {
-            guard let r = CloudReminders.decode(text: b) else { return fail(.reminders) }
+            guard let r = CloudReminders.decode(text: b)?.live else { return fail(.reminders) }
             out["reminders"] = CloudCanon.reminders(r, nowMs: now)
         }
         if let b = backupBody(.watchlist) {
@@ -903,7 +1075,7 @@ final class CloudSnapshotSync: ObservableObject {
         let now = Self.nowMs()
         switch c {
         case .favorites:
-            guard let s = CloudFavorites.decode(text: body) else { return false }
+            guard let s = CloudFavorites.decode(text: body)?.live else { return false }
             let local = DsyncLocal.favorites()
             let m = DsyncLocal.channelMap(pid)
             let order = s.entries.sorted { $0.displayOrder < $1.displayOrder }
@@ -913,7 +1085,7 @@ final class CloudSnapshotSync: ObservableObject {
             debugLog(CloudCanon.replaceLine("favorites", local: local.count, backup: s.entries.count, removed: gone.count))
             return true
         case .watchProgress:
-            guard let s0 = CloudProgress.decode(text: body) else { return false }
+            guard let s0 = CloudProgress.decode(text: body)?.live else { return false }
             let s = CloudCanon.progressInScope(s0, host: pid)
             let held = s.entries.compactMap(CloudCanon.heldRow)
             let rows = s.entries.compactMap { e -> ProgressRow? in
@@ -940,7 +1112,7 @@ final class CloudSnapshotSync: ObservableObject {
                                             backup: CloudCanon.progress(s, .init(), nowMs: now).rows, removed: gone.count))
             return true
         case .reminders:
-            guard let s = CloudReminders.decode(text: body) else { return false }
+            guard let s = CloudReminders.decode(text: body)?.live else { return false }
             let cur = ReminderManager.shared.syncableReminders
             let local = cur.map { k, r in
                 CloudReminderEntry(reminderKey: k, channelName: r.channelName, programTitle: r.programTitle,

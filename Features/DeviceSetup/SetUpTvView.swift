@@ -359,7 +359,9 @@ struct SetUpTvView: View {
                     loaded = true
                     // Copy entire setup: every profile that has a sign-in saved here.
                     picked = Set(source.choices.filter { $0.credentialLabel != nil }.map(\.id))
-                    sync = source.isDispatcharr
+                    // Pre-ticked only when Dispatcharr Sync is on here (2026-11-10;
+                    // it used to tick for every Dispatcharr playlist).
+                    sync = source.syncOnHere
                 }
             }
         } else {

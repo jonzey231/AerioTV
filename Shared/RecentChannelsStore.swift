@@ -115,6 +115,20 @@ final class RecentChannelsStore: ObservableObject {
         return ids
     }
 
+    /// One playlist across devices (2026-11-10): a playlist merged into
+    /// another hands its recents over when the winner has none.
+    static func moveList(from loser: String, to winner: String) {
+        let ud = UserDefaults.standard
+        let lk = "\(legacyDefaultsKey).\(loser)", wk = "\(legacyDefaultsKey).\(winner)"
+        if let list = ud.stringArray(forKey: lk), !list.isEmpty, (ud.stringArray(forKey: wk) ?? []).isEmpty {
+            ud.set(list, forKey: wk)
+            addToIndex(winner)
+        }
+        ud.removeObject(forKey: lk)
+        shared.recentIDs = []
+        shared.load()
+    }
+
     /// playlist ID -> recent channel IDs (most recent first).
     static func syncSnapshot() -> [String: [String]] {
         var out: [String: [String]] = [:]

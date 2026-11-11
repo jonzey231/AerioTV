@@ -551,10 +551,19 @@ enum SetupSender {
         if !s.isDefault {
             let c = SetupProtocol.Credential(apiKey: s.apiKey.flatMap(nonEmpty), username: nonEmpty(s.username),
                                              password: s.password.flatMap(nonEmpty))
-            if c.apiKey != nil || c.password != nil { full.playlist.credential = c }
+            if c.apiKey != nil || c.password != nil {
+                full.playlist.credential = c
+                // A different server account: not the same playlist, so not its id.
+                full.playlist.id = nil
+            }
         }
         var only = SetupProfileRules.parts([s], selected: [s.id]).first
-            ?? SetupProtocol.ProfilePart(username: s.username, displayName: s.displayName, role: s.role, avatar: s.avatar)
+            ?? SetupProtocol.ProfilePart(username: s.username, displayName: s.displayName, role: s.role, avatar: s.avatar, id: s.id)
+        // A non-default profile imported alone is a different account: no ids at all.
+        if !s.isDefault {
+            full.playlist.id = nil
+            only.id = nil
+        }
         only.isDefault = true
         only.credential = nil
         only.order = 0
@@ -588,7 +597,9 @@ enum SetupSender {
             catchupOffsetMinutes: CatchupSupport.timeOffsetMinutes(serverID: server.id),
             vodEnabled: server.vodEnabled,
             channelProfileIds: server.type == .dispatcharrAPI ? server.dispatcharrProfileIDList : [],
-            credential: cred.isEmpty ? nil : cred)
+            credential: cred.isEmpty ? nil : cred,
+            // The receiver keeps this id: one playlist, one id on every device.
+            id: server.id.uuidString)
         // Xtream Codes and M3U send the playlist only.
         guard server.type == .dispatcharrAPI else { return SetupProtocol.Payload(playlist: playlist) }
         // The default profile always, then the chosen profiles that carry a sign-in
