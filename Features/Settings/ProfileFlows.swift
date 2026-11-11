@@ -244,13 +244,15 @@ struct ChildNeedsAdminPin: View {
     }
 }
 
-/// An Admin or Standard profile added while a Child exists sets its PIN right after; cancelling undoes the add.
+/// An Admin or Standard profile added while a Child exists sets its PIN right after;
+/// cancelling undoes only the add that opened this step ([addedIds]).
 struct PinAfterAdd: View {
     let playlistId: String
+    let addedIds: Set<String>
     let onDone: (Bool) -> Void
     var body: some View {
         ChildNeedsAdminPin(playlistId: playlistId) { ok in
-            if ok { onDone(true) } else { Task { await pm.discardPendingAdds(playlistId); onDone(false) } }
+            if ok { onDone(true) } else { Task { await pm.discardPendingAdds(playlistId, addedIds: addedIds); onDone(false) } }
         }
     }
 }
@@ -723,7 +725,7 @@ struct RosterSuggestionsView: View {
         addedIds[r.username.lowercased()] = id
         if keepAdded { added.append(r) }
         if pm.needsPinAfterAdd(playlistId, id) {
-            step = .pinAfter(onDone: { ok in
+            step = .pinAfter(addedIds: [id], onDone: { ok in
                 if !ok { addedIds.removeValue(forKey: r.username.lowercased()); added.removeAll { $0.username.caseInsensitiveCompare(r.username) == .orderedSame } }
                 step = nil
                 if ok { onAddedProfile(id); onAdded() }
@@ -832,7 +834,7 @@ struct AddProfileFlow: View {
     enum Step {
         case credentials(title: String, username: String, submit: (String?, String?) async -> String?)
         case childGate(onDone: (Bool) -> Void)
-        case pinAfter(onDone: (Bool) -> Void)
+        case pinAfter(addedIds: Set<String>, onDone: (Bool) -> Void)
     }
 
     static func childGateClear(_ playlistId: String, becomingChild: String? = nil) -> Bool {
@@ -859,7 +861,7 @@ struct AddProfileFlow: View {
     @State private var manualRole: ProfileRole = .user
 
     private func added(_ p: DispatcharrProfile) {
-        if pm.needsPinAfterAdd(playlistId, p.id) { step = .pinAfter(onDone: { _ in onClose() }) } else { onClose() }
+        if pm.needsPinAfterAdd(playlistId, p.id) { step = .pinAfter(addedIds: [p.id], onDone: { _ in onClose() }) } else { onClose() }
     }
 
     private func roleOf(_ u: DispatcharrUserSummary) -> ProfileRole { u.isServerAdmin ? .admin : (rowRoles[u.id] ?? .user) }
@@ -895,8 +897,8 @@ struct AddProfileFlow: View {
                 CredentialStep(title: title, username: username, onCancel: { step = nil }, onSubmit: submit)
             case .childGate(let onDone):
                 ChildNeedsAdminPin(playlistId: playlistId, onDone: onDone)
-            case .pinAfter(let onDone):
-                PinAfterAdd(playlistId: playlistId, onDone: onDone)
+            case .pinAfter(let ids, let onDone):
+                PinAfterAdd(playlistId: playlistId, addedIds: ids, onDone: onDone)
             case nil:
                 if manual { manualForm } else { listForm }
             }

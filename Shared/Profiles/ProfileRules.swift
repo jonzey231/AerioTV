@@ -420,7 +420,20 @@ enum ProfileRoster {
     /// a roster add is removed on this device only, with no tombstone and no
     /// roster change, so its row is offered again under "From your other
     /// devices". A plain add keeps [plainWrites], today's behavior on that path.
-    static func undoWritesTombstone(rosterAdd: Bool, plainWrites: Bool) -> Bool { rosterAdd ? false : plainWrites }
+    /// A profile added while the playlist's roster sync was paused counts the
+    /// same ([pauseAdd]): the device could not tell whether that user has a
+    /// roster row, and a tombstone sent once the pause ends could delete that
+    /// person's profile on every synced device.
+    static func undoWritesTombstone(rosterAdd: Bool, pauseAdd: Bool = false, plainWrites: Bool) -> Bool {
+        rosterAdd || pauseAdd ? false : plainWrites
+    }
+
+    /// Cancel on "PIN Required" (follow-up 7): only the profiles added in the
+    /// action that opened the step are removed. Every other pending add, such
+    /// as one from a setup handoff, stays exactly as it was, still waiting for its PIN.
+    static func pinCancelDrops(pending: [String], addedInAction: Set<String>) -> [String] {
+        pending.filter { addedInAction.contains($0) }
+    }
 
     static func applyRow(_ p: DispatcharrProfile, _ r: ProfileRow) -> DispatcharrProfile {
         var out = p

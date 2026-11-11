@@ -542,14 +542,18 @@ final class ProfileManager: ObservableObject {
         anyChild(playlistId) && RoleRules.isFullAccess(roleOf(profileId)) && !pinStore.hasPin(profileId)
     }
 
-    /// The PIN step after an add was cancelled: the add is undone (a Child exists, so a PIN is required).
-    /// A roster add goes from this device only, with no tombstone, and is offered again.
-    func discardPendingAdds(_ playlistId: String) async {
-        let drop = store.forPlaylist(playlistId).filter { pendingPinAdds.contains($0.id) && !pinStore.hasPin($0.id) && !$0.isDefault }
-        for p in drop {
+    /// The PIN step after an add was cancelled: the profiles that action added
+    /// ([addedIds]) are undone (a Child exists, so a PIN is required); any other
+    /// pending add stays. A roster add or a pause add goes from this device only,
+    /// with no tombstone, and a roster add is offered again.
+    func discardPendingAdds(_ playlistId: String, addedIds: Set<String>) async {
+        let pending = store.forPlaylist(playlistId).filter { pendingPinAdds.contains($0.id) && !pinStore.hasPin($0.id) && !$0.isDefault }
+        let dropIds = Set(ProfileRoster.pinCancelDrops(pending: pending.map(\.id), addedInAction: addedIds))
+        for p in pending where dropIds.contains(p.id) {
             pendingPinAdds.remove(p.id)
             let roster = rosterAddIds.contains(p.id)
-            await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(rosterAdd: roster, plainWrites: true))
+            await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(
+                rosterAdd: roster, pauseAdd: holds.addedDuringPause(p.id), plainWrites: true))
             rosterAddIds.remove(p.id)
             freshUndoable.remove(p.id)
             undoableRosterAdds.remove(p.id)
@@ -1109,7 +1113,8 @@ final class ProfileManager: ObservableObject {
         guard !p.isDefault else { throw fail("The default profile cannot be removed.") }
         let fresh = freshUndoable.remove(profileId) != nil
         let roster = rosterAddIds.remove(profileId) != nil
-        await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(rosterAdd: roster, plainWrites: fresh))
+        await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(
+            rosterAdd: roster, pauseAdd: holds.addedDuringPause(p.id), plainWrites: fresh))
         undoableRosterAdds.remove(profileId)
         refreshActiveRole()
         debugLog("[PROFILES] undo add \(Self.tag(profileId))")

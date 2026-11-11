@@ -257,6 +257,8 @@ struct AddProfilesStepView: View {
     @State private var phase: Phase = .loading
     @State private var step: AddProfileFlow.Step?
     @State private var pinWalk = false
+    /// Profiles the last add action added: Cancel on the PIN walk removes only these.
+    @State private var actionAdds: Set<String> = []
     @State private var finished = false
     @State private var busy = false
     @State private var undoBusy = false
@@ -307,7 +309,7 @@ struct AddProfilesStepView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             if pinWalk {
-                PinAfterAdd(playlistId: playlistId) { _ in pinWalk = false; finish() }
+                PinAfterAdd(playlistId: playlistId, addedIds: actionAdds) { _ in pinWalk = false; finish() }
             } else if let s = step {
                 stepView(s)
             } else if let u = needsCredential.first {
@@ -316,7 +318,8 @@ struct AddProfilesStepView: View {
                     if needsCredential.isEmpty && error == nil { done() }
                 }) { pw, key in
                     do {
-                        _ = try await pm.addProfile(playlistId, user: u, password: pw, apiKey: key, role: roleOf(u))
+                        let p = try await pm.addProfile(playlistId, user: u, password: pw, apiKey: key, role: roleOf(u))
+                        actionAdds.insert(p.id)
                         needsCredential.removeFirst()
                         if needsCredential.isEmpty && error == nil { done() }
                         return nil
@@ -348,8 +351,8 @@ struct AddProfilesStepView: View {
             CredentialStep(title: title, username: username, onCancel: { step = nil }, onSubmit: submit)
         case .childGate(let onDone):
             ChildNeedsAdminPin(playlistId: playlistId, onDone: onDone)
-        case .pinAfter(let onDone):
-            PinAfterAdd(playlistId: playlistId, onDone: onDone)
+        case .pinAfter(let ids, let onDone):
+            PinAfterAdd(playlistId: playlistId, addedIds: ids, onDone: onDone)
         }
     }
 
@@ -444,12 +447,13 @@ struct AddProfilesStepView: View {
             return
         }
         busy = true; error = nil
+        actionAdds = []
         Task {
             var failures: [String] = []
             var creds: [DispatcharrUserSummary] = []
             for u in picked {
                 if (u.apiKey ?? "").isEmpty { creds.append(u); continue }
-                do { _ = try await pm.addProfile(playlistId, user: u, password: nil, apiKey: nil, role: roleOf(u)) }
+                do { let p = try await pm.addProfile(playlistId, user: u, password: nil, apiKey: nil, role: roleOf(u)); actionAdds.insert(p.id) }
                 catch { failures.append(u.username) }
             }
             busy = false
@@ -553,7 +557,7 @@ struct AddProfilesStepView: View {
                 ProgressView().tint(.accentPrimary).frame(minHeight: stepIsTV ? 60 : 44)
             } else {
                 OnboardingPillButton(title: selected.isEmpty ? "Continue" : "Add selected", filled: true, fullWidth: true) {
-                    if selected.isEmpty { done() } else { addSelected(users) }
+                    if selected.isEmpty { actionAdds = []; done() } else { addSelected(users) }
                 }
             }
             countLine
@@ -619,7 +623,7 @@ struct AddProfilesStepView: View {
                 : try await pm.addProfileManual(playlistId, username: username, password: password, apiKey: nil, role: role)
             pm.markFreshAddUndoable(p.id)
             if pm.needsPinAfterAdd(playlistId, p.id) {
-                step = .pinAfter(onDone: { _ in step = nil })
+                step = .pinAfter(addedIds: [p.id], onDone: { _ in step = nil })
             }
             collapseAfterAdd()
             return nil
@@ -729,7 +733,7 @@ struct AddProfilesStepView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 // While Enter details is open, Add profile is the single filled primary.
-                OnboardingPillButton(title: "Continue", filled: !(wantsMore && detailsOpen), fullWidth: true) { done() }
+                OnboardingPillButton(title: "Continue", filled: !(wantsMore && detailsOpen), fullWidth: true) { actionAdds = []; done() }
                     .padding(.top, 4)
                 countLine
                 setUpTvLink

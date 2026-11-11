@@ -994,6 +994,18 @@ do {
         check(ProfileRoster.suggestions(roster, ["admin", "Kid"]).isEmpty, "while added here, kid is not offered")
         eq(ProfileRoster.suggestions(roster, ["admin"]).map(\.username), ["Kid"], "after the undo, kid is offered again")
         eq(ProfileTombstones.resolve(roster, []).rows.map(\.username), ["admin", "Kid"], "no tombstone: the roster keeps the row")
+        // A profile added while the roster sync was paused: no tombstone on either path.
+        for (path, today) in paths {
+            check(!ProfileRoster.undoWritesTombstone(rosterAdd: false, pauseAdd: true, plainWrites: today), "\(path), pause add: no tombstone")
+        }
+
+        // Cancel on "PIN Required" removes only the add that opened it (follow-up 7).
+        let pending = ["setup-handoff-profile", "just-added"]
+        let drops = ProfileRoster.pinCancelDrops(pending: pending, addedInAction: ["just-added"])
+        eq(drops, ["just-added"], "with a setup-handoff profile pending, Cancel removes only the new add")
+        check(!drops.contains("setup-handoff-profile"), "the pending setup-handoff profile is untouched, so no tombstone for it")
+        eq(ProfileRoster.pinCancelDrops(pending: pending, addedInAction: []), [], "an action that added nothing removes nothing")
+        eq(ProfileRoster.pinCancelDrops(pending: ["a"], addedInAction: ["a", "b"]), ["a"], "several adds in one action: each pending one goes")
     }
     eq(AvatarCatalog.defaultColorIndex("ab"), (97 + 98) % 8, "default color index")
 
