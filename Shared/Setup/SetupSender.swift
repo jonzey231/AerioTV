@@ -30,6 +30,13 @@ struct SetupTarget: Identifiable, Equatable, Sendable {
     var seenAt: Date = Date()
     /// TXT `kind`; a QR link carries none, so it reads as tv (the only receiver before kind).
     var kind: SetupProtocol.Kind = .tv
+    /// Advertised `mode` (FixLogin.normalizeMode): nil = a normal setup receiver.
+    var mode: String? = nil
+    /// Advertised `pl` with Fix Login: the receiver's playlist id, lowercase.
+    var playlistID: String? = nil
+
+    /// The receiver asks for one playlist's sign-in (Fix Login), not a whole setup.
+    var isFixLogin: Bool { mode == SetupProtocol.modeFixLogin }
 
     /// Name plus key: a TV that rotates its key is a new target.
     var id: String { name + "|" + SetupCrypto.b64(pk) }
@@ -43,6 +50,7 @@ struct SetupTarget: Identifiable, Equatable, Sendable {
 
     static func == (a: SetupTarget, b: SetupTarget) -> Bool {
         a.id == b.id && a.host == b.host && a.port == b.port && a.code == b.code
+            && a.mode == b.mode && a.playlistID == b.playlistID
     }
 }
 
@@ -75,6 +83,9 @@ final class SetupDiscovery: ObservableObject {
         let shown: String
         let kind: SetupProtocol.Kind
         let endpoint: NWEndpoint
+        /// Fix Login: `mode` and `pl` (FixLogin.normalizeMode, normalizePlaylistID).
+        var mode: String? = nil
+        var playlistID: String? = nil
     }
 
     /// An advert being resolved: its connection and timeout, or (conn nil)
@@ -207,7 +218,9 @@ final class SetupDiscovery: ObservableObject {
                 }
                 let shown = DeviceInfo.friendlyName(advertised: txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name)
                 return Advert(service: name, pk: pk, shown: shown,
-                              kind: SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind]), endpoint: r.endpoint)
+                              kind: SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind]), endpoint: r.endpoint,
+                              mode: FixLogin.normalizeMode(txt[SetupProtocol.txtMode]),
+                              playlistID: FixLogin.normalizePlaylistID(txt[SetupProtocol.txtPlaylist]))
             }
             let count = results.count
             let dropped = drops
@@ -278,7 +291,7 @@ final class SetupDiscovery: ObservableObject {
         latest = adverts
         // Every browse change is logged (names and kinds only) so a device that never
         // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
-        let seen = adverts.map { "\($0.service) (\($0.kind.rawValue))" }
+        let seen = adverts.map { "\($0.service) (\($0.kind.rawValue)\($0.mode.map { ", \($0)" } ?? ""))" }
         debugLog("[SETUP] browse adverts=\(count) valid=[\(seen.joined(separator: ", "))] dropped=[\(dropped.joined(separator: ", "))]")
         apply(adverts)
     }
@@ -326,7 +339,8 @@ final class SetupDiscovery: ObservableObject {
         for a in adverts {
             // This device's own receiver (Add Playlist open while the banner runs) is never offered.
             if a.pk == SetupReceiver.ownPk { continue }
-            if let existing = byService[a.service], existing.pk == a.pk, existing.name == a.shown { continue }
+            if let existing = byService[a.service], existing.pk == a.pk, existing.name == a.shown,
+               existing.mode == a.mode, existing.playlistID == a.playlistID { continue }
             // Already resolving this key (or waiting to retry it), or out of attempts until
             // the next refresh brings a new browser.
             if let r = resolving[a.service], r.advert.pk == a.pk { continue }
@@ -374,7 +388,7 @@ final class SetupDiscovery: ObservableObject {
                     if let hostString {
                         let clean = hostString.split(separator: "%").first.map(String.init) ?? hostString
                         target = SetupTarget(name: a.shown, host: clean, port: Int(port.rawValue), pk: a.pk,
-                                             serviceName: a.service, kind: a.kind)
+                                             serviceName: a.service, kind: a.kind, mode: a.mode, playlistID: a.playlistID)
                     }
                 }
                 let found = target
@@ -486,13 +500,65 @@ final class SetupTvOfferCenter: ObservableObject {
     @Published var pendingLink: LinkBox?
     /// Set by the app root from the active playlist and the profile gate.
     @Published var canOffer = false
+    /// Every playlist on this device (set by the app root), for the Fix Login card rule.
+    @Published var playlists: [ServerConnection] = []
 
     struct LinkBox: Identifiable { let id = UUID(); let link: String }
 
     private var bag: AnyCancellable?
 
     private init() {
-        bag = discovery.$tvs.sink { [weak self] list in self?.tvs = list }
+        bag = discovery.$tvs.sink { [weak self] list in
+            self?.tvs = list
+            self?.logFixLoginMatches(list)
+        }
+    }
+
+    /// One line per Fix Login advert and key: offered from which playlist, or why not.
+    private var loggedFixLogin: Set<String> = []
+    private func logFixLoginMatches(_ list: [SetupTarget]) {
+        for t in list where t.isFixLogin && !loggedFixLogin.contains(t.id) {
+            loggedFixLogin.insert(t.id)
+            if let s = fixLoginServer(for: t) {
+                debugLog("[SETUP] fix login advert key=\(t.fingerprint) pl=\(t.playlistID?.prefix(8) ?? "none"): this phone can send \(s.id.uuidString.prefix(8).lowercased())")
+            } else {
+                debugLog("[SETUP] fix login advert key=\(t.fingerprint) pl=\(t.playlistID?.prefix(8) ?? "none"): no playlist here with a good sign-in for it; not offered")
+            }
+        }
+    }
+
+    /// Fix Login: this phone's playlist whose sign-in the device asks for
+    /// (FixLogin.matchPlaylist), or nil. Reads keys only while such an advert
+    /// is on the network.
+    func fixLoginServer(for t: SetupTarget) -> ServerConnection? {
+        guard t.isFixLogin else { return nil }
+        let gate = DispatcharrRequestGate.shared
+        let live = playlists.filter { !$0.isGone }
+        let locals = live.map { s -> FixLogin.Local in
+            let key = s.baseApiKey
+            var account = s.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            if account.isEmpty, s.type == .dispatcharrAPI { account = DispatcharrAccountFactsStore.load(s.id).username }
+            return FixLogin.Local(id: s.id.uuidString, isDispatcharr: s.type == .dispatcharrAPI,
+                                  account: account.isEmpty ? nil : account,
+                                  hasCredential: !key.isEmpty || !s.effectivePassword.isEmpty,
+                                  keyHeld: gate.isPlaylistRejected(s.id.uuidString) || (!key.isEmpty && gate.isKeyRejected(key)))
+        }
+        let learned = t.playlistID.flatMap { SyncManager.shared.learnedAccount(playlistID: $0) }
+        guard let m = FixLogin.matchPlaylist(t.playlistID, locals: locals, learnedAccount: learned) else { return nil }
+        return live.first { $0.id.uuidString == m.id }
+    }
+
+    /// Whether the card and banner offer `t`, and as what (FixLogin.offer).
+    func offerKind(_ t: SetupTarget) -> FixLogin.Offer {
+        let active = playlists.first { $0.isActive && !$0.isGone }
+        let fix = t.isFixLogin ? fixLoginServer(for: t) : nil
+        return FixLogin.offer(mode: t.mode,
+                              activePlaylistID: canOffer ? active?.id.uuidString : nil,
+                              fixLoginPlaylistID: fix?.id.uuidString,
+                              canSetUp: { id in
+                                  if id == active?.id.uuidString { return self.canOffer }
+                                  return SetupGate.canSetUpTv(self.playlists.first { $0.id.uuidString == id })
+                              })
     }
 
     func setForeground(_ active: Bool) {
@@ -502,9 +568,11 @@ final class SetupTvOfferCenter: ObservableObject {
 
     /// The TV on offer: the first advertising TV not dismissed, hidden while
     /// its setup sheet is open. Phones and tablets, Admin or default profile.
+    /// A Fix Login advert only when this phone has that playlist with a good
+    /// sign-in (FixLogin.offer); a mode this build does not know, never.
     var offer: SetupTarget? {
-        guard canOffer, presentedTarget == nil, pendingLink == nil else { return nil }
-        return tvs.first { !dismissed.contains($0.id) }
+        guard presentedTarget == nil, pendingLink == nil else { return nil }
+        return tvs.first { !dismissed.contains($0.id) && offerKind($0) != .none }
     }
 
     func dismiss(_ t: SetupTarget) {
@@ -742,6 +810,19 @@ enum SetupSender {
         full.profiles = [only]
         debugLog("[SETUP] payload user only, sync=\(turnOnSync)")
         return full
+    }
+
+    /// Fix Login: only this playlist's own sign-in (the default profile's, as
+    /// in a full setup), marked `mode: "fixlogin"`, with `playlist.id` set to
+    /// the device's advertised `pl` so it updates the playlist it asked about.
+    /// No profiles, no sync choice. nil when there is no sign-in to send.
+    @MainActor
+    static func buildFixLoginPayload(_ server: ServerConnection, receiverPlaylistID: String?) -> SetupProtocol.Payload? {
+        guard server.type == .dispatcharrAPI else { return nil }
+        let p = FixLogin.payload(buildPayload(server, profileIds: [], turnOnSync: false).playlist,
+                                 receiverPlaylistID: receiverPlaylistID)
+        if p != nil { debugLog("[SETUP] fix login: sending \(server.id.uuidString.prefix(8).lowercased())'s sign-in for \(receiverPlaylistID?.prefix(8) ?? "none")") }
+        return p
     }
 
     @MainActor

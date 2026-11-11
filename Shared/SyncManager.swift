@@ -1876,6 +1876,19 @@ final class SyncManager: ObservableObject {
 
     private static let playlistMergedIntoKey = "syncPlaylistMergedInto.v1"
 
+    /// The account (username) iCloud sync reported for playlist `id`, from the
+    /// synced playlist records, or nil. Fix Login's one-playlist identity rule
+    /// (Android SyncStamps.learnedAccount). Main queue only (KVS).
+    func learnedAccount(playlistID id: String) -> String? {
+        let want = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !want.isEmpty,
+              let records = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]] else { return nil }
+        for r in records where (r["id"] as? String)?.lowercased() == want {
+            if let u = (r["username"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !u.isEmpty { return u }
+        }
+        return nil
+    }
+
     /// True when this device merged another playlist into [id]: a deletion
     /// time for it is the other device's opposite pick. It stays, with a
     /// fresh change time so it wins and every device converges on it.

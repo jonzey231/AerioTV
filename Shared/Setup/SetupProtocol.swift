@@ -119,6 +119,13 @@ enum SetupProtocol {
     static let txtPk = "pk"
     /// Receiver form factor: phone, tablet, or tv. Absent (older builds) = tv.
     static let txtKind = "kind"
+    /// Receiver mode. Absent = a normal setup receiver; `modeFixLogin` = a TV
+    /// whose playlist's key is held as rejected, asking a phone for that
+    /// playlist's sign-in only (FixLogin). Older builds never advertise it.
+    static let txtMode = "mode"
+    static let modeFixLogin = "fixlogin"
+    /// With `modeFixLogin`: the playlist id (UUID, lowercase) whose sign-in is wanted. Not a secret.
+    static let txtPlaylist = "pl"
 
     enum Kind: String, Sendable {
         case phone, tablet, tv
@@ -305,9 +312,14 @@ enum SetupProtocol {
         var playlist: PlaylistPart
         var profiles: [ProfilePart] = []
         var sync: SyncPart? = nil
+        /// `modeFixLogin` = only the playlist's sign-in (no profiles, no sync
+        /// choice); the receiver updates the sign-in of its playlist with
+        /// `playlist.id` and nothing else. Absent (left out of the JSON) = a
+        /// normal setup, which is what every sender before Fix Login sends.
+        var mode: String? = nil
 
-        init(playlist: PlaylistPart, profiles: [ProfilePart] = [], sync: SyncPart? = nil) {
-            self.playlist = playlist; self.profiles = profiles; self.sync = sync
+        init(playlist: PlaylistPart, profiles: [ProfilePart] = [], sync: SyncPart? = nil, mode: String? = nil) {
+            self.playlist = playlist; self.profiles = profiles; self.sync = sync; self.mode = mode
         }
 
         init(from decoder: Decoder) throws {
@@ -315,6 +327,7 @@ enum SetupProtocol {
             playlist = try c.decode(PlaylistPart.self, forKey: .playlist)
             profiles = try c.decodeIfPresent([ProfilePart].self, forKey: .profiles) ?? []
             sync = try c.decodeIfPresent(SyncPart.self, forKey: .sync)
+            mode = try c.decodeIfPresent(String.self, forKey: .mode)
         }
     }
 
@@ -369,6 +382,187 @@ enum SetupProtocol {
         else { return .badRequest }
         guard let plain = SetupCrypto.open(key: key, nonce: nonce, ciphertext: ct) else { return .wrongCode }
         return decodePayload(plain).map { .ok($0) } ?? .badRequest
+    }
+}
+
+// MARK: - Fix Login (update a TV's sign-in from a phone)
+
+/// Fix Login (docs/DeviceSetupHandoff.md, "Fix Login"; Android
+/// core/setup/FixLogin.kt): a phone updates a TV's sign-in when the server
+/// rejected the TV's API key. Same receiver, sender, crypto, and envelope as
+/// Set up another device; the TV advertises `mode=fixlogin` and
+/// `pl=<playlist id>`, and the payload carries `mode: "fixlogin"` with one
+/// playlist and its credential. Every user-facing string lives here, word for
+/// word as Android, so a wording change is one edit. Pure, so
+/// Scripts/setup-tests checks the advert, the card rule, and the apply rule.
+enum FixLogin {
+    /// Dock card and Settings banner button for a Fix Login advert.
+    static let button = "Fix Login"
+    /// Sender sheet title while fixing a TV's sign-in.
+    static let sheetTitle = "Fix Login"
+    /// Receive screen header on the TV.
+    static let receiveTitle = "Update from your phone"
+    /// Receive screen line on the TV.
+    static let receiveLine = "On your phone, open AerioTV and tap Fix Login."
+    /// TV progress line while the sign-in is written.
+    static let applyingLine = "Signing in"
+    /// TV confirmation before the receive screen closes.
+    static let doneLine = "Signed in. Loading channels."
+    /// How long the TV shows `doneLine` before the receive screen closes.
+    static let doneSeconds: Double = 2
+    /// TV error (under "Setup did not finish") when the sign-in is not for a playlist here.
+    static let notHere = "The sign-in that was sent is not for a playlist on this device."
+    /// Phone error when the playlist to send cannot be read.
+    static let unreadable = "This playlist could not be read."
+
+    /// Rejected-key prompt buttons on TVs, in this order.
+    static let promptFromPhone = "Update from Phone"
+    static let promptWithRemote = "Update with Remote"
+    static let promptNotNow = "Not Now"
+
+    /// Phone line after a successful send.
+    static func sentLine(_ deviceName: String) -> String {
+        let n = deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "Sent. \(n.isEmpty ? "The device" : n) is signing in."
+    }
+
+    /// An advert's `mode`: nil for a normal setup receiver (absent or blank,
+    /// every build before this key), `SetupProtocol.modeFixLogin`, or any other
+    /// value as read (a mode this build does not know; never offered).
+    static func normalizeMode(_ raw: String?) -> String? {
+        guard let t = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// An advert's `pl`: trimmed and lowercased, nil when absent or blank.
+    static func normalizePlaylistID(_ raw: String?) -> String? {
+        guard let t = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// The TXT keys a Fix Login receiver adds for `playlistID` (none when blank).
+    static func txt(playlistID: String?) -> [String: String] {
+        guard let pl = normalizePlaylistID(playlistID) else { return [:] }
+        return [SetupProtocol.txtMode: SetupProtocol.modeFixLogin, SetupProtocol.txtPlaylist: pl]
+    }
+
+    // MARK: Phone: is the card offered, and from which playlist
+
+    /// One playlist on the phone, as the card rule sees it (never a key).
+    struct Local: Equatable, Sendable {
+        var id: String
+        var isDispatcharr: Bool
+        /// The username it signs in as, when known here.
+        var account: String? = nil
+        /// It has an API key or a password to send.
+        var hasCredential: Bool
+        /// This phone's own key for it is held as rejected.
+        var keyHeld: Bool
+    }
+
+    /// The phone playlist a Fix Login advert for `pl` can be fixed from, or nil
+    /// (no card). A Dispatcharr playlist whose id equals `pl` (ids compare
+    /// without case), else, per the one-playlist identity rule, the one
+    /// Dispatcharr playlist here that signs in as `learnedAccount` (the account
+    /// sync reported for `pl`; two candidates are ambiguous and match
+    /// nothing). The match must have a sign-in to send and its own key must
+    /// not be held as rejected here.
+    static func matchPlaylist(_ pl: String?, locals: [Local], learnedAccount: String?) -> Local? {
+        guard let want = normalizePlaylistID(pl) else { return nil }
+        let dispatcharr = locals.filter(\.isDispatcharr)
+        var match = dispatcharr.first { $0.id.trimmingCharacters(in: .whitespaces).lowercased() == want }
+        if match == nil, let acct = learnedAccount?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !acct.isEmpty {
+            let same = dispatcharr.filter { ($0.account?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "") == acct }
+            if same.count == 1 { match = same[0] }
+        }
+        guard let m = match, m.hasCredential, !m.keyHeld else { return nil }
+        return m
+    }
+
+    /// Whether the Set up card and banner offer a device, and as what.
+    enum Offer: Equatable, Sendable {
+        case none
+        /// Normal setup, from the active playlist.
+        case setup
+        /// Fix Login, sending this playlist's sign-in.
+        case fix(String)
+    }
+
+    /// `fixLoginPlaylistID` is `matchPlaylist`'s answer for a Fix Login advert;
+    /// `canSetUp` is the sender gate (Admin or default profile) for a playlist id.
+    static func offer(mode: String?, activePlaylistID: String?, fixLoginPlaylistID: String?,
+                      canSetUp: (String) -> Bool) -> Offer {
+        switch mode {
+        case nil:
+            guard let a = activePlaylistID, canSetUp(a) else { return .none }
+            return .setup
+        case SetupProtocol.modeFixLogin?:
+            guard let f = fixLoginPlaylistID, canSetUp(f) else { return .none }
+            return .fix(f)
+        default:
+            return .none
+        }
+    }
+
+    /// The button on the card and banner for an advert's mode.
+    static func buttonLabel(_ mode: String?) -> String { mode == SetupProtocol.modeFixLogin ? button : "Set up" }
+
+    /// The Fix Login payload from a full payload's playlist part: that playlist
+    /// and its credential only, addressed to `receiverPlaylistID`. nil without
+    /// a credential (nothing to fix with) or a receiver playlist id.
+    static func payload(_ playlist: SetupProtocol.PlaylistPart, receiverPlaylistID: String?) -> SetupProtocol.Payload? {
+        guard let cred = playlist.credential, cred.apiKey != nil || cred.password != nil,
+              let id = receiverPlaylistID?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else { return nil }
+        var p = playlist
+        p.id = id
+        p.credential = cred
+        return SetupProtocol.Payload(playlist: p, profiles: [], sync: nil, mode: SetupProtocol.modeFixLogin)
+    }
+
+    // MARK: TV: which playlist a received payload updates, and with what
+
+    /// True when a received payload is applied as a Fix Login: the screen was
+    /// opened in Fix Login mode (whatever the sender sent, only the sign-in is
+    /// taken), or the payload says `mode: "fixlogin"`.
+    static func appliesAsFixLogin(screenPlaylistID: String?, payloadMode: String?) -> Bool {
+        screenPlaylistID != nil || normalizeMode(payloadMode) == SetupProtocol.modeFixLogin
+    }
+
+    /// The local playlist id a Fix Login payload updates, or nil (the
+    /// "not for a playlist on this device" error). The payload's `playlist.id`
+    /// must name the playlist the screen was opened for (`screenPlaylistID`,
+    /// nil outside Fix Login) and a playlist that exists here (`localIDs`);
+    /// ids compare without case. A payload with no id never matches.
+    static func receiverPlaylistID(screenPlaylistID: String?, payloadID: String?, localIDs: [String]) -> String? {
+        guard let id = payloadID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !id.isEmpty else { return nil }
+        if let s = screenPlaylistID, s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != id { return nil }
+        return localIDs.first { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == id }
+    }
+
+    /// The sign-in fields to write; the rest of the playlist never changes.
+    struct SignIn: Equatable, Sendable {
+        var apiKey: String?
+        var username: String?
+        var password: String?
+        /// The username or password changed: cached sessions belong to the old sign-in.
+        var accountChanged: Bool
+    }
+
+    /// Only the sign-in: the API key, and the username and password when the
+    /// payload carries them. A field the payload leaves out (or sends blank)
+    /// keeps the stored value. nil when the payload carries no sign-in at all.
+    static func signInToWrite(oldKey: String?, oldUser: String?, oldPass: String?,
+                              sent: SetupProtocol.Credential?) -> SignIn? {
+        func clean(_ s: String?) -> String? {
+            guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+            return t
+        }
+        let key = clean(sent?.apiKey)
+        let user = clean(sent?.username)
+        let pass = sent?.password.flatMap { $0.isEmpty ? nil : $0 }
+        guard key != nil || user != nil || pass != nil else { return nil }
+        let changed = (user != nil && user != clean(oldUser)) || (pass != nil && pass != oldPass)
+        return SignIn(apiKey: key ?? oldKey, username: user ?? oldUser, password: pass ?? oldPass, accountChanged: changed)
     }
 }
 

@@ -481,6 +481,26 @@ do {
 eq(DispatcharrGateError.keyRejected.errorDescription,
    "Dispatcharr no longer accepts this playlist's API key. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key rejected error copy")
 eq(DispatcharrRateLimitCopy.keyRejectedTitle, "API key no longer valid", "prompt title")
+// Fix Login (2026-11-11): writing a new sign-in lifts the hold and the prompt for
+// that playlist only, the new key counts as good, and the old key goes out as the new one.
+do {
+    let g = DispatcharrRequestGate()
+    g.markKeyRejected(playlistID: "P1", key: "DEAD", playlistName: "Home")
+    g.markKeyRejected(playlistID: "P2", key: "OTHER", playlistName: "Other")
+    g.consumePrompt()
+    g.markKeyRejected(playlistID: "P1", key: "DEAD2", playlistName: "Home")
+    check(g.prompt?.playlistID == "P1", "prompt up for P1")
+    g.liftFixedLogin(playlistID: "P1", oldKey: "DEAD", newKey: "GOOD")
+    check(!g.isPlaylistRejected("P1"), "P1 hold lifted")
+    check(g.prompt == nil, "P1 prompt cleared")
+    check(g.isPlaylistRejected("P2") && g.isKeyRejected("OTHER"), "another playlist's hold stays")
+    check(!g.isKeyRejected("GOOD"), "new key good")
+    eq(g.replacementKey(for: "DEAD"), "GOOD", "old key goes out as the new one")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], gate: g), .send(["X-API-Key": "GOOD"]), "a stream built with the old key opens with the new one")
+    g.liftFixedLogin(playlistID: "P2", oldKey: "OTHER", newKey: nil)
+    check(!g.isPlaylistRejected("P2"), "password-only fix still lifts the hold")
+}
+
 // Catch-up alert title (2026-11-11): the rejected-key title only when a held key stopped it.
 eq(DispatcharrRateLimitCopy.catchupAlertTitle(DispatcharrGateError.keyRejected), "API key no longer valid", "catch-up held key title")
 eq(DispatcharrRateLimitCopy.catchupAlertTitle(NSError(domain: "x", code: 1, userInfo: [NSUnderlyingErrorKey: DispatcharrGateError.keyRejected])),

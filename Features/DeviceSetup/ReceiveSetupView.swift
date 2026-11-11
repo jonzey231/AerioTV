@@ -28,6 +28,9 @@ final class SetupApplyModel: ObservableObject {
         case requestFailed(String)
         /// The received playlist matches one already on this device (existing name).
         case duplicate(String)
+        /// Fix Login: this playlist's sign-in was written and its hold lifted;
+        /// the screen confirms, then closes.
+        case signedIn(UUID)
     }
 
     /// What to do with a received playlist that matches an existing one.
@@ -45,6 +48,9 @@ final class SetupApplyModel: ObservableObject {
     var modelContext: ModelContext?
     /// Set for "Copy entire setup from this device" after a User QR scan.
     var request: UserQrSourceRequest?
+    /// Fix Login (TVs, from the rejected-key prompt): the playlist whose
+    /// sign-in this screen asks a phone for. nil = a normal setup.
+    var fixLoginPlaylistID: String?
     private var asked = false
     private static var askedRequests: Set<UUID> = []
 
@@ -54,6 +60,7 @@ final class SetupApplyModel: ObservableObject {
 
     func start() {
         receiver.onPayload = { [weak self] p in Task { @MainActor in await self?.apply(p) } }
+        receiver.fixLoginPlaylistID = fixLoginPlaylistID
         Task {
             // Advertised in every mode, as on Welcome, so other devices show the waiting banner.
             guard await receiver.start() else { phase = .noNetwork; return }
@@ -109,6 +116,9 @@ final class SetupApplyModel: ObservableObject {
         Task { await apply(p) }
     }
 
+    fileprivate func setPhase(_ p: Phase) { phase = p }
+    fileprivate func clearPending() { pending = nil; choice = nil }
+
     /// Answer to the "This playlist already exists" prompt. nil = Cancel.
     func resolveDuplicate(replace: Bool?) {
         guard case .duplicate = phase, let p = pending else { return }
@@ -133,6 +143,10 @@ final class SetupApplyModel: ObservableObject {
     var onCancelled: (() -> Void)?
 
     private func apply(_ p: SetupProtocol.Payload) async {
+        if FixLogin.appliesAsFixLogin(screenPlaylistID: fixLoginPlaylistID, payloadMode: p.mode) {
+            applyFixLogin(p)
+            return
+        }
         pending = p
         stop()
         guard let ctx = modelContext else { phase = .failed("Setup is not ready. Try again."); return }
@@ -296,6 +310,59 @@ final class SetupApplyModel: ObservableObject {
     }
 }
 
+extension SetupApplyModel {
+    /// Fix Login (docs/DeviceSetupHandoff.md): only the sign-in of the playlist
+    /// this screen was opened for (or, for a `mode: "fixlogin"` payload on a
+    /// normal screen, the playlist it names) is written: the API key, and the
+    /// username and password when sent. Profiles, settings, and other
+    /// playlists are never touched, whatever else the payload carries. Then
+    /// the hold and its prompt are lifted and the channels reload. Not for a
+    /// playlist here: "Setup did not finish" and the screen stays open (Retry
+    /// offers a new code).
+    fileprivate func applyFixLogin(_ p: SetupProtocol.Payload) {
+        stop()
+        // A failed fix never re-applies the same payload: Retry starts a new code.
+        clearPending()
+        setPhase(.applying(FixLogin.applyingLine))
+        guard let ctx = modelContext else { setPhase(.failed(FixLogin.notHere)); return }
+        let all = (try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        guard let pid = FixLogin.receiverPlaylistID(screenPlaylistID: fixLoginPlaylistID, payloadID: p.playlist.id,
+                                                    localIDs: all.map(\.id.uuidString)),
+              let server = all.first(where: { $0.id.uuidString == pid }) else {
+            debugLog("[SETUP] fix login: the sign-in is not for \(fixLoginPlaylistID != nil ? "the playlist this screen asked for" : "a playlist here")")
+            setPhase(.failed(FixLogin.notHere))
+            return
+        }
+        let oldKey = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let next = FixLogin.signInToWrite(oldKey: oldKey, oldUser: server.username,
+                                                oldPass: server.effectivePassword, sent: p.playlist.credential) else {
+            debugLog("[SETUP] fix login: no sign-in was sent")
+            setPhase(.failed(FixLogin.notHere))
+            return
+        }
+        // Only the sign-in fields; the credentials go to the Keychain as on any save.
+        if let k = next.apiKey { server.apiKey = k }
+        if let u = next.username { server.username = u }
+        if let pw = next.password { server.password = pw }
+        if next.accountChanged {
+            // Sessions minted for the old sign-in belong to it.
+            DispatcharrTokenStore.shared.clear(serverID: server.id)
+            CatchupSupport.invalidateCredentials(serverID: server.id)
+        }
+        let newKey = next.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Lift the hold first so the credential save below treats the new key as good.
+        DispatcharrRequestGate.shared.liftFixedLogin(playlistID: server.id.uuidString,
+                                                     oldKey: oldKey.isEmpty ? nil : oldKey, newKey: newKey)
+        SyncManager.shared.saveCredentialsSynced(for: server)
+        try? ctx.save()
+        debugLog("[SETUP] fix login applied to \(server.id.uuidString.prefix(8)): key \(newKey != nil && newKey != oldKey ? "replaced" : "unchanged")"
+                 + (next.accountChanged ? ", username or password updated" : "") + "; hold lifted")
+        // The same reload as a held key that proves good again: channels, guide, On Demand.
+        DispatcharrKeyRecheck.shared.onRecovered?(server.id.uuidString)
+        setPhase(.signedIn(server.id))
+    }
+}
+
 struct ReceiveSetupView: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -306,6 +373,9 @@ struct ReceiveSetupView: View {
     var request: UserQrSourceRequest? = nil
     /// "Import this user only" after a failed User QR request.
     var onUserOnly: (() -> Void)? = nil
+    /// Fix Login (TVs, from the rejected-key prompt): ask a phone for this
+    /// playlist's sign-in only. The advert carries `mode=fixlogin` and `pl`.
+    var fixLoginPlaylistID: String? = nil
     let onCancel: () -> Void
     let onDone: () -> Void
 
@@ -335,6 +405,7 @@ struct ReceiveSetupView: View {
         .onAppear {
             model.modelContext = modelContext
             model.request = request
+            model.fixLoginPlaylistID = fixLoginPlaylistID
             model.onCancelled = { onCancel() }
             model.start()
         }
@@ -343,6 +414,12 @@ struct ReceiveSetupView: View {
             if p == .done {
                 if model.syncOffer { showSyncOffer = true } else { onDone() }
             }
+        }
+        // Fix Login: the reload is under way; show the confirmation briefly, then close.
+        .task(id: model.phase) {
+            guard case .signedIn = model.phase else { return }
+            try? await Task.sleep(nanoseconds: UInt64(FixLogin.doneSeconds * 1_000_000_000))
+            if !Task.isCancelled { onDone() }
         }
         #if os(tvOS)
         .fullScreenCover(isPresented: $showSyncOffer) { syncOfferView }
@@ -423,6 +500,11 @@ struct ReceiveSetupView: View {
             .frame(maxWidth: 640)
         case .duplicate(let name):
             duplicatePrompt(name)
+        case .signedIn:
+            VStack(spacing: 20) {
+                ProgressView()
+                Text(FixLogin.doneLine).scaledFont(.headlineMedium).foregroundColor(.textPrimary)
+            }
         case .requestFailed(let msg):
             message(title: "Setup did not finish", body: msg,
                     primary: ("Import this user only", { model.stop(); onUserOnly?() }))
@@ -438,10 +520,10 @@ struct ReceiveSetupView: View {
         .frame(width: isTV ? 360 : 240, height: isTV ? 360 : 240)
         .accessibilityLabel("Setup QR code")
         let details = VStack(alignment: isTV ? .leading : .center, spacing: 12) {
-            Text(Self.title)
+            Text(fixLoginPlaylistID != nil ? FixLogin.receiveTitle : Self.title)
                 .scaledFont(isTV ? .system(size: 44, weight: .bold) : .headlineLarge)
                 .foregroundColor(.textPrimary)
-            Text(Self.instructions)
+            Text(fixLoginPlaylistID != nil ? FixLogin.receiveLine : Self.instructions)
                 .scaledFont(isTV ? .system(size: 24).subtext() : .bodyMedium.subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(isTV ? .leading : .center)

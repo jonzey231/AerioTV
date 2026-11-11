@@ -329,6 +329,104 @@ do {
     eq(act(same: true, live: false), .open, "the same link after Cancel opens again")
 }
 
+// MARK: Fix Login (2026-11-11; Android FixLoginTest)
+do {
+    typealias F = FixLogin
+    // Strings: one place, word for word as Android.
+    eq(F.button, "Fix Login", "card button")
+    eq(F.sheetTitle, "Fix Login", "sheet title")
+    eq(F.receiveTitle, "Update from your phone", "receive header")
+    eq(F.receiveLine, "On your phone, open AerioTV and tap Fix Login.", "receive line")
+    eq(F.applyingLine, "Signing in", "applying line")
+    eq(F.doneLine, "Signed in. Loading channels.", "done line")
+    eq(F.notHere, "The sign-in that was sent is not for a playlist on this device.", "not here")
+    eq([F.promptFromPhone, F.promptWithRemote, F.promptNotNow], ["Update from Phone", "Update with Remote", "Not Now"], "TV prompt buttons in order")
+    eq(F.sentLine("Living Room"), "Sent. Living Room is signing in.", "sent line")
+    eq(F.sentLine("  "), "Sent. The device is signing in.", "sent line, no name")
+
+    // TXT: mode and pl (lowercase); absent mode = a normal setup receiver.
+    eq(SetupProtocol.txtMode, "mode", "TXT mode key")
+    eq(SetupProtocol.txtPlaylist, "pl", "TXT playlist key")
+    eq(SetupProtocol.modeFixLogin, "fixlogin", "mode value")
+    let pid = "0A1B2C3D-0000-4000-8000-000000000001"
+    eq(F.txt(playlistID: pid), ["mode": "fixlogin", "pl": pid.lowercased()], "receiver TXT for Fix Login")
+    eq(F.txt(playlistID: nil), [:], "normal receiver adds nothing")
+    eq(F.txt(playlistID: "  "), [:], "blank id adds nothing")
+    check(F.normalizeMode(nil) == nil && F.normalizeMode("") == nil, "absent mode = normal setup")
+    eq(F.normalizeMode(" FixLogin "), "fixlogin", "mode trimmed and lowercased")
+    eq(F.normalizePlaylistID(" \(pid) "), pid.lowercased(), "pl trimmed and lowercased")
+    eq(F.buttonLabel(nil), "Set up", "normal advert: Set up")
+    eq(F.buttonLabel("fixlogin"), "Fix Login", "fix advert: Fix Login")
+
+    // Card: id match without case, held key or no sign-in hides it, identity fallback.
+    let mine = F.Local(id: pid, isDispatcharr: true, account: "admin", hasCredential: true, keyHeld: false)
+    let other = F.Local(id: "B0000000-0000-4000-8000-000000000002", isDispatcharr: true, account: "sam", hasCredential: true, keyHeld: false)
+    let m3u = F.Local(id: "C0000000-0000-4000-8000-000000000003", isDispatcharr: false, hasCredential: true, keyHeld: false)
+    eq(F.matchPlaylist(pid.lowercased(), locals: [other, mine], learnedAccount: nil)?.id, pid, "same id (Apple uppercase, advert lowercase)")
+    check(F.matchPlaylist("d0000000-0000-4000-8000-000000000004", locals: [other, mine], learnedAccount: nil) == nil, "unknown playlist: no card")
+    check(F.matchPlaylist(nil, locals: [mine], learnedAccount: "admin") == nil, "no pl: no card")
+    var held = mine; held.keyHeld = true
+    check(F.matchPlaylist(pid, locals: [held], learnedAccount: nil) == nil, "this phone's key is held too: no card")
+    var bare = mine; bare.hasCredential = false
+    check(F.matchPlaylist(pid, locals: [bare], learnedAccount: nil) == nil, "nothing to send: no card")
+    check(F.matchPlaylist(m3u.id, locals: [m3u], learnedAccount: nil) == nil, "not Dispatcharr: no card")
+    let tvID = "e0000000-0000-4000-8000-000000000005"
+    eq(F.matchPlaylist(tvID, locals: [other, mine], learnedAccount: "Admin")?.id, pid, "other id, account sync learned for it: the one playlist signing in as it")
+    var twin = other; twin.account = "admin"
+    check(F.matchPlaylist(tvID, locals: [twin, mine], learnedAccount: "admin") == nil, "two playlists sign in as that account: ambiguous, no card")
+    check(F.matchPlaylist(tvID, locals: [other, mine], learnedAccount: nil) == nil, "other id, nothing learned: no card")
+    eq(F.matchPlaylist(other.id, locals: [other, mine], learnedAccount: "admin")?.id, other.id, "the id wins over the learned account")
+    let yes: (String) -> Bool = { _ in true }, no: (String) -> Bool = { _ in false }
+    eq(F.offer(mode: nil, activePlaylistID: "a", fixLoginPlaylistID: nil, canSetUp: yes), .setup, "normal advert: setup")
+    eq(F.offer(mode: nil, activePlaylistID: nil, fixLoginPlaylistID: nil, canSetUp: yes), .none, "no active playlist: none")
+    eq(F.offer(mode: "fixlogin", activePlaylistID: "a", fixLoginPlaylistID: pid, canSetUp: yes), .fix(pid), "fix advert with a match: fix")
+    eq(F.offer(mode: "fixlogin", activePlaylistID: "a", fixLoginPlaylistID: nil, canSetUp: yes), .none, "fix advert, no match: none")
+    eq(F.offer(mode: "fixlogin", activePlaylistID: "a", fixLoginPlaylistID: pid, canSetUp: no), .none, "Child profile: none")
+    eq(F.offer(mode: "future", activePlaylistID: "a", fixLoginPlaylistID: pid, canSetUp: yes), .none, "unknown mode: never offered")
+
+    // Payload: mode fixlogin, one playlist and its credential, addressed to the TV's id.
+    let pl = SetupProtocol.PlaylistPart(type: "dispatcharr", name: "Home", url: "http://127.0.0.1:1",
+                                        credential: .init(apiKey: "NEW", username: "admin"), id: "SENDER-ID")
+    let fp = F.payload(pl, receiverPlaylistID: pid.lowercased())
+    eq(fp?.mode, "fixlogin", "payload mode")
+    eq(fp?.playlist.id, pid.lowercased(), "addressed to the TV's playlist id")
+    eq(fp?.playlist.credential?.apiKey, "NEW", "credential carried")
+    check(fp?.profiles.isEmpty == true && fp?.sync == nil, "no profiles, no sync choice")
+    var noCred = pl; noCred.credential = .init(username: "admin")
+    check(F.payload(noCred, receiverPlaylistID: pid) == nil, "no key or password: nothing to send")
+    check(F.payload(pl, receiverPlaylistID: nil) == nil, "no TV playlist id: nothing to send")
+    if let fp {
+        let json = String(decoding: SetupProtocol.encodePayload(fp), as: UTF8.self)
+        check(json.contains("\"mode\":\"fixlogin\""), "mode on the wire")
+        eq(SetupProtocol.decodePayload(SetupProtocol.encodePayload(fp)), fp, "Fix Login payload round-trips")
+    }
+    // Backward compatibility: a normal payload has no mode on the wire, older JSON decodes with none.
+    let normal = SetupProtocol.Payload(playlist: .init(type: "m3u", name: "a", url: "b"))
+    check(!String(decoding: SetupProtocol.encodePayload(normal), as: UTF8.self).contains("mode"), "normal payload omits mode")
+    eq(SetupProtocol.decodePayload(Data(#"{"playlist":{"type":"m3u","name":"a","url":"b"}}"#.utf8))?.mode, nil, "older sender: no mode")
+    check(!F.appliesAsFixLogin(screenPlaylistID: nil, payloadMode: nil), "no mode on a normal screen: normal setup")
+    check(F.appliesAsFixLogin(screenPlaylistID: nil, payloadMode: "fixlogin"), "fixlogin payload: Fix Login")
+    check(F.appliesAsFixLogin(screenPlaylistID: pid, payloadMode: nil), "Fix Login screen: only the sign-in, whatever was sent")
+
+    // Receiver: the right playlist only.
+    let localIDs = [other.id, pid]
+    eq(F.receiverPlaylistID(screenPlaylistID: pid, payloadID: pid.lowercased(), localIDs: localIDs), pid, "screen's playlist, any case")
+    check(F.receiverPlaylistID(screenPlaylistID: pid, payloadID: other.id, localIDs: localIDs) == nil, "a sign-in for another playlist is refused")
+    check(F.receiverPlaylistID(screenPlaylistID: nil, payloadID: "d0000000-0000-4000-8000-000000000004", localIDs: localIDs) == nil, "not here: refused")
+    check(F.receiverPlaylistID(screenPlaylistID: pid, payloadID: nil, localIDs: localIDs) == nil, "no id: refused")
+    eq(F.receiverPlaylistID(screenPlaylistID: nil, payloadID: other.id.lowercased(), localIDs: localIDs), other.id, "fixlogin payload on a normal screen: the playlist it names")
+
+    // Receiver: only the sign-in; a field left out keeps the stored value.
+    eq(F.signInToWrite(oldKey: "OLD", oldUser: "admin", oldPass: nil, sent: .init(apiKey: "NEW")),
+       F.SignIn(apiKey: "NEW", username: "admin", password: nil, accountChanged: false), "key only")
+    eq(F.signInToWrite(oldKey: "OLD", oldUser: "admin", oldPass: "pw", sent: .init(apiKey: " NEW ", username: "admin")),
+       F.SignIn(apiKey: "NEW", username: "admin", password: "pw", accountChanged: false), "same user, key trimmed, password kept")
+    eq(F.signInToWrite(oldKey: "OLD", oldUser: "admin", oldPass: "pw", sent: .init(username: "bob", password: "x"))?.accountChanged, true,
+       "new username or password: account changed")
+    check(F.signInToWrite(oldKey: "OLD", oldUser: nil, oldPass: nil, sent: .init(apiKey: "  ")) == nil, "blank sign-in: nothing written")
+    check(F.signInToWrite(oldKey: "OLD", oldUser: nil, oldPass: nil, sent: nil) == nil, "no credential: nothing written")
+}
+
 // MARK: Discovery timing (SetupDiscoveryRules, 2026-11-11)
 do {
     typealias D = SetupDiscoveryRules

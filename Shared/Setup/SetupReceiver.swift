@@ -38,6 +38,12 @@ final class SetupReceiver: ObservableObject {
     /// Called on the main actor with a verified payload.
     var onPayload: ((SetupProtocol.Payload) -> Void)?
 
+    /// Fix Login (TVs): the playlist whose sign-in this receiver asks for. The
+    /// advert then carries `mode=fixlogin` and `pl=<id>`, so phones offer
+    /// "Fix Login" instead of "Set up". nil = a normal setup receiver. Set
+    /// before start().
+    var fixLoginPlaylistID: String?
+
     private var keys = Curve25519.KeyAgreement.PrivateKey()
     private var code = SetupCrypto.newCode()
     private var failures = 0
@@ -100,7 +106,8 @@ final class SetupReceiver: ObservableObject {
         guard ready, let p = l.port?.rawValue else { l.cancel(); return false }
         listener = l
         port = Int(p)
-        debugLog("[SETUP] receiver: listening port=\(port) kind=\(Self.deviceKind.rawValue)")
+        debugLog("[SETUP] receiver: listening port=\(port) kind=\(Self.deviceKind.rawValue)"
+                 + (fixLoginPlaylistID.map { " mode=fixlogin pl=\($0.prefix(8).lowercased())" } ?? ""))
         publish()
         return true
     }
@@ -129,6 +136,7 @@ final class SetupReceiver: ObservableObject {
         txt[SetupProtocol.txtName] = Self.deviceName
         txt[SetupProtocol.txtPk] = SetupCrypto.b64(keys.publicKey.rawRepresentation)
         txt[SetupProtocol.txtKind] = Self.deviceKind.rawValue
+        for (k, v) in FixLogin.txt(playlistID: fixLoginPlaylistID) { txt[k] = v }
         return NWListener.Service(name: Self.deviceName, type: SetupProtocol.serviceType, domain: nil, txtRecord: txt)
     }
 
@@ -231,7 +239,8 @@ final class SetupReceiver: ObservableObject {
         switch SetupProtocol.openOnTv(req.body, tv: keys, code: code) {
         case .ok(let payload):
             used = true
-            debugLog("[SETUP] receiver: payload accepted (\(payload.playlist.type), \(payload.profiles.count) profiles, sync=\(payload.sync?.enabled == true))")
+            debugLog("[SETUP] receiver: payload accepted (\(payload.playlist.type), \(payload.profiles.count) profiles, sync=\(payload.sync?.enabled == true)"
+                     + (payload.mode.map { ", mode=\($0)" } ?? "") + ")")
             reply(c, 200, nil)
             listener?.service = nil
             onPayload?(payload)

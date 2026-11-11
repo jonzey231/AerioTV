@@ -5,10 +5,12 @@
 //  "Sign-in not accepted": shown once per rejection when the server refused
 //  a playlist's API key and AerioTV holds every API call for it locally
 //  (DispatcharrRequestGate). Android twin: feature/settings/
-//  ApiKeyRejectedPrompt.kt (fd145f3d). Buttons in order Not Now, Edit
-//  Playlist; Edit Playlist is the preferred action, so it is the bold one on
-//  iPhone and iPad and the one that takes focus on Apple TV. Edit Playlist
-//  opens Edit Playlist for THAT playlist.
+//  ApiKeyRejectedPrompt.kt (fd145f3d). iPhone and iPad: Not Now, Edit
+//  Playlist; Edit Playlist is the preferred (bold) action and opens Edit
+//  Playlist for THAT playlist. Apple TV (Fix Login, docs/DeviceSetupHandoff.md):
+//  "Update from Phone" (preferred, default focus) opens the receive screen
+//  asking a phone for this playlist's sign-in, "Update with Remote" opens
+//  Edit Playlist, and "Not Now".
 //
 //  A platform alert (UIAlertController) on the topmost presented controller
 //  rather than a SwiftUI `.alert`: the rejection usually lands while a sheet
@@ -26,6 +28,8 @@ final class DispatcharrKeyPromptModel: ObservableObject {
 
     @Published private(set) var prompt: DispatcharrRequestGate.Prompt?
     private weak var shown: UIAlertController?
+    /// Fix Login (Apple TV): the receive screen while it is up.
+    private weak var fixHost: UIViewController?
     private var shownPrompt: DispatcharrRequestGate.Prompt?
     private var retry: Task<Void, Never>?
 
@@ -76,6 +80,21 @@ final class DispatcharrKeyPromptModel: ObservableObject {
             message: DispatcharrRateLimitCopy.keyRejectedBody(playlistName: p.playlistName,
                                                               passwordToo: p.passwordToo),
             preferredStyle: .alert)
+        #if os(tvOS)
+        // Fix Login (Apple TV): Update from Phone (preferred, default focus),
+        // Update with Remote (Edit Playlist), Not Now.
+        let fromPhone = UIAlertAction(title: FixLogin.promptFromPhone, style: .default) { _ in
+            Task { @MainActor in DispatcharrKeyPromptModel.shared.updateFromPhone(p) }
+        }
+        alert.addAction(fromPhone)
+        alert.addAction(UIAlertAction(title: FixLogin.promptWithRemote, style: .default) { _ in
+            Task { @MainActor in DispatcharrKeyPromptModel.shared.editPlaylist(p) }
+        })
+        alert.addAction(UIAlertAction(title: FixLogin.promptNotNow, style: .cancel) { _ in
+            Task { @MainActor in DispatcharrKeyPromptModel.shared.notNow() }
+        })
+        alert.preferredAction = fromPhone
+        #else
         alert.addAction(UIAlertAction(title: "Not Now", style: .cancel) { _ in
             Task { @MainActor in DispatcharrKeyPromptModel.shared.notNow() }
         })
@@ -84,6 +103,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         }
         alert.addAction(edit)
         alert.preferredAction = edit
+        #endif
         shown = alert
         shownPrompt = p
         debugLog("[AUTH] Sign-in not accepted prompt shown for \(p.playlistID.prefix(8))")
@@ -126,6 +146,49 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         shownPrompt = nil
         DispatcharrRequestGate.shared.consumePrompt()
         prompt = nil
+    }
+
+    /// Apple TV: open the receive screen in Fix Login mode for this playlist.
+    func updateFromPhone(_ p: DispatcharrRequestGate.Prompt) {
+        debugLog("[SETUP] fix login screen opened from the rejected-key prompt for \(p.playlistID.prefix(8))")
+        shown = nil
+        shownPrompt = nil
+        DispatcharrRequestGate.shared.consumePrompt()
+        prompt = nil
+        presentFixLogin(p.playlistID, attempt: 0)
+    }
+
+    /// The receive screen in Fix Login mode, presented like the prompt itself
+    /// on the topmost controller (a SwiftUI cover at the root never showed:
+    /// onboarding and the other root hosts present from there, measured on the
+    /// simulator 2026-11-11). Waits for the alert to finish dismissing.
+    private func presentFixLogin(_ playlistID: String, attempt: Int) {
+        guard fixHost == nil else { return }
+        guard let top = Self.topController(), !top.isBeingDismissed, !top.isBeingPresented,
+              !(top is UIAlertController), let container = AerioApp.sharedContainer else {
+            guard attempt < 40 else {
+                debugLog("[SETUP] fix login screen could not be shown")
+                return
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                self.presentFixLogin(playlistID, attempt: attempt + 1)
+            }
+            return
+        }
+        let close: (String) -> Void = { [weak self] why in
+            debugLog("[SETUP] fix login screen closed\(why)")
+            self?.fixHost?.dismiss(animated: true)
+            self?.fixHost = nil
+        }
+        let screen = ReceiveSetupView(fixLoginPlaylistID: playlistID,
+                                      onCancel: { close("") },
+                                      onDone: { close(" after sign-in") })
+            .modelContainer(container)
+        let host = UIHostingController(rootView: screen)
+        host.modalPresentationStyle = .fullScreen
+        fixHost = host
+        top.present(host, animated: true)
     }
 
     func editPlaylist(_ p: DispatcharrRequestGate.Prompt) {

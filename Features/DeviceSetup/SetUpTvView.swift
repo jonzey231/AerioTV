@@ -41,7 +41,7 @@ struct SetUpTvView: View {
     }
 
     /// Where Try Again goes.
-    enum Back: Equatable { case pick, choose(SetupTarget, String) }
+    enum Back: Equatable { case pick, choose(SetupTarget, String), code(SetupTarget) }
 
     @Query private var servers: [ServerConnection]
     @ObservedObject private var center = SetupTvOfferCenter.shared
@@ -51,6 +51,9 @@ struct SetUpTvView: View {
     @State private var sync = false
     @State private var codeText = ""
     @State private var userOnly = false
+    /// Fix Login (the device advertised `mode=fixlogin`): the device asking for
+    /// this playlist's sign-in. Code, then send; no scope, profile, or sync choices.
+    @State private var fixTarget: SetupTarget?
     /// Remote-session (Cast) sheet sizing: hug the content, full height for the
     /// code entry and sign-in steps (keyboard) or when the user drags it up.
     @State private var contentHeight: CGFloat = 320
@@ -74,7 +77,7 @@ struct SetUpTvView: View {
                         stepView
                         if step != .sent && step != .sending && !isChecking {
                             HStack(spacing: 12) {
-                                if step != .pick { SetupSheetButton("Back", primary: false) { back() } }
+                                if step != .pick && !fixAtCode { SetupSheetButton("Back", primary: false) { back() } }
                                 SetupSheetButton("Cancel", primary: false) { onClose() }
                             }
                         }
@@ -125,6 +128,12 @@ struct SetUpTvView: View {
         return false
     }
 
+    /// Fix Login starts at the code: nothing before it to go back to.
+    private var fixAtCode: Bool {
+        if case .code(let t, _) = step { return t.isFixLogin }
+        return false
+    }
+
     private var needsKeyboard: Bool {
         switch step {
         case .code, .credential: return true
@@ -153,7 +162,7 @@ struct SetUpTvView: View {
                 .font(.system(size: 40))  // glyph in a fixed box: not text, stays fixed
                 .foregroundStyle(ThemeManager.shared.accent)
                 .frame(height: 56)
-            Text("Set up another device")
+            Text(fixTarget != nil ? FixLogin.sheetTitle : "Set up another device")
                 .scaledFont(.title3.weight(.bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
@@ -203,7 +212,7 @@ struct SetUpTvView: View {
                 Text("Sending to the other device").foregroundColor(.textPrimary)
             }
         case .sent:
-            Text("Sent. The device is finishing setup now.")
+            Text(fixTarget.map { FixLogin.sentLine($0.name) } ?? "Sent. The device is finishing setup now.")
                 .scaledFont(.bodyLarge)
                 .foregroundColor(.textPrimary)
             SetupSheetButton("Done") { onClose() }
@@ -217,18 +226,22 @@ struct SetUpTvView: View {
 
     // MARK: Pick
 
+    /// The list offers setup receivers only; a device asking for Fix Login is
+    /// offered by the dock card and the Settings banner.
+    private var setupReceivers: [SetupTarget] { center.tvs.filter { $0.mode == nil } }
+
     private var pickStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("On the other device, open AerioTV and choose Set up from another device. Then pick it below, or scan the code it shows.")
                 .scaledFont(.bodyMedium.subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))
-            if center.tvs.isEmpty {
+            if setupReceivers.isEmpty {
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
                     Text("Looking for devices on this network").foregroundColor(Color.contrastText(.textSecondary))
                 }
             }
-            ForEach(center.tvs) { t in
+            ForEach(setupReceivers) { t in
                 Button { pick(t) } label: {
                     HStack(spacing: 12) {
                         Image(systemName: t.kind.symbol).foregroundColor(.accentPrimary)
@@ -283,8 +296,10 @@ struct SetUpTvView: View {
         }
     }
 
-    /// Only a Dispatcharr playlist has profiles to choose between.
+    /// Only a Dispatcharr playlist has profiles to choose between. Fix Login
+    /// goes straight to the code: the playlist and its sign-in are decided.
     private func firstStep(_ t: SetupTarget, _ code: String?) -> Step {
+        if t.isFixLogin { return .code(t, nil) }
         if playlist?.type == .dispatcharrAPI { return .scope(t, code) }
         return code.map { .choose(t, $0) } ?? .code(t, nil)
     }
@@ -375,6 +390,7 @@ struct SetUpTvView: View {
         if let link, let l = SetupProtocol.parseLink(link) {
             step = firstStep(SetupTarget.fromLink(l), l.code)
         } else if let target {
+            if target.isFixLogin { fixTarget = target }
             step = firstStep(target, nil)
         }
         center.discovery.start()
@@ -394,12 +410,15 @@ struct SetUpTvView: View {
         switch step {
         case .choose(let t, let c):
             if t.code != nil { step = playlist?.type == .dispatcharrAPI ? .scope(t, c) : .pick } else { step = .code(t, nil) }
-        case .code(let t, _): step = playlist?.type == .dispatcharrAPI ? .scope(t, nil) : .pick
+        case .code(let t, _):
+            if t.isFixLogin { return }
+            step = playlist?.type == .dispatcharrAPI ? .scope(t, nil) : .pick
         case .credential(let t, let c, _): step = .scope(t, c)
         case .error(_, let b), .keyRejected(_, let b):
             switch b {
             case .pick: step = .pick
             case .choose(let t, let c): step = .choose(t, c)
+            case .code(let t): codeText = ""; step = .code(t, nil)
             }
         default: step = .pick
         }
@@ -408,6 +427,8 @@ struct SetUpTvView: View {
     private func submitCode(_ t: SetupTarget) {
         let c = codeText.filter(\.isNumber)
         guard c.count == 6 else { step = .code(t, "Enter the 6-digit code shown on the other device."); return }
+        // Fix Login has nothing to choose: the code sends.
+        if t.isFixLogin, let pl = playlist { send(t, c, pl); return }
         step = .choose(t, c)
     }
 
@@ -424,9 +445,20 @@ struct SetUpTvView: View {
             step = .error(Self.noLongerWaiting, .pick)
             return
         }
-        let payload = userOnly && pl.type == .dispatcharrAPI
-            ? SetupSender.buildUserOnlyPayload(pl, turnOnSync: sync)
-            : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
+        let back: Back = t.isFixLogin ? .code(t) : .choose(t, code)
+        let built: SetupProtocol.Payload?
+        if t.isFixLogin {
+            // Fix Login: only this playlist's sign-in, addressed to the device's playlist id.
+            built = SetupSender.buildFixLoginPayload(pl, receiverPlaylistID: t.playlistID)
+        } else {
+            built = userOnly && pl.type == .dispatcharrAPI
+                ? SetupSender.buildUserOnlyPayload(pl, turnOnSync: sync)
+                : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
+        }
+        guard let payload = built else {
+            step = .error(FixLogin.unreadable, back)
+            return
+        }
         step = .sending
         Task { @MainActor in
             // Never hand over a key the server refuses (2026-11-09, Android
@@ -439,7 +471,7 @@ struct SetUpTvView: View {
                                      ?? DispatcharrRateLimitCopy.checkingLine)
                 }
                 if verdict == .rejected {
-                    step = .keyRejected(pl.id, .choose(t, code))
+                    step = .keyRejected(pl.id, back)
                     return
                 }
                 step = .sending
@@ -466,7 +498,7 @@ struct SetUpTvView: View {
             case .refused:
                 step = .error(Self.noLongerWaiting, .pick)
             case .failed(let m):
-                step = .error(m, .choose(t, code))
+                step = .error(m, back)
             }
         }
     }
@@ -533,7 +565,8 @@ private struct SetupTvOfferContent: View {
             }
             .buttonStyle(.plain)
             Button(action: onSetUp) {
-                Text("Set up")
+                // "Fix Login" when the device asks for one playlist's sign-in (Fix Login).
+                Text(FixLogin.buttonLabel(target.mode))
                     .scaledFont(.subheadline.weight(.semibold))
                     .foregroundStyle(ThemeManager.shared.accent)
                     .padding(.horizontal, 10)
@@ -640,6 +673,14 @@ struct SetupHandoffRoot: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
     @Query private var servers: [ServerConnection]
 
+    private var serverIDs: [UUID] { servers.map(\.id) }
+
+    /// Fix Login sends the matched playlist's sign-in, whichever playlist is active.
+    private func targetSheet(_ t: SetupTarget) -> some View {
+        let fixFrom: ServerConnection? = t.isFixLogin ? center.fixLoginServer(for: t) : nil
+        return SetUpTvView(server: fixFrom, target: t) { center.presentedTarget = nil }
+    }
+
     /// A setup link waits while the launch PIN screen is up or a profile switch
     /// is landing: the profile that will be active is not settled yet.
     private var linkHeld: Bool { SetupGate.isLocked || profiles.switching }
@@ -650,6 +691,8 @@ struct SetupHandoffRoot: ViewModifier {
             .onChange(of: servers.first(where: \.isActive)?.id, initial: true) { _, _ in
                 center.canOffer = SetupGate.canSetUpTv(servers.first(where: \.isActive))
             }
+            // Fix Login's card rule reads every playlist here (FixLogin.matchPlaylist).
+            .onChange(of: serverIDs, initial: true) { _, _ in center.playlists = servers }
             // Admin or default profile only: a switch to a Child profile hides the offer.
             .onChange(of: profiles.activeRoleNow) { _, _ in
                 center.canOffer = SetupGate.canSetUpTv(servers.first(where: \.isActive))
@@ -675,7 +718,7 @@ struct SetupHandoffRoot: ViewModifier {
                 if !held { center.unlocked(allowed: SetupGate.canSetUpTv(servers.first(where: \.isActive))) }
             }
             .sheet(item: Binding(get: { center.presentedTarget }, set: { center.presentedTarget = $0 })) { t in
-                SetUpTvView(target: t) { center.presentedTarget = nil }
+                targetSheet(t)
             }
             .sheet(item: Binding(get: { center.pendingLink }, set: { center.pendingLink = $0 })) { box in
                 SetUpTvView(link: box.link) { center.pendingLink = nil }

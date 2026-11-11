@@ -357,6 +357,17 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Fix Login wrote a new sign-in for `playlistID` (docs/DeviceSetupHandoff.md):
+    /// its hold and prompt are lifted, `newKey` counts as good, and requests or
+    /// streams still built with `oldKey` go out with `newKey`.
+    func liftFixedLogin(playlistID: String, oldKey: String?, newKey: String?) {
+        clearPlaylist(playlistID)
+        if let n = newKey?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
+            clearKey(n)
+            if let o = oldKey { noteKeyReplaced(old: o, new: n) }
+        }
+    }
+
     /// The key that replaced `key` within the memo window, or nil.
     func replacementKey(for key: String) -> String? {
         let hash = Self.keyHash(key)

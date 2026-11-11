@@ -16,8 +16,8 @@ tablet) over the local network.
 
 | Side | Who | What it does |
 |------|-----|--------------|
-| Receiver | Every device (Android TV, Apple TV, Android phone and tablet, iPhone, iPad) | Welcome > "Set up from another device", and on phones and tablets also Add Playlist > "Set up from another device". Generates a code and key pair, listens, advertises, shows a QR code and the code, applies the payload. |
-| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up another device" (list and playlist detail; Admin or default profile only), a dock card directly above the tab bar while another device is advertising (that device's name and type icon, "Waiting for setup, key XXXX", Set up, and dismiss; it shares a row with the Control a TV button when that button shows), a banner at the top of the Settings root for the same device (same lines, Set up, and dismiss; one shared discovery, gating, and dismissal with the dock card), and "Set up another device with this playlist" on the phone onboarding's Add Profiles step. A device never lists its own advert. |
+| Receiver | Every device (Android TV, Apple TV, Android phone and tablet, iPhone, iPad) | Welcome > "Set up from another device", and on phones and tablets also Add Playlist > "Set up from another device". On TVs also the rejected-key prompt's "Update from Phone" (see Fix Login). Generates a code and key pair, listens, advertises, shows a QR code and the code, applies the payload. |
+| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up another device" (list and playlist detail; Admin or default profile only), a dock card directly above the tab bar while another device is advertising (that device's name and type icon, "Waiting for setup, key XXXX", Set up, and dismiss; it shares a row with the Control a TV button when that button shows), a banner at the top of the Settings root for the same device (same lines, Set up, and dismiss; one shared discovery, gating, and dismissal with the dock card), and "Set up another device with this playlist" on the phone onboarding's Add Profiles step. The dock card and banner read "Fix Login" for a TV asking for a sign-in (see Fix Login). A device never lists its own advert. |
 
 ## Receiver session
 
@@ -34,6 +34,8 @@ tablet) over the local network.
    | `name` | device name (at most 60 characters) |
    | `pk` | receiver public key, 32 raw bytes, standard base64 with padding |
    | `kind` | `phone`, `tablet`, or `tv` (iPad and Mac count as `tablet`). Absent or unknown reads as `tv`, which is what builds before this key advertised. The sender shows a device-type icon from it. |
+   | `mode` | Optional. Absent (or blank) = a setup receiver, which is every build before this key. `fixlogin` = a TV asking for one playlist's sign-in (see Fix Login). Senders do not offer an advert whose `mode` they do not know. |
+   | `pl` | With `mode`=`fixlogin`: the id of the playlist whose sign-in is wanted (UUID, lowercase). Not a secret. |
 
    The TXT record carries nothing derived from the code.
 4. Show the QR code, the code in large type, next to it the key
@@ -196,7 +198,7 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
 ```json
 {
   "playlist": {
-    "id": "<the sender's playlist UUID>",
+    "id": "6F1C2A4E-0B7D-4E52-9C1A-2D3E4F5A6B7C",
     "type": "dispatcharr | xtream | m3u",
     "name": "Home",
     "url": "https://server.example",
@@ -211,7 +213,7 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
   },
   "profiles": [
     {
-      "id": "<the sender's profile id>",
+      "id": "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D",
       "username": "alex",
       "displayName": "Alex",
       "role": "admin | user | child",
@@ -239,6 +241,11 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
 
 Notes:
 
+- `playlist.id` is the sender's playlist id (its UUID string) and
+  `profiles[].id` each profile's id. Both are optional: older senders omit
+  them. "Import this user only" for a profile other than the default omits
+  both (another user's sign-in is another account, so another playlist).
+  Ids compare without case (Apple writes uppercase, Android lowercase).
 - `playlist.credential` is the playlist's own sign-in: the default
   profile's API key and/or username and password on Dispatcharr, the
   account login on Xtream Codes, absent on M3U. Only non-empty fields are
@@ -252,15 +259,9 @@ Notes:
   sync that has not been re-entered yet is sent as `none`.
 - XC and M3U playlists send `playlist` only.
 - `sync` is present only when the user chose to turn it on.
-- `playlist.id` and `profiles[].id` (added 2026-11-10, both optional) are
-  the sender's ids. The receiver creates the playlist (and its profiles)
-  with these ids when no row here has them, so the same playlist has one id
-  on every device and iCloud or Drive sync sees one playlist. A row here
-  that already has `playlist.id` IS that playlist: it is updated in place
-  (Replace), never added twice. The receive-time duplicate check still runs
-  for rows with a different id. Older senders omit both ids and receivers
-  keep the earlier behavior. A "this user only" handoff whose sign-in is a
-  different account than the sender's playlist omits `playlist.id`.
+- `mode` is optional: absent = a setup (every sender before Fix Login);
+  `fixlogin` = only `playlist` and its `credential`, with no `profiles` and
+  no `sync` (see Fix Login).
 
 ## Receiver apply
 
@@ -270,6 +271,14 @@ Non-interactive, with a progress line on screen:
    Playlist save path (it loads the channels, which is the connection
    test), then store the catch-up offset. On failure: "Setup did not
    finish" with the error, Retry (re-applies the same payload), and Cancel.
+   Playlist id: when a playlist here already has `playlist.id`, it is the
+   same playlist and is updated in place (Replace, "Updating your
+   playlist"), never added a second time and never prompted. Otherwise the
+   duplicate check (same server and account, Cancel, Add Anyway, or
+   Replace) runs against playlists with other ids, and a new playlist is
+   created with the sender's `playlist.id`, its default profile with the
+   default entry's `id`, and each added profile with its `id` (an id
+   already used here gets a new one). Without ids, today's behavior.
 2. "Adding profiles": the default profile first (name, role, avatar,
    order, PIN), then Admins, then the rest, each through the roster add
    path (signs in once with the sent credential, then applies role, PIN,
@@ -283,10 +292,87 @@ Non-interactive, with a progress line on screen:
    Settings when the device was already set up, and open the main screen
    (the profile picker shows when the playlist asks for it).
 
+## Fix Login
+
+A TV whose playlist's API key the server rejected (the rejected-key hold:
+"API key no longer valid", every API call for that playlist held locally) and
+that has no stored password that could sign in again on its own gets the
+working sign-in from a phone or tablet that has one. Same receiver, sender,
+code, crypto, envelope, and replies as a setup; only the advert, the payload,
+and the apply differ. Both new fields are optional, so older receivers,
+senders, and other ports keep working: a receiver that never advertises
+`mode` is a setup receiver, and a payload without `mode` is a setup. Works
+across platforms (an iPhone can fix an Android TV and the reverse).
+
+On the TV:
+
+1. The rejected-key prompt (title "API key no longer valid", body
+   unchanged) has, on TVs, the buttons "Update from Phone" (primary, default
+   focus), "Update with Remote" (opens Edit Playlist), and "Not Now", in
+   that order. Phones and tablets keep Edit Playlist and Not Now.
+2. "Update from Phone" opens the receive screen (QR code, code, key
+   fingerprint, device name) for that playlist with the header "Update from
+   your phone" and the line "On your phone, open AerioTV and tap Fix Login."
+   Cancel returns to the guide.
+3. The advert adds `mode`=`fixlogin` and `pl`=the playlist id.
+4. Apply: only the sign-in of the playlist with `playlist.id`, which must be
+   the playlist the screen was opened for (ids compare without case): the
+   API key, and the username and password when sent. A field not sent, or
+   sent blank, keeps its stored value. Profiles, settings, and other
+   playlists never change; a Fix Login screen takes only
+   `playlist.credential` from whatever it receives. The progress line is
+   "Signing in". Then the rejected-key hold and its prompt are lifted for
+   that playlist, requests still built with the old key go out with the new
+   one, the channels reload, and the screen shows "Signed in. Loading
+   channels." for 2 seconds and closes.
+5. No playlist here with that id (or no sign-in in the payload): "Setup did
+   not finish" with "The sign-in that was sent is not for a playlist on this
+   device.", Retry (a new code), and Cancel; the screen stays open.
+
+On the phone or tablet:
+
+1. The Set up dock card and the Settings banner (same slot, one-row layout,
+   sizing, and dismissal) show the device's name with the button "Fix
+   Login" when its advert has `mode`=`fixlogin`, and only when this device
+   has a Dispatcharr playlist whose id equals `pl`, or else, per the
+   one-playlist identity rule, exactly one Dispatcharr playlist that signs
+   in as the account sync reported for `pl`. That playlist must have a
+   sign-in to send, and its own key must not be held as rejected here. The
+   sender gate applies to that playlist (Admin or default profile, never
+   while the launch PIN is up). The device list in Set up another device
+   lists setup receivers only.
+2. Fix Login opens the sheet titled "Fix Login": the code, then the
+   pre-send key check, then the sealed send. No scope, profile, or sync
+   choices.
+3. Payload: `mode`: `fixlogin` and `playlist` = that playlist with its
+   `credential` (the playlist's own sign-in, as in a setup) and
+   `playlist.id` = the advertised `pl`. No `profiles`, no `sync`.
+
+   ```json
+   {
+     "mode": "fixlogin",
+     "playlist": {
+       "id": "6f1c2a4e-0b7d-4e52-9c1a-2d3e4f5a6b7c",
+       "type": "dispatcharr",
+       "name": "Home",
+       "url": "https://server.example",
+       "credential": { "apiKey": "...", "username": "..." }
+     }
+   }
+   ```
+
+   The other `playlist` fields are sent as in a setup (readers before Fix
+   Login need `type`, `name`, and `url`); the receiver uses only `id` and
+   `credential`.
+4. Success: "Sent. <device name> is signing in."
+
 ## Security
 
-- LAN only. No server path is used (setup and the user QR display) and the server is never involved; the
-  README path tables are unchanged.
+- LAN only. No server path is used (setup, Fix Login, and the user QR
+  display) and the server is never involved beyond the sender's existing
+  pre-send key check; the README path tables are unchanged.
+- The Fix Login advert's `pl` is a playlist id, not a secret; the sign-in
+  itself travels only inside the sealed payload.
 - One-time 6-digit code, 10 minute window, 3 attempts, then a new code and
   key pair. One successful send per code.
 - End to end encrypted: the key needs both the receiver's public key (from the
