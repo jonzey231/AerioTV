@@ -81,10 +81,10 @@ enum ProfileAvatarStyle {
         }
     }
 
-    /// Dark ink on the light swatches (Android avatarInk: luminance above 0.45).
-    static func ink(_ id: String) -> Color {
-        ["teal", "orange", "green", "slate"].contains(id) ? Color(hex6: 0x0B1220) : .white
-    }
+    /// Letter and icon ink: #0B1220 on teal, orange, green, and slate, white
+    /// on the rest, in light and dark mode (AvatarCatalog.inkHex, the owner's
+    /// final pick 2026-11-11; Android draws the same set).
+    static func ink(_ id: String) -> Color { Color(hex6: AvatarCatalog.inkHex(id)) }
 
     static func symbol(_ id: String) -> String? {
         switch id {
@@ -144,7 +144,7 @@ struct ProfileAvatarView: View {
                     .font(.system(size: size * 0.5, weight: .semibold))
                     .foregroundColor(ProfileAvatarStyle.ink(colorId))
             } else {
-                Text(String((name.isEmpty ? username : name).prefix(1)).uppercased())
+                Text(AvatarCatalog.initial(name: name, username: username))
                     .font(.system(size: size * 0.46, weight: .bold))
                     .foregroundColor(ProfileAvatarStyle.ink(colorId))
             }

@@ -982,6 +982,17 @@ do {
               "a plain add would win everywhere and drop the PIN and the Child role")
     }
     eq(AvatarCatalog.defaultColorIndex("ab"), (97 + 98) % 8, "default color index")
+
+    // Avatar ink and initial (review finding A8; the owner's final pick, both platforms).
+    for c in ["teal", "orange", "green", "slate"] { eq(AvatarCatalog.inkHex(c), 0x0B1220, "dark ink on \(c)") }
+    for c in ["blue", "purple", "sea", "ember"] { eq(AvatarCatalog.inkHex(c), 0xFFFFFF, "white ink on \(c)") }
+    eq(Set(AvatarCatalog.COLORS), AvatarCatalog.DARK_INK_COLORS.union(["blue", "purple", "sea", "ember"]), "every color has an ink")
+    eq(AvatarCatalog.initial(name: "  bob ", username: "x"), "B", "the trimmed name, uppercased")
+    eq(AvatarCatalog.initial(name: "", username: " alice"), "A", "empty name: the trimmed username")
+    eq(AvatarCatalog.initial(name: " \t\n", username: "carol"), "C", "whitespace name: the username")
+    eq(AvatarCatalog.initial(name: "", username: "  "), "?", "nothing: a question mark")
+    eq(AvatarCatalog.initial(name: "", username: ""), "?", "empty both: a question mark")
+    eq(AvatarCatalog.initial(name: "\u{e9}lan", username: "x"), "\u{c9}", "a non-ASCII first letter is uppercased")
     eq(SnapshotStaleness.normalize("3, 1,x,2"), "1,2,3", "assignment normalize")
     eq(SnapshotStaleness.reason(SnapshotStamp(userId: 2, assignment: ""), currentUserId: 2, currentAssignment: ""), nil, "fresh stamp")
 }

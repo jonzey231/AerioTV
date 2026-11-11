@@ -281,6 +281,26 @@ extension AvatarCatalog {
         if let i = spec?.icon, ICONS.contains(i) { return i }
         return INITIAL
     }
+
+    /// Ink for the letter or icon on the circle: the owner's final pick
+    /// (2026-11-11), the same on Android and on every form factor, in light
+    /// and dark mode. #0B1220 on teal, orange, green, and slate; white on
+    /// blue, purple, sea, and ember. A fixed set, not a luminance rule.
+    static let DARK_INK_COLORS: Set<String> = ["teal", "orange", "green", "slate"]
+    static let DARK_INK: UInt32 = 0x0B1220
+    static let LIGHT_INK: UInt32 = 0xFFFFFF
+
+    static func inkHex(_ colorId: String) -> UInt32 { DARK_INK_COLORS.contains(colorId) ? DARK_INK : LIGHT_INK }
+
+    /// The letter on an initial avatar, the same on Android: the trimmed
+    /// display name, else the trimmed username, else "?"; its first
+    /// character, uppercased.
+    static func initial(name: String, username: String) -> String {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = !n.isEmpty ? n : (!u.isEmpty ? u : "?")
+        return String(s.prefix(1)).uppercased()
+    }
 }
 
 // MARK: - Profile record (pure part of Android DispatcharrProfile)
