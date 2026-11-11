@@ -5581,7 +5581,9 @@ struct RemoteSessionCard: View {
         // 18 pt on both: the iPhone card is a capsule now too, so the
         // transport buttons need the same clearance from the rounded ends.
         .padding(.horizontal, 18)
-        .dockCardHeight()
+        // iPad: 44 pt tile plus 6 pt above and below is the 56 pt pill; phones keep 8.
+        // Cast, AirPlay, and AerioTV Remote share this card, so all three match.
+        .dockCardHeight(padVerticalPadding: 6)
         .modifier(SurfaceStyle())
         .contentShape(Rectangle())
         .onTapGesture {
@@ -5826,8 +5828,8 @@ final class MultiviewDockState: ObservableObject {
 }
 
 /// The Multiview staging dock card: the exact shape of KeptLiveCard's dock
-/// body (44 pt tile, title and subtitle, 18/8 pt padding, same capsule
-/// surface). Tapping the body opens the Multiview sheet; Play plays.
+/// body (44 pt tile, title and subtitle, 18/8 pt padding, 18/6 on iPad, same
+/// capsule surface). Tapping the body opens the Multiview sheet; Play plays.
 struct MultiviewDockCard: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -5879,7 +5881,9 @@ struct MultiviewDockCard: View {
             .accessibilityLabel("Play Multiview")
         }
         .padding(.horizontal, 18)
-        .dockCardHeight()
+        // iPad: the 44 pt tile with 6 pt above and below is exactly the 56 pt pill
+        // (8 pt made the card 60 pt tall beside it). Phones and the Duo keep 8.
+        .dockCardHeight(padVerticalPadding: 6)
         .modifier(MultiviewDockSurface())
         .accessibilityElement(children: .contain)
     }
@@ -6026,7 +6030,8 @@ struct MultiviewBackgroundCard: View {
             .accessibilityLabel("Stop Multiview")
         }
         .padding(.horizontal, 18)
-        .dockCardHeight()
+        // iPad: 44 pt tile plus 6 pt above and below is the 56 pt pill; phones keep 8.
+        .dockCardHeight(padVerticalPadding: 6)
         .modifier(Surface())
         .accessibilityElement(children: .contain)
     }
@@ -6178,8 +6183,9 @@ struct KeptLiveCard: View {
     var onShowList: () -> Void = {}
     /// Dock card (Logan 2026-10-05): the exact shape of RemoteSessionCard on
     /// iPhone and iPad: same 44 pt tile, title and subtitle lines, 18 pt side
-    /// padding, 8 pt vertical padding and the same capsule surface, so both
-    /// cards come out the same height and radius. Several channels stay one
+    /// padding, 8 pt vertical padding (6 on iPad, so the card is the 56 pt
+    /// pill's height) and the same capsule surface, so both cards come out the
+    /// same height and radius. Several channels stay one
     /// capsule; tapping it calls `onShowList`.
     var dockCard: Bool = false
 
@@ -6234,7 +6240,8 @@ struct KeptLiveCard: View {
             }
         }
         .padding(.horizontal, 18)
-        .dockCardHeight()
+        // iPad: 44 pt tile plus 6 pt above and below is the 56 pt pill; phones keep 8.
+        .dockCardHeight(padVerticalPadding: 6)
         .modifier(KeptDockSurface())
         .onAppear {
             debugLog("[AVP-RETAIN] kept dock card show (\(channels.count))")

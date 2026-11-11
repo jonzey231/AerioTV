@@ -11134,9 +11134,12 @@ final class RemoteSessionCardMetrics: ObservableObject {
 struct DockCardHeight: ViewModifier {
     @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
     @ObservedObject private var verticalBar = VerticalBarControlATV.shared
+    /// iPad only: the vertical padding when 8 pt would push the card past the
+    /// 56 pt pill (a 44 pt tile takes 6). nil keeps 8.
+    var padVerticalPadding: CGFloat? = nil
     func body(content: Content) -> some View {
         content
-            .padding(.vertical, 8)
+            .padding(.vertical, PadTabPill.isActive ? (padVerticalPadding ?? 8) : 8)
             .frame(minHeight: metrics.dockCardHeight)
     }
 }
@@ -11144,7 +11147,9 @@ struct DockCardHeight: ViewModifier {
 extension View {
     /// See DockCardHeight. Goes where the card had `.padding(.vertical, 8)`,
     /// before its capsule surface.
-    func dockCardHeight() -> some View { modifier(DockCardHeight()) }
+    func dockCardHeight(padVerticalPadding: CGFloat? = nil) -> some View {
+        modifier(DockCardHeight(padVerticalPadding: padVerticalPadding))
+    }
 }
 
 /// Pins the cast card 8 pt above the measured tab bar on every tab. A
