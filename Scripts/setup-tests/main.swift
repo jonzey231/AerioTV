@@ -340,7 +340,6 @@ do {
     eq(F.applyingLine, "Signing in", "applying line")
     eq(F.doneLine, "Signed in. Loading channels.", "done line")
     eq(F.notHere, "The sign-in that was sent is not for a playlist on this device.", "not here")
-    eq([F.promptFromPhone, F.promptWithRemote, F.promptNotNow], ["Update from Phone", "Update with Remote", "Not Now"], "TV prompt buttons in order")
     eq(F.sentLine("Living Room"), "Sent. Living Room is signing in.", "sent line")
     eq(F.sentLine("  "), "Sent. The device is signing in.", "sent line, no name")
 

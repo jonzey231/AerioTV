@@ -192,17 +192,20 @@ enum DispatcharrKeyBroker {
             return false
         }
         let passwordToo: Bool
+        // A stored password that signed in on an account with no API key
+        // ends the road too: re-signing in can never mint a key (2026-11-11).
+        let noKey = info.hasPassword && DispatcharrLoginGate.shared.foundNoKey(serverID: info.id)
         if info.hasPassword {
-            guard DispatcharrLoginGate.shared.isRejected(serverID: info.id) else { return false }
-            passwordToo = true
+            guard DispatcharrLoginGate.shared.isRejected(serverID: info.id) || noKey else { return false }
+            passwordToo = !noKey
         } else {
             passwordToo = false
         }
         if gate.markKeyRejected(playlistID: info.id.uuidString, key: key, playlistName: info.name,
-                                passwordToo: passwordToo, baseURL: info.baseURL) {
+                                passwordToo: passwordToo, noKey: noKey, baseURL: info.baseURL) {
             debugLog("[AUTH] API key for \(info.id.uuidString.prefix(8)) rejected by the server; holding every API call "
                      + "for this playlist locally (no network) until Edit Playlist changes the key or credentials"
-                     + (passwordToo ? " (re-login refused too)" : ""))
+                     + (noKey ? " (the account has no API key)" : passwordToo ? " (re-login refused too)" : ""))
         }
         return true
     }
@@ -333,7 +336,8 @@ final class DispatcharrKeyRecheck {
             if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }
             accepted = fresh != nil && fresh != r.key
             outcome = accepted ? "accepted (re-login issued a key)"
-                : DispatcharrLoginGate.shared.isRejected(serverID: info.id) ? "rejected (login refused)" : "unknown"
+                : DispatcharrLoginGate.shared.isRejected(serverID: info.id) ? "rejected (login refused)"
+                : DispatcharrLoginGate.shared.foundNoKey(serverID: info.id) ? "rejected (the account has no API key)" : "unknown"
         } else {
             let api = DispatcharrAPI(baseURL: r.baseURL, auth: .apiKey(r.key),
                                      userAgent: info?.userAgent ?? DeviceInfo.defaultUserAgent,

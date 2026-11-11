@@ -69,16 +69,16 @@ enum DispatcharrRateLimitCopy {
 
     /// Body of the rejected-key prompt (key-only playlist, or a password
     /// playlist whose re-login was refused too). Blank name: "this playlist".
+    /// Same on every device (sign-in from the prompt, 2026-11-11).
     static func keyRejectedBody(playlistName: String, passwordToo: Bool) -> String {
         let trimmed = playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "this playlist" : playlistName
         if passwordToo {
-            return "Dispatcharr no longer accepts the API key or password for \(name). "
-                + "They may have been changed on the server. Enter the current details in Edit Playlist, "
-                + "or ask your Dispatcharr administrator."
+            return "Dispatcharr no longer accepts the sign-in for \(name). It may have been changed on the server. "
+                + "Sign in with your Dispatcharr username and password to reconnect, or enter the current details in Edit Playlist."
         }
-        return "Dispatcharr no longer accepts the API key for \(name). It may have been changed or removed on the server. "
-            + "Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one."
+        return "Dispatcharr no longer accepts the API key for \(name). It may have been changed on the server. "
+            + "Sign in with your Dispatcharr username and password to reconnect, or enter the current key in Edit Playlist."
     }
 
     /// Sender status line while it checks the key it is about to send.
@@ -88,6 +88,87 @@ enum DispatcharrRateLimitCopy {
     static let setupKeyRejectedMessage =
         "Dispatcharr no longer accepts this playlist's API key, so it was not sent. "
             + "Enter the current key in Edit Playlist, then try again."
+}
+
+extension DispatcharrRateLimitCopy {
+    /// The rejected-key prompt's body for what happened: the account has no
+    /// API key (a stored password signed in, but the key was removed on the
+    /// server), else the key-only or password-too body.
+    static func keyRejectedPromptBody(playlistName: String, passwordToo: Bool, noKey: Bool) -> String {
+        noKey ? KeySignInCopy.noAPIKey : keyRejectedBody(playlistName: playlistName, passwordToo: passwordToo)
+    }
+}
+
+// MARK: - Sign in from the rejected-key prompt (2026-11-11)
+
+/// "API key no longer valid": sign in with the Dispatcharr username and
+/// password instead of entering a key (Android ApiKeyRejectedPrompt, same
+/// words). The prompt's buttons per device, the sign-in form, and its
+/// messages live here, so a wording change is one edit. Pure; the gate
+/// tests pin it.
+enum KeySignInCopy {
+    // Prompt buttons.
+    static let signIn = "Sign In"
+    static let editPlaylist = "Edit Playlist"
+    static let notNow = "Not Now"
+    /// TVs: the Fix Login receive screen.
+    static let updateFromPhone = "Update from Phone"
+    /// TVs: the same sign-in form as Sign In; key entry stays in Settings > Edit Playlist.
+    static let signInWithRemote = "Sign In with Remote"
+
+    // The form.
+    static let formTitle = "Sign in to Dispatcharr"
+    static let username = "Username"
+    static let password = "Password"
+    static let submit = "Sign In"
+    static let cancel = "Cancel"
+    static let footnote = "AerioTV keeps your password on this device so it can reconnect if the key changes again."
+    static let wrongCredentials = "Dispatcharr did not accept that username or password."
+    static let noAPIKey = "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it."
+
+    enum PromptAction: Equatable, Sendable { case signIn, editPlaylist, updateFromPhone, notNow }
+
+    /// The prompt's buttons, in order. Phones and tablets: Sign In (primary),
+    /// Edit Playlist, Not Now. TVs: Update from Phone (primary, default
+    /// focus), Sign In with Remote, Not Now. A profile that may not open the
+    /// form (a Child, or the app behind the launch PIN) gets no sign-in button.
+    static func promptActions(isTV: Bool, canSignIn: Bool) -> [PromptAction] {
+        if isTV { return canSignIn ? [.updateFromPhone, .signIn, .notNow] : [.updateFromPhone, .notNow] }
+        return canSignIn ? [.signIn, .editPlaylist, .notNow] : [.editPlaylist, .notNow]
+    }
+
+    static func label(_ a: PromptAction, isTV: Bool) -> String {
+        switch a {
+        case .signIn: return isTV ? signInWithRemote : signIn
+        case .editPlaylist: return editPlaylist
+        case .updateFromPhone: return updateFromPhone
+        case .notNow: return notNow
+        }
+    }
+
+    /// What a sign-in attempt came to.
+    enum Outcome: Equatable, Sendable {
+        case signedIn
+        case wrongCredentials
+        case noAPIKey
+        /// The existing line for a rate limit or a connection failure.
+        case failed(String)
+    }
+
+    /// The form's inline line for an outcome; nil on success (the form closes).
+    static func message(_ o: Outcome) -> String? {
+        switch o {
+        case .signedIn: return nil
+        case .wrongCredentials: return wrongCredentials
+        case .noAPIKey: return noAPIKey
+        case .failed(let line): return line
+        }
+    }
+
+    /// Sign In is offered once both fields have something in them.
+    static func canSubmit(username: String, password: String) -> Bool {
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
+    }
 }
 
 // MARK: - Countdown retry (interactive flows)

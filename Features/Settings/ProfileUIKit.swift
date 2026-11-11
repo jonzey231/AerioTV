@@ -262,6 +262,26 @@ struct ProfileChoiceRow: View {
     }
 }
 
+// MARK: - Field box
+
+extension View {
+    /// The box behind a text field in the profile dialogs and forms. iPhone and
+    /// iPad: a light fill and hairline that show on the dialog card (the old
+    /// elevatedBackground fill is the card's own color, so the fields were
+    /// invisible, measured 2026-11-11). Apple TV: nothing extra, the system
+    /// draws the field's own platter (a box under it made a double outline).
+    func profileFieldBox() -> some View {
+        #if os(tvOS)
+        return self
+        #else
+        return self
+            .padding(ProfileUI.s(10, 16))
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.white.opacity(0.12), lineWidth: 1))
+        #endif
+    }
+}
+
 // MARK: - Themed dialog
 
 /// The themed dialog card every profile prompt uses (Android SettingsAlertDialog).

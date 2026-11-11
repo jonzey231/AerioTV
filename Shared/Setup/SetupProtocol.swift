@@ -415,10 +415,8 @@ enum FixLogin {
     /// Phone error when the playlist to send cannot be read.
     static let unreadable = "This playlist could not be read."
 
-    /// Rejected-key prompt buttons on TVs, in this order.
-    static let promptFromPhone = "Update from Phone"
-    static let promptWithRemote = "Update with Remote"
-    static let promptNotNow = "Not Now"
+    // The rejected-key prompt's TV buttons live in KeySignInCopy
+    // (Networking/DispatcharrRateLimitRetry.swift) with the rest of its copy.
 
     /// Phone line after a successful send.
     static func sentLine(_ deviceName: String) -> String {

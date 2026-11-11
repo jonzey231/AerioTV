@@ -508,12 +508,46 @@ eq(DispatcharrRateLimitCopy.catchupAlertTitle(NSError(domain: "x", code: 1, user
 eq(DispatcharrRateLimitCopy.catchupAlertTitle(DispatcharrGateError.rateLimited(seconds: 30)), "Catch-up Unavailable", "catch-up 429 title")
 eq(DispatcharrRateLimitCopy.catchupAlertTitle(URLError(.timedOut)), "Catch-up Unavailable", "catch-up other failure title")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: false),
-   "Dispatcharr no longer accepts the API key for Home. It may have been changed or removed on the server. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key-only body")
+   "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect, or enter the current key in Edit Playlist.", "key-only body")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: true),
-   "Dispatcharr no longer accepts the API key or password for Home. They may have been changed on the server. Enter the current details in Edit Playlist, or ask your Dispatcharr administrator.",
+   "Dispatcharr no longer accepts the sign-in for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect, or enter the current details in Edit Playlist.",
    "password body")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "  ", passwordToo: false),
-   "Dispatcharr no longer accepts the API key for this playlist. It may have been changed or removed on the server. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "blank name")
+   "Dispatcharr no longer accepts the API key for this playlist. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect, or enter the current key in Edit Playlist.", "blank name")
+
+// A stored password signed in but the account has no API key (2026-11-11): the
+// key is held with its own prompt body, the form's no-key line.
+do {
+    let g = DispatcharrRequestGate()
+    check(g.markKeyRejected(playlistID: "P1", key: "DEAD", playlistName: "Home", noKey: true), "no-key hold is a fresh rejection")
+    check(g.isKeyRejected("DEAD"), "the dead key is held: no further requests with it")
+    eq(g.prompt?.noKey, true, "prompt carries no-key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], gate: g), .held, "a stream with the dead key never opens")
+    eq(DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: true),
+       "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it.", "no-key prompt body")
+    eq(DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: "Home", passwordToo: true, noKey: false),
+       DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: true), "other bodies unchanged")
+}
+
+// Sign in from the prompt (2026-11-11): buttons per device, the form, its messages.
+do {
+    typealias K = KeySignInCopy
+    eq(K.promptActions(isTV: false, canSignIn: true), [.signIn, .editPlaylist, .notNow], "phone prompt: Sign In, Edit Playlist, Not Now")
+    eq(K.promptActions(isTV: true, canSignIn: true), [.updateFromPhone, .signIn, .notNow], "TV prompt: Update from Phone, Sign In with Remote, Not Now")
+    eq(K.promptActions(isTV: false, canSignIn: false), [.editPlaylist, .notNow], "Child or locked phone: no Sign In")
+    eq(K.promptActions(isTV: true, canSignIn: false), [.updateFromPhone, .notNow], "Child or locked TV: no Sign In with Remote")
+    eq(K.promptActions(isTV: false, canSignIn: true).map { K.label($0, isTV: false) }, ["Sign In", "Edit Playlist", "Not Now"], "phone labels")
+    eq(K.promptActions(isTV: true, canSignIn: true).map { K.label($0, isTV: true) }, ["Update from Phone", "Sign In with Remote", "Not Now"], "TV labels")
+    eq(K.formTitle, "Sign in to Dispatcharr", "form title")
+    eq([K.username, K.password, K.submit, K.cancel], ["Username", "Password", "Sign In", "Cancel"], "form fields and buttons")
+    eq(K.footnote, "AerioTV keeps your password on this device so it can reconnect if the key changes again.", "footnote")
+    eq(K.message(.wrongCredentials), "Dispatcharr did not accept that username or password.", "wrong username or password")
+    eq(K.message(.noAPIKey), "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it.", "no API key")
+    eq(K.message(.failed("line")), "line", "network or rate limit: the existing line")
+    check(K.message(.signedIn) == nil, "signed in: the form closes")
+    check(!K.canSubmit(username: " ", password: "x") && !K.canSubmit(username: "a", password: ""), "both fields needed")
+    check(K.canSubmit(username: "a", password: " "), "a password is never trimmed")
+}
 
 // accepted memo
 do {

@@ -486,8 +486,8 @@ struct RenameProfileFlow: View {
             TextField("", text: $name)
                 .textFieldStyle(.plain)
                 .scaledFont(ProfileUI.body)
-                .padding(ProfileUI.s(10, 16))
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.elevatedBackground))
+                .profileFieldBox()
+                .accessibilityLabel("Name")
                 .submitLabel(.done)
         }
         .onAppear { if !loaded { loaded = true; name = profile.displayName } }
@@ -610,8 +610,8 @@ struct ProfileTextField: View {
             .textInputAutocapitalization(.never)
             #endif
             .scaledFont(ProfileUI.body)
-            .padding(ProfileUI.s(10, 16))
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color.elevatedBackground))
+            .profileFieldBox()
+            .accessibilityLabel(label)
         }
     }
 }

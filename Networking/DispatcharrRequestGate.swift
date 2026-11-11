@@ -238,6 +238,9 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         let playlistID: String
         let playlistName: String
         let passwordToo: Bool
+        /// The stored password signed in, but the account has no API key
+        /// (removed on the server): the prompt says so (2026-11-11).
+        var noKey: Bool = false
     }
 
     /// SHA-256 prefix (12 bytes, hex) of the trimmed key: what the gate
@@ -258,7 +261,7 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// slow re-check.
     @discardableResult
     func markKeyRejected(playlistID: String, key: String, playlistName: String = "",
-                         passwordToo: Bool = false, baseURL: String = "") -> Bool {
+                         passwordToo: Bool = false, noKey: Bool = false, baseURL: String = "") -> Bool {
         let hash = Self.keyHash(key)
         lock.lock()
         var set = rejected[hash] ?? []
@@ -266,7 +269,7 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         rejected[hash] = set
         var changed: Prompt?? = nil
         if fresh {
-            let p = Prompt(playlistID: playlistID, playlistName: playlistName, passwordToo: passwordToo)
+            let p = Prompt(playlistID: playlistID, playlistName: playlistName, passwordToo: passwordToo, noKey: noKey)
             pendingPrompt = p
             changed = .some(p)
             if !baseURL.isEmpty, rechecks[hash] == nil {

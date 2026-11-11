@@ -35,13 +35,58 @@
 //
 
 import Foundation
+import CryptoKit
 
 // MARK: - Decodable response shapes
 
 /// Response from `/api/accounts/token/`, the JWT login endpoint.
-struct DispatcharrJWTPair: Decodable {
+struct DispatcharrJWTPair: Decodable, Sendable {
     let access: String
     let refresh: String
+}
+
+/// One login per server at a time, and a fresh one reused (2026-11-11):
+/// at a cold launch the startup warmup (Username & Password playlists) and a
+/// silent re-login after a rejected key each logged in, two token requests
+/// seconds apart, and two devices on one network then went past Dispatcharr's
+/// login limit (3 a minute per address). Callers with the same credentials
+/// share an in-flight login and reuse a successful one for `reuseWindow`.
+/// Failures are never reused. The login gate and the 429 handling sit
+/// unchanged inside `DispatcharrAPI.login`.
+actor DispatcharrLoginShare {
+    static let shared = DispatcharrLoginShare()
+    /// A fresh access token lasts minutes; reuse stays well inside that.
+    static let reuseWindow: TimeInterval = 60
+
+    private var inFlight: [String: Task<DispatcharrJWTPair, Error>] = [:]
+    private var recent: [String: (pair: DispatcharrJWTPair, at: Date)] = [:]
+
+    private static func slot(_ serverID: UUID, _ username: String, _ password: String) -> String {
+        let digest = SHA256.hash(data: Data((username + "\u{1F}" + password).utf8))
+        return serverID.uuidString + "|" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func login(serverID: UUID, baseURL: String, username: String, password: String,
+               userAgent: String, caller: String) async throws -> DispatcharrJWTPair {
+        let key = Self.slot(serverID, username, password)
+        let id8 = serverID.uuidString.prefix(8)
+        if let r = recent[key], Date().timeIntervalSince(r.at) < Self.reuseWindow {
+            debugLog("[AUTH] \(caller) for \(id8): reusing a login from \(Int(Date().timeIntervalSince(r.at)))s ago (no new login)")
+            return r.pair
+        }
+        if let t = inFlight[key] {
+            debugLog("[AUTH] \(caller) for \(id8): a login is in flight; sharing it")
+            return try await t.value
+        }
+        let t = Task {
+            try await DispatcharrAPI.login(baseURL: baseURL, username: username, password: password, userAgent: userAgent)
+        }
+        inFlight[key] = t
+        defer { inFlight[key] = nil }
+        let pair = try await t.value
+        recent[key] = (pair, Date())
+        return pair
+    }
 }
 
 /// Response from `/api/accounts/token/refresh/`. The refresh token is
@@ -383,11 +428,13 @@ final class DispatcharrTokenStore: @unchecked Sendable {
             return
         }
         do {
-            let pair = try await DispatcharrAPI.login(
+            let pair = try await DispatcharrLoginShare.shared.login(
+                serverID: serverID,
                 baseURL: baseURL,
                 username: username,
                 password: password,
-                userAgent: userAgent
+                userAgent: userAgent,
+                caller: "warmup"
             )
             store(serverID: serverID, access: pair.access, refresh: pair.refresh)
             debugLog("📺 Direct Connect warmup: logged in fresh (server=\(serverID.uuidString.prefix(8)))")
@@ -879,11 +926,13 @@ extension DispatcharrAPI {
         // 429 and rejected logins park (DispatcharrLoginGate).
         return await DispatcharrLoginGate.shared.silentRelogin(serverID: serverID) {
         do {
-            let pair = try await login(
+            let pair = try await DispatcharrLoginShare.shared.login(
+                serverID: serverID,
                 baseURL: baseURL,
                 username: username,
                 password: password,
-                userAgent: userAgent
+                userAgent: userAgent,
+                caller: "silent re-login"
             )
             DispatcharrTokenStore.shared.store(
                 serverID: serverID,
@@ -915,7 +964,13 @@ extension DispatcharrAPI {
                 KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
             }
             debugLog("📺 silentRebootstrapApiKey: SUCCESS, fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
+            DispatcharrLoginGate.shared.clearNoKey(serverID: serverID)
             return .key(user.apiKey)
+        } catch DispatcharrDirectConnectError.noAPIKeyForAccount {
+            // Signed in, but the account has no API key: hold the dead key
+            // (holdIfProven) instead of probing and re-signing in forever.
+            DispatcharrLoginGate.shared.noteNoKey(serverID: serverID)
+            return .failed
         } catch DispatcharrDirectConnectError.invalidCredentials {
             debugLog("📺 silentRebootstrapApiKey: FAIL, login rejected (server=\(serverID.uuidString.prefix(8)))")
             return .rejected
@@ -954,6 +1009,9 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     private var lastAttemptAt: [UUID: Date] = [:]
     private var lastKey: [UUID: String] = [:]
     private var rejectedUntil: [UUID: Date] = [:]
+    /// A silent re-login that signed in but found no API key on the account
+    /// (removed on the server), for the same window as a rejected login.
+    private var noKeyUntil: [UUID: Date] = [:]
     private var serverParkedUntil: [String: Date] = [:]
     /// The server's reason for each login park (stream-429-spec.md UPDATE).
     private var serverParkedReason: [String: RateLimitReason] = [:]
@@ -1000,6 +1058,38 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     func isRejected(serverID: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return (rejectedUntil[serverID] ?? .distantPast) > Date()
+    }
+
+    /// The user signed in with a username and password that worked (the
+    /// rejected-key prompt's Sign In): a parked rejection no longer applies,
+    /// so a later key change can re-sign in silently again.
+    func clearRejected(serverID: UUID) {
+        lock.lock()
+        rejectedUntil[serverID] = nil
+        noKeyUntil[serverID] = nil
+        lock.unlock()
+    }
+
+    /// The last silent re-login for `serverID` signed in but the account has no
+    /// API key: the key is held like a refused re-login, so nothing keeps
+    /// sending the dead key (2026-11-11, Android parity).
+    func noteNoKey(serverID: UUID) {
+        lock.lock()
+        noKeyUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
+        lock.unlock()
+        debugLog("[AUTH] re-login for \(serverID.uuidString.prefix(8)) signed in, but the account has no API key; the key is held")
+    }
+
+    func foundNoKey(serverID: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return (noKeyUntil[serverID] ?? .distantPast) > Date()
+    }
+
+    /// A re-login that found a key: the account has one again.
+    func clearNoKey(serverID: UUID) {
+        lock.lock()
+        noKeyUntil[serverID] = nil
+        lock.unlock()
     }
 
     /// A login outside `silentRelogin` (warmup) was rejected.
