@@ -9607,6 +9607,12 @@ private struct ChannelInfoBanner: View {
     /// the banner can never outlive the budget regardless of
     /// Task state.
     @State private var bannerOpenedAt: Date?
+    #if !os(tvOS)
+    /// The banner's full-screen container (global), for the card's width.
+    @State private var containerFrame: CGRect = .zero
+    /// Where the chrome's right-hand button group starts (global x).
+    @ObservedObject private var topRow = PlayerTopRowLayout.shared
+    #endif
 
     /// Renders ONLY inside the wall-clock-capped window that opens on
     /// each stream start (`streamStartedToken`, bumped for every live
@@ -9757,6 +9763,13 @@ private struct ChannelInfoBanner: View {
         }
         .frame(maxWidth: .infinity, maxHeight: embedded ? nil : .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
+        #if !os(tvOS)
+        .onGeometryChange(for: CGRect.self) { proxy in
+            proxy.frame(in: .global)
+        } action: { frame in
+            containerFrame = frame
+        }
+        #endif
         // v1.6.18: same safe-area carve-out as the chrome and
         // Stream Info overlays, the `iOSDynamicTopInset` formula
         // was designed against an absolute screen-top reference.
@@ -9832,6 +9845,8 @@ private struct ChannelInfoBanner: View {
                             Text(item.number)
                                 .scaledFont(channelNumberFont)
                                 .foregroundColor(.white.opacity(0.55))
+                                .lineLimit(1)
+                                .layoutPriority(1)
                         }
                         if showCardChannelName {
                             Text(item.name)
@@ -9878,7 +9893,9 @@ private struct ChannelInfoBanner: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+            // The card hugs its content up to the cap (Android fill = false);
+            // the half-folded panel keeps its full-width card.
+            if embedded { Spacer(minLength: 0) }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, verticalPadding)
@@ -9891,7 +9908,7 @@ private struct ChannelInfoBanner: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
-        .frame(maxWidth: maxBannerWidth, alignment: .leading)
+        .frame(maxWidth: maxCardWidth(logo: item.logoURL != nil && showCardLogo), alignment: .leading)
         .padding(.top, topPadding)
         .padding(.leading, sidePadding)
     }
@@ -9986,11 +10003,38 @@ private struct ChannelInfoBanner: View {
         return 10
         #endif
     }
-    private var maxBannerWidth: CGFloat {
+    /// The card's width cap. Android parity (PlayerChromeOverlay InfoCard,
+    /// 2026-11-10): the text column stops at 320 pt, and beside the close
+    /// button the card takes only the space before the right-hand button
+    /// group, so a long name truncates instead of running under the icons.
+    private func maxCardWidth(logo: Bool) -> CGFloat {
         #if os(tvOS)
         return 720
         #else
-        return 460
+        if embedded { return 460 }
+        let cap = 320 + 32 + (logo ? logoSize + 14 : 0)
+        if cardUnderBar { return cap }
+        let leading = containerFrame.minX + sidePadding
+        let trailing = topRow.trailingGroupMinX > 0
+            ? topRow.trailingGroupMinX - 12
+            // Not measured yet: Close-row geometry (16 pt edge, up to four
+            // 52 pt buttons 12 pt apart).
+            : containerFrame.maxX - 16 - (4 * 52 + 3 * 12) - 12
+        guard containerFrame.width > 0 else { return cap }
+        return max(0, min(cap, trailing - leading))
+        #endif
+    }
+
+    /// The card sits under the top row in a window narrower than 500 pt
+    /// (Android compactTopBar: a portrait phone, an iPad split view), and
+    /// beside the close button where the row has room (landscape, iPad, an
+    /// unfolded iPhone Duo in portrait).
+    private var cardUnderBar: Bool {
+        #if os(tvOS)
+        return false
+        #else
+        guard containerFrame.width > 0 else { return isiPhonePortrait }
+        return containerFrame.width < 500
         #endif
     }
     private var topPadding: CGFloat {
@@ -10007,7 +10051,7 @@ private struct ChannelInfoBanner: View {
         // user feedback, landscape has plenty of horizontal room
         // and the previous "below close button" placement looked
         // awkward.
-        if isiPhonePortrait {
+        if cardUnderBar {
             return iOSDynamicTopInset + 60  // close-button height (52) + 8pt spacing
         } else {
             return iOSDynamicTopInset
@@ -10026,7 +10070,7 @@ private struct ChannelInfoBanner: View {
         // width + 12pt breathing room = 80pt. v1.6.18: iPhone
         // landscape now matches iPad here so the banner sits to
         // the right of the close button instead of below it.
-        if isiPhonePortrait {
+        if cardUnderBar {
             return 8
         } else {
             return 80

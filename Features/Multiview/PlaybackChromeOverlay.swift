@@ -284,6 +284,9 @@ struct PlaybackChromeOverlay: View {
                 // iPhone-portrait three-line title stack was
                 // duplicating that information.
                 Spacer(minLength: 0)
+                // The right-hand group, measured so the channel info card
+                // (HomeView ChannelInfoBanner) never runs under it.
+                HStack(alignment: .center, spacing: 12) {
                 #if os(iOS)
                 // Issue #38: rotate-to-fullscreen, iPhone only (iPad already
                 // rotates with the device).
@@ -365,6 +368,13 @@ struct PlaybackChromeOverlay: View {
                 // only the in-Multiview chrome dropped its add and layout
                 // buttons, which the tile menu covers.
                 addButton_iOS
+                }
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.frame(in: .global).minX
+                } action: { minX in
+                    PlayerTopRowLayout.shared.noteTrailingGroup(minX: minX)
+                }
+                .onDisappear { PlayerTopRowLayout.shared.noteTrailingGroup(minX: 0) }
             }
             .padding(.horizontal, 16)
             // Dynamic top inset, not a hardcoded constant, and not a
@@ -2403,6 +2413,22 @@ struct DpadScrubHUD: View {
         )
         .allowsHitTesting(false)
         .focusable(false)
+    }
+}
+#endif
+
+#if !os(tvOS)
+/// Where the player's top-row right-hand button group starts (global x), so
+/// the channel info card (HomeView ChannelInfoBanner) stops short of it.
+/// 0: not on screen.
+@MainActor
+final class PlayerTopRowLayout: ObservableObject {
+    static let shared = PlayerTopRowLayout()
+    @Published private(set) var trailingGroupMinX: CGFloat = 0
+
+    func noteTrailingGroup(minX: CGFloat) {
+        let v = minX.rounded()
+        if v != trailingGroupMinX { trailingGroupMinX = v }
     }
 }
 #endif
