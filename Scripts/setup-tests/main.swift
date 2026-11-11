@@ -329,5 +329,50 @@ do {
     eq(act(same: true, live: false), .open, "the same link after Cancel opens again")
 }
 
+// MARK: Discovery timing (SetupDiscoveryRules, 2026-11-11)
+do {
+    typealias D = SetupDiscoveryRules
+    // Refresh pace: fast first for a browser deaf from the start, then a slow steady pace
+    // that never stops while discovery runs.
+    eq(D.refreshDelay(after: 0), 5, "first refresh after 5 s")
+    eq(D.refreshDelay(after: 1), 10, "second after 10 s")
+    eq(D.refreshDelay(after: 2), 20, "third after 20 s")
+    eq(D.refreshDelay(after: 3), 30, "then every 30 s")
+    eq(D.refreshDelay(after: 500), 30, "still every 30 s much later")
+    check((0..<1000).allSatisfy { D.refreshDelay(after: $0) >= 5 }, "never faster than every 5 s")
+    var t: TimeInterval = 0, n = 0
+    while true { t += D.refreshDelay(after: n); if t > 600 { break }; n += 1 }
+    check(n <= 22, "at most 22 refreshes in 10 minutes (the old silent loop ran 120): \(n)")
+
+    // Refresh step: a second browser only while devices are listed, so nothing blinks.
+    eq(D.refreshStep(currentLists: false, probeRunning: false, silentProbes: 0), .recreate, "nothing listed: recreate")
+    eq(D.refreshStep(currentLists: false, probeRunning: true, silentProbes: 1), .recreate, "nothing listed, silent probe: recreate")
+    eq(D.refreshStep(currentLists: true, probeRunning: false, silentProbes: 0), .startProbe, "devices listed: start a second browser")
+    eq(D.refreshStep(currentLists: true, probeRunning: true, silentProbes: 0), .replaceProbe, "first silent probe: replace it")
+    eq(D.refreshStep(currentLists: true, probeRunning: true, silentProbes: 1), .probeTakesOver, "second silent probe: listed devices are gone")
+    // A stale listing (missed goodbye) clears within two steady intervals plus the probe start.
+    var steps: [D.RefreshStep] = []
+    var probe = false, silent = 0
+    for _ in 0..<5 {
+        let s = D.refreshStep(currentLists: true, probeRunning: probe, silentProbes: silent)
+        steps.append(s)
+        if s == .probeTakesOver { break }
+        if s == .replaceProbe { silent += 1 }
+        probe = true
+    }
+    eq(steps, [.startProbe, .replaceProbe, .probeTakesOver], "missed goodbye clears on the third refresh")
+
+    // Resolve: every attempt times out, attempts are bounded, the worst case stays short.
+    check(D.resolveTimeout >= 2 && D.resolveTimeout <= 5, "resolve timeout 2 to 5 s: \(D.resolveTimeout)")
+    check(D.resolveAttempts >= 2 && D.resolveAttempts <= 4, "2 to 4 attempts: \(D.resolveAttempts)")
+    eq(D.resolveRetryDelay(afterAttempt: 1), 1, "retry after 1 s")
+    eq(D.resolveRetryDelay(afterAttempt: 2), 2, "then after 2 s")
+    let worst = TimeInterval(D.resolveAttempts) * D.resolveTimeout
+        + (1..<D.resolveAttempts).map { D.resolveRetryDelay(afterAttempt: $0) }.reduce(0, +)
+    check(worst < 20, "a hung advert gives up in under 20 s: \(worst)")
+    check(worst < D.refreshDelay(after: 3), "and before the next steady refresh tries it again")
+    check(D.takeoverRemovalHold > 0 && D.takeoverRemovalHold < D.refreshDelay(after: 0), "removal hold shorter than any refresh gap")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

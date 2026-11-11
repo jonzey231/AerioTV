@@ -58,26 +58,64 @@ extension SetupProtocol.Kind {
 /// NWBrowser for `_aeriotv-setup._tcp`. Each advert is validated (TXT v=1,
 /// 32-byte pk) and resolved to an IPv4 host and port through a short
 /// NWConnection. A changed pk under the same instance replaces the row.
+///
+/// The browser is refreshed for as long as discovery runs
+/// (SetupDiscoveryRules): one can stop hearing new sessions after its first
+/// result, and one can be deaf from the start. While devices are listed, a
+/// refresh runs a second browser that takes over on its first result, so the
+/// offer does not blink. Every resolve has a timeout and a bounded retry.
 @MainActor
 final class SetupDiscovery: ObservableObject {
     @Published private(set) var tvs: [SetupTarget] = []
 
+    /// One valid advert from a browse result set.
+    private struct Advert: Sendable {
+        let service: String
+        let pk: Data
+        let shown: String
+        let kind: SetupProtocol.Kind
+        let endpoint: NWEndpoint
+    }
+
+    /// An advert being resolved: its connection and timeout, or (conn nil)
+    /// the wait before its next attempt.
+    private struct Resolving {
+        let advert: Advert
+        let attempt: Int
+        let serial: Int
+        var conn: NWConnection?
+        var task: Task<Void, Never>?
+        func cancel() {
+            conn?.cancel()
+            task?.cancel()
+        }
+    }
+
+    /// The browser whose results count.
     private var browser: NWBrowser?
-    private var resolving: [String: NWConnection] = [:]
+    /// A second browser a refresh started while devices are listed.
+    private var probe: NWBrowser?
+    /// The current browser's last result set: every advert it listed, and the valid ones.
+    private var listed = 0
+    private var latest: [Advert] = []
+    /// Silent second browsers replaced since the last takeover.
+    private var silentProbes = 0
+    /// After a takeover, removals wait until then (SetupDiscoveryRules.takeoverRemovalHold).
+    private var holdRemovalsUntil: Date?
+    private var resolving: [String: Resolving] = [:]
+    private var resolveSerial = 0
+    /// Adverts whose resolve used up its attempts under the current browser, by key.
+    private var gaveUp: [String: Data] = [:]
     /// Instance name -> resolved target.
     private var byService: [String: SetupTarget] = [:]
     private let queue = DispatchQueue(label: "aerio.setup.discovery")
 
     var isRunning: Bool { browser != nil }
-    /// True once the current browser has delivered a browse result set (even an empty one).
-    /// A browser that only reports .ready can still be deaf for the whole session.
-    /// True once the running browser delivered a result. Reset on start and stop, so a
+    /// True once a browser in this run delivered a result set; false after stop(), so a
     /// list emptied by stop() (scene inactive) is not read as the device leaving.
     private(set) var heard = false
-    /// Recreations of a browser that reached ready but never delivered results.
-    private var recreations = 0
     private var silentRestarts = 0
-    private var watchdog: Task<Void, Never>?
+    private var refresher: Task<Void, Never>?
 
     /// Cancels and recreates the browser. A browser started before Local
     /// Network permission was granted can stay silent for the whole session.
@@ -88,60 +126,76 @@ final class SetupDiscovery: ObservableObject {
 
     func start() {
         guard browser == nil else { return }
-        recreations = 0
-        makeBrowser()
+        browser = makeBrowser()
         debugLog("[SETUP] discovery started")
-        watchdog?.cancel()
-        // While no results callback has fired, recreate the browser every 5 s for as long as
-        // discovery runs. Measured: a browser sat at ready with zero results for over 2 minutes
-        // while the advert resolved on the LAN; a relaunch always fixed it. Once results arrive
-        // the loop ends; a browse that later returns to empty is normal. stop() cancels it, and
-        // everything here runs on the main actor, so it cannot interleave with stop() or start().
-        watchdog = Task { @MainActor [weak self] in
-            while true {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard let self, !Task.isCancelled, let old = self.browser else { return }
-                if self.heard { return }
-                self.recreations += 1
-                let n = self.recreations
-                if n <= 3 || n % 5 == 0 { debugLog("[SETUP] discovery recreated (ready, no results) n=\(n)") }
-                old.cancel()
-                self.makeBrowser()
+        refresher?.cancel()
+        // Refreshes run for as long as discovery runs, at 5, 10, and 20 s, then every 30 s
+        // (SetupDiscoveryRules). Measured 2026-11-11: a browser that had heard one advert
+        // never reported a later session until a relaunch, so the refresh no longer stops
+        // once results arrive. stop() cancels it, and everything here runs on the main
+        // actor, so a refresh cannot interleave with stop() or start().
+        refresher = Task { @MainActor [weak self] in
+            var done = 0
+            while !Task.isCancelled {
+                let delay = SetupDiscoveryRules.refreshDelay(after: done)
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled, let self, self.browser != nil else { return }
+                done += 1
+                self.refresh(done)
             }
         }
     }
 
-    private func makeBrowser() {
-        heard = false
+    private func refresh(_ n: Int) {
+        let step = SetupDiscoveryRules.refreshStep(currentLists: listed > 0, probeRunning: probe != nil,
+                                                   silentProbes: silentProbes)
+        if n <= 3 || n % 10 == 0 || step == .probeTakesOver {
+            debugLog("[SETUP] discovery refresh n=\(n) \(step) listed=\(listed)")
+        }
+        switch step {
+        case .recreate:
+            probe?.cancel()
+            probe = nil
+            silentProbes = 0
+            browser?.cancel()
+            browser = makeBrowser()
+            listed = 0
+            latest = []
+            gaveUp.removeAll()
+        case .startProbe:
+            probe = makeBrowser()
+        case .replaceProbe:
+            silentProbes += 1
+            probe?.cancel()
+            probe = makeBrowser()
+        case .probeTakesOver:
+            // Fresh browsers heard nothing twice while this one still lists devices: it
+            // missed their goodbye. The silent browser takes over with an empty set.
+            browser?.cancel()
+            browser = probe ?? makeBrowser()
+            probe = nil
+            silentProbes = 0
+            listed = 0
+            latest = []
+            gaveUp.removeAll()
+            holdRemovalsUntil = nil
+            apply([])
+        }
+    }
+
+    private func makeBrowser() -> NWBrowser {
         let params = NWParameters.tcp
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: SetupProtocol.serviceType, domain: nil), using: params)
         b.stateUpdateHandler = { [weak self, weak b] state in
-            // Only a browse result counts as heard; .ready alone does not.
             Task { @MainActor in
-                guard let self, let b, self.browser === b else { return }
-                switch state {
-                case .ready:
-                    debugLog("[SETUP] discovery ready")
-                case .setup:
-                    debugLog("[SETUP] discovery state setup")
-                case .cancelled:
-                    debugLog("[SETUP] discovery state cancelled")
-                case .failed(let e):
-                    debugLog("[SETUP] discovery failed \(e.errorCode)")
-                    self.restartAfterError(b, reason: "failed")
-                case .waiting(let e):
-                    // Local network permission off reads as waiting with a policy error.
-                    debugLog("[SETUP] discovery waiting \(e.errorCode)")
-                    self.restartAfterError(b, reason: "waiting")
-                @unknown default:
-                    debugLog("[SETUP] discovery state unknown")
-                }
+                guard let self, let b else { return }
+                self.browserState(b, state)
             }
         }
         b.browseResultsChangedHandler = { [weak self, weak b] results, _ in
             var drops: [String] = []
-            let snapshot = results.compactMap { r -> (String, Data, String, NWEndpoint)? in
+            let adverts = results.compactMap { r -> Advert? in
                 guard case let .service(name, _, _, _) = r.endpoint else { return nil }
                 guard case let .bonjour(txt) = r.metadata else { drops.append("\(name): no TXT"); return nil }
                 if txt[UserQrCrypto.txtRole] == UserQrCrypto.roleSource { return nil }
@@ -152,21 +206,81 @@ final class SetupDiscovery: ObservableObject {
                     drops.append("\(name): bad public key"); return nil
                 }
                 let shown = DeviceInfo.friendlyName(advertised: txt[SetupProtocol.txtName].flatMap { $0.isEmpty ? nil : $0 } ?? name)
-                let kind = SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind])
-                return (name, pk, shown + "\u{1F}" + kind.rawValue, r.endpoint)
+                return Advert(service: name, pk: pk, shown: shown,
+                              kind: SetupProtocol.Kind.fromTxt(txt[SetupProtocol.txtKind]), endpoint: r.endpoint)
             }
-            // Every browse change is logged (names and kinds only) so a device that never
-            // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
-            let seen = snapshot.map { "\($0.0) (\($0.2.split(separator: "\u{1F}").last ?? ""))" }
+            let count = results.count
+            let dropped = drops
             Task { @MainActor in
-                guard let self, let b, self.browser === b else { return }
-                self.heard = true
-                debugLog("[SETUP] browse adverts=\(results.count) valid=[\(seen.joined(separator: ", "))] dropped=[\(drops.joined(separator: ", "))]")
-                self.apply(snapshot)
+                guard let self, let b else { return }
+                self.browserReported(b, count: count, adverts: adverts, dropped: dropped)
             }
         }
-        browser = b
         b.start(queue: queue)
+        return b
+    }
+
+    private func browserState(_ b: NWBrowser, _ state: NWBrowser.State) {
+        if b === probe {
+            switch state {
+            case .failed(let e), .waiting(let e):
+                debugLog("[SETUP] discovery probe stopped \(e.errorCode)")
+                b.cancel()
+                probe = nil
+            default:
+                break
+            }
+            return
+        }
+        guard browser === b else { return }
+        // Only a browse result counts as hearing; .ready alone does not.
+        switch state {
+        case .ready:
+            debugLog("[SETUP] discovery ready")
+        case .setup:
+            debugLog("[SETUP] discovery state setup")
+        case .cancelled:
+            debugLog("[SETUP] discovery state cancelled")
+        case .failed(let e):
+            debugLog("[SETUP] discovery failed \(e.errorCode)")
+            restartAfterError(b, reason: "failed")
+        case .waiting(let e):
+            // Local network permission off reads as waiting with a policy error.
+            debugLog("[SETUP] discovery waiting \(e.errorCode)")
+            restartAfterError(b, reason: "waiting")
+        @unknown default:
+            debugLog("[SETUP] discovery state unknown")
+        }
+    }
+
+    private func browserReported(_ b: NWBrowser, count: Int, adverts: [Advert], dropped: [String]) {
+        if b === probe {
+            // The refresh browser heard the network: it replaces the current one. Its set may
+            // arrive in pieces, so removals wait briefly and then use its latest set.
+            browser?.cancel()
+            browser = b
+            probe = nil
+            silentProbes = 0
+            gaveUp.removeAll()
+            let hold = SetupDiscoveryRules.takeoverRemovalHold
+            holdRemovalsUntil = Date().addingTimeInterval(hold)
+            Task { @MainActor [weak self, weak b] in
+                try? await Task.sleep(nanoseconds: UInt64(hold * 1_000_000_000))
+                guard let self, let b, self.browser === b else { return }
+                self.holdRemovalsUntil = nil
+                self.apply(self.latest)
+            }
+            debugLog("[SETUP] discovery refreshed: new browser took over")
+        }
+        guard browser === b else { return }
+        heard = true
+        listed = count
+        latest = adverts
+        // Every browse change is logged (names and kinds only) so a device that never
+        // shows the offer can be told apart: not seen, dropped by validation, or unresolved.
+        let seen = adverts.map { "\($0.service) (\($0.kind.rawValue))" }
+        debugLog("[SETUP] browse adverts=\(count) valid=[\(seen.joined(separator: ", "))] dropped=[\(dropped.joined(separator: ", "))]")
+        apply(adverts)
     }
 
     /// Restarts a browser that reported failed or waiting, sharing the silent-restart budget.
@@ -178,71 +292,103 @@ final class SetupDiscovery: ObservableObject {
     }
 
     func stop() {
-        watchdog?.cancel()
-        watchdog = nil
+        refresher?.cancel()
+        refresher = nil
         browser?.cancel()
         browser = nil
+        probe?.cancel()
+        probe = nil
         resolving.values.forEach { $0.cancel() }
         resolving.removeAll()
+        gaveUp.removeAll()
         byService.removeAll()
+        listed = 0
+        latest = []
+        silentProbes = 0
+        holdRemovalsUntil = nil
         heard = false
         if !tvs.isEmpty { tvs = [] }
         debugLog("[SETUP] discovery stopped")
     }
 
-    private func apply(_ snapshot: [(String, Data, String, NWEndpoint)]) {
-        let live = Set(snapshot.map(\.0))
-        // Gone adverts (the TV left the screen, expired, or was set up).
-        for gone in byService.keys where !live.contains(gone) {
-            if let t = byService.removeValue(forKey: gone) { debugLog("[SETUP] tv gone key=\(t.fingerprint)") }
-        }
-        for gone in resolving.keys where !live.contains(gone) {
-            resolving.removeValue(forKey: gone)?.cancel()
-        }
-        for (service, pk, shownKind, endpoint) in snapshot {
-            // This device's own receiver (Add Playlist open while the banner runs) is never offered.
-            if pk == SetupReceiver.ownPk { continue }
-            let shown = String(shownKind.split(separator: "\u{1F}", omittingEmptySubsequences: false).first ?? "")
-            let kind = SetupProtocol.Kind.fromTxt(shownKind.split(separator: "\u{1F}").last.map(String.init))
-            if let existing = byService[service], existing.pk == pk, existing.name == shown { continue }
-            if let existing = byService[service], existing.pk != pk {
-                // Key rotation: the stale target is dropped until the new one resolves.
-                debugLog("[SETUP] tv key changed old=\(existing.fingerprint) new=\(SetupCrypto.keyFingerprint(pk))")
-                byService.removeValue(forKey: service)
+    private func apply(_ adverts: [Advert]) {
+        let live = Set(adverts.map(\.service))
+        if (holdRemovalsUntil.map { Date() < $0 } ?? false) == false {
+            // Gone adverts (the device left the screen, expired, or was set up).
+            for gone in byService.keys where !live.contains(gone) {
+                if let t = byService.removeValue(forKey: gone) { debugLog("[SETUP] tv gone key=\(t.fingerprint)") }
             }
-            resolve(service: service, pk: pk, shown: shown, kind: kind, endpoint: endpoint)
+            for gone in resolving.keys where !live.contains(gone) {
+                resolving.removeValue(forKey: gone)?.cancel()
+            }
+            gaveUp = gaveUp.filter { live.contains($0.key) }
+        }
+        for a in adverts {
+            // This device's own receiver (Add Playlist open while the banner runs) is never offered.
+            if a.pk == SetupReceiver.ownPk { continue }
+            if let existing = byService[a.service], existing.pk == a.pk, existing.name == a.shown { continue }
+            // Already resolving this key (or waiting to retry it), or out of attempts until
+            // the next refresh brings a new browser.
+            if let r = resolving[a.service], r.advert.pk == a.pk { continue }
+            if gaveUp[a.service] == a.pk { continue }
+            if let existing = byService[a.service], existing.pk != a.pk {
+                // Key rotation: the stale target is dropped until the new one resolves.
+                debugLog("[SETUP] tv key changed old=\(existing.fingerprint) new=\(SetupCrypto.keyFingerprint(a.pk))")
+                byService.removeValue(forKey: a.service)
+            }
+            resolve(a, attempt: 1)
         }
         publish()
     }
 
-    private func resolve(service: String, pk: Data, shown: String, kind: SetupProtocol.Kind, endpoint: NWEndpoint) {
-        resolving.removeValue(forKey: service)?.cancel()
+    /// One attempt: a short TCP connection to the advert gives its address and
+    /// port. It fails on error, on waiting, or after SetupDiscoveryRules.resolveTimeout
+    /// (measured: a connection sat in preparing for over 25 s with no callback).
+    private func resolve(_ a: Advert, attempt: Int) {
+        resolving.removeValue(forKey: a.service)?.cancel()
+        resolveSerial += 1
+        let serial = resolveSerial
         let params = NWParameters.tcp
         if let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options { ip.version = .v4 }
-        let c = NWConnection(to: endpoint, using: params)
-        resolving[service] = c
+        let c = NWConnection(to: a.endpoint, using: params)
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(SetupDiscoveryRules.resolveTimeout * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.resolveFailed(a.service, serial: serial, reason: "timeout")
+        }
+        resolving[a.service] = Resolving(advert: a, attempt: attempt, serial: serial, conn: c, task: timeout)
         c.stateUpdateHandler = { [weak self, weak c] state in
             switch state {
             case .ready:
                 let remote = c?.currentPath?.remoteEndpoint
                 c?.cancel()
-                guard case let .hostPort(host, port)? = remote else { return }
-                let hostString: String
-                switch host {
-                case .ipv4(let a): hostString = "\(a)"
-                case .ipv6(let a): hostString = "\(a)"
-                case .name(let n, _): hostString = n
-                @unknown default: return
+                var target: SetupTarget?
+                if case let .hostPort(host, port)? = remote {
+                    var hostString: String?
+                    switch host {
+                    case .ipv4(let addr): hostString = "\(addr)"
+                    case .ipv6(let addr): hostString = "\(addr)"
+                    case .name(let n, _): hostString = n
+                    @unknown default: hostString = nil
+                    }
+                    if let hostString {
+                        let clean = hostString.split(separator: "%").first.map(String.init) ?? hostString
+                        target = SetupTarget(name: a.shown, host: clean, port: Int(port.rawValue), pk: a.pk,
+                                             serviceName: a.service, kind: a.kind)
+                    }
                 }
-                let clean = hostString.split(separator: "%").first.map(String.init) ?? hostString
-                let t = SetupTarget(name: shown, host: clean, port: Int(port.rawValue), pk: pk, serviceName: service, kind: kind)
-                Task { @MainActor in self?.resolved(service: service, target: t) }
+                let found = target
+                Task { @MainActor in
+                    if let found {
+                        self?.resolved(a.service, serial: serial, target: found)
+                    } else {
+                        self?.resolveFailed(a.service, serial: serial, reason: "no address")
+                    }
+                }
             case .failed(let e), .waiting(let e):
                 c?.cancel()
-                Task { @MainActor in
-                    debugLog("[SETUP] resolve failed \(shown) (\(kind.rawValue)): \(e.errorCode)")
-                    self?.resolving.removeValue(forKey: service)
-                }
+                let code = e.errorCode
+                Task { @MainActor in self?.resolveFailed(a.service, serial: serial, reason: "\(code)") }
             default:
                 break
             }
@@ -250,12 +396,41 @@ final class SetupDiscovery: ObservableObject {
         c.start(queue: queue)
     }
 
-    private func resolved(service: String, target: SetupTarget) {
+    private func resolved(_ service: String, serial: Int, target: SetupTarget) {
+        guard let r = resolving[service], r.serial == serial, r.conn != nil else { return }
+        r.cancel()
         resolving.removeValue(forKey: service)
         guard browser != nil else { return }
         byService[service] = target
-        debugLog("[SETUP] tv found key=\(target.fingerprint)")
+        debugLog("[SETUP] tv found key=\(target.fingerprint)" + (r.attempt > 1 ? " attempt=\(r.attempt)" : ""))
         publish()
+    }
+
+    /// A failed attempt waits SetupDiscoveryRules.resolveRetryDelay and tries again with
+    /// the advert's latest endpoint; after the last attempt the advert waits for the
+    /// next refresh's browser.
+    private func resolveFailed(_ service: String, serial: Int, reason: String) {
+        guard let r = resolving[service], r.serial == serial, r.conn != nil else { return }
+        r.cancel()
+        let a = r.advert
+        let limit = SetupDiscoveryRules.resolveAttempts
+        guard r.attempt < limit else {
+            resolving.removeValue(forKey: service)
+            gaveUp[service] = a.pk
+            debugLog("[SETUP] resolve failed \(a.shown) (\(a.kind.rawValue)): \(reason), attempt \(r.attempt) of \(limit), next refresh tries again")
+            return
+        }
+        let delay = SetupDiscoveryRules.resolveRetryDelay(afterAttempt: r.attempt)
+        debugLog("[SETUP] resolve failed \(a.shown) (\(a.kind.rawValue)): \(reason), attempt \(r.attempt) of \(limit), retry in \(Int(delay)) s")
+        let next = r.attempt + 1
+        let wait = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.browser != nil,
+                  let w = self.resolving[service], w.serial == serial, w.conn == nil else { return }
+            let current = self.latest.first { $0.service == service && $0.pk == a.pk } ?? a
+            self.resolve(current, attempt: next)
+        }
+        resolving[service] = Resolving(advert: a, attempt: r.attempt, serial: serial, conn: nil, task: wait)
     }
 
     private func publish() {

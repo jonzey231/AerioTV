@@ -446,6 +446,73 @@ enum SetupLinkRules {
     }
 }
 
+// MARK: - Discovery timing
+
+/// When the sender's `_aeriotv-setup._tcp` browser is refreshed and how a
+/// resolve is retried (SetupDiscovery). Pure so Scripts/setup-tests can check it.
+///
+/// Measured 2026-11-11: a browser that had heard one advert never reported a
+/// later session until a relaunch; a browser on a network with no adverts
+/// never calls back at all, so the old "recreate every 5 s while silent" loop
+/// ran 12 times a minute for as long as the app stayed open; and a resolve
+/// connection sat in preparing for over 25 s without failing.
+enum SetupDiscoveryRules {
+    /// Gap before refresh number `done + 1` since discovery started: 5, 10,
+    /// and 20 s, then every 30 s while discovery runs. The first comes fast
+    /// for a browser that is deaf from the start; the steady pace costs one
+    /// browse query burst every 30 s.
+    static func refreshDelay(after done: Int) -> TimeInterval {
+        switch done {
+        case ..<1: return 5
+        case 1: return 10
+        case 2: return 20
+        default: return 30
+        }
+    }
+
+    enum RefreshStep: Equatable, Sendable {
+        /// Nothing is listed, so nothing can flicker: cancel the browser and start a new one.
+        case recreate
+        /// Devices are listed: start a second browser beside the current one. It takes
+        /// over on its first result, so the offer never blinks during a refresh.
+        case startProbe
+        /// The second browser stayed silent for a whole interval: replace it.
+        case replaceProbe
+        /// The second browser stayed silent again while the current one still lists
+        /// devices: the current one has missed their goodbye, so the silent browser
+        /// takes over and the listed devices count as gone.
+        case probeTakesOver
+    }
+
+    /// Silent second browsers in a row before the listed devices count as gone.
+    static let silentProbeLimit = 2
+
+    /// - Parameters:
+    ///   - currentLists: the current browser's last result set listed at least one advert.
+    ///   - probeRunning: a second browser from the previous refresh is still silent.
+    ///   - silentProbes: silent second browsers already replaced since the last takeover.
+    static func refreshStep(currentLists: Bool, probeRunning: Bool, silentProbes: Int) -> RefreshStep {
+        guard currentLists else { return .recreate }
+        guard probeRunning else { return .startProbe }
+        return silentProbes + 1 >= silentProbeLimit ? .probeTakesOver : .replaceProbe
+    }
+
+    /// A browser that just took over may report its adverts in pieces (the TXT
+    /// record after the name): removals wait this long, then use its latest set.
+    static let takeoverRemovalHold: TimeInterval = 2
+
+    /// One resolve attempt (a short TCP connection to the advert) gives up after this.
+    /// Measured resolves take 0.05 to 0.5 s.
+    static let resolveTimeout: TimeInterval = 4
+    /// Attempts per advert per browser; the next refresh tries again after the last.
+    static let resolveAttempts = 3
+
+    /// Wait before attempt `attempt + 1`: 1 s, then 2 s.
+    static func resolveRetryDelay(afterAttempt attempt: Int) -> TimeInterval {
+        attempt <= 1 ? 1 : 2
+    }
+}
+
 enum SetupProfileRules {
     /// One local profile of the playlist, in list order, with what this device stores for it.
     struct Source: Equatable, Sendable {
