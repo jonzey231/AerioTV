@@ -439,7 +439,7 @@ rule for it; see the note below the table.
 | 1 | Pass to Auth | Path | `/api/swagger/*` | keeps the API docs behind SSO |
 | 2 | Pass to Auth | Path | `/api/redoc/*` | keeps the API docs behind SSO |
 | 3 | Pass to Auth | Path | `/api/schema/*` | keeps the API docs behind SSO |
-| 4 | Bypass Auth | Path | `/api/*` | channels, EPG (including the now-airing programs search, `/api/epg/programs/search/`), VOD, recordings, logos, native Catch-Up sessions, Mark as Radio Channel (admin only PATCH of `/api/channels/channels/<id>/`), Dispatcharr Sync (`/api/accounts/users/me/app-data/` and `/api/accounts/users/me/app-data/<key>/`), Enable API access for a profile (admin only: `POST /api/accounts/api-keys/generate/` and `/api/accounts/api-keys/revoke/`), Channel Profiles for a profile (admin only: `PATCH /api/accounts/users/<id>/`) |
+| 4 | Bypass Auth | Path | `/api/*` | channels, EPG (including the now-airing programs search, `/api/epg/programs/search/`), VOD, recordings, logos, native Catch-Up sessions, Mark as Radio Channel (admin only: `PATCH /api/channels/channels/<id>/`), Dispatcharr Sync (`/api/accounts/users/me/app-data/` and `/api/accounts/users/me/app-data/<key>/`), Enable API access for a profile (admin only: `POST /api/accounts/api-keys/generate/` and `/api/accounts/api-keys/revoke/`), Channel Profiles for a profile (admin only: `PATCH /api/accounts/users/<id>/`) |
 | 5 | Bypass Auth | Path | `/proxy/*` | live streams, VOD streams, Catch-Up playback, stream switching |
 | 6 | Bypass Auth | Path | `/player_api.php` | Xtream Codes only |
 | 7 | Bypass Auth | Path | `/xmltv.php` | Xtream Codes only |
@@ -479,7 +479,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 7 | Login and account | `/api/accounts/api-keys/generate/` | `POST` with `user_id` to mint an API key for a user from Enable API access in Add Profile (admin only) |
 | 8 | Login and account | `/api/accounts/api-keys/revoke/` | `POST` with `user_id` to revoke that key when Enable API access is turned back off (admin only) |
 | 9 | Login and account | `/api/accounts/users/<id>/` | `PATCH` with `channel_profiles` to assign a profile's Channel Profiles (admin only) |
-| 10 | Server | `/api/core/version/` | server version, also the connectivity and auth test at setup |
+| 10 | Server | `/api/core/version/` | server version, also the connectivity and auth test at setup (older Dispatcharr builds: `/api/version/`) |
 | 11 | Server | `/api/core/settings/` | server-wide switches such as whether Catch-Up is enabled |
 | 12 | Channels and guide | `/api/channels/channels/` | the channel list for the playlist |
 | 13 | Channels and guide | `/api/channels/channels/<id>/` | one channel's details and stream order (Switch Stream reorder); PATCH `is_radio` for Mark as Radio Channel (admin only) |
@@ -488,7 +488,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 16 | Channels and guide | `/api/channels/profiles/` | channel profiles for the Edit Playlist picker |
 | 17 | Channels and guide | `/api/channels/profiles/<id>/` | the channels inside the chosen profile |
 | 18 | Channels and guide | `/api/channels/logos/<id>/cache/` | channel logo images |
-| 19 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection |
+| 19 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection (last resort: the `/api/channels/` index) |
 | 20 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
 | 21 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
 | 22 | Channels and guide | `/api/epg/programs/search/` | every program airing now, with categories, in one request (`airing_at`, `fields`, `page_size`), for tinted guide cards |
