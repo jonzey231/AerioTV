@@ -852,8 +852,14 @@ final class PlayerSession: ObservableObject {
         }
         if let server, server.type == .dispatcharrAPI {
             let key = server.effectiveApiKey
-            // A key the server already rejected is left off the stream open.
-            if !key.isEmpty, !DispatcharrRequestGate.shared.isKeyRejected(key) {
+            // A key the server already rejected stays here on purpose: every
+            // open passes StreamKeyGate.headersForOpen, which stops an open
+            // built with a held key before any request goes out ("API key no
+            // longer valid"). Leaving it off (2026-11-09 to 11-11) sent the
+            // open keyless: a plain 401 the player could not tell from any
+            // other (measured 2026-11-11: "Unable to Play, ingest failed:
+            // HTTP 401" instead of the key notice).
+            if !key.isEmpty {
                 headers["X-API-Key"] = key
                 headers["Authorization"] = "ApiKey \(key)"
             }

@@ -750,10 +750,12 @@ final class ServerConnection {
             // just Accept + UA so the calling layer can layer JWT
             // Bearer on top. Otherwise emit the configured shape.
             guard !key.isEmpty else { return h }
-            // A key the server already rejected is left off (stream opens,
-            // logos, posters): each would count against its failed-key
-            // throttle (DispatcharrRequestGate, 2026-11-09).
-            guard !DispatcharrRequestGate.shared.isKeyRejected(key) else { return h }
+            // A key the server already rejected stays here (2026-11-11): stream
+            // opens pass StreamKeyGate.headersForOpen, which stops an open built
+            // with a held key before any request ("API key no longer valid"),
+            // and API calls pass DispatcharrHTTPGate. Image loads leave it off
+            // themselves (AuthPosterImage, LogoFetcher), so a logo or poster never
+            // counts against the server's failed-key throttle.
             switch dispatcharrHeaderMode {
             case .xapikey:
                 h["X-API-Key"] = key

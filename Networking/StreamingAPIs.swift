@@ -7059,6 +7059,13 @@ enum CatchupSupport {
         }
         switch server.type {
         case .dispatcharrAPI:
+            // A key held as rejected: nothing goes out (no session mint, no
+            // /timeshift/ fallback on cached XC credentials); the caller shows
+            // the "no longer accepts this playlist's API key" message.
+            if DispatcharrRequestGate.shared.isKeyRejected(server.effectiveApiKey) {
+                debugLog("[CATCHUP] not opened: this playlist's API key is held as rejected")
+                throw DispatcharrGateError.keyRejected
+            }
             // Task #149: prefer the native sessions API (normal auth on
             // the mint, header-free playback URL, per-session provider
             // slot, no xc_password dependency). One 404 marks the base

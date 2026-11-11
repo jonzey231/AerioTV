@@ -5526,6 +5526,8 @@ struct EPGGuideView: View {
     /// Catch-up: user-facing resolve failure (missing XC password,
     /// unsupported server, URL build failure), shown as an alert.
     @State private var catchupErrorMessage: String? = nil
+    /// "API key no longer valid" when a held key stopped the catch-up.
+    @State private var catchupErrorTitle = "Catch-up Unavailable"
 
     /// Hoisted out of `.alert(isPresented:)`. Written inline there, the
     /// `Binding(get:set:)` literal trips Swift's type-inference budget on Xcode
@@ -6516,7 +6518,7 @@ struct EPGGuideView: View {
                     catchup: pb
                 )
             }
-            .alert("Catch-up Unavailable",
+            .alert(catchupErrorTitle,
                    isPresented: catchupErrorAlertPresented) {
                 Button("OK", role: .cancel) { catchupErrorMessage = nil }
             } message: {
@@ -8508,6 +8510,7 @@ struct EPGGuideView: View {
                 // no longer reached, even with the dev mpv engine on.
                 PlayerSession.shared.beginCatchup(pb)
             } catch {
+                catchupErrorTitle = DispatcharrRateLimitCopy.catchupAlertTitle(error)
                 catchupErrorMessage = error.localizedDescription
             }
         }

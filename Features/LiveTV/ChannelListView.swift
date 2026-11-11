@@ -4188,6 +4188,8 @@ struct ChannelRow: View {
     @State private var playingCatchup: CatchupPlayback? = nil
     /// Catch-up: user-facing resolve failure, shown as an alert.
     @State private var catchupErrorMessage: String? = nil
+    /// "API key no longer valid" when a held key stopped the catch-up.
+    @State private var catchupErrorTitle = "Catch-up Unavailable"
     /// Tracks which upcoming-program row currently owns the popover
     /// shown in response to a long-press. `EPGEntry.id` is
     /// deterministic (title + start + end) so the binding is stable
@@ -5099,6 +5101,7 @@ struct ChannelRow: View {
                 PlayerSession.shared.beginCatchup(pb)
             } catch {
                 debugLog("[CATCHUP] resolve failed for \(item.name) \(entry.title): \(error)")
+                catchupErrorTitle = DispatcharrRateLimitCopy.catchupAlertTitle(error)
                 catchupErrorMessage = error.localizedDescription
             }
         }
@@ -5521,7 +5524,7 @@ struct ChannelRow: View {
                     catchup: pb
                 )
             }
-            .alert("Catch-up Unavailable",
+            .alert(catchupErrorTitle,
                    isPresented: Binding(
                         get: { catchupErrorMessage != nil },
                         set: { if !$0 { catchupErrorMessage = nil } })) {
@@ -6286,7 +6289,9 @@ enum LogoFetcher {
         let candidates = [server.effectiveBaseURL, server.normalizedBaseURL, server.normalizedLocalURL]
         for raw in candidates {
             guard let candidateHost = URL(string: raw)?.host?.lowercased() else { continue }
-            if candidateHost == host { return server.authHeaders }
+            // A key held as rejected is left off: a logo never counts against
+            // the server's failed-key throttle (stream opens keep it and stop).
+            if candidateHost == host { return DispatcharrHTTPGate.strippingRejectedKey(server.authHeaders) }
         }
         return nil
     }

@@ -481,6 +481,12 @@ do {
 eq(DispatcharrGateError.keyRejected.errorDescription,
    "Dispatcharr no longer accepts this playlist's API key. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key rejected error copy")
 eq(DispatcharrRateLimitCopy.keyRejectedTitle, "API key no longer valid", "prompt title")
+// Catch-up alert title (2026-11-11): the rejected-key title only when a held key stopped it.
+eq(DispatcharrRateLimitCopy.catchupAlertTitle(DispatcharrGateError.keyRejected), "API key no longer valid", "catch-up held key title")
+eq(DispatcharrRateLimitCopy.catchupAlertTitle(NSError(domain: "x", code: 1, userInfo: [NSUnderlyingErrorKey: DispatcharrGateError.keyRejected])),
+   "API key no longer valid", "catch-up held key title (wrapped)")
+eq(DispatcharrRateLimitCopy.catchupAlertTitle(DispatcharrGateError.rateLimited(seconds: 30)), "Catch-up Unavailable", "catch-up 429 title")
+eq(DispatcharrRateLimitCopy.catchupAlertTitle(URLError(.timedOut)), "Catch-up Unavailable", "catch-up other failure title")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: false),
    "Dispatcharr no longer accepts the API key for Home. It may have been changed or removed on the server. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one.", "key-only body")
 eq(DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: true),

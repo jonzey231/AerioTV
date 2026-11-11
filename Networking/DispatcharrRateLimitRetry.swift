@@ -54,6 +54,19 @@ enum DispatcharrRateLimitCopy {
     /// Title of the rejected-key prompt.
     static let keyRejectedTitle = "API key no longer valid"
 
+    /// Title of the catch-up failure alert (list and guide): the rejected-key
+    /// title when a held key stopped it, "Catch-up Unavailable" otherwise.
+    static func catchupAlertTitle(_ error: Error) -> String {
+        var current: Error? = error
+        var depth = 0
+        while let e = current, depth < 8 {
+            if case DispatcharrGateError.keyRejected? = e as? DispatcharrGateError { return keyRejectedTitle }
+            current = (e as NSError).userInfo[NSUnderlyingErrorKey] as? Error
+            depth += 1
+        }
+        return "Catch-up Unavailable"
+    }
+
     /// Body of the rejected-key prompt (key-only playlist, or a password
     /// playlist whose re-login was refused too). Blank name: "this playlist".
     static func keyRejectedBody(playlistName: String, passwordToo: Bool) -> String {
