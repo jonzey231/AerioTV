@@ -383,6 +383,18 @@ enum ProfileRoster {
         }
     }
 
+    /// A manual add ("Enter details" or an API key) of a user the synced
+    /// roster already offers (review finding A2): the row to finish it with
+    /// as a roster add, matched like the suggestions (the username, ignoring
+    /// case). A plain add would stamp the row now with no PIN and the picked
+    /// role, and the next push would drop that profile's PIN and Child role
+    /// on every device. Nil: a plain add.
+    static func rowForManualAdd(_ username: String, rows: [ProfileRow], localUsernames: [String]) -> ProfileRow? {
+        let u = username.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !u.isEmpty else { return nil }
+        return suggestions(rows, localUsernames).first { $0.username.lowercased() == u }
+    }
+
     static func applyRow(_ p: DispatcharrProfile, _ r: ProfileRow) -> DispatcharrProfile {
         var out = p
         if !r.displayName.trimmingCharacters(in: .whitespaces).isEmpty { out.displayName = r.displayName }

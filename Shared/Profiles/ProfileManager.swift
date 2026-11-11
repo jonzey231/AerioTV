@@ -767,16 +767,30 @@ final class ProfileManager: ObservableObject {
     }
 
     /// Manual add (non-admin base): [username] signs in with [password] or [apiKey].
+    /// A user the synced roster offers finishes as a roster add (its row and stamp kept).
     func addProfileManual(_ playlistId: String, username: String, password: String?, apiKey: String?, role: ProfileRole? = nil) async throws -> DispatcharrProfile {
         let name = username.trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { throw fail("Enter a username.") }
         if store.forPlaylist(playlistId).contains(where: { $0.username.caseInsensitiveCompare(name) == .orderedSame }) {
             throw fail("\(name) already has a profile.")
         }
-        return try await addProfile(playlistId, user: DispatcharrUserSummary(id: 0, username: name), password: password, apiKey: apiKey, role: role)
+        let user = DispatcharrUserSummary(id: 0, username: name)
+        if let row = rosterRowForManualAdd(playlistId, name) {
+            return try await addFromRoster(playlistId, row: row, user: user, password: password, apiKey: apiKey)
+        }
+        return try await addProfile(playlistId, user: user, password: password, apiKey: apiKey, role: role)
     }
 
-    /// Manual add by API key only: /me/ with [apiKey] names the user.
+    /// The synced roster row a manual add must finish with (ProfileRoster.rowForManualAdd).
+    private func rosterRowForManualAdd(_ playlistId: String, _ username: String) -> ProfileRow? {
+        let row = ProfileRoster.rowForManualAdd(username, rows: rosterRows[playlistId] ?? [],
+                                                localUsernames: store.forPlaylist(playlistId).map(\.username))
+        if row != nil { debugLog("[DSYNC] profiles: manual add of a roster user; finishing it as a roster add (row kept)") }
+        return row
+    }
+
+    /// Manual add by API key only: /me/ with [apiKey] names the user. A user the
+    /// synced roster offers finishes as a roster add (its row and stamp kept).
     func addProfileByApiKey(_ playlistId: String, apiKey: String, role: ProfileRole? = nil) async throws -> DispatcharrProfile {
         let key = apiKey.trimmingCharacters(in: .whitespaces)
         guard !key.isEmpty else { throw fail("Enter an API key.") }
@@ -785,9 +799,12 @@ final class ProfileManager: ObservableObject {
         if store.forPlaylist(playlistId).contains(where: { $0.username.caseInsensitiveCompare(me.username) == .orderedSame }) {
             throw fail("\(me.username) already has a profile.")
         }
-        return try await addProfile(playlistId, user: DispatcharrUserSummary(id: me.id, username: me.username, userLevel: me.userLevel,
-                                                                             isSuperuser: me.isSuperuser, isStaff: me.isStaff),
-                                    password: nil, apiKey: key, role: role)
+        let user = DispatcharrUserSummary(id: me.id, username: me.username, userLevel: me.userLevel,
+                                          isSuperuser: me.isSuperuser, isStaff: me.isStaff)
+        if let row = rosterRowForManualAdd(playlistId, me.username) {
+            return try await addFromRoster(playlistId, row: row, user: user, password: nil, apiKey: key)
+        }
+        return try await addProfile(playlistId, user: user, password: nil, apiKey: key, role: role)
     }
 
     /// Add Profile step 2: validate by signing in as [user] once, then store the credential. Never changes the server.
@@ -1016,7 +1033,9 @@ final class ProfileManager: ObservableObject {
 
     /// Onboarding manual add: the profile just created here may be removed (its undo writes the tombstone).
     func markFreshAddUndoable(_ profileId: String) {
-        freshUndoable.insert(profileId)
+        // A manual add that finished as a roster add undoes like one: this
+        // device only, no tombstone (the row belongs to the other devices).
+        if !undoableRosterAdds.contains(profileId) { freshUndoable.insert(profileId) }
         undoableRosterAdds.insert(profileId)
     }
 

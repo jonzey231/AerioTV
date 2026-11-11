@@ -939,6 +939,48 @@ do {
     let tr = ProfileTombstones.resolve([row(1, "admin"), row(8, "test2", at: 1_792_000_000)], [ProfileTombstone(username: "test2", removedAt: 1_793_500_000, userId: 8)])
     eq(tr.dropped.map(\.username), ["test2"], "tombstone drops"); check(ProfileRoster.suggestions(tr.rows, ["admin"]).isEmpty, "tombstoned not suggested")
     check(ProfileRoster.isStripped(row(1, "u")) && !ProfileRoster.isStripped(row(1, "u", name: "Named")), "stripped rows")
+
+    // Manual add of a roster user (review finding A2): "Enter details" or an
+    // API key for a user the roster offers finishes as a roster add.
+    do {
+        let salt = String(repeating: "a1", count: 16)
+        var kidRow = row(9, "Kid", role: "child", order: 2, avatar: av, name: "Little One", at: 1_792_500_000)
+        kidRow.pinType = "numbers"; kidRow.pinHash = PinRules.hashV2(saltHex: salt, normalized: "2580")!; kidRow.pinSalt = salt
+        let roster = [row(1, "admin"), kidRow]
+        eq(ProfileRoster.rowForManualAdd(" kid ", rows: roster, localUsernames: ["admin"]), kidRow, "manual add of a roster user, any case: its row")
+        check(ProfileRoster.rowForManualAdd("someone", rows: roster, localUsernames: ["admin"]) == nil, "a user not in the roster: a plain add")
+        check(ProfileRoster.rowForManualAdd("   ", rows: roster, localUsernames: []) == nil, "no username: no row")
+        check(ProfileRoster.rowForManualAdd("kid", rows: roster, localUsernames: ["KID"]) == nil, "same match as the suggestions (a local profile hides it)")
+
+        // What the roster add stores (ProfileManager.addProfile with the row as seed):
+        // the role from the row, the row applied, its PIN imported, its stamp kept.
+        let suite = "aerio.dsync-tests.manual-roster.\(UUID().uuidString)"
+        let ud = UserDefaults(suiteName: suite)!
+        defer { ud.removePersistentDomain(forName: suite) }
+        let pins = ProfilePinStore(defaults: ud, secrets: MemorySecretBox())
+        var p = DispatcharrProfile(id: "k", playlistId: "p", displayName: "Kid", username: "Kid", userLevel: 1)
+        p.role = ProfileRole.resolve(p.userLevel, ProfileRole.fromWire(kidRow.role))
+        p = ProfileRoster.applyRow(p, kidRow)
+        pins.importSynced(p.id, PinRules.typeFromWire(kidRow.pinType)!, hash: kidRow.pinHash, salt: kidRow.pinSalt)
+        let stamp = kidRow.updatedAt
+        eq(p.effectiveRole, C, "the Child role is kept")
+        check(p.displayName == "Little One" && p.avatar == av && p.order == 2, "name, avatar, and order from the row")
+        let rec = pins.syncRecord(p.id)
+        check(rec?.hash == kidRow.pinHash && rec?.salt == kidRow.pinSalt, "the PIN is kept")
+        // The next push builds the row from the profile, its PIN, and its stamp (buildProfiles):
+        let pushed = ProfileRow(userId: 9, username: "Kid", displayName: p.displayName, pinType: PinRules.wireType(rec?.type),
+                                pinHash: rec?.hash ?? "", pinSalt: rec?.salt ?? "", role: p.effectiveRole.wire,
+                                updatedAt: stamp, avatar: p.avatar, order: 2)
+        check(pushed.role == kidRow.role && pushed.pinType == kidRow.pinType && pushed.pinHash == kidRow.pinHash
+              && pushed.pinSalt == kidRow.pinSalt && pushed.updatedAt == kidRow.updatedAt, "the next push sends the same role, PIN, and stamp")
+        check(!DsyncGate.profileRowWins(localUpdatedAt: kidRow.updatedAt, remote: pushed), "other devices change nothing on that push")
+
+        // A plain add of the same user (the bug): stamped now, no PIN, the picked role.
+        let plain = ProfileRow(userId: 9, username: "Kid", displayName: "Kid", pinType: "none", pinHash: "", pinSalt: "",
+                               role: ProfileRole.user.wire, updatedAt: 1_793_000_000, avatar: AvatarSpec(), order: 2)
+        check(DsyncGate.profileRowWins(localUpdatedAt: kidRow.updatedAt, remote: plain),
+              "a plain add would win everywhere and drop the PIN and the Child role")
+    }
     eq(AvatarCatalog.defaultColorIndex("ab"), (97 + 98) % 8, "default color index")
     eq(SnapshotStaleness.normalize("3, 1,x,2"), "1,2,3", "assignment normalize")
     eq(SnapshotStaleness.reason(SnapshotStamp(userId: 2, assignment: ""), currentUserId: 2, currentAssignment: ""), nil, "fresh stamp")
