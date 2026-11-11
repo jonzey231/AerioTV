@@ -415,6 +415,13 @@ enum ProfileRoster {
         return suggestions(rows, localUsernames).first { $0.username.lowercased() == u }
     }
 
+    /// Undoing a fresh add (onboarding or Settings Remove, or Cancel on the
+    /// "PIN Required" step after an add while a Child exists), follow-up A1:
+    /// a roster add is removed on this device only, with no tombstone and no
+    /// roster change, so its row is offered again under "From your other
+    /// devices". A plain add keeps [plainWrites], today's behavior on that path.
+    static func undoWritesTombstone(rosterAdd: Bool, plainWrites: Bool) -> Bool { rosterAdd ? false : plainWrites }
+
     static func applyRow(_ p: DispatcharrProfile, _ r: ProfileRow) -> DispatcharrProfile {
         var out = p
         if !r.displayName.trimmingCharacters(in: .whitespaces).isEmpty { out.displayName = r.displayName }

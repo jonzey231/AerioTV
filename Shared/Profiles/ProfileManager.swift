@@ -539,12 +539,17 @@ final class ProfileManager: ObservableObject {
     }
 
     /// The PIN step after an add was cancelled: the add is undone (a Child exists, so a PIN is required).
+    /// A roster add goes from this device only, with no tombstone, and is offered again.
     func discardPendingAdds(_ playlistId: String) async {
         let drop = store.forPlaylist(playlistId).filter { pendingPinAdds.contains($0.id) && !pinStore.hasPin($0.id) && !$0.isDefault }
         for p in drop {
             pendingPinAdds.remove(p.id)
-            await deleteLocal(p, fromSync: false)
-            debugLog("[PROFILE] add of \(Self.tag(p.id)) undone: no PIN while a Child exists")
+            let roster = rosterAddIds.contains(p.id)
+            await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(rosterAdd: roster, plainWrites: true))
+            rosterAddIds.remove(p.id)
+            freshUndoable.remove(p.id)
+            undoableRosterAdds.remove(p.id)
+            debugLog("[PROFILE] add of \(Self.tag(p.id)) undone: no PIN while a Child exists\(roster ? " (roster add: this device only)" : "")")
         }
     }
 
@@ -888,6 +893,9 @@ final class ProfileManager: ObservableObject {
 
     private var rosterRows: [String: [ProfileRow]] = [:]
     private var freshUndoable = Set<String>()
+    /// Profiles added from the synced roster in this run (addFromRoster, including a
+    /// manual add of a roster user): undoing one never writes a tombstone.
+    private var rosterAddIds = Set<String>()
 
     /// Merge a pulled `profiles` list PER ROW (schema 4.12). The roster is a
     /// catalog: a row with no local profile is never added here (it is offered
@@ -968,6 +976,7 @@ final class ProfileManager: ObservableObject {
         let added = try await addProfile(playlistId, user: user, password: password, apiKey: apiKey, role: role, seed: row)
         refreshActiveRole()
         debugLog("[DSYNC] profiles: added \(Self.tag(added.id)) from the roster (explicit choice) role=\(role?.label ?? "default") order=\(row.order)")
+        rosterAddIds.insert(added.id)
         undoableRosterAdds.insert(added.id)
         return store.byId(added.id) ?? added
     }
@@ -1074,7 +1083,8 @@ final class ProfileManager: ObservableObject {
         guard let p = store.byId(profileId) else { undoableRosterAdds.remove(profileId); return }
         guard !p.isDefault else { throw fail("The default profile cannot be removed.") }
         let fresh = freshUndoable.remove(profileId) != nil
-        await deleteLocal(p, fromSync: false, tombstone: fresh)
+        let roster = rosterAddIds.remove(profileId) != nil
+        await deleteLocal(p, fromSync: false, tombstone: ProfileRoster.undoWritesTombstone(rosterAdd: roster, plainWrites: fresh))
         undoableRosterAdds.remove(profileId)
         refreshActiveRole()
         debugLog("[PROFILES] undo add \(Self.tag(profileId))")

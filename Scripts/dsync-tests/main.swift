@@ -980,6 +980,20 @@ do {
                                role: ProfileRole.user.wire, updatedAt: 1_793_000_000, avatar: AvatarSpec(), order: 2)
         check(DsyncGate.profileRowWins(localUpdatedAt: kidRow.updatedAt, remote: plain),
               "a plain add would win everywhere and drop the PIN and the Child role")
+
+        // Undoing an add (follow-up A1). Paths: Remove on an add just made
+        // (undoAdd, onboarding and the roster suggestions; a plain add there
+        // is a fresh manual add and writes a tombstone) and Cancel on "PIN
+        // Required" (discardPendingAdds; a plain add always wrote one).
+        let paths: [(String, Bool)] = [("Remove after an add", true), ("Cancel on PIN Required", true)]
+        for (path, today) in paths {
+            check(!ProfileRoster.undoWritesTombstone(rosterAdd: true, plainWrites: today), "\(path), roster add: no tombstone")
+            eq(ProfileRoster.undoWritesTombstone(rosterAdd: false, plainWrites: today), today, "\(path), plain add: as today")
+        }
+        // The undone roster add is offered again: its row stays, only the local profile goes.
+        check(ProfileRoster.suggestions(roster, ["admin", "Kid"]).isEmpty, "while added here, kid is not offered")
+        eq(ProfileRoster.suggestions(roster, ["admin"]).map(\.username), ["Kid"], "after the undo, kid is offered again")
+        eq(ProfileTombstones.resolve(roster, []).rows.map(\.username), ["admin", "Kid"], "no tombstone: the roster keeps the row")
     }
     eq(AvatarCatalog.defaultColorIndex("ab"), (97 + 98) % 8, "default color index")
 
