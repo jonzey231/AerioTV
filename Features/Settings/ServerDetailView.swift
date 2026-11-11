@@ -30,6 +30,8 @@ func performServerCascadeDelete(_ server: ServerConnection,
     server.deleteCredentialsFromKeychain()
     // Display-only account facts for the permissions section.
     DispatcharrAccountFactsStore.clear(deletedID)
+    // The default profile's recorded account and any profile sign-in hold (ProfileHostHold).
+    ProfileManager.shared.playlistDeleted(sid)
     // Rebuildable on-disk caches are keyed per server and are kept across
     // playlist switches so switching back is instant (Logan 2026-09-16).
     // DELETING the playlist is the one moment they are removed.
@@ -153,7 +155,9 @@ func performPlaylistMerge(loser: ServerConnection, into winner: ServerConnection
     }
     let movedHidden = HiddenVODStore.shared.moveServer(from: lid, to: wid)
     RecentChannelsStore.moveList(from: lid, to: wid)
-    ProfileManager.shared.movePlaylistProfiles(from: lid, to: wid)
+    ProfileManager.shared.movePlaylistProfiles(from: lid, to: wid,
+                                               loserRoute: (base: loser.baseURL, local: loser.localURL),
+                                               winnerRoute: (base: winner.baseURL, local: winner.localURL))
     if DispatcharrAccountFactsStore.load(winner.id).username.isEmpty {
         let facts = DispatcharrAccountFactsStore.load(loser.id)
         if !facts.username.isEmpty { DispatcharrAccountFactsStore.save(facts, for: winner.id) }

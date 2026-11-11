@@ -2096,6 +2096,14 @@ struct RootView: View {
                 let remoteDate = remote.lastConnected ?? remote.createdAt
                 if replace || (pick == .remote && plan.newer.contains(remote.id.uuidString)) {
                     didMutate = true
+                    if local.type == .dispatcharrAPI {
+                        // Before iCloud's address is written: the other profiles'
+                        // stored sign-ins are held (ProfileHostHold, review finding
+                        // A-APP-1); the switch to the default profile and the
+                        // same-server check follow once this merge has written it.
+                        ProfileManager.shared.routeWillChangeNow(local.id.uuidString, oldBase: local.baseURL, oldLocal: local.localURL,
+                                                                 newBase: remote.baseURL, newLocal: remote.localURL)
+                    }
                     local.name = remote.name
                     local.baseURL = remote.baseURL
                     local.username = remote.username
@@ -2351,6 +2359,7 @@ struct RootView: View {
                                      winnerPendingApiKey: pendingKeys[twin.id.uuidString] ?? "")
             } else {
                 local.deleteCredentialsFromKeychain()
+                ProfileManager.shared.playlistDeleted(id)
                 modelContext.delete(local)
                 DebugLogger.shared.log(
                     "SyncManager: deleted server \(local.name) (\(replace ? "absent from the cloud copy the user pulled" : "removed on another device"), age=\(String(format: "%.1f", ageSeconds))s, remoteCount=\(remoteServers.count))",

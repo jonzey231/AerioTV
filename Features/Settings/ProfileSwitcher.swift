@@ -224,7 +224,7 @@ struct WhoIsWatchingView: View {
     @State private var flow: Flow?
     @FocusState private var focus: String?
 
-    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add, move(DispatcharrProfile) }
+    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add, move(DispatcharrProfile), signIn(DispatcharrProfile) }
 
     /// The hold that opened Move also ends in a Select release; that one is swallowed.
     @State private var swallowNextSelect = false
@@ -241,6 +241,12 @@ struct WhoIsWatchingView: View {
     }
 
     private func choose(_ p: DispatcharrProfile) {
+        // Held after a server address change: sign in again first (Cancel keeps the current profile).
+        if ProfileHostHoldRules.onPick(isHeld: manager.isHeld(p.id), hasStoredSignIn: manager.signIns.hasStored(p.id)) == .signInAgain {
+            error = nil
+            flow = .signIn(p)
+            return
+        }
         busy = true; error = nil
         Task {
             do {
@@ -298,6 +304,9 @@ struct WhoIsWatchingView: View {
                 }
             case .add:
                 AddProfileFlow(playlistId: playlistId) { flow = nil; manager.pickerAddUnlocked = nil }
+            case .signIn(let p):
+                KeySignInView(playlistID: playlistId, heldProfile: p, hosted: false,
+                              onClose: { flow = nil; focus = p.id }, onSignedIn: { flow = nil; choose(p) })
             case .move(let p):
                 let at = profiles.firstIndex { $0.id == p.id } ?? -1
                 ProfileDialog(title: p.displayName, onCancel: { flow = nil; focus = p.id }) {

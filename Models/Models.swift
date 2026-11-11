@@ -1712,6 +1712,9 @@ enum DispatcharrCapabilityProbe {
             // put the old account's answers straight back.
             return true
         }
+        // The default profile's account for this playlist (recorded unless a
+        // profile sign-in is held, which also re-runs the same-server check).
+        ProfileManager.shared.noteDefaultUsersMe(id.uuidString, userId: user.id, username: user.username)
 
         var level = user.effectiveUserLevel
         // A legacy superuser can still report a low custom level; the

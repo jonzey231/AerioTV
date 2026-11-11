@@ -303,31 +303,78 @@ enum KeySignInService {
             SyncManager.shared.saveCredentialsSynced(for: server)
             try? ctx.save()
             debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): signed in, key \(key == oldKey ? "unchanged" : "replaced"); hold lifted")
+            // The default profile's account (ProfileHostHold).
+            ProfileManager.shared.noteDefaultUsersMe(server.id.uuidString, userId: user.id, username: user.username)
             DispatcharrKeyRecheck.shared.onRecovered?(server.id.uuidString)
             return .signedIn
-        } catch let e as DispatcharrDirectConnectError {
+        } catch {
+            return outcome(for: error, log: "sign-in from the prompt for \(playlistID.prefix(8))")
+        }
+    }
+
+    /// A profile whose sign-in is held after its playlist's server address
+    /// changed (ProfileHostHold): the same login and users/me at the
+    /// playlist's current address, as that profile's Dispatcharr user. A
+    /// success replaces only that profile's key and password and lifts only
+    /// its hold; the caller finishes the switch. Never logs the password or key.
+    static func signInHeldProfile(playlistID: String, profileID: String,
+                                  username rawUser: String, password: String) async -> KeySignInCopy.Outcome {
+        let pm = ProfileManager.shared
+        guard let profile = pm.store.byId(profileID), profile.playlistId == playlistID,
+              let server = DsyncLocal.server(playlistID), !server.isGone else {
+            return .failed(KeySignInCopy.wrongCredentials)
+        }
+        let tag = "sign-in for held profile \(profileID.prefix(8))"
+        let username = rawUser.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = server.effectiveBaseURL
+        let ua = server.effectiveUserAgent
+        do {
+            let pair = try await DispatcharrAPI.login(baseURL: base, username: username, password: password, userAgent: ua)
+            let user = try await DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua).fetchCurrentUser()
+            // The profile is one Dispatcharr user: another account's sign-in is not its sign-in.
+            guard user.username.caseInsensitiveCompare(profile.username) == .orderedSame else {
+                debugLog("[AUTH] \(tag): signed in as a different user than the profile's")
+                return .wrongCredentials
+            }
+            let key = user.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else {
+                debugLog("[AUTH] \(tag): the account has no API key")
+                return .noAPIKey
+            }
+            guard pm.store.byId(profileID) != nil else { return .failed(KeySignInCopy.wrongCredentials) }
+            await pm.completeHeldSignIn(profileID, apiKey: key, password: password)
+            debugLog("[AUTH] \(tag): signed in")
+            return .signedIn
+        } catch {
+            return outcome(for: error, log: tag)
+        }
+    }
+
+    /// What a failed login or users/me comes to on the form.
+    private static func outcome(for error: Error, log: String) -> KeySignInCopy.Outcome {
+        if let e = error as? DispatcharrDirectConnectError {
             switch e {
             case .invalidCredentials:
-                debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): username or password not accepted")
+                debugLog("[AUTH] \(log): username or password not accepted")
                 return .wrongCredentials
             case .noAPIKeyForAccount:
-                debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): the account has no API key")
+                debugLog("[AUTH] \(log): the account has no API key")
                 return .noAPIKey
             case .transport:
-                debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)) failed: server not reachable")
+                debugLog("[AUTH] \(log) failed: server not reachable")
                 return .failed(DsyncManualCopy.DISPATCHARR_UNREACHABLE)
             default:
                 // A rate limit keeps its own message (no automatic retry).
-                debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)) failed: \(type(of: e))")
+                debugLog("[AUTH] \(log) failed: \(type(of: e))")
                 return .failed(DispatcharrDirectConnectError.userMessage(for: e, step: "sign-in"))
             }
-        } catch let e where e is URLError {
-            debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)) failed: server not reachable")
-            return .failed(DsyncManualCopy.DISPATCHARR_UNREACHABLE)
-        } catch {
-            debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)) failed: \(type(of: error))")
-            return .failed(DispatcharrDirectConnectError.userMessage(for: error, step: "sign-in"))
         }
+        if error is URLError {
+            debugLog("[AUTH] \(log) failed: server not reachable")
+            return .failed(DsyncManualCopy.DISPATCHARR_UNREACHABLE)
+        }
+        debugLog("[AUTH] \(log) failed: \(type(of: error))")
+        return .failed(DispatcharrDirectConnectError.userMessage(for: error, step: "sign-in"))
     }
 
     /// The username the form starts with: the playlist's, else the account it signed in as.
@@ -347,78 +394,103 @@ enum KeySignInService {
 
 /// "Sign in to Dispatcharr": the themed profile dialog with Username and
 /// Password, Sign In and Cancel, the footnote, and the inline error line.
+/// With `heldProfile` it signs that profile in again after its playlist's
+/// server address changed (ProfileHostHold): its username prefilled and the
+/// line above the fields; a success calls `onSignedIn` to finish the switch.
 struct KeySignInView: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
     let playlistID: String
+    /// A profile whose sign-in is held: sign in as that profile, not the playlist.
+    var heldProfile: DispatcharrProfile? = nil
+    /// False inside a surface that already dims the screen (the profile switch flows).
+    var hosted = true
     let onClose: () -> Void
+    /// A held profile signed in again (nil: close).
+    var onSignedIn: (() -> Void)? = nil
     @State private var username = ""
     @State private var password = ""
     @State private var busy = false
     @State private var error: String?
     @State private var loaded = false
+    @State private var playlistName = ""
     private enum Field: Hashable { case username, password }
     @FocusState private var focus: Field?
 
     var body: some View {
-        let ready = !busy && KeySignInCopy.canSubmit(username: username, password: password)
-        // The profile dialogs' chrome (title, pills, card), sized to the form:
-        // no inner scroll view, so the card hugs the fields on every platform.
-        ProfileDialogHost {
-            VStack(alignment: .leading, spacing: ProfileUI.s(12, 22)) {
-                Text(KeySignInCopy.formTitle)
-                    .scaledFont(ProfileUI.title)
-                    .foregroundColor(.textPrimary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                field(KeySignInCopy.username, .username) {
-                    TextField("", text: $username)
-                        .submitLabel(.next)
-                        .onSubmit { focus = .password }
-                }
-                field(KeySignInCopy.password, .password) {
-                    // The keyboard's Done (Return) signs in.
-                    SecureField("", text: $password)
-                        .submitLabel(.done)
-                        .onSubmit { submit() }
-                }
-                Text(KeySignInCopy.footnote)
-                    .scaledFont(ProfileUI.small)
-                    .foregroundColor(.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if busy { ProgressView().tint(.accentPrimary) }
-                if let error {
-                    Text(error)
-                        .scaledFont(ProfileUI.small)
-                        .foregroundColor(ProfileUI.errorColor)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: ProfileUI.s(12, 24)) {
-                    Spacer(minLength: 0)
-                    Button(KeySignInCopy.cancel) { cancel() }
-                        .buttonStyle(ProfilePillStyle(filled: false))
-                    // Never disabled (a disabled focused TV button drops focus); dimmed and inert instead.
-                    Button(KeySignInCopy.submit) { if ready { submit() } }
-                        .buttonStyle(ProfilePillStyle(destructive: false))
-                        .opacity(ready ? 1 : 0.45)
-                }
-            }
-            .padding(ProfileUI.s(20, 48))
-            .frame(maxWidth: ProfileUI.s(520, 1000))
-            .background(RoundedRectangle(cornerRadius: ProfileUI.s(20, 28), style: .continuous).fill(Color.cardBackground))
-            .padding(ProfileUI.s(16, 60))
-            #if os(tvOS)
-            .onExitCommand { cancel() }
-            #endif
+        Group {
+            if hosted { ProfileDialogHost { card } } else { card }
         }
         .onAppear {
             guard !loaded else { return }
             loaded = true
-            username = KeySignInService.knownUsername(playlistID: playlistID)
+            if let heldProfile {
+                username = heldProfile.username
+                playlistName = DsyncLocal.server(playlistID)?.name ?? ""
+            } else {
+                username = KeySignInService.knownUsername(playlistID: playlistID)
+            }
             #if os(tvOS)
             // A known username: start in Password, so the keyboard's Done signs in.
             if !username.isEmpty { focus = .password }
             #endif
         }
+    }
+
+    private var card: some View {
+        let ready = !busy && KeySignInCopy.canSubmit(username: username, password: password)
+        // The profile dialogs' chrome (title, pills, card), sized to the form:
+        // no inner scroll view, so the card hugs the fields on every platform.
+        return VStack(alignment: .leading, spacing: ProfileUI.s(12, 22)) {
+            Text(KeySignInCopy.formTitle)
+                .scaledFont(ProfileUI.title)
+                .foregroundColor(.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if heldProfile != nil {
+                Text(KeySignInCopy.hostChanged(playlistName: playlistName))
+                    .scaledFont(ProfileUI.body)
+                    .foregroundColor(.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            field(KeySignInCopy.username, .username) {
+                TextField("", text: $username)
+                    .submitLabel(.next)
+                    .onSubmit { focus = .password }
+            }
+            field(KeySignInCopy.password, .password) {
+                // The keyboard's Done (Return) signs in.
+                SecureField("", text: $password)
+                    .submitLabel(.done)
+                    .onSubmit { submit() }
+            }
+            Text(KeySignInCopy.footnote)
+                .scaledFont(ProfileUI.small)
+                .foregroundColor(.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if busy { ProgressView().tint(.accentPrimary) }
+            if let error {
+                Text(error)
+                    .scaledFont(ProfileUI.small)
+                    .foregroundColor(ProfileUI.errorColor)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: ProfileUI.s(12, 24)) {
+                Spacer(minLength: 0)
+                Button(KeySignInCopy.cancel) { cancel() }
+                    .buttonStyle(ProfilePillStyle(filled: false))
+                // Never disabled (a disabled focused TV button drops focus); dimmed and inert instead.
+                Button(KeySignInCopy.submit) { if ready { submit() } }
+                    .buttonStyle(ProfilePillStyle(destructive: false))
+                    .opacity(ready ? 1 : 0.45)
+            }
+        }
+        .padding(ProfileUI.s(20, 48))
+        .frame(maxWidth: ProfileUI.s(520, 1000))
+        .background(RoundedRectangle(cornerRadius: ProfileUI.s(20, 28), style: .continuous).fill(Color.cardBackground))
+        .padding(ProfileUI.s(16, 60))
+        #if os(tvOS)
+        .onExitCommand { cancel() }
+        #endif
     }
 
     /// One labeled field, styled like the profile dialogs' fields (profileFieldBox).
@@ -448,11 +520,18 @@ struct KeySignInView: View {
         busy = true
         error = nil
         Task { @MainActor in
-            let outcome = await KeySignInService.signIn(playlistID: playlistID, username: username, password: password)
+            let outcome = if let heldProfile {
+                await KeySignInService.signInHeldProfile(playlistID: playlistID, profileID: heldProfile.id,
+                                                         username: username, password: password)
+            } else {
+                await KeySignInService.signIn(playlistID: playlistID, username: username, password: password)
+            }
             busy = false
             if let line = KeySignInCopy.message(outcome) {
                 error = line
                 password = ""
+            } else if heldProfile != nil, let onSignedIn {
+                onSignedIn()
             } else {
                 onClose()
             }

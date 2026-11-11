@@ -1,0 +1,426 @@
+//  ProfileHostHold.swift
+//  Aerio
+//
+//  Profile sign-ins after a server address change (security fix, review
+//  finding A-APP-1, approved by the owner 2026-11-11; the Android app has
+//  the same rules). Each non-default profile keeps its own Dispatcharr API
+//  key and password on this device, attached to the playlist id. Edit
+//  Playlist, a setup handoff that updates a playlist in place, an iCloud
+//  pull, and a playlist merge can point a playlist at another address, and
+//  those sign-ins used to follow it there: laid over every request, sent on
+//  the next switch (users/me, then the token endpoint), and used by that
+//  profile's Dispatcharr Sync session. A typo or someone else's server got
+//  other users' keys and passwords.
+//
+//  Now a route change (the scheme, host, or port of the server URL or the
+//  local URL) holds every non-default profile's stored sign-in before
+//  anything is sent. A held sign-in is never sent anywhere (ProfileSignIns).
+//  The DEFAULT profile's users/me at the new address is compared with the
+//  user id and username this device recorded before the change started
+//  (the snapshot; nothing answered during the change, or while anything is
+//  held, is recorded). The same account releases every held profile whose
+//  own tag (the default account where that profile last signed in) is the
+//  snapshot; any other profile, and every profile when the account differs,
+//  stays held until it is signed in again. Holds survive a relaunch.
+//
+//  Pure: Foundation only, with the defaults and the profile store injected,
+//  so Scripts/profile-host-tests compiles this file directly.
+
+import Foundation
+
+// MARK: - Route
+
+/// Where a playlist's requests, and so its sign-ins, go: the scheme, host,
+/// and port of its server URL and its local URL.
+enum PlaylistRoute {
+
+    /// "scheme://host:port", lowercased, with the default port filled in.
+    /// Empty for an empty or unparseable value.
+    static func hostKey(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if !s.lowercased().hasPrefix("http://") && !s.lowercased().hasPrefix("https://") {
+            s = "http://" + s
+        }
+        guard let url = URL(string: s), let host = url.host?.lowercased(), !host.isEmpty else { return "" }
+        let scheme = (url.scheme ?? "http").lowercased()
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
+    }
+
+    /// True when either route of the playlist now points somewhere else. A
+    /// path-only change on the same scheme, host, and port is not a route change.
+    static func changed(oldBase: String, newBase: String, oldLocal: String, newLocal: String) -> Bool {
+        hostKey(oldBase) != hostKey(newBase) || hostKey(oldLocal) != hostKey(newLocal)
+    }
+
+    /// Both routes as one value, to compare a playlist now with a hold.
+    static func key(base: String, local: String) -> String {
+        hostKey(base) + "|" + hostKey(local)
+    }
+
+    /// The routes' host keys, without blanks or repeats.
+    static func hosts(base: String, local: String) -> [String] {
+        var out: [String] = []
+        for k in [hostKey(base), hostKey(local)] where !k.isEmpty && !out.contains(k) { out.append(k) }
+        return out
+    }
+
+    /// Where the same-server check calls users/me: every current address
+    /// whose host the profiles were not used with before the change. When
+    /// none is new (the playlist went back), the address requests use now.
+    static func checkTargets(base: String, local: String, effective: String, trusted: [String]) -> [String] {
+        var out: [String] = []
+        var seen: [String] = []
+        for url in [base, local] {
+            let k = hostKey(url)
+            guard !k.isEmpty, !trusted.contains(k), !seen.contains(k) else { continue }
+            seen.append(k)
+            out.append(url)
+        }
+        if out.isEmpty, !hostKey(effective).isEmpty { out.append(effective) }
+        return out
+    }
+}
+
+// MARK: - The same-server check
+
+/// The default profile's Dispatcharr account as users/me answered it.
+struct DefaultIdentity: Equatable, Sendable {
+    let userId: Int
+    let username: String
+
+    /// Nil for an answer that names no account (no id or no username).
+    init?(userId: Int, username: String) {
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard userId > 0, !u.isEmpty else { return nil }
+        self.userId = userId
+        self.username = u
+    }
+}
+
+enum SameServerCheck {
+    /// One users/me answer: the account, or why there is none
+    /// ("network", "rejected", "rate-limited", "error").
+    enum Answer: Equatable, Sendable {
+        case user(DefaultIdentity)
+        case failed(String)
+    }
+
+    enum Decision: Equatable, Sendable {
+        case lift
+        case keep(String)
+    }
+
+    /// The same server: every address answered, each with the user id AND
+    /// username recorded before the change. No record, no answer, a failed
+    /// answer, or a different user keeps the hold.
+    static func decide(expected: DefaultIdentity?, answers: [Answer]) -> Decision {
+        guard let expected else { return .keep("no-record") }
+        guard !answers.isEmpty else { return .keep("no-address") }
+        for a in answers {
+            switch a {
+            case .failed(let why): return .keep(why)
+            case .user(let u): if u != expected { return .keep("different-user") }
+            }
+        }
+        return .lift
+    }
+
+    /// The check runs only against the address the hold was made for, so a
+    /// users/me that lands before the new address is written (still the old
+    /// server) can never lift the hold.
+    static func ready(holdRoute: String, routeNow: String) -> Bool { holdRoute == routeNow }
+}
+
+// MARK: - Store
+
+/// One playlist's hold: the profiles held, the default identity recorded
+/// before the first change (the snapshot every check compares with), the
+/// hosts the sign-ins were used with before it, and the route the hold is for now.
+struct HostHoldRecord: Equatable, Sendable {
+    var profileIds: [String]
+    var expected: DefaultIdentity?
+    var trustedHosts: [String]
+    var route: String
+}
+
+/// Which default account a profile's sign-in belongs with: the one users/me
+/// answered (live) at the address where the profile last signed in or was
+/// verified. `unknown` when that answer could not be read; such a profile is
+/// never released by a same-server check, only by signing in again.
+enum SignInTag: Equatable, Sendable {
+    case identity(DefaultIdentity)
+    case unknown
+}
+
+enum ProfileHostHoldRules {
+    /// Who a route change holds: every non-default profile with a sign-in
+    /// stored here. Profiles with no stored sign-in behave as before.
+    static func toHold(_ profiles: [DispatcharrProfile], hasStoredSignIn: (String) -> Bool) -> [String] {
+        profiles.filter { !$0.isDefault && hasStoredSignIn($0.id) }.map(\.id)
+    }
+
+    /// A passing check releases only the held profiles whose tag is the
+    /// snapshot. A profile that signed in at another server (moved away,
+    /// added there, moved back) stays held: its key is for that server.
+    static func liftable(held: [String], tags: (String) -> SignInTag?, snapshot: DefaultIdentity?) -> [String] {
+        guard let snapshot else { return [] }
+        return held.filter { tags($0) == .identity(snapshot) }
+    }
+
+    enum Pick: Equatable, Sendable {
+        /// The "Sign in to Dispatcharr" form with the server-address line, then the switch.
+        case signInAgain
+        /// The switch as before.
+        case switchNow
+    }
+
+    /// Picking a profile in a switcher: a held profile always gets the form
+    /// with the line, whether or not it still has a stored sign-in.
+    static func onPick(isHeld: Bool, hasStoredSignIn: Bool) -> Pick {
+        isHeld ? .signInAgain : .switchNow
+    }
+}
+
+/// The holds, the default profile's recorded identity, and each profile's
+/// sign-in tag, in UserDefaults (no secrets: profile ids, user ids,
+/// usernames, hosts).
+final class ProfileHostHoldStore {
+    static let KEY_HOLDS = "aerio.profiles.host_hold.v1"
+    static let KEY_IDENTITY = "aerio.profiles.default_identity.v1"
+    static let KEY_TAGS = "aerio.profiles.signin_tag.v1"
+
+    private let defaults: UserDefaults
+    private var holds: [String: HostHoldRecord] = [:]
+    private var identities: [String: DefaultIdentity] = [:]
+    private var tags: [String: SignInTag] = [:]
+    /// Playlists in the middle of a route change (memory only).
+    private var changing = Set<String>()
+
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+        load()
+    }
+
+    // MARK: Reads
+
+    func record(_ playlistId: String) -> HostHoldRecord? { holds[playlistId] }
+
+    func isHeld(_ profileId: String) -> Bool { holds.values.contains { $0.profileIds.contains(profileId) } }
+
+    /// The default profile's identity this device last recorded for [playlistId].
+    func identity(_ playlistId: String) -> DefaultIdentity? { identities[playlistId] }
+
+    func tag(_ profileId: String) -> SignInTag? { tags[profileId] }
+
+    /// Whether a users/me answer may update [playlistId]'s record now.
+    /// Never during a route change (SNAPSHOT: the change's own users/me,
+    /// such as the save's validation, the host-change re-verify, or a setup
+    /// payload's verify, would record the new server and then match itself),
+    /// and never while any profile of the playlist is held (FREEZE).
+    func mayRecord(_ playlistId: String) -> Bool { holds[playlistId] == nil && !changing.contains(playlistId) }
+
+    // MARK: Writes
+
+    /// A route change for [playlistId] starts: from here the record is the
+    /// snapshot until endChange.
+    func beginChange(_ playlistId: String) { changing.insert(playlistId) }
+    func endChange(_ playlistId: String) { changing.remove(playlistId) }
+
+    /// Record the default profile's users/me answer for [playlistId]. False
+    /// when frozen: once nothing is held and no change is under way it
+    /// records again, and from then on the new address is the trusted one.
+    @discardableResult
+    func recordIdentity(_ playlistId: String, _ id: DefaultIdentity) -> Bool {
+        guard mayRecord(playlistId) else { return false }
+        guard identities[playlistId] != id else { return true }
+        identities[playlistId] = id
+        save()
+        return true
+    }
+
+    /// A profile signed in or was verified at the playlist's current address.
+    func setTag(_ profileId: String, _ tag: SignInTag) {
+        guard tags[profileId] != tag else { return }
+        tags[profileId] = tag
+        save()
+    }
+
+    /// Profiles from before this release have no tag: they get the recorded
+    /// identity the first time there is one (never over a tag they have).
+    @discardableResult
+    func backfillTags(_ playlistId: String, profileIds: [String]) -> Int {
+        guard let id = identities[playlistId] else { return 0 }
+        var n = 0
+        for p in profileIds where tags[p] == nil {
+            tags[p] = .identity(id)
+            n += 1
+        }
+        if n > 0 { save() }
+        return n
+    }
+
+    /// Hold [profileIds] while [playlistId] changes to [route]. The snapshot
+    /// is the record as it stood before the change; untagged profiles get it
+    /// as their tag. A playlist already on hold keeps its snapshot and hosts
+    /// from before its first change and only follows the new route. Returns
+    /// the hold, or nil when nothing is held.
+    @discardableResult
+    func hold(_ playlistId: String, profileIds: [String], trustedHosts: [String], route: String) -> HostHoldRecord? {
+        backfillTags(playlistId, profileIds: profileIds)
+        var r = holds[playlistId]
+            ?? HostHoldRecord(profileIds: [], expected: identities[playlistId], trustedHosts: trustedHosts, route: route)
+        r.profileIds = Array(Set(r.profileIds).union(profileIds)).sorted()
+        r.route = route
+        guard !r.profileIds.isEmpty else { return nil }
+        holds[playlistId] = r
+        save()
+        return r
+    }
+
+    /// The same server: releases the held profiles whose tag is the
+    /// snapshot; the rest stay held. Returns both lists.
+    @discardableResult
+    func liftMatching(_ playlistId: String) -> (lifted: [String], kept: [String]) {
+        guard var r = holds[playlistId] else { return ([], []) }
+        let lifted = ProfileHostHoldRules.liftable(held: r.profileIds, tags: { self.tags[$0] }, snapshot: r.expected)
+        r.profileIds.removeAll { lifted.contains($0) }
+        holds[playlistId] = r.profileIds.isEmpty ? nil : r
+        if !lifted.isEmpty { save() }
+        return (lifted, r.profileIds)
+    }
+
+    /// One profile signed in again, or removed. True when it was held.
+    @discardableResult
+    func lift(profileId: String) -> Bool {
+        guard let hit = holds.first(where: { $0.value.profileIds.contains(profileId) }) else { return false }
+        var r = hit.value
+        r.profileIds.removeAll { $0 == profileId }
+        holds[hit.key] = r.profileIds.isEmpty ? nil : r
+        save()
+        return true
+    }
+
+    /// A profile was removed: its hold and tag go.
+    func forgetProfile(_ profileId: String) {
+        lift(profileId: profileId)
+        if tags.removeValue(forKey: profileId) != nil { save() }
+    }
+
+    /// A playlist merged into another: its holds go with its profiles.
+    func move(from loser: String, to winner: String) {
+        guard loser != winner, let r = holds.removeValue(forKey: loser) else { return }
+        if var w = holds[winner] {
+            w.profileIds = Array(Set(w.profileIds).union(r.profileIds)).sorted()
+            holds[winner] = w
+        } else {
+            holds[winner] = r
+        }
+        save()
+    }
+
+    /// A playlist's profiles were removed: its hold goes too.
+    func drop(_ playlistId: String) {
+        guard holds.removeValue(forKey: playlistId) != nil else { return }
+        save()
+    }
+
+    /// The playlist itself was deleted: its hold and its recorded identity
+    /// go. The only place the identity is cleared.
+    func forgetPlaylist(_ playlistId: String) {
+        let hadHold = holds.removeValue(forKey: playlistId) != nil
+        let hadIdentity = identities.removeValue(forKey: playlistId) != nil
+        changing.remove(playlistId)
+        if hadHold || hadIdentity { save() }
+    }
+
+    // MARK: Persistence
+
+    private static func identity(from v: [String: Any]) -> DefaultIdentity? {
+        DefaultIdentity(userId: (v["userId"] as? NSNumber)?.intValue ?? 0, username: v["username"] as? String ?? "")
+    }
+
+    private func object(_ key: String) -> [String: [String: Any]] {
+        guard let data = defaults.data(forKey: key) else { return [:] }
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: [String: Any]]) ?? [:]
+    }
+
+    private func load() {
+        for (pid, v) in object(Self.KEY_HOLDS) {
+            let ids = (v["profiles"] as? [String]) ?? []
+            guard !ids.isEmpty else { continue }
+            holds[pid] = HostHoldRecord(profileIds: ids.sorted(), expected: Self.identity(from: v),
+                                        trustedHosts: (v["trusted"] as? [String]) ?? [],
+                                        route: v["route"] as? String ?? "")
+        }
+        for (pid, v) in object(Self.KEY_IDENTITY) {
+            if let id = Self.identity(from: v) { identities[pid] = id }
+        }
+        for (profileId, v) in object(Self.KEY_TAGS) {
+            if let id = Self.identity(from: v) { tags[profileId] = .identity(id) } else { tags[profileId] = .unknown }
+        }
+    }
+
+    private func write(_ o: [String: Any], _ key: String) {
+        if let data = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) { defaults.set(data, forKey: key) }
+    }
+
+    private func save() {
+        var h: [String: Any] = [:]
+        for (pid, r) in holds {
+            var v: [String: Any] = ["profiles": r.profileIds, "trusted": r.trustedHosts, "route": r.route]
+            if let e = r.expected { v["userId"] = e.userId; v["username"] = e.username }
+            h[pid] = v
+        }
+        write(h, Self.KEY_HOLDS)
+        var i: [String: Any] = [:]
+        for (pid, id) in identities { i[pid] = ["userId": id.userId, "username": id.username] }
+        write(i, Self.KEY_IDENTITY)
+        var t: [String: Any] = [:]
+        for (profileId, tag) in tags {
+            switch tag {
+            case .identity(let id): t[profileId] = ["userId": id.userId, "username": id.username]
+            case .unknown: t[profileId] = ["unknown": true]
+            }
+        }
+        write(t, Self.KEY_TAGS)
+    }
+}
+
+// MARK: - Outbound sign-ins
+
+/// Every read of a non-default profile's stored sign-in that can leave this
+/// device goes through here, naming what it is for. While the profile is
+/// held, nothing comes back for any use; the Keychain keeps the values so a
+/// lifted hold needs nothing re-entered.
+struct ProfileSignIns {
+    enum Use: String, CaseIterable, Sendable {
+        /// The active profile's key laid over every request (ProfileOverlay).
+        case requestOverlay
+        /// users/me with the stored key: a switch, the permissions probe, the account facts.
+        case profileSwitch
+        /// The stored password to the token endpoint.
+        case tokenLogin
+        /// The profile's Dispatcharr Sync session.
+        case syncSession
+        /// A setup handoff payload, or the User QR code.
+        case setupPayload
+    }
+
+    let store: ProfileStore
+    let holds: ProfileHostHoldStore
+
+    func apiKey(_ profileId: String, for use: Use) -> String? {
+        holds.isHeld(profileId) ? nil : store.apiKey(profileId)
+    }
+
+    func password(_ profileId: String, for use: Use) -> String? {
+        holds.isHeld(profileId) ? nil : store.password(profileId)
+    }
+
+    /// Whether this device stores any sign-in for the profile, held or not.
+    func hasStored(_ profileId: String) -> Bool {
+        store.apiKey(profileId) != nil || store.password(profileId) != nil
+    }
+}

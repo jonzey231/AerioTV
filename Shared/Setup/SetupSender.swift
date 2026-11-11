@@ -760,8 +760,9 @@ enum SetupSender {
                 role: p.effectiveRole.wire,
                 avatar: p.avatar.map { SetupProtocol.Avatar(icon: $0.icon, color: $0.color) },
                 isDefault: p.isDefault,
-                apiKey: p.isDefault ? nil : pm.store.apiKey(p.id),
-                password: p.isDefault ? nil : pm.store.password(p.id),
+                // A sign-in held after a server address change is never sent (reads as none here).
+                apiKey: p.isDefault ? nil : pm.signIns.apiKey(p.id, for: .setupPayload),
+                password: p.isDefault ? nil : pm.signIns.password(p.id, for: .setupPayload),
                 pinType: pin.map { PinRules.wireType($0.type) },
                 pinHash: pin?.hash ?? "",
                 pinSalt: pin?.salt ?? "")
@@ -777,7 +778,8 @@ enum SetupSender {
         guard server.type == .dispatcharrAPI else { return nil }
         let pm = ProfileManager.shared
         guard let p = pm.activeProfile(server.id.uuidString), !p.isDefault else { return nil }
-        let has = (pm.store.apiKey(p.id) ?? "").isEmpty == false || (pm.store.password(p.id) ?? "").isEmpty == false
+        let has = (pm.signIns.apiKey(p.id, for: .setupPayload) ?? "").isEmpty == false
+            || (pm.signIns.password(p.id, for: .setupPayload) ?? "").isEmpty == false
         return has ? nil : p
     }
 

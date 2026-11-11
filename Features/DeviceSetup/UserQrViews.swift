@@ -38,7 +38,8 @@ enum UserQrPayload {
         guard let server = DsyncLocal.server(playlistId), server.type == .dispatcharrAPI else { return nil }
         let pm = ProfileManager.shared
         guard let p = pm.store.byId(profileId) ?? pm.profiles(playlistId).first(where: { $0.id == profileId }) else { return nil }
-        let key = (p.isDefault ? server.baseApiKey : (pm.store.apiKey(p.id) ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+        // A key held after a server address change never goes into a code for the new address.
+        let key = (p.isDefault ? server.baseApiKey : (pm.signIns.apiKey(p.id, for: .setupPayload) ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return nil }
         var base = server.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }

@@ -3369,6 +3369,10 @@ final class ChannelStore: ObservableObject {
         var effectiveProfileIDs = channelProfileIDs
         if let user = try? await dAPI.fetchCurrentUser() {
             effectiveProfileIDs = user.channelProfiles
+            // The default profile's account for this playlist (ProfileHostHold).
+            if let server = activeServer, server.id == serverID, ProfileOverlay.values(server.id.uuidString) == nil {
+                ProfileManager.shared.noteDefaultUsersMe(server.id.uuidString, userId: user.id, username: user.username)
+            }
             // A non-default profile's /me/ never lands on the playlist row
             // (the default profile's home; Android EncryptingPlaylistDao).
             if let server = activeServer, ProfileOverlay.values(server.id.uuidString) == nil,

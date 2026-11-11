@@ -79,14 +79,19 @@ struct EditServerPage: View {
     /// reload against the half-typed host. Staged in @State until Save,
     /// same pattern as `pendingCredentialType`. Mirrors EditServerSheet.
     @State private var pendingBaseURL: String? = nil
+    /// Local URL staged the same way (2026-11-11): the field used to write
+    /// the row on every keystroke, so a Local URL typed and then cancelled
+    /// still moved the playlist to a new address with no save, and with it
+    /// every profile's sign-in (ProfileHostHold). Save commits it.
+    @State private var pendingLocalURL: String? = nil
 
     /// Which account this playlist was connected as when the page opened.
     /// Save diffs against it so a credential swap triggers a full
     /// re-authentication while a rename or an EPG-URL edit costs nothing.
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
-    /// Local URL when the edit surface opened. The field binds straight to
-    /// the row, so Save needs this to tell a host change apart.
+    /// Local URL when the edit surface opened: the old route for Save's
+    /// host-change check.
     @State private var originalLocalURL: String? = nil
 
     /// See `EditServerSheet.saveEdits` for the rationale: Save verifies a
@@ -110,6 +115,19 @@ struct EditServerPage: View {
         guard let pending = pendingBaseURL else { return }
         server.baseURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingBaseURL = nil
+    }
+
+    private var localURLBinding: Binding<String> {
+        Binding(
+            get: { pendingLocalURL ?? server.localURL },
+            set: { pendingLocalURL = $0 }
+        )
+    }
+
+    private func commitLocalURLIfStaged() {
+        guard let pending = pendingLocalURL else { return }
+        server.localURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingLocalURL = nil
     }
     @State private var isRefreshingSession: Bool = false
     @State private var sessionRefreshMessage: String? = nil
@@ -153,9 +171,11 @@ struct EditServerPage: View {
             credentialType: mode,
             originalCredentials: originalCredentials,
             originalLocalURL: originalLocalURL,
+            typedLocalURL: pendingLocalURL.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
             progress: saveProgress,
             commitStaged: {
                 commitBaseURLIfStaged()
+                commitLocalURLIfStaged()
                 commitCredentialModeIfStaged()
             }
         )
@@ -383,7 +403,7 @@ struct EditServerPage: View {
                             // Phase 3 item 2: tvOS used to say "when the Apple
                             // TV detects"; the helper is now the one shared
                             // device-neutral string used on iOS and Android.
-                            SettingsTextField("Local URL", text: $server.localURL,
+                            SettingsTextField("Local URL", text: localURLBinding,
                                               helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
                                               keyboardType: .URL)
                         }

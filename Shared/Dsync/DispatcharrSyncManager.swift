@@ -212,6 +212,13 @@ final class DispatcharrSyncManager: ObservableObject {
             await self.flush(s)
         }
         pm.onSwitched = { [weak self] _, _, _ in self?.evaluateTarget() }
+        // A server address change held these profiles' sign-ins: a session
+        // running as one of them sends nothing more (not even its flush).
+        pm.onSignInsHeld = { [weak self] pid, ids in
+            guard let s = self?.session, s.playlistId == pid, ids.contains(s.token) else { return }
+            s.client = nil
+            debugLog("[DSYNC] session for a held profile stopped sending (server address changed)")
+        }
         pm.$switching.removeDuplicates()
             .sink { [weak self] _ in Task { @MainActor in self?.evaluateTarget() } }
             .store(in: &cancellables)
@@ -341,7 +348,7 @@ final class DispatcharrSyncManager: ObservableObject {
         let s = DsyncSession(playlistId: playlistId, profileKey: Self.profileKey(token), token: token)
         if let server = DsyncLocal.server(playlistId) {
             s.client = token.isEmpty ? DsyncLocal.client(server)
-                : DsyncLocal.client(server, profileKey: ProfileManager.shared.store.apiKey(token) ?? "")
+                : DsyncLocal.client(server, profileKey: ProfileManager.shared.signIns.apiKey(token, for: .syncSession) ?? "")
         }
         return s
     }

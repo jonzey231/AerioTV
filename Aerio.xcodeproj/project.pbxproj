@@ -395,6 +395,8 @@
 		9F0F11E50000000000000204 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000004 /* ProfileManager.swift */; };
 		9F0F11E50000000000000101 /* ProfileRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000001 /* ProfileRules.swift */; };
 		9F0F11E50000000000000201 /* ProfileRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E50000000000000001 /* ProfileRules.swift */; };
+		9F0F11E70000000000000011 /* ProfileHostHold.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E70000000000000010 /* ProfileHostHold.swift */; };
+		9F0F11E70000000000000012 /* ProfileHostHold.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E70000000000000010 /* ProfileHostHold.swift */; };
 		D5C0DA7A0000000000000103 /* DsyncSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000003 /* DsyncSchema.swift */; };
 		D5C0DA7A0000000000000203 /* DsyncSchema.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000003 /* DsyncSchema.swift */; };
 		D5C0DA7A0000000000000104 /* DsyncV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5C0DA7A0000000000000004 /* DsyncV2.swift */; };
@@ -692,6 +694,7 @@
 		9F0F11E60000000000000010 /* ProfileDataStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileDataStore.swift; path = ../Profiles/ProfileDataStore.swift; sourceTree = "<group>"; };
 		9F0F11E50000000000000004 /* ProfileManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileManager.swift; path = ../Profiles/ProfileManager.swift; sourceTree = "<group>"; };
 		9F0F11E50000000000000001 /* ProfileRules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileRules.swift; path = ../Profiles/ProfileRules.swift; sourceTree = "<group>"; };
+		9F0F11E70000000000000010 /* ProfileHostHold.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ProfileHostHold.swift; path = ../Profiles/ProfileHostHold.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000003 /* DsyncSchema.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncSchema.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000004 /* DsyncV2.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncV2.swift; sourceTree = "<group>"; };
 		D5C0DA7A0000000000000005 /* DsyncReadiness.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DsyncReadiness.swift; sourceTree = "<group>"; };
@@ -1297,6 +1300,7 @@
 				9F0F11E50000000000000003 /* ProfilePinStore.swift */,
 				9F0F11E60000000000000010 /* ProfileDataStore.swift */,
 				9F0F11E50000000000000002 /* ProfileStore.swift */,
+				9F0F11E70000000000000010 /* ProfileHostHold.swift */,
 				D5C0DA7A0000000000000004 /* DsyncV2.swift */,
 				D5C0DA7A0000000000000005 /* DsyncReadiness.swift */,
 				D5C0DA7A0000000000000006 /* DsyncSettingsValidator.swift */,
@@ -1697,6 +1701,7 @@
 				9F0F11E50000000000000103 /* ProfilePinStore.swift in Sources */,
 				9F0F11E60000000000000011 /* ProfileDataStore.swift in Sources */,
 				9F0F11E50000000000000102 /* ProfileStore.swift in Sources */,
+				9F0F11E70000000000000011 /* ProfileHostHold.swift in Sources */,
 				D5C0DA7A0000000000000104 /* DsyncV2.swift in Sources */,
 				D5C0DA7A0000000000000105 /* DsyncReadiness.swift in Sources */,
 				D5C0DA7A0000000000000106 /* DsyncSettingsValidator.swift in Sources */,
@@ -1900,6 +1905,7 @@
 				9F0F11E50000000000000203 /* ProfilePinStore.swift in Sources */,
 				9F0F11E60000000000000012 /* ProfileDataStore.swift in Sources */,
 				9F0F11E50000000000000202 /* ProfileStore.swift in Sources */,
+				9F0F11E70000000000000012 /* ProfileHostHold.swift in Sources */,
 				D5C0DA7A0000000000000204 /* DsyncV2.swift in Sources */,
 				D5C0DA7A0000000000000205 /* DsyncReadiness.swift in Sources */,
 				D5C0DA7A0000000000000206 /* DsyncSettingsValidator.swift in Sources */,

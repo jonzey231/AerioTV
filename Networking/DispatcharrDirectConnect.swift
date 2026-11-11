@@ -1479,23 +1479,14 @@ enum ServerCredentialChange {
 enum PlaylistHostChange {
 
     /// "scheme://host:port", lowercased, with the default port filled in.
-    /// Empty for an empty or unparseable value.
-    static func hostKey(_ raw: String) -> String {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return "" }
-        if !s.lowercased().hasPrefix("http://") && !s.lowercased().hasPrefix("https://") {
-            s = "http://" + s
-        }
-        guard let url = URL(string: s), let host = url.host?.lowercased(), !host.isEmpty else { return "" }
-        let scheme = (url.scheme ?? "http").lowercased()
-        let port = url.port ?? (scheme == "https" ? 443 : 80)
-        return "\(scheme)://\(host):\(port)"
-    }
+    /// Empty for an empty or unparseable value. Shared with the profile
+    /// sign-in hold (PlaylistRoute, Shared/Profiles/ProfileHostHold.swift).
+    static func hostKey(_ raw: String) -> String { PlaylistRoute.hostKey(raw) }
 
     /// True when either route of the playlist now points somewhere else.
     static func hostChanged(oldBase: String, newBase: String,
                             oldLocal: String, newLocal: String) -> Bool {
-        hostKey(oldBase) != hostKey(newBase) || hostKey(oldLocal) != hostKey(newLocal)
+        PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal)
     }
 
     static func invalidate(server: ServerConnection,

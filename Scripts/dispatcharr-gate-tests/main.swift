@@ -547,6 +547,8 @@ do {
     check(K.message(.signedIn) == nil, "signed in: the form closes")
     check(!K.canSubmit(username: " ", password: "x") && !K.canSubmit(username: "a", password: ""), "both fields needed")
     check(K.canSubmit(username: "a", password: " "), "a password is never trimmed")
+    eq(K.hostChanged(playlistName: "Home"),
+       "The server address for Home changed. Sign in again to use this profile.", "held profile: the line above the fields")
 }
 
 // accepted memo

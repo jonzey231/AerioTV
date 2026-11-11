@@ -174,6 +174,11 @@ final class SetupApplyModel: ObservableObject {
         }
         let replaceID: UUID? = { if case .replace(let id) = choice { return id } else { return nil } }()
         let applyingLine = replaceID != nil ? "Updating your playlist" : "Connecting to your server"
+        // An in-place update may move the playlist to a new address: from here
+        // on, no users/me answer (the payload's verify below) is recorded as
+        // the default profile's account (ProfileHostHold).
+        if let id = replaceID { ProfileManager.shared.beginRouteChange(id.uuidString) }
+        defer { if let id = replaceID { ProfileManager.shared.endRouteChange(id.uuidString) } }
         phase = .applying(applyingLine)
         // A device setup is an explicit save: lift any local "this key was
         // rejected" hold for the key it carries and the playlist it replaces.
@@ -225,6 +230,14 @@ final class SetupApplyModel: ObservableObject {
         }
         // The Add Playlist save path (AddServerView.saveServer).
         let existing = (try? ctx.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        let incoming = vm.buildServerConnection()
+        if case .replace(let id) = choice, let target = existing.first(where: { $0.id == id }), target.type == .dispatcharrAPI {
+            // Before the new address is written: the other profiles' stored
+            // sign-ins are held and a held active profile is left for the
+            // default one (ProfileHostHold, review finding A-APP-1).
+            await ProfileManager.shared.routeWillChange(target.id.uuidString, oldBase: target.baseURL, oldLocal: target.localURL,
+                                                        newBase: incoming.baseURL, newLocal: incoming.localURL)
+        }
         for s in existing { s.isActive = false }
         var replaced = false
         let server: ServerConnection
@@ -232,14 +245,14 @@ final class SetupApplyModel: ObservableObject {
             // Replace in place: same row id, so cached channels, EPG, and favorites stay.
             let jwt = vm.pendingJWTPair
             vm.pendingJWTPair = nil
-            SetupPlaylistMatch.copy(from: vm.buildServerConnection(), into: target)
+            SetupPlaylistMatch.copy(from: incoming, into: target)
             if let jwt { DispatcharrTokenStore.shared.store(serverID: target.id, access: jwt.access, refresh: jwt.refresh) }
             server = target
             replaced = true
         } else {
             let jwt = vm.pendingJWTPair
             vm.pendingJWTPair = nil
-            server = vm.buildServerConnection()
+            server = incoming
             // Keep the sender's id when no row here has it, so iCloud sees one
             // playlist on both devices (the sign-in token follows the id).
             if let senderID, !existing.contains(where: { $0.id == senderID }) {
@@ -289,6 +302,8 @@ final class SetupApplyModel: ObservableObject {
                 }
             }
         }
+        // An in-place update to a new address: the same server lifts the profile hold at once.
+        if isD && replaced { await ProfileManager.shared.recheckHostHold(pid) }
         if isD, let sync = p.sync, sync.enabled, sync.provider == "dispatcharr", !DispatcharrSyncManager.shared.isEnabled {
             // Never turned on silently: the owner answers the opt-in once the setup has applied.
             if DsyncUpgradeOfferStore.declined {

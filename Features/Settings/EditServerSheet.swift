@@ -53,14 +53,19 @@ struct EditServerSheet: View {
     /// lives in @State until Save, so intermediate keystrokes never reach
     /// the model or its observers, and Cancel discards for free.
     @State private var pendingBaseURL: String? = nil
+    /// Local URL staged the same way (2026-11-11): the field used to write
+    /// the row on every keystroke, so a Local URL typed and then cancelled
+    /// still moved the playlist to a new address with no save, and with it
+    /// every profile's sign-in (ProfileHostHold). Save commits it.
+    @State private var pendingLocalURL: String? = nil
 
     /// Which account this playlist was connected as when the sheet opened.
     /// Save diffs against it so a credential swap triggers a full
     /// re-authentication while a rename or an EPG-URL edit costs nothing.
     /// See `ServerCredentialChange` for what a swap has to invalidate.
     @State private var originalCredentials: DispatcharrCredentialSnapshot? = nil
-    /// Local URL when the edit surface opened. The field binds straight to
-    /// the row, so Save needs this to tell a host change apart.
+    /// Local URL when the edit surface opened: the old route for Save's
+    /// host-change check.
     @State private var originalLocalURL: String? = nil
 
     /// Save is no longer fire-and-forget. A credential change is verified
@@ -96,6 +101,19 @@ struct EditServerSheet: View {
         guard let pending = pendingBaseURL else { return }
         server.baseURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
         pendingBaseURL = nil
+    }
+
+    private var localURLBinding: Binding<String> {
+        Binding(
+            get: { pendingLocalURL ?? server.localURL },
+            set: { pendingLocalURL = $0 }
+        )
+    }
+
+    private func commitLocalURLIfStaged() {
+        guard let pending = pendingLocalURL else { return }
+        server.localURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingLocalURL = nil
     }
 
     /// v1.7.x: read view of the credential mode that respects any
@@ -165,9 +183,11 @@ struct EditServerSheet: View {
             credentialType: mode,
             originalCredentials: originalCredentials,
             originalLocalURL: originalLocalURL,
+            typedLocalURL: pendingLocalURL.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
             progress: saveProgress,
             commitStaged: {
                 commitBaseURLIfStaged()
+                commitLocalURLIfStaged()
                 commitCredentialModeIfStaged()
             }
         )
@@ -574,7 +594,7 @@ struct EditServerSheet: View {
                 Section {
                     // Phase 3 item 2: single-field footer folded into the
                     // field's helper; tvOS and Android carry the same string.
-                    SettingsTextField("Local URL", text: $server.localURL,
+                    SettingsTextField("Local URL", text: localURLBinding,
                                       helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
                                       keyboardType: .URL)
                         .listRowBackground(Color.cardBackground)

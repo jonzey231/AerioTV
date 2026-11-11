@@ -746,6 +746,7 @@ enum PlaylistSaveRunner {
                     credentialType: DispatcharrCredentialType,
                     originalCredentials: DispatcharrCredentialSnapshot?,
                     originalLocalURL: String? = nil,
+                    typedLocalURL: String? = nil,
                     progress: PlaylistSaveProgress,
                     commitStaged: () -> Void) async -> String? {
         progress.reset()
@@ -764,14 +765,23 @@ enum PlaylistSaveRunner {
         )
         let urlChanged = typedBaseURL != server.baseURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        // Host, scheme, or port of either route. The Local URL field binds
-        // straight to the row, so its pre-edit value comes from the caller.
+        // Host, scheme, or port of either route. The Local URL is staged by
+        // the form (typedLocalURL) like the URL; a caller without staging
+        // binds it to the row and passes its pre-edit value instead.
         let oldBaseURL = server.baseURL
         let oldLocalURL = originalLocalURL ?? server.localURL
+        let newLocalURL = typedLocalURL ?? server.localURL
         let hostChanged = PlaylistHostChange.hostChanged(oldBase: oldBaseURL,
                                                          newBase: typedBaseURL,
                                                          oldLocal: oldLocalURL,
-                                                         newLocal: server.localURL)
+                                                         newLocal: newLocalURL)
+        // A new address: from here to the end of the save, no users/me answer
+        // (the validation below, the host-change re-verify) is recorded as the
+        // default profile's account; the profile hold compares with the record
+        // from before the change (ProfileHostHold).
+        let routeChange = hostChanged && server.type == .dispatcharrAPI
+        if routeChange { ProfileManager.shared.beginRouteChange(server.id.uuidString) }
+        defer { if routeChange { ProfileManager.shared.endRouteChange(server.id.uuidString) } }
         // A rename, a User-Agent edit or a Guide Days change costs no login
         // round trip at all, only a credential swap or a new URL does.
         let needsVerify = credentialsChanged || (urlChanged && server.type != .m3uPlaylist)
@@ -789,6 +799,15 @@ enum PlaylistSaveRunner {
             progress.finish(.verify)
         } else {
             progress.skip(.verify, "no credential or URL change")
+        }
+
+        if routeChange {
+            // Before the new address is written: every other profile's
+            // stored sign-in is held, and a held active profile is left for
+            // the default one, so none of them goes to the new address
+            // (ProfileHostHold, review finding A-APP-1).
+            await ProfileManager.shared.routeWillChange(server.id.uuidString, oldBase: oldBaseURL, oldLocal: oldLocalURL,
+                                                        newBase: typedBaseURL, newLocal: newLocalURL)
         }
 
         commitStaged()
@@ -818,6 +837,8 @@ enum PlaylistSaveRunner {
                                                 oldBase: oldBaseURL,
                                                 oldLocal: oldLocalURL,
                                                 allServers: servers)
+            // The same server at the new address lifts the hold at once.
+            if server.type == .dispatcharrAPI { await ProfileManager.shared.recheckHostHold(server.id.uuidString) }
         } else if urlChanged, !credentialsChanged, server.type == .dispatcharrAPI {
             // Same host, new path: permissions still have to be re-read
             // before the Movies / TV Shows rows are decided.

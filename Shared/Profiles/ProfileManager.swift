@@ -45,6 +45,8 @@ final class ProfileManager: ObservableObject {
     let pinStore: ProfilePinStore
     let settings: ProfileSettingsStore
     let data: ProfileDataStore
+    /// Profile sign-ins held after a server address change (ProfileHostHold.swift).
+    let holds: ProfileHostHoldStore
 
     // MARK: Published state for the UI (part 3) and onboarding (part 4)
 
@@ -85,6 +87,8 @@ final class ProfileManager: ObservableObject {
     var onSwitched: ((_ playlistId: String, _ from: String?, _ to: String) -> Void)?
     /// Dispatcharr Sync: before a switch, push the outgoing profile's pending changes (Android flush on session end).
     var beforeSwitch: ((_ playlistId: String) async -> Void)?
+    /// Dispatcharr Sync: these profiles' sign-ins were just held (a server address change).
+    var onSignInsHeld: ((_ playlistId: String, _ profileIds: Set<String>) -> Void)?
     /// True while anything is playing (main player, mini player, background audio).
     var isPlaying: () -> Bool = { false }
     /// The stop-playback confirmation ("Switching profiles stops playback"); true = go ahead.
@@ -100,6 +104,7 @@ final class ProfileManager: ObservableObject {
         pinStore = ProfilePinStore(defaults: .standard, secrets: box)
         settings = ProfileSettingsStore(defaults: .standard)
         data = ProfileDataStore(defaults: .standard)
+        holds = ProfileHostHoldStore(defaults: .standard)
         store.onChange = { [weak self] in self?.publish() }
         pinStore.onChange = { [weak self] in
             guard let self else { return }
@@ -130,7 +135,8 @@ final class ProfileManager: ObservableObject {
     private func refreshOverlay(_ act: [String: String]) {
         var next: [String: ProfileOverlay.Values] = [:]
         for (pid, id) in act {
-            guard let p = store.byId(id), !p.isDefault, let key = store.apiKey(id), !key.isEmpty else { continue }
+            // A held sign-in is never laid over a request (ProfileHostHold).
+            guard let p = store.byId(id), !p.isDefault, let key = signIns.apiKey(id, for: .requestOverlay), !key.isEmpty else { continue }
             let ids = p.accountProfileIds.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
             next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
         }
@@ -155,7 +161,7 @@ final class ProfileManager: ObservableObject {
     /// same way). Returns whether the server was reached.
     func refreshActiveCapabilities(_ playlistId: String, reason: String) async -> Bool {
         guard let p = activeProfile(playlistId), !p.isDefault, let server = DsyncLocal.server(playlistId),
-              let key = store.apiKey(p.id) else { return false }
+              let key = signIns.apiKey(p.id, for: .profileSwitch) else { return false }
         guard let me = await fetchMe(server, key),
               me.username.caseInsensitiveCompare(p.username) == .orderedSame,
               let live = store.byId(p.id) else {
@@ -194,6 +200,9 @@ final class ProfileManager: ObservableObject {
             .sink { [weak self] _ in Task { @MainActor in await self?.activePlaylistMaybeChanged() } }
             .store(in: &cancellables)
         Task {
+            // A profile whose sign-in was held when the app last closed is
+            // left for the default profile before anything loads as it.
+            for pid in Set(store.profiles.map(\.playlistId)) { await leaveHeldProfile(pid) }
             await activePlaylistMaybeChanged()
             let ids = store.profiles.filter { !$0.isDefault }.map(\.id)
             let n = settings.seedExistingOnce(ids, source: settings.capture())
@@ -205,7 +214,8 @@ final class ProfileManager: ObservableObject {
     private func restoreAtLaunch() {
         guard let pid = store.lastActivePlaylistId else { return }
         let all = store.forPlaylist(pid)
-        let active = store.activeProfileId(pid).flatMap(store.byId)
+        // A held profile is never restored: start() leaves it for the default profile.
+        let active = store.activeProfileId(pid).flatMap(store.byId).flatMap { holds.isHeld($0.id) ? nil : $0 }
         let restored = (active?.playlistId == pid ? active : nil) ?? all.first { $0.isDefault }
         if RoleRules.showLaunchPicker(isTv: DsyncLocal.isTv, isDispatcharr: !all.isEmpty, toggleOn: store.askAtLaunch(pid),
                                       profileCount: all.count, lastRole: restored?.effectiveRole) {
@@ -240,7 +250,10 @@ final class ProfileManager: ObservableObject {
         var username = server.dispatcharrCredentialType == .usernamePassword ? server.username : ""
         if username.trimmingCharacters(in: .whitespaces).isEmpty {
             // API-key login: ask the server who the key belongs to.
-            username = (await fetchMe(server, server.baseApiKey))?.username ?? ""
+            if let me = await fetchMe(server, server.baseApiKey) {
+                username = me.username
+                noteDefaultUsersMe(pid, userId: me.id, username: me.username)
+            }
         }
         if store.forPlaylist(pid).contains(where: \.isDefault) { return }
         // A setup handoff passes the sender's profile id (kept when free here).
@@ -277,7 +290,7 @@ final class ProfileManager: ObservableObject {
     func activeApiKey(_ playlistId: String) -> String? {
         guard let p = activeProfile(playlistId) else { return nil }
         if p.isDefault { return DsyncLocal.server(playlistId)?.baseApiKey }
-        return store.apiKey(p.id)
+        return signIns.apiKey(p.id, for: .syncSession)
     }
 
     /// The session's user id when not read yet (a default profile never switched to): ask /me/ once.
@@ -286,6 +299,7 @@ final class ProfileManager: ObservableObject {
         if p.userId > 0 { return p.userId }
         guard let server = DsyncLocal.server(playlistId), let key = activeApiKey(playlistId),
               let me = await fetchMe(server, key), me.username.caseInsensitiveCompare(p.username) == .orderedSame else { return 0 }
+        if p.isDefault { noteDefaultUsersMe(playlistId, userId: me.id, username: me.username) }
         store.update(p.id) { var c = $0; c.userId = me.id; return c }
         return me.id
     }
@@ -548,6 +562,7 @@ final class ProfileManager: ObservableObject {
     /// (Android ProfileRoleStepViewModel.isStandardUser): read live from /me/.
     func baseIsStandardUser(_ playlistId: String) async -> Bool {
         guard let server = DsyncLocal.server(playlistId), let me = await fetchMe(server, server.baseApiKey) else { return false }
+        noteDefaultUsersMe(playlistId, userId: me.id, username: me.username)
         let admin = me.effectiveUserLevel >= 10 || me.isStaff || me.isSuperuser
         debugLog("[PROFILE] onboarding role step: level=\(me.effectiveUserLevel) admin=\(admin)")
         return !admin
@@ -814,6 +829,7 @@ final class ProfileManager: ObservableObject {
             mutated(id, "add")
         }
         debugLog("[PROFILE] added \(Self.tag(id)) on \(Self.tag(playlistId)) level=\(ProfileLevel.of(profile.userLevel).rawValue) role=\(profile.effectiveRole.label)")
+        await tagSignIn(id, server)
         return store.byId(id) ?? profile
     }
 
@@ -919,18 +935,38 @@ final class ProfileManager: ObservableObject {
     /// One playlist across devices (2026-11-10): a playlist merged into
     /// another hands its profiles over when the winner has none here (the
     /// active choice follows); otherwise the loser's are removed.
-    func movePlaylistProfiles(from loser: String, to winner: String) {
+    /// The two playlists share the server URL; a different local URL moves
+    /// the profiles' sign-ins to another address, so they are held first
+    /// (ProfileHostHold), and any hold the loser had goes with them.
+    func movePlaylistProfiles(from loser: String, to winner: String,
+                              loserRoute: (base: String, local: String), winnerRoute: (base: String, local: String)) {
         guard loser != winner else { return }
         let mine = store.forPlaylist(loser)
         guard !mine.isEmpty else { return }
         if store.forPlaylist(winner).isEmpty {
+            if PlaylistRoute.changed(oldBase: loserRoute.base, newBase: winnerRoute.base,
+                                     oldLocal: loserRoute.local, newLocal: winnerRoute.local),
+               let rec = holds.hold(loser, profileIds: ProfileHostHoldRules.toHold(mine, hasStoredSignIn: signIns.hasStored),
+                                    trustedHosts: PlaylistRoute.hosts(base: loserRoute.base, local: loserRoute.local),
+                                    route: PlaylistRoute.key(base: winnerRoute.base, local: winnerRoute.local)) {
+                debugLog("[PROFILE-HOST] hold playlist=\(Self.tag(winner)) profiles=\(rec.profileIds.count)")
+                onSignInsHeld?(loser, Set(rec.profileIds))
+            }
+            holds.move(from: loser, to: winner)
             for p in mine { store.update(p.id) { var c = $0; c.playlistId = winner; return c } }
             if let a = store.activeProfileId(loser) { store.setActiveProfileId(winner, a) }
         } else {
             store.removeForPlaylist(loser)
+            holds.drop(loser)
         }
         store.setActiveProfileId(loser, nil)
         publish()
+        if holds.record(winner) != nil {
+            Task {
+                await self.leaveHeldProfile(winner)
+                await self.recheckHostHold(winner)
+            }
+        }
     }
 
     func applySetupProfile(_ playlistId: String, row: ProfileRow, isDefault: Bool, password: String?, apiKey: String?,
@@ -969,7 +1005,12 @@ final class ProfileManager: ObservableObject {
         }
         store.setApiKey(profileId, auth.key)
         store.setPassword(profileId, password)
+        // Typed at the playlist's current address: a held sign-in is replaced.
+        if holds.lift(profileId: profileId) {
+            debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(playlistId)) profile=\(Self.tag(profileId)) (signed in)")
+        }
         publish()
+        await tagSignIn(profileId, server)
         debugLog("[PROFILE] sign-in saved for \(Self.tag(profileId))")
     }
 
@@ -1128,11 +1169,202 @@ final class ProfileManager: ObservableObject {
         pinStore.remove(p.id)
         settings.deleteScope(p.id)
         data.deleteScope(p.id)
+        holds.forgetProfile(p.id)
         if tomb { onProfilesMutated?(p.playlistId, p.username, "remove", 0) }
         else if !fromSync { onProfilesMutated?(p.playlistId, p.username, "undo-add", 0) }
         store.remove(p.id)
         debugLog("[PROFILE] removed \(Self.tag(p.id)) on \(Self.tag(p.playlistId)); local state deleted\(fromSync ? " (synced removal)" : "")")
     }
+
+    // MARK: Server address change (profile sign-ins, review finding A-APP-1)
+
+    /// Every outbound read of a non-default profile's sign-in: nil while held.
+    var signIns: ProfileSignIns { ProfileSignIns(store: store, holds: holds) }
+
+    /// True while [profileId]'s sign-in is held after its playlist's server
+    /// address changed: picking it opens the sign-in form first.
+    func isHeld(_ profileId: String) -> Bool { holds.isHeld(profileId) }
+
+    /// A successful users/me with the DEFAULT profile's sign-in for
+    /// [playlistId]: record who answered (frozen while anything on the
+    /// playlist is held), and run the same-server check again when it has a hold.
+    func noteDefaultUsersMe(_ playlistId: String, userId: Int, username: String) {
+        if let id = DefaultIdentity(userId: userId, username: username), holds.recordIdentity(playlistId, id) {
+            // Profiles from before this release are tagged the first time there is a record.
+            holds.backfillTags(playlistId, profileIds: store.forPlaylist(playlistId).filter { !$0.isDefault }.map(\.id))
+        }
+        guard holds.record(playlistId) != nil else { return }
+        Task { await self.recheckHostHold(playlistId) }
+    }
+
+    /// A route change of [playlistId] starts (before its own validation
+    /// users/me) or ends: in between, nothing users/me answers is recorded,
+    /// so the snapshot is the record from before the change.
+    func beginRouteChange(_ playlistId: String) { holds.beginChange(playlistId) }
+    func endRouteChange(_ playlistId: String) { holds.endChange(playlistId) }
+
+    /// [profileId] signed in or was verified at the playlist's current
+    /// address: tag it with the default account users/me answers there now
+    /// (live, never the frozen record). Unreadable: the last record when it
+    /// is still live (nothing held, no change under way), else unknown.
+    private func tagSignIn(_ profileId: String, _ server: ServerConnection) async {
+        let pid = server.id.uuidString
+        let route = PlaylistRoute.key(base: server.baseURL, local: server.localURL)
+        let me = await fetchMe(server, server.baseApiKey)
+        guard !server.isGone, PlaylistRoute.key(base: server.baseURL, local: server.localURL) == route,
+              store.byId(profileId) != nil, !holds.isHeld(profileId) else { return }
+        if let me { noteDefaultUsersMe(pid, userId: me.id, username: me.username) }
+        if let live = me.flatMap({ DefaultIdentity(userId: $0.id, username: $0.username) }) {
+            holds.setTag(profileId, .identity(live))
+        } else if holds.mayRecord(pid), let last = holds.identity(pid) {
+            holds.setTag(profileId, .identity(last))
+        } else {
+            holds.setTag(profileId, .unknown)
+        }
+    }
+
+    /// Before a new server or local URL is written to [playlistId]: hold every
+    /// non-default profile's stored sign-in, then leave a held active profile
+    /// for the default one (as removing the active profile does). A path-only
+    /// change does nothing. The caller writes the address, then runs
+    /// recheckHostHold.
+    func routeWillChange(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) async {
+        guard holdForRouteChange(playlistId, oldBase: oldBase, oldLocal: oldLocal, newBase: newBase, newLocal: newLocal) else { return }
+        await leaveHeldProfile(playlistId)
+    }
+
+    /// The same for a caller that cannot wait (the iCloud merge): the hold is
+    /// in place when this returns; the switch to the default profile and the
+    /// same-server check follow once the caller has written the address.
+    func routeWillChangeNow(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) {
+        guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return }
+        let leave = holdForRouteChange(playlistId, oldBase: oldBase, oldLocal: oldLocal, newBase: newBase, newLocal: newLocal)
+        guard holds.record(playlistId) != nil else { return }
+        Task {
+            if leave { await self.leaveHeldProfile(playlistId) }
+            await self.recheckHostHold(playlistId)
+        }
+    }
+
+    /// Places the hold. True when the active profile is now held.
+    private func holdForRouteChange(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) -> Bool {
+        guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return false }
+        let ids = ProfileHostHoldRules.toHold(store.forPlaylist(playlistId), hasStoredSignIn: signIns.hasStored)
+        guard let rec = holds.hold(playlistId, profileIds: ids,
+                                   trustedHosts: PlaylistRoute.hosts(base: oldBase, local: oldLocal),
+                                   route: PlaylistRoute.key(base: newBase, local: newLocal)) else { return false }
+        debugLog("[PROFILE-HOST] hold playlist=\(Self.tag(playlistId)) profiles=\(rec.profileIds.count)")
+        onSignInsHeld?(playlistId, Set(rec.profileIds))
+        // The request overlay drops a held profile at once.
+        publish()
+        return store.activeProfileId(playlistId).map(holds.isHeld) ?? false
+    }
+
+    /// The active profile is held: switch to the default profile first.
+    func leaveHeldProfile(_ playlistId: String) async {
+        guard let a = store.activeProfileId(playlistId), holds.isHeld(a),
+              let def = store.forPlaylist(playlistId).first(where: \.isDefault) else { return }
+        // The channel reload only for the playlist on screen (it would load this one in its place).
+        let onScreen = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString == playlistId
+        try? await switchTo(playlistId, def.id, bypassPin: true, reload: onScreen)
+    }
+
+    private var checking = Set<String>()
+    private var checkAgain = Set<String>()
+
+    /// The same-server check: with the DEFAULT profile's sign-in only,
+    /// users/me at the new address (through the request gate). The same user
+    /// id and username as recorded before the change lifts the hold for every
+    /// profile of the playlist; anything else keeps it until the next
+    /// successful default users/me. One check per playlist at a time.
+    func recheckHostHold(_ playlistId: String) async {
+        guard holds.record(playlistId) != nil else { return }
+        guard checking.insert(playlistId).inserted else {
+            checkAgain.insert(playlistId)
+            return
+        }
+        defer { checking.remove(playlistId) }
+        repeat {
+            checkAgain.remove(playlistId)
+            await sameServerCheck(playlistId)
+        } while checkAgain.contains(playlistId) && holds.record(playlistId) != nil
+    }
+
+    private func sameServerCheck(_ playlistId: String) async {
+        guard let rec = holds.record(playlistId) else { return }
+        let tag = Self.tag(playlistId)
+        func failed(_ why: String) { debugLog("[PROFILE-HOST] same-server check failed playlist=\(tag) reason=\(why)") }
+        guard let server = DsyncLocal.server(playlistId), !server.isGone, server.type == .dispatcharrAPI else {
+            failed("no-playlist")
+            return
+        }
+        let route = PlaylistRoute.key(base: server.baseURL, local: server.localURL)
+        // A users/me before the new address is written still reaches the old server.
+        guard SameServerCheck.ready(holdRoute: rec.route, routeNow: route) else { failed("address-pending"); return }
+        guard rec.expected != nil else { failed("no-record"); return }
+        let key = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { failed("no-default-sign-in"); return }
+        let targets = PlaylistRoute.checkTargets(base: server.normalizedBaseURL,
+                                                 local: server.localURL.isEmpty ? "" : server.normalizedLocalURL,
+                                                 effective: server.effectiveBaseURL, trusted: rec.trustedHosts)
+        let ua = server.effectiveUserAgent
+        let mode = server.dispatcharrHeaderMode
+        var answers: [SameServerCheck.Answer] = []
+        for url in targets {
+            do {
+                let me = try await DispatcharrAPI(baseURL: url, auth: .apiKey(key), userAgent: ua, authMode: mode).fetchCurrentUser()
+                answers.append(DefaultIdentity(userId: me.id, username: me.username).map { .user($0) } ?? .failed("error"))
+            } catch {
+                answers.append(.failed(Self.checkFailure(error)))
+            }
+        }
+        // The address or the hold may have moved while users/me was out.
+        guard let now = holds.record(playlistId), now.route == rec.route,
+              let live = DsyncLocal.server(playlistId), !live.isGone,
+              PlaylistRoute.key(base: live.baseURL, local: live.localURL) == route else {
+            failed("address-changed")
+            return
+        }
+        switch SameServerCheck.decide(expected: now.expected, answers: answers) {
+        case .lift:
+            debugLog("[PROFILE-HOST] same-server check passed playlist=\(tag)")
+            // Only profiles that signed in where this account answered before the change.
+            let r = holds.liftMatching(playlistId)
+            debugLog("[PROFILE-HOST] lifted playlist=\(tag) profiles=\(r.lifted.count) kept=\(r.kept.count) (same server)")
+            publish()
+        case .keep(let why):
+            failed(why)
+        }
+    }
+
+    /// A fixed reason for the log; never the error text (it can carry a URL).
+    private static func checkFailure(_ error: Error) -> String {
+        if DispatcharrHTTPGate.rateLimit(in: error) != nil { return "rate-limited" }
+        if case DispatcharrGateError.keyRejected? = error as? DispatcharrGateError { return "rejected" }
+        if error is URLError { return "network" }
+        if case DispatcharrDirectConnectError.transport(let m)? = error as? DispatcharrDirectConnectError {
+            if m.contains("HTTP 401") || m.contains("HTTP 403") { return "rejected" }
+            return m.contains("HTTP ") ? "error" : "network"
+        }
+        return "error"
+    }
+
+    /// The sign-in form signed a held profile in at the playlist's current
+    /// address: its key and password are replaced, only its hold lifts, and
+    /// it is tagged with the default account there.
+    func completeHeldSignIn(_ profileId: String, apiKey: String, password: String) async {
+        store.setApiKey(profileId, apiKey)
+        store.setPassword(profileId, password)
+        guard let p = store.byId(profileId) else { return }
+        if holds.lift(profileId: profileId) {
+            debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(p.playlistId)) profile=\(Self.tag(profileId)) (signed in)")
+        }
+        publish()
+        if let server = DsyncLocal.server(p.playlistId) { await tagSignIn(profileId, server) }
+    }
+
+    /// The playlist was deleted: its hold and recorded identity go with it.
+    func playlistDeleted(_ playlistId: String) { holds.forgetPlaylist(playlistId) }
 
     // MARK: Switch
 
@@ -1174,13 +1406,16 @@ final class ProfileManager: ObservableObject {
     /// Switch [playlistId] to [profileId]. The caller already confirmed stopping
     /// playback. Signs in as the profile (stored key first, then the password),
     /// re-reads permissions, swaps the settings, and hands the switch to
-    /// Dispatcharr Sync and the reload (onSwitched).
-    func switchTo(_ playlistId: String, _ profileId: String, bypassPin: Bool = false) async throws {
+    /// Dispatcharr Sync and the reload (onSwitched). [reload] false skips the
+    /// channel reload (leaving a held profile on a playlist that is not on screen).
+    func switchTo(_ playlistId: String, _ profileId: String, bypassPin: Bool = false, reload: Bool = true) async throws {
         if !bypassPin && pinStore.hasPin(profileId) {
             guard switchTickets.remove(profileId) != nil else { throw fail("Enter PIN") }
         }
         guard let target = store.byId(profileId) else { throw fail("Profile not found") }
         guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }
+        // Held after a server address change: the sign-in form comes first (the UI opens it).
+        if !target.isDefault && holds.isHeld(profileId) { throw fail(KeySignInCopy.hostChanged(playlistName: server.name)) }
         let from = activeProfile(playlistId)
         switching = true
         defer { switching = false }
@@ -1191,9 +1426,12 @@ final class ProfileManager: ObservableObject {
             if let me = await fetchMe(server, server.baseApiKey) {
                 store.update(target.id) { var c = $0; c.userId = me.id; return c }
                 followServerRole(target.id, me.effectiveUserLevel)
+                noteDefaultUsersMe(playlistId, userId: me.id, username: me.username)
             }
         } else {
-            let a = try await authenticate(server, username: target.username, password: store.password(target.id), apiKey: store.apiKey(target.id))
+            let a = try await authenticate(server, username: target.username,
+                                           password: signIns.password(target.id, for: .tokenLogin),
+                                           apiKey: signIns.apiKey(target.id, for: .profileSwitch))
             store.setApiKey(target.id, a.key)
             store.upsert(applyMe(target, a.me))
             followServerRole(target.id, a.me.effectiveUserLevel)
@@ -1201,7 +1439,7 @@ final class ProfileManager: ObservableObject {
         let sw = settings.swap(from: from?.id, to: target.id)
         store.setActiveProfileId(playlistId, target.isDefault ? nil : target.id)
         publish()
-        if !target.isDefault, let key = store.apiKey(target.id), let me = await fetchMe(server, key) {
+        if !target.isDefault, let key = signIns.apiKey(target.id, for: .profileSwitch), let me = await fetchMe(server, key) {
             await saveAccountFacts(server, key: key, me: me)
         }
         // After the overlay moved, so iCloud (default profile only) never sees the incoming data as a change.
@@ -1220,7 +1458,9 @@ final class ProfileManager: ObservableObject {
         debugLog("[PROFILE] switch \(from.map { Self.tag($0.id) } ?? "?") -> \(Self.tag(target.id))")
         debugLog("[SWITCH] profile gate=\(Self.nowMs() - t0)ms")
         onSwitched?(playlistId, from?.id, target.id)
-        if from?.id != target.id { await reloadAfterSwitch(server) }
+        // Verified at this address: tag it with the default account here (ProfileHostHold).
+        if !target.isDefault { Task { await self.tagSignIn(target.id, server) } }
+        if from?.id != target.id && reload { await reloadAfterSwitch(server) }
     }
 
     /// Android Reload: channels, groups, guide, VOD, and DVR load again as the new

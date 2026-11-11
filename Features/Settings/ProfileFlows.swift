@@ -506,7 +506,9 @@ struct StopPlaybackConfirm: View {
     }
 }
 
-/// The switch path every surface shares: PIN pad when locked, the stop-playback confirm, then switchTo.
+/// The switch path every surface shares: PIN pad when locked, the
+/// stop-playback confirm, the sign-in form when the profile's sign-in is held
+/// after a server address change (Cancel stays on the current profile), then switchTo.
 struct ProfileSwitchFlow: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -515,6 +517,7 @@ struct ProfileSwitchFlow: View {
     let onClose: (String?) -> Void
     @State private var pinPassed = false
     @State private var confirmed = false
+    @State private var signedIn = false
     @State private var started = false
 
     private func run() {
@@ -531,6 +534,10 @@ struct ProfileSwitchFlow: View {
             SwitchPinFlow(profile: profile, onDismiss: { onClose(nil) }) { pinPassed = true }
         } else if PlayerSession.shared.mode != .idle && !confirmed {
             StopPlaybackConfirm(name: profile.displayName, onCancel: { onClose(nil) }) { confirmed = true }
+        } else if !signedIn,
+                  ProfileHostHoldRules.onPick(isHeld: pm.isHeld(profile.id), hasStoredSignIn: pm.signIns.hasStored(profile.id)) == .signInAgain {
+            KeySignInView(playlistID: playlistId, heldProfile: profile, hosted: false,
+                          onClose: { onClose(nil) }, onSignedIn: { signedIn = true })
         } else {
             ProgressView().tint(.accentPrimary).scaleEffect(ProfileUI.s(1.2, 2)).onAppear(perform: run)
         }
