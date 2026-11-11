@@ -6474,8 +6474,15 @@ struct MainTabView: View {
                !setupCardVisible,
                // iPhone Duo vertical bar: the button is a bar item there
                // (VerticalBarControlATV), never a floating circle.
-               !verticalBarControlATV.verticalBarActive {
+               !verticalBarControlATV.verticalBarActive,
+               // Large screens: the circle rides the bar's row instead.
+               !cardMetrics.controlATVOnBarRow {
                 CompanionControlFABDock { showCompanionPickerGlobal = true }
+            }
+        }
+        .overlay {
+            if showsBarRowControlATV {
+                BarRowControlATVButton { showCompanionPickerGlobal = true }
             }
         }
         .overlay(alignment: .bottomLeading) {
@@ -7764,6 +7771,13 @@ struct MainTabView: View {
     /// dock card row draws a second one.
     private var showsControlATVButton: Bool {
         controlATVBaseGate && !verticalBarControlATV.verticalBarActive
+            && !cardMetrics.controlATVOnBarRow
+    }
+
+    /// Large screens: the circle on the tab bar's own row instead
+    /// (RemoteSessionCardMetrics.controlATVOnBarRow).
+    private var showsBarRowControlATV: Bool {
+        controlATVBaseGate && cardMetrics.controlATVOnBarRow
     }
 
     /// The Control-a-TV gates without the vertical bar rule; feeds the
@@ -10738,9 +10752,65 @@ final class RemoteSessionCardMetrics: ObservableObject {
     func setWindowWidth(_ w: CGFloat) {
         guard abs(w - windowWidth) > 0.5 else { return }
         windowWidth = w
+        startPlacementTimeout()
         // Width or orientation changed: re-measure the capsule (stale
         // insets are dropped inside measureTabBar).
         measureTabBar()
+    }
+
+    /// Window width the dock's current placement was established at: the
+    /// capsule measured at that width, or the iPhone Duo's vertical bar seen
+    /// at it. 0 after a size change until measured again.
+    @Published private(set) var placementWidth: CGFloat = 0
+    @Published private(set) var placementTimedOut = false
+    private var placementTimeoutTask: Task<Void, Never>?
+
+    /// Rotating the iPhone Duo showed the Control-a-TV circle for a moment
+    /// in the phone spot (above the bar, 48 pt) before it moved to the bar's
+    /// row, and the cards at the fallback width and height, until the bar was
+    /// measured again (Logan 2026-11-11). At launch and after every size
+    /// change the dock cards and the circle stay hidden until the bar is
+    /// measured for the current window (5 s at most), then fade in. The iPad
+    /// pill row needs no measurement.
+    func placementReady(width: CGFloat) -> Bool {
+        if PadTabPill.isActive || placementTimedOut { return true }
+        return placementWidth > 0 && abs(placementWidth - width) < 0.5
+    }
+
+    private func markPlacement(_ width: CGFloat) {
+        barRetries = 0
+        placementTimeoutTask?.cancel()
+        if placementTimedOut { placementTimedOut = false }
+        if abs(placementWidth - width) > 0.5 { placementWidth = width }
+    }
+
+    private func startPlacementTimeout() {
+        if placementTimedOut { placementTimedOut = false }
+        placementTimeoutTask?.cancel()
+        // The iPad pill row needs no measurement (placementReady).
+        guard !PadTabPill.isActive else { return }
+        placementTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard let self, !Task.isCancelled, !self.placementTimedOut else { return }
+            debugLog("[TABBAR] bar not measured 5 s after launch or a size change; dock shown unmeasured")
+            self.placementTimedOut = true
+        }
+    }
+
+    /// True when a vertical bar (the iPhone Duo's rail) is laid out for the
+    /// current window: about as tall as it and against its leading or
+    /// trailing edge (folded, log 2026-11-10: 69x678 at the trailing edge of
+    /// a 466x678 window). A rail left from the previous orientation is not
+    /// (Logan 2026-11-11: the landscape rail, 669 tall, still in place for a
+    /// moment after turning to portrait, 951 tall, read as the layout and
+    /// showed the phone dock before the bar's row).
+    private static func railFitsWindow(_ bar: UITabBar, superview: UIView) -> Bool {
+        let size = superview.bounds.size
+        guard size.height > 0 else { return false }
+        let f = bar.frame
+        let tall = bar.bounds.height >= size.height * 0.85
+        let atEdge = f.minX < 1 || abs(f.maxX - size.width) < 1
+        return tall && atEdge
     }
 
     /// Top edge of the system tab bar in WINDOW coordinates, 0 until measured.
@@ -10766,7 +10836,27 @@ final class RemoteSessionCardMetrics: ObservableObject {
         guard let window,
               let bar = Self.firstTabBar(in: window),
               let superview = bar.superview,
-              bar.bounds.height > 0 else { return }
+              bar.bounds.height > 0 else {
+            retryBar()
+            return
+        }
+        if bar.bounds.height > bar.bounds.width {
+            // The iPhone Duo's vertical bar is never measured as a capsule;
+            // its layout is the placement, once it is laid out for this
+            // window.
+            if Self.railFitsWindow(bar, superview: superview) {
+                markPlacement(window.bounds.width)
+            } else {
+                retryBar()
+            }
+        } else if !Self.isMinimizedPill(bar, superview: superview),
+                  abs(bar.bounds.width - window.bounds.width) > 1 {
+            // A bar still laid out for the previous size (mid rotation, log
+            // 2026-11-11: barW=669 window=951 measured trailing 416). Measure
+            // again once it spans the window.
+            retryBar()
+            return
+        }
         let layer = bar.layer
         let originY = layer.position.y - layer.anchorPoint.y * bar.bounds.height
         let top = superview.convert(CGPoint(x: 0, y: originY), to: window).y
@@ -10802,10 +10892,27 @@ final class RemoteSessionCardMetrics: ObservableObject {
             insetsWindowWidth = 0
             if barLeadingInset != 0 { barLeadingInset = 0 }
             if barTrailingInset != 0 { barTrailingInset = 0 }
+            if barHeight != 0 { barHeight = 0 }
+            if barCapsuleMinY != 0 { barCapsuleMinY = 0 }
+            if placementWidth != 0 { placementWidth = 0 }
             loggedBarFrame = .null
             TabBarCollapseState.shared.reassertPlayerHide(reason: "size change")
         }
         measureBarInsets(bar, superview: superview, window: window)
+    }
+
+    /// The dock measured only when it appeared and 0.4 s later, and the first
+    /// look at launch always misses (the bar is not in the window yet). When
+    /// the second missed too, nothing measured again and the cards sat on
+    /// the 55 pt fallback, ON the bar (Logan's iPhone 17 Pro Max 2026-11-11:
+    /// Set up card bottom at 900 pt, bar top at 873 pt). Look again every
+    /// 250 ms for up to 15 s while the bar is missing or not yet laid out
+    /// for the window; a placement resets the count.
+    private var barRetries = 0
+    private func retryBar() {
+        guard barRetries < 60 else { return }
+        barRetries += 1
+        scheduleSettledRemeasure()
     }
 
     /// Top edge of the bar the last time it was measured EXPANDED, 0 until then.
@@ -10891,10 +10998,14 @@ final class RemoteSessionCardMetrics: ObservableObject {
         let barOriginX = barLayer.position.x - barLayer.anchorPoint.x * width
         let localMinX: CGFloat
         let localWidth: CGFloat
+        let localHeight: CGFloat
+        let localMinY: CGFloat
         let source: String
         if let best {
             localMinX = best.rect.minX
             localWidth = best.rect.width
+            localHeight = best.rect.height
+            localMinY = best.rect.minY
             source = String(describing: type(of: best.view))
         } else {
             // No capsule view in the bar (landscape over a fullscreen
@@ -10921,11 +11032,14 @@ final class RemoteSessionCardMetrics: ObservableObject {
         let trail = max(0, window.bounds.width - maxX)
         if abs(lead - barLeadingInset) > 0.5 { barLeadingInset = lead }
         if abs(trail - barTrailingInset) > 0.5 { barTrailingInset = trail }
+        if abs(localHeight - barHeight) > 0.5 { barHeight = localHeight }
+        if abs(localMinY - barCapsuleMinY) > 0.5 { barCapsuleMinY = localMinY }
         insetsWindowWidth = window.bounds.width
-        let chosen = CGRect(x: minX, y: 0, width: localWidth, height: height)
+        markPlacement(window.bounds.width)
+        let chosen = CGRect(x: minX, y: localMinY, width: localWidth, height: localHeight)
         if chosen != loggedBarFrame {
             loggedBarFrame = chosen
-            debugLog("[TABBAR] capsule frame x=\(minX) w=\(localWidth) barW=\(width) window=\(window.bounds.width) lead=\(lead) trail=\(trail) src=\(source)")
+            debugLog("[TABBAR] capsule frame x=\(minX) y=\(localMinY) w=\(localWidth) h=\(localHeight) barW=\(width) window=\(window.bounds.width) lead=\(lead) trail=\(trail) src=\(source)")
         }
     }
 
@@ -10965,7 +11079,41 @@ final class RemoteSessionCardMetrics: ObservableObject {
 
     func setCardHeight(_ height: CGFloat) {
         let value = height > 1 ? height : 0
-        if abs(value - contentInset) > 0.5 { contentInset = value }
+        guard abs(value - contentInset) > 0.5 else { return }
+        contentInset = value
+        // A card that just appeared (or changed size) sits on a fresh bar
+        // measurement, never on a missed or stale one.
+        if value > 0 { measureTabBar() }
+    }
+
+    /// Height of the visible bar capsule, measured with its width; 0 until
+    /// measured. Dock cards take it as their height (Logan 2026-11-11).
+    @Published private(set) var barHeight: CGFloat = 0
+    /// The capsule's top inside the bar (from the bar's top edge).
+    @Published private(set) var barCapsuleMinY: CGFloat = 0
+
+    /// Large screens (Logan 2026-11-11): the Control-a-TV circle rides the
+    /// tab bar's own row, at its trailing end like the iPad pill row
+    /// (b990935), and the dock cards keep the capsule's full width. Decided
+    /// from the measured layout, not the size class: a horizontal system bar
+    /// whose capsule leaves room on its right for a bar-height circle, the
+    /// 20 pt edge margin and a 12 pt gap (iPhone Duo unfolded portrait: 134 pt
+    /// free; iPhone 17 Pro Max: 21 pt). Never the iPad pill (its own row
+    /// carries the circle) or the iPhone Duo's vertical bar.
+    var controlATVOnBarRow: Bool {
+        guard !PadTabPill.isActive, !VerticalBarControlATV.shared.verticalBarActive,
+              barHeight > 0 else { return false }
+        return barTrailingInset >= barHeight + Self.barRowEdgeMargin + 12
+    }
+    static let barRowEdgeMargin: CGFloat = 20
+
+    /// The height a dock card takes: the measured capsule on iPhone, the
+    /// pill on iPad. nil (the card's own height) until measured, and beside
+    /// the iPhone Duo's vertical bar, which has no bottom capsule.
+    var dockCardHeight: CGFloat? {
+        if PadTabPill.isActive { return PadTabPill.height }
+        if VerticalBarControlATV.shared.verticalBarActive { return nil }
+        return barHeight > 0 ? barHeight : nil
     }
 
     private static func firstTabBar(in root: UIView) -> UITabBar? {
@@ -10975,6 +11123,28 @@ final class RemoteSessionCardMetrics: ObservableObject {
         }
         return nil
     }
+}
+
+/// One height rule for every card above the tab bar (Logan 2026-11-11): the
+/// bar's measured height (RemoteSessionCardMetrics.dockCardHeight), with the
+/// card's own 8 pt vertical padding inside it. A card whose content needs
+/// more (a Cast card with its codec note lines) grows rather than squeezing
+/// that content. Until the bar is measured, and beside the iPhone Duo's
+/// vertical bar, a card keeps its own height.
+struct DockCardHeight: ViewModifier {
+    @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
+    @ObservedObject private var verticalBar = VerticalBarControlATV.shared
+    func body(content: Content) -> some View {
+        content
+            .padding(.vertical, 8)
+            .frame(minHeight: metrics.dockCardHeight)
+    }
+}
+
+extension View {
+    /// See DockCardHeight. Goes where the card had `.padding(.vertical, 8)`,
+    /// before its capsule surface.
+    func dockCardHeight() -> some View { modifier(DockCardHeight()) }
 }
 
 /// Pins the cast card 8 pt above the measured tab bar on every tab. A
@@ -11009,6 +11179,10 @@ private struct RemoteSessionCardDock<Content: View>: View {
                 : barTop > 0 && measured <= fallback * 2
                 ? max(RemoteSessionCardMetrics.gap, measured)
                 : fallback
+            // Hidden after a size change until the bar is measured at the new
+            // width, then faded in (placementReady): never a frame at a stale
+            // or fallback width and height.
+            let ready = metrics.placementReady(width: geo.size.width)
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 content
@@ -11018,6 +11192,8 @@ private struct RemoteSessionCardDock<Content: View>: View {
                     .padding(.bottom, lift)
             }
             .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+            .animation(.easeIn(duration: 0.2)) { $0.opacity(ready ? 1 : 0) }
+            .allowsHitTesting(ready)
             .onAppear {
                 metrics.measureTabBar()
                 metrics.setWindowWidth(geo.size.width)
@@ -11582,7 +11758,9 @@ private struct PadTabPillBar: View {
                         Image(systemName: "tv.and.mediabox")
                             .font(.system(size: 19, weight: .semibold))  // glyph in a fixed box: not text, stays fixed
                             .foregroundStyle(theme.accent)
-                            .frame(width: 48, height: 48)
+                            // The pill's height, so the circle matches the bar
+                            // it shares a row with (Logan 2026-11-11).
+                            .frame(width: PadTabPill.height, height: PadTabPill.height)
                     }
                     .buttonStyle(.plain)
                     .modifier(PadPillSurface(shape: Circle()))
@@ -11598,14 +11776,47 @@ private struct PadTabPillBar: View {
     }
 }
 
+/// Large screens (Logan 2026-11-11, RemoteSessionCardMetrics
+/// .controlATVOnBarRow): the Control-a-TV circle on the tab bar's own row,
+/// at its trailing end like the iPad pill row, the bar's measured height,
+/// centered on the measured capsule. It stays put while the bar collapses,
+/// like the dock cards.
+private struct BarRowControlATVButton: View {
+    @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
+    @ObservedObject private var collapse = TabBarCollapseState.shared
+    let action: () -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let bottom = geo.frame(in: .global).maxY
+            let capsuleBottom = metrics.tabBarTopInWindow + metrics.barCapsuleMinY + metrics.barHeight
+            let ready = metrics.placementReady(width: geo.size.width) && !collapse.detailHidden
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                CompanionControlFAB(action: action, size: metrics.barHeight)
+            }
+            .padding(.trailing, RemoteSessionCardMetrics.barRowEdgeMargin)
+            .padding(.bottom, max(0, bottom - capsuleBottom))
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
+            .animation(.easeIn(duration: 0.2)) { $0.opacity(ready ? 1 : 0) }
+            .allowsHitTesting(ready)
+        }
+        .ignoresSafeArea(.container, edges: .bottom)
+    }
+}
+
 /// Hosts the Control-a-TV FAB above the right end of the full tab bar and,
 /// once the bar has minimized, level with the minimized pill on the left so
 /// the two corners match (Logan 2026-09-09).
 private struct CompanionControlFABDock: View {
     @ObservedObject private var collapse = TabBarCollapseState.shared
+    @ObservedObject private var metrics = RemoteSessionCardMetrics.shared
     let action: () -> Void
     init(action: @escaping () -> Void) { self.action = action }
     var body: some View {
+        // After a size change, not until the bar is measured again: the
+        // large-screen circle may belong on the bar's row instead.
+        let ready = metrics.placementReady(width: metrics.windowWidth)
         CompanionControlFAB(action: action)
             // Minimized system button measured from the view hierarchy
             // ([TABBAR] dump 2026-09-09): 48 pt circle at x 28, bottom edge
@@ -11613,6 +11824,8 @@ private struct CompanionControlFABDock: View {
             .padding(.trailing, collapse.collapsed ? 28 : 20)
             .padding(.bottom, collapse.collapsed ? -6 : 52)
             .animation(.easeInOut(duration: 0.2), value: collapse.collapsed)
+            .animation(.easeIn(duration: 0.2)) { $0.opacity(ready ? 1 : 0) }
+            .allowsHitTesting(ready)
     }
 }
 #endif

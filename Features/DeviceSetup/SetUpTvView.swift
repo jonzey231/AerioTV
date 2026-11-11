@@ -497,11 +497,15 @@ struct SetUpTvView: View {
 
 // MARK: - Dock card and Settings banner
 
-/// The TV name, "Waiting for setup, key XXXX", Set up, and dismiss.
+/// The device name on one line, Set up, and dismiss. The key check lives on
+/// the next screen ("Check that the device shows XXXX"), so the offer no
+/// longer carries a "Waiting for setup, key XXXX" line (Logan 2026-11-11).
 private struct SetupTvOfferContent: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
     let target: SetupTarget
+    /// The device tile; the dock card drops it, the Settings banner keeps it.
+    var showsIcon = true
     let onSetUp: () -> Void
     let onDismiss: () -> Void
 
@@ -509,26 +513,21 @@ private struct SetupTvOfferContent: View {
         HStack(spacing: 12) {
             Button(action: onSetUp) {
                 HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.25))
-                        Image(systemName: target.kind.symbol)
-                            .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
-                            .foregroundStyle(ThemeManager.shared.accent)
+                    if showsIcon {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.black.opacity(0.25))
+                            Image(systemName: target.kind.symbol)
+                                .font(.system(size: 20))  // glyph in a fixed box: not text, stays fixed
+                                .foregroundStyle(ThemeManager.shared.accent)
+                        }
+                        .frame(width: 44, height: 44)
                     }
-                    .frame(width: 44, height: 44)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(target.name)
-                            .scaledFont(.subheadline.weight(.bold))
-                            .foregroundStyle(Color.textPrimary)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(setupWaitingLine(target))
-                            .scaledFont(.caption)
-                            .foregroundStyle(Color.contrastText(ThemeManager.shared.accent))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(target.name)
+                        .scaledFont(.subheadline.weight(.bold))
+                        .foregroundStyle(Color.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .contentShape(Rectangle())
             }
@@ -555,18 +554,19 @@ private struct SetupTvOfferContent: View {
     }
 }
 
-/// Dock card directly above the tab bar while a TV is advertising: the same
-/// capsule shell, 44 pt tile, and padding as the Kept Live dock card.
+/// Dock card directly above the tab bar while a device is advertising: one
+/// row (name, Set up, dismiss) in the dock capsule, at the bar's measured
+/// height like every dock card (dockCardHeight()).
 struct SetupTvDockCard: View {
     let target: SetupTarget
     let onSetUp: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
-        SetupTvOfferContent(target: target, onSetUp: onSetUp, onDismiss: onDismiss)
+        SetupTvOfferContent(target: target, showsIcon: false, onSetUp: onSetUp, onDismiss: onDismiss)
             .padding(.leading, 18)
             .padding(.trailing, 6)
-            .padding(.vertical, 8)
+            .dockCardHeight()
             .modifier(DockCardSurface())
             .onAppear { debugLog("[SETUP] dock card show key=\(target.fingerprint)") }
     }

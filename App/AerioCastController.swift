@@ -5581,7 +5581,7 @@ struct RemoteSessionCard: View {
         // 18 pt on both: the iPhone card is a capsule now too, so the
         // transport buttons need the same clearance from the rounded ends.
         .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        .dockCardHeight()
         .modifier(SurfaceStyle())
         .contentShape(Rectangle())
         .onTapGesture {
@@ -5879,7 +5879,7 @@ struct MultiviewDockCard: View {
             .accessibilityLabel("Play Multiview")
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        .dockCardHeight()
         .modifier(MultiviewDockSurface())
         .accessibilityElement(children: .contain)
     }
@@ -6026,7 +6026,7 @@ struct MultiviewBackgroundCard: View {
             .accessibilityLabel("Stop Multiview")
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        .dockCardHeight()
         .modifier(Surface())
         .accessibilityElement(children: .contain)
     }
@@ -6234,7 +6234,7 @@ struct KeptLiveCard: View {
             }
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 8)
+        .dockCardHeight()
         .modifier(KeptDockSurface())
         .onAppear {
             debugLog("[AVP-RETAIN] kept dock card show (\(channels.count))")

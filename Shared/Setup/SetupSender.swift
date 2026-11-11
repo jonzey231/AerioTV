@@ -53,9 +53,6 @@ extension SetupProtocol.Kind {
     }
 }
 
-/// Second line of the dock card and the Settings banner.
-func setupWaitingLine(_ t: SetupTarget) -> String { "Waiting for setup, key \(t.fingerprint)" }
-
 // MARK: - Discovery
 
 /// NWBrowser for `_aeriotv-setup._tcp`. Each advert is validated (TXT v=1,
