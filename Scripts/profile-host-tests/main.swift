@@ -806,5 +806,19 @@ do {
     eq(L.logLine(reason: "playlist", group: "NBA", pin: "NBA"), "[GROUPS] playlist landing group=NBA (default=set)", "playlist log line")
 }
 
+// MARK: - What's New: Menu closes it, focus inside, top fade (owner 2026-11-12)
+do {
+    let W = WhatsNewRules.self
+    eq(W.onMenu, .markSeenAndClose, "Menu on Apple TV closes What's New and marks this version seen")
+    eq(W.onMenu, W.onSwipeDown, "Menu is the same close as the swipe down on iPhone and iPad")
+    eq(W.onNeverShowAgain, .disableAndClose, "Never show again turns it off for good, then closes")
+    check(W.onMenu != W.onNeverShowAgain, "Menu never turns What's New off for future updates")
+    eq(W.initialFocus(bulletCount: 7), .bullet(0), "Apple TV focus starts on the first bullet, never nothing")
+    eq(W.initialFocus(bulletCount: 0), .neverShowAgain, "no bullets: focus starts on the only button")
+    check(!W.fadeActive(scrolledBy: 0), "at rest the top line is not faded")
+    check(!W.fadeActive(scrolledBy: -40), "pulled past the top (overscroll) is not faded")
+    check(W.fadeActive(scrolledBy: 12), "scrolled away from the top: the top edge fades")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

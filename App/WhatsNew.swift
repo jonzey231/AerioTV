@@ -785,6 +785,25 @@ struct WhatsNewSheet: View {
     }
 
     @FocusState private var tvFocus: TVTarget?
+    /// The list has scrolled away from its top: its top edge fades under the header.
+    @State private var listScrolled = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    private func target(_ f: WhatsNewRules.Focus) -> TVTarget {
+        switch f {
+        case .bullet(let i): return .bullet(i)
+        case .neverShowAgain: return .disable
+        }
+    }
+
+    /// Puts focus inside What's New when nothing is focused (device log
+    /// 2026-11-12: the cover sat with nothing focused until the remote was
+    /// touched; Menu reaches the cover's close only through a focused view).
+    private func focusInside(_ why: String) {
+        guard tvFocus == nil else { return }
+        tvFocus = target(WhatsNewRules.initialFocus(bulletCount: release.bullets.count))
+        debugLog("[WHATSNEW] focus placed inside (\(why))")
+    }
     #endif
 
     var body: some View {
@@ -839,6 +858,7 @@ struct WhatsNewSheet: View {
                     // Sets `whatsNew.permanentlyDisabled` so `shouldShow`'s
                     // first guard short-circuits forever on this device.
                     Button {
+                        debugLog("[WHATSNEW] never show again")
                         onPermanentlyDisable()
                         isPresented = false
                     } label: {
@@ -852,6 +872,9 @@ struct WhatsNewSheet: View {
                 }
             }
             .listStyle(.insetGrouped)
+            // Rows that slide under the title bar fade out, never cut through
+            // (owner 2026-11-12): the system soft top edge, pinned explicitly.
+            .modifier(WhatsNewSoftTopEdge())
             .navigationTitle("What's New")
             .navigationBarTitleDisplayMode(.large)
         }
@@ -904,6 +927,23 @@ struct WhatsNewSheet: View {
                 .padding(.vertical, 24)
             }
             .defaultFocus($tvFocus, .bullet(0))
+            // The rows slide under the pinned header: once the list has scrolled,
+            // its top line fades out instead of being cut through (owner
+            // 2026-11-12). The mask also keeps rows from drawing over the header.
+            .onScrollGeometryChange(for: Bool.self) { g in
+                WhatsNewRules.fadeActive(scrolledBy: Double(g.contentOffset.y + g.contentInsets.top))
+            } action: { _, scrolled in
+                listScrolled = scrolled
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [listScrolled ? .clear : .black, .black],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: topFadeHeight)
+                    Color.black
+                }
+                .animation(.easeInOut(duration: 0.2), value: listScrolled)
+            }
         }
         .frame(maxWidth: 1000)
         .padding(.horizontal, 60)
@@ -911,6 +951,17 @@ struct WhatsNewSheet: View {
         .background(Color.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .preferredColorScheme(ThemeManager.shared.resolvedColorScheme)
+        .onAppear {
+            debugLog("[WHATSNEW] shown \(release.version)")
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                focusInside("appeared")
+            }
+        }
+        // Shown while the Apple TV was asleep: focus once the app is active.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { focusInside("app active") }
+        }
     }
 
     /// Focusable, non-actionable bullet row. `.focusable()` rather than a
@@ -952,6 +1003,7 @@ struct WhatsNewSheet: View {
             // Sets `whatsNew.permanentlyDisabled` so `shouldShow`'s
             // first guard short-circuits forever on this device.
             Button {
+                debugLog("[WHATSNEW] never show again")
                 onPermanentlyDisable()
                 isPresented = false
             } label: {
@@ -970,11 +1022,9 @@ struct WhatsNewSheet: View {
         }
     }
 
+    /// Title and version only; no icon above the title (owner 2026-11-12).
     private var header: some View {
         VStack(spacing: 10) {
-            Image(systemName: "sparkles")
-                .scaledFont(.system(size: iconSize, weight: .semibold))
-                .foregroundStyle(Color.accentPrimary)
             Text(release.title)
                 .scaledFont(titleFont)
                 .multilineTextAlignment(.center)
@@ -989,12 +1039,13 @@ struct WhatsNewSheet: View {
     // MARK: Platform sizing
 
     #if os(tvOS)
-    private var iconSize: CGFloat { 56 }
     private var titleFont: AerioFont { .system(size: 38, weight: .bold) }
     private var bulletIconFont: AerioFont { .system(size: 24) }
     private var bulletTextFont: AerioFont { .system(size: 24) }
     private var contentHorizontalPadding: CGFloat { 24 }
     private var headerTopPadding: CGFloat { 24 }
+    /// About one line of the 24 pt bullet text.
+    private var topFadeHeight: CGFloat { 30 }
     #else
     private var bulletIconFont: AerioFont { .body }
     private var bulletTextFont: AerioFont { .body }
@@ -1022,6 +1073,18 @@ extension View {
 private struct WhatsNewSheetModifier: ViewModifier {
     @Binding var isPresented: Bool
 
+    #if os(tvOS)
+    /// One close for every way out of the cover (WhatsNewRules).
+    private func close(_ exit: WhatsNewRules.Exit, reason: String) {
+        switch exit {
+        case .markSeenAndClose: WhatsNewStore.markSeen()
+        case .disableAndClose: WhatsNewStore.disable()
+        }
+        debugLog("[WHATSNEW] \(reason): \(exit == .markSeenAndClose ? "marked seen" : "never again"), closing")
+        isPresented = false
+    }
+    #endif
+
     func body(content: Content) -> some View {
         // Resolve the current release once. If there isn't one
         // (e.g. dev build before we curated this version's bullets),
@@ -1047,10 +1110,7 @@ private struct WhatsNewSheetModifier: ViewModifier {
                 // and it is wired explicitly rather than relying on the
                 // system's implicit cover dismissal. Treat it as the
                 // per-version acknowledge, same as "Dismiss".
-                .onExitCommand {
-                    WhatsNewStore.markSeen()
-                    isPresented = false
-                }
+                .onExitCommand { close(WhatsNewRules.onMenu, reason: "Menu") }
             }
         }
         #else
@@ -1058,7 +1118,10 @@ private struct WhatsNewSheetModifier: ViewModifier {
         // acknowledge: with no Dismiss button on the sheet, the drag is
         // the normal way out, so it must stamp the current version as
         // seen exactly like tapping Dismiss used to.
-        return content.sheet(isPresented: $isPresented, onDismiss: { WhatsNewStore.markSeen() }) {
+        return content.sheet(isPresented: $isPresented, onDismiss: {
+            WhatsNewStore.markSeen()
+            debugLog("[WHATSNEW] closed: marked seen")
+        }) {
             if let release {
                 WhatsNewSheet(
                     release: release,
@@ -1079,3 +1142,17 @@ private struct WhatsNewSheetModifier: ViewModifier {
         #endif
     }
 }
+
+#if !os(tvOS)
+/// The system's soft top edge (iOS 26 and later) on What's New's list: rows
+/// fade as they slide under the title bar.
+private struct WhatsNewSoftTopEdge: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            content
+        }
+    }
+}
+#endif

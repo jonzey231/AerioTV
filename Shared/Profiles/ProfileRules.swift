@@ -616,3 +616,38 @@ enum LiveTVLanding {
         "[GROUPS] \(reason) landing group=\(group) (default=\(pin.isEmpty ? "unset" : "set"))"
     }
 }
+
+// MARK: - What's New (owner 2026-11-12)
+
+/// What's New on every platform: what each way out does, where Apple TV focus
+/// starts, and when the list's top edge fades under the pinned header.
+enum WhatsNewRules {
+    enum Exit: Equatable {
+        /// This version is marked seen and What's New closes (the next release shows it again).
+        case markSeenAndClose
+        /// Never again on this device, then it closes.
+        case disableAndClose
+    }
+
+    /// Menu on Apple TV is the same close as the swipe down on iPhone and iPad.
+    static let onMenu: Exit = .markSeenAndClose
+    static let onSwipeDown: Exit = .markSeenAndClose
+    static let onNeverShowAgain: Exit = .disableAndClose
+
+    enum Focus: Hashable {
+        case bullet(Int)
+        case neverShowAgain
+    }
+
+    /// Apple TV: focus goes inside What's New as it appears, never nothing
+    /// (device log 2026-11-12: the cover sat with nothing focused until the
+    /// remote was touched, and Menu reaches the cover's close only through a
+    /// focused view inside it).
+    static func initialFocus(bulletCount: Int) -> Focus {
+        bulletCount > 0 ? .bullet(0) : .neverShowAgain
+    }
+
+    /// The top edge of the list fades (about one line) only once it has
+    /// scrolled away from the top, so at rest the first line is not faded.
+    static func fadeActive(scrolledBy offset: Double) -> Bool { offset > 0.5 }
+}
