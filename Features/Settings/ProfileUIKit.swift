@@ -23,6 +23,8 @@ enum ProfileUI {
     static var small: AerioFont { .system(size: s(13, 21)) }
     static var label: AerioFont { .system(size: s(13, 21), weight: .semibold) }
     static let errorColor = Color(red: 0.94, green: 0.33, blue: 0.31)
+    /// Apple TV's screen height in points (1920 x 1080 at every output resolution).
+    static let tvScreenHeight: CGFloat = 1080
     /// Action capsules: the gap between two in one group, and the one larger gap
     /// that opens the next group (Remove, then Cancel; owner 2026-11-12).
     static var actionGap: CGFloat { s(8, 16) }
@@ -486,6 +488,22 @@ extension EnvironmentValues {
 struct ProfileDialogHost<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
+        #if os(tvOS)
+        // Apple TV shows this in a sheet that sizes itself to its content. A
+        // GeometryReader root has no size of its own there, so the card
+        // collapsed to a sliver at screen center (device report 2026-11-12,
+        // build 98fc424). The host is the backdrop and the card, as before
+        // 98fc424, so the card takes its content's size (up to 1000 pt wide).
+        // The 80% cap comes from the 1080 pt screen, never from the sheet's own
+        // size: a cap measured from a content-sized sheet shrinks the card on
+        // every pass (measured in a standalone tvOS probe).
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea()
+            content()
+                .environment(\.profileDialogMaxHeight, ProfileUI.tvScreenHeight * 0.8)
+        }
+        .presentationBackground(.clear)
+        #else
         GeometryReader { geo in
             ZStack {
                 content()
@@ -493,16 +511,13 @@ struct ProfileDialogHost<Content: View>: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .backgroundPreferenceValue(ProfileDialogDismissKey.self) { dismiss in
-                #if os(iOS)
                 Color.black.opacity(0.6).ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture { dismiss?.action() }
-                #else
-                Color.black.opacity(0.6).ignoresSafeArea()
-                #endif
             }
         }
         .presentationBackground(.clear)
+        #endif
     }
 }
 
