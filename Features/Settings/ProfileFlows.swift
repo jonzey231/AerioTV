@@ -706,6 +706,9 @@ struct RosterSuggestionsView: View {
     var keepAdded = true
     /// The id of a profile just added here (onboarding focus hand-off).
     var onAddedProfile: (String) -> Void = { _ in }
+    /// The manual form follows these rows (Add Profile): a divider and "Or
+    /// sign in as another Dispatcharr user" close the block (ProfileRoster).
+    var formFollows = false
     @ObservedObject private var manager = ProfileManager.shared
     @State private var busy: String?
     @State private var error: String?
@@ -787,6 +790,12 @@ struct RosterSuggestionsView: View {
                 ForEach(all, id: \.username) { r in row(r) }
                 if let footnote { Text(footnote).scaledFont(ProfileUI.small).foregroundColor(.textSecondary).fixedSize(horizontal: false, vertical: true) }
                 if let error { Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor) }
+                if ProfileRoster.showsManualFormHeading(suggestionRows: all.count, formFollows: formFollows) {
+                    Rectangle().fill(Color.borderMedium).frame(height: 1)
+                        .padding(.top, ProfileUI.s(4, 6))
+                        .accessibilityHidden(true)
+                    Text(ProfileRoster.manualFormHeading).scaledFont(ProfileUI.label).foregroundColor(.textSecondary)
+                }
             }
         }
     }
@@ -1020,7 +1029,8 @@ struct AddProfileFlow: View {
                 } catch { busy = false; self.error = error.localizedDescription.isEmpty ? "Could not add profile" : error.localizedDescription }
             }
         }), form: true, onCancel: onClose) {
-            RosterSuggestionsView(playlistId: playlistId, users: nil, enabled: !busy, onAdded: onClose, step: $step)
+            RosterSuggestionsView(playlistId: playlistId, users: nil, enabled: !busy, onAdded: onClose,
+                                  formFollows: true, step: $step)
             Text("Role").scaledFont(ProfileUI.label).foregroundColor(.textSecondary)
             #if os(tvOS)
             // One row on Apple TV: "Standard   Child" (Admin when it applies),

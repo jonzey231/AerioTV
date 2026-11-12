@@ -395,6 +395,17 @@ enum ProfileOrder {
 
 /// The synced roster is a catalog, not a mandate (owner 2026-10-27).
 enum ProfileRoster {
+    /// The heading between "From your other devices" and the manual form in Add
+    /// Profile (owner 2026-11-12): a suggestion row's role menu sat right above
+    /// the form's Role radios, so the role looked chosen twice.
+    static let manualFormHeading = "Or sign in as another Dispatcharr user"
+
+    /// The divider and that heading show only when suggestion rows are shown
+    /// directly above a manual form; with no suggestions nothing changes.
+    static func showsManualFormHeading(suggestionRows: Int, formFollows: Bool) -> Bool {
+        suggestionRows > 0 && formFollows
+    }
+
     struct Plan: Equatable, Sendable {
         var merge: [ProfileRow]
         var available: [ProfileRow]

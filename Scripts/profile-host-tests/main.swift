@@ -837,5 +837,14 @@ do {
     check(W.fadeActive(scrolledBy: 12), "scrolled away from the top: the top edge fades")
 }
 
+// MARK: - Add Profile: suggestions apart from the manual form (owner 2026-11-12)
+do {
+    let R = ProfileRoster.self
+    eq(R.manualFormHeading, "Or sign in as another Dispatcharr user", "the heading's exact words")
+    check(R.showsManualFormHeading(suggestionRows: 1, formFollows: true), "suggestions above the form: divider and heading")
+    check(!R.showsManualFormHeading(suggestionRows: 0, formFollows: true), "no suggestions: nothing changes")
+    check(!R.showsManualFormHeading(suggestionRows: 2, formFollows: false), "no form below (the user list, onboarding): no heading")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
