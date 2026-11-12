@@ -205,6 +205,12 @@ enum ProfileHostHoldRules {
     static func rowAfterPause(_ username: String, rows: [ProfileRow]) -> ProfileRow? {
         ProfileRoster.rowForManualAdd(username, rows: rows, localUsernames: [])
     }
+
+    /// A pause add that took its roster row is a roster add from then on, so
+    /// undoing it while it still can be undone (Remove after an add, or Cancel
+    /// on "PIN Required") stays on this device with no tombstone. One that
+    /// found no row stays a plain add.
+    static func isRosterAddAfterPause(adoptedRow: Bool) -> Bool { adoptedRow }
 }
 
 /// The holds, the default profile's recorded identity, and each profile's

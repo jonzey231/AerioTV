@@ -472,6 +472,17 @@ do {
     check(!DsyncGate.profileRowWins(localUpdatedAt: found!.updatedAt, remote: row), "the row's stamp is kept, so the next push changes nothing")
     holds.clearAddedDuringPause("kid2"); holds.clearAddedDuringPause("plain")
     check(!holds.addedDuringPause("kid2") && !ProfileHostHoldStore(defaults: ud).addedDuringPause("plain"), "checked once, then unmarked")
+
+    // Undo after the pause ended (Remove after an add, Cancel on PIN Required): the add
+    // that took its row is a roster add now, so no tombstone; the one with no row is plain.
+    let kid2Roster = ProfileHostHoldRules.isRosterAddAfterPause(adoptedRow: found != nil)
+    let plainRoster = ProfileHostHoldRules.isRosterAddAfterPause(adoptedRow: ProfileHostHoldRules.rowAfterPause("plain", rows: rows) != nil)
+    for (path, today) in [("Remove after an add", true), ("Cancel on PIN Required", true)] {
+        check(!ProfileRoster.undoWritesTombstone(rosterAdd: kid2Roster, pauseAdd: holds.addedDuringPause("kid2"), plainWrites: today),
+              "\(path): the adopted pause add writes no tombstone")
+        eq(ProfileRoster.undoWritesTombstone(rosterAdd: plainRoster, pauseAdd: holds.addedDuringPause("plain"), plainWrites: today), today,
+           "\(path): a pause add with no roster row is a plain add, as today")
+    }
     holds.markAddedDuringPause("gone"); holds.forgetProfile("gone")
     check(!holds.addedDuringPause("gone"), "a removed profile's mark goes")
 }

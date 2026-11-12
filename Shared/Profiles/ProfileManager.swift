@@ -1027,6 +1027,8 @@ final class ProfileManager: ObservableObject {
                 pendingPinAdds.remove(p.id)
             }
             adopted(p.username, row.updatedAt)
+            // A roster add from now on: an undo still pending stays local, with no tombstone.
+            if ProfileHostHoldRules.isRosterAddAfterPause(adoptedRow: true) { rosterAddIds.insert(p.id) }
             debugLog("[DSYNC] profiles: \(Self.tag(p.id)) added during the roster pause takes its roster row (row and stamp kept)")
         }
     }
