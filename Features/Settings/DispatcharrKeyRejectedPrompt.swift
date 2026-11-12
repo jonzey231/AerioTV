@@ -283,6 +283,12 @@ enum KeySignInService {
         do {
             let pair = try await DispatcharrAPI.login(baseURL: base, username: username, password: password, userAgent: ua)
             let user = try await DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua).fetchCurrentUser()
+            // Only the playlist's current account (follow-up 11): another account is refused
+            // before anything is written, and its token is dropped.
+            guard accountAccepted(server, userId: user.id, username: user.username) else {
+                debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): users/me names another account; nothing written")
+                return .wrongCredentials
+            }
             let key = user.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !key.isEmpty else {
                 debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): the account has no API key")
@@ -378,6 +384,22 @@ enum KeySignInService {
         }
         debugLog("[AUTH] \(log) failed: \(type(of: error))")
         return .failed(DispatcharrDirectConnectError.userMessage(for: error, step: "sign-in"))
+    }
+
+    /// Follow-up 11: [userId] and [username] (users/me after a sign-in) are the
+    /// playlist's current account. The known user is the row's username, else
+    /// the recorded account facts (only while the default profile is active:
+    /// otherwise they are the active profile's), else the default profile's.
+    static func accountAccepted(_ server: ServerConnection, userId: Int, username: String) -> Bool {
+        let pm = ProfileManager.shared
+        let pid = server.id.uuidString
+        let def = pm.profiles(pid).first(where: \.isDefault)
+        let active = pm.activeProfile(pid)
+        let facts = (active?.isDefault ?? true) ? DispatcharrAccountFactsStore.load(server.id).username : ""
+        let known = KeySignInAccount.knownUsername(row: server.username, facts: facts, defaultProfile: def?.username ?? "")
+        let rec = pm.holds.identity(pid).map { (userId: $0.userId, username: $0.username) }
+        let child = active?.effectiveRole == .child || def?.effectiveRole == .child
+        return KeySignInAccount.accepts(username: username, userId: userId, known: known, recorded: rec, childInvolved: child)
     }
 
     /// The username the form starts with: the playlist's, else the account it signed in as.

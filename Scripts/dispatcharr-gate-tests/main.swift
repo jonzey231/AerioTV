@@ -549,6 +549,28 @@ do {
     check(K.canSubmit(username: "a", password: " "), "a password is never trimmed")
     eq(K.hostChanged(playlistName: "Home"),
        "The server address for Home changed. Sign in again to use this profile.", "held profile: the line above the fields")
+    // Follow-up 11: the form and Fix Login reconnect only the playlist's current account.
+    typealias A = KeySignInAccount
+    eq(A.knownUsername(row: " kid ", facts: "x", defaultProfile: "y"), "kid", "the row's username first")
+    eq(A.knownUsername(row: "", facts: "kid", defaultProfile: "y"), "kid", "else the recorded account facts")
+    eq(A.knownUsername(row: "", facts: " ", defaultProfile: "kid"), "kid", "else the default profile's username")
+    check(A.knownUsername(row: "", facts: "", defaultProfile: "") == nil, "no known user")
+    check(!A.accepts(username: "parent", userId: 9, known: "kid", recorded: nil, childInvolved: true),
+          "a sign-in as another account is refused (nothing is written)")
+    check(!A.accepts(username: "parent", userId: 9, known: "kid", recorded: nil, childInvolved: false),
+          "for every account, not only a Child")
+    check(A.accepts(username: "KID", userId: 5, known: "kid", recorded: nil, childInvolved: true), "the same account succeeds (any case)")
+    check(!A.accepts(username: "kid", userId: 6, known: "kid", recorded: (userId: 5, username: "kid"), childInvolved: false),
+          "same name, another user id on record: refused")
+    check(A.accepts(username: "kid", userId: 5, known: "kid", recorded: (userId: 5, username: "Kid"), childInvolved: false),
+          "same name and the recorded id: succeeds")
+    check(A.accepts(username: "kid", userId: 7, known: "kid", recorded: (userId: 5, username: "old-account"), childInvolved: false),
+          "a recorded id for a different account is not compared")
+    check(!A.accepts(username: "parent", userId: 9, known: nil, recorded: nil, childInvolved: true), "no known user: a Child is refused")
+    check(A.accepts(username: "parent", userId: 9, known: nil, recorded: nil, childInvolved: false), "no known user: an adult succeeds, as before")
+    // Fix Login receive runs the same check on users/me for the sent sign-in.
+    check(!A.accepts(username: "someone-else", userId: 3, known: "kid", recorded: nil, childInvolved: false),
+          "Fix Login with another account is refused")
     for blank in ["", "  ", "\t\n"] {
         eq(K.hostChanged(playlistName: blank),
            "The server address for this playlist changed. Sign in again to use this profile.", "a blank playlist name reads this playlist")

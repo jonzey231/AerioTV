@@ -144,7 +144,7 @@ final class SetupApplyModel: ObservableObject {
 
     private func apply(_ p: SetupProtocol.Payload) async {
         if FixLogin.appliesAsFixLogin(screenPlaylistID: fixLoginPlaylistID, payloadMode: p.mode) {
-            applyFixLogin(p)
+            await applyFixLogin(p)
             return
         }
         pending = p
@@ -334,7 +334,7 @@ extension SetupApplyModel {
     /// the hold and its prompt are lifted and the channels reload. Not for a
     /// playlist here: "Setup did not finish" and the screen stays open (Retry
     /// offers a new code).
-    fileprivate func applyFixLogin(_ p: SetupProtocol.Payload) {
+    fileprivate func applyFixLogin(_ p: SetupProtocol.Payload) async {
         stop()
         // A failed fix never re-applies the same payload: Retry starts a new code.
         clearPending()
@@ -355,6 +355,14 @@ extension SetupApplyModel {
             setPhase(.failed(FixLogin.notHere))
             return
         }
+        // Only the playlist's current account (follow-up 11): verify the sent sign-in at the
+        // playlist's address and compare users/me before anything is written.
+        guard await fixLoginAccountAccepted(server, sent: p.playlist.credential, username: next.username) else {
+            debugLog("[SETUP] fix login: the sent sign-in is not this playlist's account (or did not verify); nothing written")
+            setPhase(.failed(FixLogin.notHere))
+            return
+        }
+        guard !server.isGone else { setPhase(.failed(FixLogin.notHere)); return }
         // Only the sign-in fields; the credentials go to the Keychain as on any save.
         if let k = next.apiKey { server.apiKey = k }
         if let u = next.username { server.username = u }
@@ -375,6 +383,27 @@ extension SetupApplyModel {
         // The same reload as a held key that proves good again: channels, guide, On Demand.
         DispatcharrKeyRecheck.shared.onRecovered?(server.id.uuidString)
         setPhase(.signedIn(server.id))
+    }
+
+    /// users/me with the sent key, else a login with the sent password, at the
+    /// playlist's address; then the same account check as the sign-in form.
+    private func fixLoginAccountAccepted(_ server: ServerConnection, sent: SetupProtocol.Credential?, username: String?) async -> Bool {
+        let base = server.effectiveBaseURL
+        let ua = server.effectiveUserAgent
+        let key = sent?.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let password = sent?.password ?? ""
+        let user = (sent?.username ?? username ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let me: DispatcharrUser?
+        if !key.isEmpty {
+            me = try? await DispatcharrAPI(baseURL: base, auth: .apiKey(key), userAgent: ua, authMode: server.dispatcharrHeaderMode).fetchCurrentUser()
+        } else if !password.isEmpty, !user.isEmpty,
+                  let pair = try? await DispatcharrAPI.login(baseURL: base, username: user, password: password, userAgent: ua) {
+            me = try? await DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua).fetchCurrentUser()
+        } else {
+            me = nil
+        }
+        guard let me else { return false }
+        return KeySignInService.accountAccepted(server, userId: me.id, username: me.username)
     }
 }
 

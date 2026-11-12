@@ -179,6 +179,37 @@ enum KeySignInCopy {
     }
 }
 
+/// Follow-up 11 (2026-11-11): the "Sign in to Dispatcharr" form and Fix Login
+/// receive reconnect only the playlist's CURRENT account, for every account.
+/// Changing which account a playlist uses stays in Edit Playlist.
+enum KeySignInAccount {
+    /// The playlist's known user: the row's username, else the recorded
+    /// account facts, else the default profile's username (first non-blank).
+    static func knownUsername(row: String, facts: String, defaultProfile: String) -> String? {
+        for c in [row, facts, defaultProfile] {
+            let t = c.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { return t }
+        }
+        return nil
+    }
+
+    /// Whether the account users/me named after the sign-in may be written to
+    /// the playlist. It must be the known user (username without regard to
+    /// case) and, when the default profile's recorded account is that user,
+    /// the same user id. With no known user, a Child (active or default) is
+    /// refused and anyone else allowed, as before.
+    static func accepts(username: String, userId: Int, known: String?,
+                        recorded: (userId: Int, username: String)?, childInvolved: Bool) -> Bool {
+        guard let known else { return !childInvolved }
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard u.caseInsensitiveCompare(known) == .orderedSame else { return false }
+        if let r = recorded, r.userId > 0, r.username.caseInsensitiveCompare(known) == .orderedSame, r.userId != userId {
+            return false
+        }
+        return true
+    }
+}
+
 // MARK: - Countdown retry (interactive flows)
 
 /// The give-up failure: its description is the user-facing rate-limit copy.
