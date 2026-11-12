@@ -194,29 +194,39 @@ enum KeySignInCopy {
 /// receive reconnect only the playlist's CURRENT account, for every account.
 /// Changing which account a playlist uses stays in Edit Playlist.
 enum KeySignInAccount {
-    /// The playlist's known user: the row's username, else the recorded
-    /// account facts, else the default profile's username (first non-blank).
-    static func knownUsername(row: String, facts: String, defaultProfile: String) -> String? {
-        for c in [row, facts, defaultProfile] {
+    /// The playlist's known account: who a sign-in may reconnect it as.
+    struct Known: Equatable, Sendable {
+        let username: String
+        /// Compared whenever one is recorded.
+        let userId: Int?
+    }
+
+    /// The chain, first match: the recorded default identity (user id and
+    /// username, ProfileHostHold's record, written only from the default
+    /// profile's own users/me), else the playlist's own stored username (the
+    /// default's sign-in), else the default profile's username. Never a value
+    /// a non-default profile could have written (account facts, the form).
+    static func known(recorded: (userId: Int, username: String)?, row: String, defaultProfile: String) -> Known? {
+        if let r = recorded {
+            let u = r.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !u.isEmpty || r.userId > 0 { return Known(username: u, userId: r.userId > 0 ? r.userId : nil) }
+        }
+        for c in [row, defaultProfile] {
             let t = c.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { return t }
+            if !t.isEmpty { return Known(username: t, userId: nil) }
         }
         return nil
     }
 
     /// Whether the account users/me named after the sign-in may be written to
-    /// the playlist. It must be the known user (username without regard to
-    /// case) and, when the default profile's recorded account is that user,
-    /// the same user id. With no known user, a Child (active or default) is
-    /// refused and anyone else allowed, as before.
-    static func accepts(username: String, userId: Int, known: String?,
-                        recorded: (userId: Int, username: String)?, childInvolved: Bool) -> Bool {
+    /// the playlist: the known user (username without regard to case) and,
+    /// whenever an id is recorded, the same user id. With no known account, a
+    /// Child (active or default) is refused and anyone else allowed, as before.
+    static func accepts(username: String, userId: Int, known: Known?, childInvolved: Bool) -> Bool {
         guard let known else { return !childInvolved }
+        if let id = known.userId, id != userId { return false }
         let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard u.caseInsensitiveCompare(known) == .orderedSame else { return false }
-        if let r = recorded, r.userId > 0, r.username.caseInsensitiveCompare(known) == .orderedSame, r.userId != userId {
-            return false
-        }
+        if !known.username.isEmpty, u.caseInsensitiveCompare(known.username) != .orderedSame { return false }
         return true
     }
 }

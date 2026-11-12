@@ -404,33 +404,33 @@ enum KeySignInService {
     }
 
     /// Follow-up 11: [userId] and [username] (users/me after a sign-in) are the
-    /// playlist's current account. The known user is the row's username, else
-    /// the recorded account facts (only while the default profile is active:
-    /// otherwise they are the active profile's), else the default profile's.
+    /// playlist's current account (KeySignInAccount.known: the recorded default
+    /// identity, else the playlist's own username, else the default profile's).
     static func accountAccepted(_ server: ServerConnection, userId: Int, username: String) -> Bool {
         let pm = ProfileManager.shared
         let pid = server.id.uuidString
         let def = pm.profiles(pid).first(where: \.isDefault)
         let active = pm.activeProfile(pid)
-        let facts = (active?.isDefault ?? true) ? DispatcharrAccountFactsStore.load(server.id).username : ""
-        let known = KeySignInAccount.knownUsername(row: server.username, facts: facts, defaultProfile: def?.username ?? "")
-        let rec = pm.holds.identity(pid).map { (userId: $0.userId, username: $0.username) }
+        let known = knownAccount(server)
         let child = active?.effectiveRole == .child || def?.effectiveRole == .child
-        return KeySignInAccount.accepts(username: username, userId: userId, known: known, recorded: rec, childInvolved: child)
+        return KeySignInAccount.accepts(username: username, userId: userId, known: known, childInvolved: child)
     }
 
-    /// The username the form starts with: the playlist's, else the account it signed in as.
+    /// The playlist's known account, from the same chain for the check and the form.
+    private static func knownAccount(_ server: ServerConnection) -> KeySignInAccount.Known? {
+        let pid = server.id.uuidString
+        let pm = ProfileManager.shared
+        return KeySignInAccount.known(recorded: pm.holds.identity(pid).map { (userId: $0.userId, username: $0.username) },
+                                      row: server.username,
+                                      defaultProfile: pm.profiles(pid).first(where: \.isDefault)?.username ?? "")
+    }
+
+    /// The username the form starts with: the playlist's known account (the same chain).
     static func knownUsername(playlistID: String) -> String {
         guard let container = AerioApp.sharedContainer, let uuid = UUID(uuidString: playlistID) else { return "" }
         let descriptor = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == uuid })
         guard let s = (try? container.mainContext.fetch(descriptor))?.first, !s.isGone else { return "" }
-        for candidate in [s.username,
-                          DispatcharrAccountFactsStore.load(s.id).username,
-                          ProfileManager.shared.profiles(s.id.uuidString).first(where: \.isDefault)?.username ?? ""] {
-            let u = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !u.isEmpty { return u }
-        }
-        return ""
+        return knownAccount(s)?.username ?? ""
     }
 }
 
