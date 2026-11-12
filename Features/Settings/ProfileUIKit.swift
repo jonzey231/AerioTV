@@ -25,6 +25,11 @@ enum ProfileUI {
     static let errorColor = Color(red: 0.94, green: 0.33, blue: 0.31)
     /// Apple TV's screen height in points (1920 x 1080 at every output resolution).
     static let tvScreenHeight: CGFloat = 1080
+    /// Apple TV dialog card width: never narrower than the system alert ("API
+    /// key no longer valid" is 502 pt wide, measured on the tvOS 27 simulator),
+    /// never wider than 1000 pt.
+    static let tvDialogMinWidth: CGFloat = 502
+    static let tvDialogMaxWidth: CGFloat = 1000
     /// Action capsules: the gap between two in one group, and the one larger gap
     /// that opens the next group (Remove, then Cancel; owner 2026-11-12).
     static var actionGap: CGFloat { s(8, 16) }
@@ -417,7 +422,7 @@ struct ProfileDialog<Content: View>: View {
             }
         }
         .padding(ProfileUI.s(20, 48))
-        .frame(maxWidth: ProfileUI.s(520, 1000))
+        .modifier(ProfileDialogCardWidth())
         .background(RoundedRectangle(cornerRadius: ProfileUI.s(20, 28), style: .continuous).fill(Color.cardBackground))
         // The cap only limits what the card is offered (its content scrolls past
         // it); the card itself stays the size of its content.
@@ -427,6 +432,54 @@ struct ProfileDialog<Content: View>: View {
         .profileDialogDismiss(cancelLabel == nil ? nil : onCancel)
         #if os(tvOS)
         .onExitCommand(perform: onCancel)
+        #endif
+    }
+}
+
+/// The card's width. iPhone and iPad: up to 520 pt. Apple TV: its content's
+/// own width, at least the system alert's and at most 1000 pt, then laid out
+/// at that width so rows and buttons fill it (owner 2026-11-12: short labels
+/// made a card about 250 pt wide, with buttons too small for a TV).
+private struct ProfileDialogCardWidth: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(tvOS)
+        TVDialogWidthLayout { content }
+        #else
+        content.frame(maxWidth: 520)
+        #endif
+    }
+}
+
+#if os(tvOS)
+private struct TVDialogWidthLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let card = subviews.first else { return .zero }
+        let w = width(card, proposal)
+        return CGSize(width: w, height: card.sizeThatFits(ProposedViewSize(width: w, height: proposal.height)).height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                              proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
+    }
+
+    private func width(_ card: LayoutSubview, _ proposal: ProposedViewSize) -> CGFloat {
+        let own = card.sizeThatFits(.unspecified).width
+        return min(max(own, ProfileUI.tvDialogMinWidth), ProfileUI.tvDialogMaxWidth, proposal.width ?? .infinity)
+    }
+}
+#endif
+
+extension View {
+    /// Presents a profile dialog flow over the current screen. iPhone and iPad:
+    /// a sheet. Apple TV: a clear full-screen cover, so only the card and the
+    /// dim show; a tvOS sheet draws its own dark panel around the card (a card
+    /// inside a card, device report 2026-11-12).
+    func profileDialogCover<C: View>(isPresented: Binding<Bool>, @ViewBuilder content: @escaping () -> C) -> some View {
+        #if os(tvOS)
+        fullScreenCover(isPresented: isPresented, content: content)
+        #else
+        sheet(isPresented: isPresented, content: content)
         #endif
     }
 }
@@ -489,14 +542,13 @@ struct ProfileDialogHost<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
         #if os(tvOS)
-        // Apple TV shows this in a sheet that sizes itself to its content. A
-        // GeometryReader root has no size of its own there, so the card
-        // collapsed to a sliver at screen center (device report 2026-11-12,
-        // build 98fc424). The host is the backdrop and the card, as before
-        // 98fc424, so the card takes its content's size (up to 1000 pt wide).
-        // The 80% cap comes from the 1080 pt screen, never from the sheet's own
-        // size: a cap measured from a content-sized sheet shrinks the card on
-        // every pass (measured in a standalone tvOS probe).
+        // Apple TV: the backdrop and the card, no GeometryReader (in the tvOS
+        // sheet this used to be shown in, a GeometryReader root had no size
+        // and the card collapsed to a sliver, device report 2026-11-12). The
+        // card's width is ProfileDialogCardWidth's; the 80% cap comes from the
+        // 1080 pt screen, never measured from the presentation (a cap read
+        // from a content-sized container shrinks the card on every pass,
+        // measured in a standalone tvOS probe).
         ZStack {
             Color.black.opacity(0.6).ignoresSafeArea()
             content()

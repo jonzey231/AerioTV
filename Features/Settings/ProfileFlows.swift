@@ -386,7 +386,7 @@ struct ProfileRoleChip: View {
             }
             .buttonStyle(ProfilePillStyle(filled: false))
             .accessibilityHint("Change role")
-            .sheet(isPresented: $open) {
+            .profileDialogCover(isPresented: $open) {
                 ProfileDialogHost {
                     ProfileDialog(title: "Role", centeredTitle: true, onCancel: { open = false }) {
                         ForEach(ProfileRole.optionsFor(serverAdmin: false), id: \.self) { r in
@@ -672,7 +672,7 @@ struct EnableApiAccessRow: View {
             .accessibilityAddTraits(enabled ? .isSelected : [])
             if let error { Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor) }
         }
-        .sheet(isPresented: $confirmRevoke) {
+        .profileDialogCover(isPresented: $confirmRevoke) {
             ProfileDialogHost {
                 ProfileDialog(title: "Revoke API access?", confirm: ("Revoke", true, true, {
                     confirmRevoke = false

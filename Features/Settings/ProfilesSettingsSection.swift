@@ -494,17 +494,13 @@ struct ProfilesTVSection: View {
 extension View {
     /// Presents the profiles flow for [playlistId] (one presentation for every step).
     func profilesFlowPresentation(_ playlistId: String?, model: ProfilesFlowModel) -> some View {
-        #if os(iOS)
         // A card centered on screen over a dim, sized to its content (owner
-        // 2026-11-12), not a full-height sheet.
+        // 2026-11-12), not a full-height sheet. Apple TV too: a tvOS sheet drew
+        // its own dark panel around the card (device report 2026-11-12). Menu
+        // stays the dialog's own Cancel (each step handles it), as on device.
         fullScreenCover(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close() } })) {
             if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
         }
-        #else
-        sheet(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close() } })) {
-            if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
-        }
-        #endif
     }
 }
 
