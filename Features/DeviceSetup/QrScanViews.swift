@@ -608,7 +608,7 @@ struct QrRestoreOfferModifier: ViewModifier {
 
 #if os(iOS)
 /// After a User QR scan finds the device showing the code: the same scope
-/// step as Set up another device. "Copy entire setup from this device" asks
+/// step as Set up another device. "Copy this playlist and its profiles" asks
 /// that device to send its setup; "Import this user only" signs in as today.
 struct UserQrScopeSheet: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
@@ -629,13 +629,13 @@ struct UserQrScopeSheet: View {
                 .scaledFont(.headlineLarge)
                 .foregroundColor(.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Copy every playlist and profile from \(request.device.name), or add just the user in this code.")
+            Text(SetupScopeCopy.userQrSubtitle(request.device.name))
                 .scaledFont(.bodyMedium.subtext())
                 .foregroundColor(Color.contrastText(.textSecondary))
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 4) {
-                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
-                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+                ProfileChoiceRow(label: SetupScopeCopy.playlistAndProfiles, checked: !userOnly) { userOnly = false }
+                ProfileChoiceRow(label: SetupScopeCopy.userOnly, checked: userOnly) { userOnly = true }
             }
             .padding(8)
             .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))

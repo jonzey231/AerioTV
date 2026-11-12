@@ -564,6 +564,22 @@ enum FixLogin {
     }
 }
 
+// MARK: - What to send (Set up another device, and after a User QR scan)
+
+/// The sender's scope choice, one wording on both screens and both apps.
+/// A setup carries the active playlist, its profiles, and preferences, never
+/// every playlist (owner 2026-11-12: "Copy entire setup from this device" read
+/// as every playlist).
+enum SetupScopeCopy {
+    static let playlistAndProfiles = "Copy this playlist and its profiles"
+    static let userOnly = "Import this user only"
+
+    /// The line under "Copy from {name}" after a User QR scan finds that device.
+    static func userQrSubtitle(_ deviceName: String) -> String {
+        "Copy the playlist and its profiles from \(deviceName), or add just the user in this code."
+    }
+}
+
 // MARK: - User QR source (copy a setup from the device showing a User QR Code)
 
 /// The device showing a User QR Code advertises `_aeriotv-setup._tcp` with

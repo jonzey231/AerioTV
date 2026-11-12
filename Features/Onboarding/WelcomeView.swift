@@ -52,7 +52,7 @@ struct WelcomeView: View {
     /// Connect a Server pushed from Welcome (nil type: the picker; Dispatcharr: the sync card).
     @State private var showConnect = false
     #if os(iOS)
-    /// "Copy entire setup from this device" after a User QR scan on the connect form.
+    /// "Copy this playlist and its profiles" after a User QR scan on the connect form.
     @State private var sourceRequest: UserQrSourceRequest?
     /// "Import this user only" after that request failed: the connect form applies it.
     @State private var fallbackUserKey: ScannedCode.UserKey?

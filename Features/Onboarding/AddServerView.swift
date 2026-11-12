@@ -22,7 +22,7 @@ struct AddServerView: View {
     var initialType: ServerType? = nil
     /// Onboarding shows the step indicator and the TV footer hints.
     var isOnboarding: Bool = false
-    /// Onboarding: "Copy entire setup from this device" after a User QR scan runs in Welcome's receive stage.
+    /// Onboarding: "Copy this playlist and its profiles" after a User QR scan runs in Welcome's receive stage.
     var onReceiveFromSource: ((UserQrSourceRequest) -> Void)? = nil
     /// A scanned user to apply on appear (the whole-setup request failed).
     var pendingUserKey: ScannedCode.UserKey? = nil
@@ -1263,7 +1263,7 @@ struct AddServerView: View {
     private func scopeChosen(_ r: UserQrSourceRequest, entire: Bool) {
         scopeFor = nil
         guard entire else { applyUserKey(r.userKey); return }
-        debugLog("[SETUP-QR] copy entire setup from the device showing the code")
+        debugLog("[SETUP-QR] copy this playlist and its profiles from the device showing the code")
         if let cb = onReceiveFromSource { cb(r) } else { entireFrom = r }
     }
 

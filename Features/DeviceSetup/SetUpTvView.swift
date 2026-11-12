@@ -281,8 +281,8 @@ struct SetUpTvView: View {
                 .scaledFont(.caption)
                 .foregroundColor(Color.contrastText(.textSecondary))
             VStack(spacing: 4) {
-                ProfileChoiceRow(label: "Copy entire setup from this device", checked: !userOnly) { userOnly = false }
-                ProfileChoiceRow(label: "Import this user only", checked: userOnly) { userOnly = true }
+                ProfileChoiceRow(label: SetupScopeCopy.playlistAndProfiles, checked: !userOnly) { userOnly = false }
+                ProfileChoiceRow(label: SetupScopeCopy.userOnly, checked: userOnly) { userOnly = true }
             }
             .padding(8)
             .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -372,7 +372,7 @@ struct SetUpTvView: View {
             .onAppear {
                 if !loaded {
                     loaded = true
-                    // Copy entire setup: every profile that has a sign-in saved here.
+                    // Copy this playlist and its profiles: every profile that has a sign-in saved here.
                     picked = Set(source.choices.filter { $0.credentialLabel != nil }.map(\.id))
                     // Pre-ticked only when Dispatcharr Sync is on here (2026-11-10;
                     // it used to tick for every Dispatcharr playlist).

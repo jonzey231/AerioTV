@@ -1147,7 +1147,7 @@ struct UserQrSourceDevice: Equatable, Sendable {
     let port: Int
 }
 
-/// What the scanner hands the receive screen for "Copy entire setup from this device".
+/// What the scanner hands the receive screen for "Copy this playlist and its profiles".
 struct UserQrSourceRequest: Identifiable, Equatable {
     let id = UUID()
     let device: UserQrSourceDevice

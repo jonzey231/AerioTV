@@ -471,5 +471,17 @@ do {
     check(D.takeoverRemovalHold > 0 && D.takeoverRemovalHold < D.refreshDelay(after: 0), "removal hold shorter than any refresh gap")
 }
 
+// MARK: - What to send: the scope choice's wording (owner 2026-11-12)
+do {
+    eq(SetupScopeCopy.playlistAndProfiles, "Copy this playlist and its profiles", "the full choice names the playlist and its profiles")
+    eq(SetupScopeCopy.userOnly, "Import this user only", "the user-only choice is unchanged")
+    eq(SetupScopeCopy.userQrSubtitle("Living Room"),
+       "Copy the playlist and its profiles from Living Room, or add just the user in this code.", "the User QR scope subtitle")
+    for word in ["entire", "every", "whole", "all "] {
+        check(!SetupScopeCopy.playlistAndProfiles.lowercased().contains(word), "the full choice never promises \(word.trimmingCharacters(in: .whitespaces)) playlists")
+        check(!SetupScopeCopy.userQrSubtitle("TV").lowercased().contains(word), "the subtitle never promises \(word.trimmingCharacters(in: .whitespaces)) playlists")
+    }
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

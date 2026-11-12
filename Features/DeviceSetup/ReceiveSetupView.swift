@@ -46,7 +46,7 @@ final class SetupApplyModel: ObservableObject {
     private var pending: SetupProtocol.Payload?
     private var offerSink: Task<Void, Never>?
     var modelContext: ModelContext?
-    /// Set for "Copy entire setup from this device" after a User QR scan.
+    /// Set for "Copy this playlist and its profiles" after a User QR scan.
     var request: UserQrSourceRequest?
     /// Fix Login (TVs, from the rejected-key prompt): the playlist whose
     /// sign-in this screen asks a phone for. nil = a normal setup.
