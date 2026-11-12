@@ -267,6 +267,9 @@ struct SyncCategoriesSettingsView: View {
                 Text("Sync Categories")
                     .scaledFont(.system(size: 38, weight: .semibold))
                     .foregroundColor(.textPrimary)
+                    // Apple TV page titles are centered (owner 2026-11-12).
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.horizontal, 24)
 
                 ForEach(settingsGroups) { group in

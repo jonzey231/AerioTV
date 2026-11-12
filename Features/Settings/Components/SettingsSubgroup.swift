@@ -260,6 +260,9 @@ struct TVSettingsSubgroupPage<Content: View>: View {
                     Text(title)
                         .scaledFont(.system(size: 38, weight: .semibold))
                         .foregroundColor(.textPrimary)
+                        // Apple TV page titles are centered (owner 2026-11-12).
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.horizontal, 20)
                         .padding(.bottom, 12)
 

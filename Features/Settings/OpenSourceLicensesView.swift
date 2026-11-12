@@ -3475,6 +3475,9 @@ struct OpenSourceLicensesView: View {
                         Text("Open Source Licenses")
                             .scaledFont(.system(size: 40, weight: .bold))
                             .foregroundColor(.textPrimary)
+                            // Apple TV page titles are centered (owner 2026-11-12).
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, alignment: .center)
                         Text(OSSCatalog.appSummary)
                             .scaledFont(.system(size: 24).subtext())
                             .foregroundColor(Color.contrastText(.textSecondary))
@@ -3562,6 +3565,9 @@ private struct OSSTVDetailView: View {
                 Text(component.name)
                     .scaledFont(.system(size: 36, weight: .bold))
                     .foregroundColor(.textPrimary)
+                    // Apple TV page titles are centered (owner 2026-11-12).
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
                 ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, block in
                     FocusableParagraph(text: block)
                 }
