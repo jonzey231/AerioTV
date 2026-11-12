@@ -716,7 +716,7 @@ final class HeadlessAVPlayerEngine {
         switch StreamKeyGate.headersForOpen(headers) {
         case .send(let h): headers = h
         case .held:
-            fail(.playback(DispatcharrRateLimitCopy.keyRejectedErrorMessage))
+            fail(.playback(DispatcharrRateLimitCopy.heldStreamMessage(headers)))
             return
         }
         var options: [String: Any] = [:]

@@ -47,6 +47,12 @@ enum DispatcharrRateLimitCopy {
         return "Dispatcharr stream limit reached: \(count) concurrent streams allowed for this account."
     }
 
+    /// A stream stopped before it opened because its key is held: a held
+    /// profile's line (item 15), else the rejected-key copy as before.
+    static func heldStreamMessage(_ headers: [String: String]) -> String {
+        StreamKeyGate.isProfileHeld(headers) ? DispatcharrRequestGate.HELD_UNREACHABLE : keyRejectedErrorMessage
+    }
+
     /// Error text for a call the rejected-key gate held locally.
     static let keyRejectedErrorMessage =
         "Dispatcharr no longer accepts this playlist's API key. Enter the current key in Edit Playlist, or ask your Dispatcharr administrator for a new one."

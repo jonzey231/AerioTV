@@ -384,6 +384,8 @@ struct LiveStopNotice: Equatable, Sendable {
         case rateLimited
         /// A stream 401 whose key the broker holds as rejected (2026-11-10).
         case keyRejected
+        /// A held profile's stream, refused before it opened (ProfileHostHold, item 15).
+        case profileHeld
     }
     let kind: Kind
     /// Empty for the rate-limit card: its one line is the message.
@@ -413,6 +415,18 @@ struct LiveStopNotice: Equatable, Sendable {
         kind: .keyRejected,
         title: DispatcharrRateLimitCopy.keyRejectedTitle,
         message: DispatcharrRateLimitCopy.keyRejectedErrorMessage)
+
+    /// A held profile's stream (a Child after a server change): the same line
+    /// as its lists, "Could not reach your Dispatcharr server" (item 15).
+    static let profileHeld = LiveStopNotice(kind: .profileHeld, title: "",
+                                            message: DispatcharrRequestGate.HELD_UNREACHABLE)
+
+    /// A stream refused before it opened because its key is held: the held
+    /// profile's notice when the placeholder rides [headers], else the
+    /// rejected-key notice as before.
+    static func heldOpen(_ headers: [String: String]) -> LiveStopNotice {
+        StreamKeyGate.isProfileHeld(headers) ? .profileHeld : .keyRejected
+    }
 
     /// Stream-limit 429 (no retry): the spec's sentence with the server's count.
     static func streamLimit(count: Int?) -> LiveStopNotice {

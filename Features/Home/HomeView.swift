@@ -2315,6 +2315,8 @@ final class ChannelStore: ObservableObject {
     /// ("A server with the specified hostname could not be found.")
     /// which users didn't know how to act on.
     private static func userFacingURLErrorMessage(_ error: URLError, baseURL: String) -> String {
+        // A held profile's refusal never left the device (item 15).
+        if let held = DispatcharrRequestGate.heldListMessage(error) { return held }
         let host = URL(string: baseURL).map(hostDescriptor) ?? baseURL
         switch error.code {
         case .cannotConnectToHost:

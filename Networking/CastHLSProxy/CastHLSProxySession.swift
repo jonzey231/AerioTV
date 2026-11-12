@@ -614,7 +614,7 @@ final class CastHLSProxySession: @unchecked Sendable {
         case .send(let h): openHeaders = h
         case .held:
             log("[AUTH] ingest open skipped: this API key is held as rejected")
-            stopForNoticeLocked(.keyRejected)
+            stopForNoticeLocked(.heldOpen(headers))
             return
         }
         let epoch = ingestEpoch

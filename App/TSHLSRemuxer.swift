@@ -7263,10 +7263,11 @@ struct AVPlayerMultiviewTile: View {
     /// The key is held as rejected: stop, no standing retry; the playlist prompts.
     private func stopForHeldKey(_ reason: String) {
         debugLog("[AUTH] stream stopped: API key held as rejected channel=\(channelName)")
+        // A held profile (item 15) reads "Could not reach your Dispatcharr server".
         if isVOD || isDVR || catchup != nil {
-            failOrFallbackTerminal(reason, message: DispatcharrRateLimitCopy.keyRejectedErrorMessage)
+            failOrFallbackTerminal(reason, message: DispatcharrRateLimitCopy.heldStreamMessage(headers))
         } else {
-            showLiveStopNotice(.keyRejected, reason: reason)
+            showLiveStopNotice(.heldOpen(headers), reason: reason)
         }
     }
 

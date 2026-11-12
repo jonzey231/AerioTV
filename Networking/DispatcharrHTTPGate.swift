@@ -68,12 +68,12 @@ enum DispatcharrHTTPGate {
                                                            authorization: req.value(forHTTPHeaderField: "Authorization"))
         // A held profile kept active (a Child after a server change, ProfileHostHold): nothing
         // goes to its playlist's addresses (as it or as the default profile), explicit key
-        // check or not, except the same-server check and its sign-in form. The existing
-        // "can't reach the server" state shows.
+        // check or not, except the same-server check and its sign-in form. Lists show
+        // "Could not reach your Dispatcharr server" (item 15, heldRefusal).
         if sentKey == DispatcharrRequestGate.HELD_PROFILE_KEY || (!heldCheck && gate.isHeldServer(url.absoluteString)) {
             SkipLog.note("[PROFILE-HOST] skipped \(method) \(url.path): the active profile is held",
                          bucket: "held|\(DispatcharrRequestGate.serverKey(url.absoluteString))")
-            throw URLError(.cannotConnectToHost)
+            throw DispatcharrRequestGate.heldRefusal()
         }
         if !bypass, let key = sentKey, gate.isKeyRejected(key) {
             SkipLog.note("[AUTH] skipped \(method) \(url.path): this API key was rejected by the server; waiting for Edit Playlist",

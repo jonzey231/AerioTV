@@ -8369,6 +8369,12 @@ struct NativeHLSPlayerScreen: View {
     /// stream); everything else falls back to mpv as before.
     private func handleRemuxFailure(_ error: Error, context: String) {
         if liveStopNotice != nil { return }
+        // A held profile's ingest never opened (item 15): its notice, not an mpv
+        // fallback that would stop the same way.
+        if "\(error)".contains("| held"), StreamKeyGate.isProfileHeld(ingestHeaders) {
+            stopForLiveNotice(.profileHeld, reason: "\(error)")
+            return
+        }
         if let notice = DispatcharrConnectionLimit.fromIngestFailure("\(error)") {
             stopForLiveNotice(notice, reason: "\(error)")
             return
@@ -8584,7 +8590,7 @@ struct NativeHLSPlayerScreen: View {
         switch StreamKeyGate.headersForOpen(headers) {
         case .send(let h): headers = h
         case .held:
-            stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")
+            stopForLiveNotice(.heldOpen(headers), reason: "HTTP 401 | held")
             return
         }
         var options: [String: Any] = [:]

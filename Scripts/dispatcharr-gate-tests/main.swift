@@ -619,6 +619,32 @@ do {
     }
 }
 
+// Item 15: a held profile's refused lists and streams read the existing
+// "Could not reach your Dispatcharr server" line; every other case keeps its copy.
+do {
+    let line = "Could not reach your Dispatcharr server"
+    eq(DispatcharrRequestGate.HELD_UNREACHABLE, line, "the held line is the existing unreachable line")
+    let held = DispatcharrRequestGate.heldRefusal()
+    eq(held.code, URLError.Code.cannotConnectToHost, "still a cannot-connect error for callers that branch on the code")
+    eq(held.localizedDescription, line, "list error text in the held case")
+    check(DispatcharrRequestGate.isHeldRefusal(held), "the held refusal is recognized")
+    let wrapped = NSError(domain: "x", code: 1, userInfo: [NSUnderlyingErrorKey: held])
+    check(DispatcharrRequestGate.isHeldRefusal(wrapped), "recognized through a wrapper")
+    eq(DispatcharrRequestGate.heldListMessage(held), line, "the list shows the held line")
+    check(DispatcharrRequestGate.heldListMessage(URLError(.cannotConnectToHost)) == nil,
+          "a real unreachable server keeps its own copy")
+    check(!DispatcharrRequestGate.isHeldRefusal(DispatcharrGateError.keyRejected), "a rejected key is not the held case")
+    let ph = DispatcharrRequestGate.HELD_PROFILE_KEY
+    check(StreamKeyGate.isProfileHeld(["X-API-Key": ph]), "placeholder in X-API-Key")
+    check(StreamKeyGate.isProfileHeld(["Authorization": "ApiKey \(ph)"]), "placeholder in Authorization")
+    check(!StreamKeyGate.isProfileHeld(["X-API-Key": "real-key"]) && !StreamKeyGate.isProfileHeld([:]), "a real or missing key is not held")
+    let g = DispatcharrRequestGate.shared
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": ph], gate: g), .held, "a held profile's stream never opens")
+    eq(DispatcharrRateLimitCopy.heldStreamMessage(["X-API-Key": ph]), line, "stream stop text in the held case")
+    eq(DispatcharrRateLimitCopy.heldStreamMessage(["X-API-Key": "DEAD"]), DispatcharrRateLimitCopy.keyRejectedErrorMessage,
+       "a rejected key keeps the rejected-key text")
+}
+
 // accepted memo
 do {
     let g = freshGate()

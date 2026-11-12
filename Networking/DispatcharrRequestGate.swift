@@ -295,6 +295,38 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// same-server check and the held profile's sign-in form. Stripped before sending.
     static let HELD_CHECK_HEADER = "X-Aerio-Held-Check"
 
+    /// What a held profile's refused lists and streams show (item 15): the
+    /// existing "Could not reach your Dispatcharr server" line
+    /// (DsyncManualCopy.DISPATCHARR_UNREACHABLE), as on Android; never
+    /// "Can't reach <host>" or the rejected-key copy.
+    static let HELD_UNREACHABLE = "Could not reach your Dispatcharr server"
+
+    /// userInfo flag on a held profile's refusal: the request never left.
+    static let HELD_REFUSAL_KEY = "AerioHeldProfileRefusal"
+
+    /// The error a held profile's refused request throws: still a
+    /// cannot-connect URLError for every caller that branches on the code,
+    /// carrying the held line as its description.
+    static func heldRefusal() -> URLError {
+        URLError(.cannotConnectToHost, userInfo: [NSLocalizedDescriptionKey: HELD_UNREACHABLE, HELD_REFUSAL_KEY: true])
+    }
+
+    /// True when [error], or one it wraps, is a held profile's refusal.
+    static func isHeldRefusal(_ error: Error) -> Bool {
+        var current: Error? = error
+        var depth = 0
+        while let e = current, depth < 8 {
+            let ns = e as NSError
+            if ns.userInfo[HELD_REFUSAL_KEY] as? Bool == true { return true }
+            current = ns.userInfo[NSUnderlyingErrorKey] as? Error
+            depth += 1
+        }
+        return false
+    }
+
+    /// The list line for [error]: the held line for a held refusal; nil keeps the existing copy.
+    static func heldListMessage(_ error: Error) -> String? { isHeldRefusal(error) ? HELD_UNREACHABLE : nil }
+
     /// Playlist id -> its server keys ("host:port") while a held profile is
     /// its active one (a Child after a server change).
     private var heldServers: [String: Set<String>] = [:]
@@ -726,6 +758,12 @@ enum StreamKeyGate {
     /// The API key a stream open carries (nil when none).
     static func apiKey(in h: [String: String]) -> String? {
         DispatcharrRequestGate.requestApiKey(xApiKey: header(h, "X-API-Key"), authorization: header(h, "Authorization"))
+    }
+
+    /// The held-profile placeholder rides these headers (a held Child): the
+    /// open stops with the held line, not the rejected-key notice (item 15).
+    static func isProfileHeld(_ h: [String: String]) -> Bool {
+        apiKey(in: h)?.trimmingCharacters(in: .whitespacesAndNewlines) == DispatcharrRequestGate.HELD_PROFILE_KEY
     }
 
     /// Re-read before every open, retry, and reconnect: a key the silent

@@ -1010,10 +1010,11 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         // Every open re-reads the key (StreamKeyGate): a replaced key goes
         // out as its successor; a key held as rejected is never sent.
         let headers: [String: String]
-        switch StreamKeyGate.headersForOpen(withStateLock { liveHeaders }) {
+        let live = withStateLock { liveHeaders }
+        switch StreamKeyGate.headersForOpen(live) {
         case .send(let h): headers = h
         case .held:
-            stopForNotice(.keyRejected, reason: "HTTP 401 | held")
+            stopForNotice(.heldOpen(live), reason: "HTTP 401 | held")
             return
         }
         buffer.markDiscontinuity()

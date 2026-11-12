@@ -6507,7 +6507,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if StreamKeyGate.apiKey(in: headers) != nil {
                 switch StreamKeyGate.headersForOpen(headers) {
                 case .held:
-                    stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")
+                    stopForLiveNotice(.heldOpen(headers), reason: "HTTP 401 | held")
                     return
                 case .send(let h):
                     if h != headers { applyHeaderFields(h, to: mpv) }
