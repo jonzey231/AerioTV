@@ -2394,6 +2394,23 @@ struct DispatcharrAPI {
                 headers(for: mode).forEach { retry.setValue($1, forHTTPHeaderField: $0) }
                 return try await HTTPRouter.data(for: retry, using: session)
             }
+            // A non-default profile's own key (Android fc04722f): it re-signs in
+            // ONLY as that profile, with its own stored password, and the new key
+            // goes into that profile only. Never the playlist's password, never
+            // the playlist's iCloud key. No own password, or a refused re-login:
+            // the profile's key is held (requests and streams stop, it prompts).
+            if let who = await MainActor.run(body: { DispatcharrKeyBroker.profileIdentity(forKey: key, serverID: serverID) }) {
+                guard case .rejected = probe else { return (data, response) }
+                if let newKey = await ProfileManager.shared.reloginProfile(who, rejectedKey: key) {
+                    DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey)
+                    debugLog("[AUTH] 401 on a profile's key; its own re-login OK for \(who); retrying with the new key")
+                    return try await HTTPRouter.data(for: withApiKey(newKey, request), using: session)
+                }
+                if await MainActor.run(body: { DispatcharrKeyBroker.holdProfileKey(key: key, identity: who) }) {
+                    throw DispatcharrGateError.keyRejected
+                }
+                return (data, response)
+            }
             // v1.7.x: silent api_key re-bootstrap. Only fires when:
             //   1. The instance was built with a serverID (production
             //      callers via ServerConnection, static helpers like

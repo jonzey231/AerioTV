@@ -89,10 +89,48 @@ enum DispatcharrKeyBroker {
     }
 
     /// A key the probe proved rejected: iCloud's key for its playlist comes
-    /// first (no network), before a silent re-login or the hold.
+    /// first (no network), before a silent re-login or the hold. iCloud carries
+    /// the playlist's own key only: never for a profile's key (Android fc04722f).
     @MainActor static func adoptCloudKey(replacing key: String, serverID: UUID?) -> String? {
-        guard let info = playlist(forKey: key, serverID: serverID) else { return nil }
+        guard profileIdentity(forKey: key, serverID: serverID) == nil,
+              let info = playlist(forKey: key, serverID: serverID) else { return nil }
         return SyncManager.shared.adoptCloudApiKey(playlistID: info.id, rejectedKey: key)
+    }
+
+    /// The non-default profile whose own key [key] is (the active profile's
+    /// request overlay), or nil for the playlist's own key. A profile's key
+    /// re-signs in only as that profile and is held per identity.
+    @MainActor static func profileIdentity(forKey key: String, serverID: UUID?) -> DispatcharrIdentity? {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let info = playlist(forKey: trimmed, serverID: serverID),
+              let o = ProfileOverlay.values(info.id.uuidString),
+              o.apiKey.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return nil }
+        return DispatcharrIdentity(playlistID: info.id.uuidString, profileID: o.profileId)
+    }
+
+    /// A profile's own key proven rejected and not re-minted (no own password,
+    /// or its own re-login refused or failed): hold THAT key for that profile.
+    /// Requests and streams with it stop, the prompt names the profile, and
+    /// nothing falls back to the playlist's credentials. True = held (the caller
+    /// fails with `DispatcharrGateError.keyRejected`).
+    @MainActor static func holdProfileKey(key: String, identity who: DispatcharrIdentity) -> Bool {
+        let gate = DispatcharrRequestGate.shared
+        if gate.isKeyRejected(key) { return true }
+        guard let pid = who.profileID, let info = playlist(id: who.playlistID) else { return false }
+        let ownPassword = ProfileManager.shared.hasOwnPassword(pid)
+        let noKey = ownPassword && DispatcharrLoginGate.shared.foundNoKey(identity: who)
+        if ownPassword {
+            // A re-login that only failed (network, a switch while it waited) is not proof.
+            guard DispatcharrLoginGate.shared.isRejected(identity: who) || noKey else { return false }
+        }
+        if gate.markKeyRejected(playlistID: who.playlistID, key: key, playlistName: info.name,
+                                passwordToo: ownPassword && !noKey, noKey: noKey, baseURL: info.baseURL,
+                                profileID: pid) {
+            debugLog("[AUTH] API key for profile \(who) rejected by the server; holding its calls and streams locally "
+                     + "until the profile signs in again (never the playlist's sign-in)"
+                     + (noKey ? " (the account has no API key)" : ownPassword ? " (its re-login refused too)" : ""))
+        }
+        return true
     }
 
     @MainActor static func playlist(id: String) -> PlaylistInfo? {
@@ -155,6 +193,19 @@ enum DispatcharrKeyBroker {
         }
         var reloginTried = false
         var newKey: String?
+        // A non-default profile's own key (Android fc04722f): its own re-login
+        // only, never the playlist's password or iCloud key; else its key is held.
+        if let who = await MainActor.run(body: { profileIdentity(forKey: key, serverID: info.id) }) {
+            if probe == .rejected {
+                reloginTried = await MainActor.run { ProfileManager.shared.hasOwnPassword(who.profileID ?? "") }
+                newKey = await ProfileManager.shared.reloginProfile(who, rejectedKey: key)
+                if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
+            }
+            let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
+            if outcome == .held { _ = await MainActor.run { holdProfileKey(key: key, identity: who) } }
+            debugLog("[AUTH] stream 401 for profile \(who): probe=\(probe) -> \(outcome)")
+            return outcome
+        }
         if probe == .rejected,
            let cloudKey = await MainActor.run(body: { adoptCloudKey(replacing: key, serverID: info.id) }) {
             // iCloud's key: the open retries once with it (noteKeyReplaced is done).
@@ -187,6 +238,10 @@ enum DispatcharrKeyBroker {
     static func holdIfProven(key: String, serverID: UUID?, baseURL: String) async -> Bool {
         let gate = DispatcharrRequestGate.shared
         if gate.isKeyRejected(key) { return true }
+        // A profile's own key is held per identity, never as the playlist's.
+        if let who = await MainActor.run(body: { profileIdentity(forKey: key, serverID: serverID) }) {
+            return await MainActor.run { holdProfileKey(key: key, identity: who) }
+        }
         guard let info = await MainActor.run(body: { playlist(forKey: key, serverID: serverID) }) else {
             debugLog("[AUTH] rejected API key belongs to no saved playlist; not held")
             return false
@@ -324,13 +379,34 @@ final class DispatcharrKeyRecheck {
         guard info != nil else {
             debugLog("[AUTH] held key re-check for \(id8) (\(reason)): playlist removed; hold dropped")
             gate.finishProbe(r, accepted: false)
-            gate.clearPlaylist(r.playlistID)
+            gate.clearIdentity(r.identity)
             return
         }
         let outcome: String
-        // A stored username and password re-sign in (Android parity), whatever
-        // the hold recorded: a rotated key is replaced, not waited out.
-        if let info, info.hasPassword {
+        // A non-default profile's held key: its own re-login (own password), or
+        // one key probe; never the playlist's password (Android fc04722f).
+        if let pid = r.profileID {
+            guard ProfileManager.shared.store.byId(pid) != nil else {
+                debugLog("[AUTH] held key re-check for \(r.identity) (\(reason)): profile removed; hold dropped")
+                gate.finishProbe(r, accepted: false)
+                gate.clearIdentity(r.identity)
+                return
+            }
+            if ProfileManager.shared.hasOwnPassword(pid) {
+                let fresh = await ProfileManager.shared.reloginProfile(r.identity, rejectedKey: r.key)
+                if let fresh { gate.noteKeyReplaced(old: r.key, new: fresh) }
+                accepted = fresh != nil
+                outcome = accepted ? "accepted (its own re-login issued a key)"
+                    : DispatcharrLoginGate.shared.isRejected(identity: r.identity) ? "rejected (its login refused)" : "unknown"
+            } else {
+                let api = DispatcharrAPI(baseURL: r.baseURL, auth: .apiKey(r.key),
+                                         userAgent: info?.userAgent ?? DeviceInfo.defaultUserAgent,
+                                         authMode: info?.authMode ?? .xapikey)
+                let probe = await api.probeApiKeyOnce()
+                if case .accepted = probe { accepted = true }
+                outcome = probe.logName
+            }
+        } else if let info, info.hasPassword {
             let fresh = await DispatcharrAPI.silentRebootstrapApiKey(serverID: info.id, baseURL: info.baseURL,
                                                                      username: info.username, userAgent: info.userAgent)
             if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }

@@ -661,6 +661,88 @@ do {
     check(!g.isHeldServer(logo), "released: the address loads again")
 }
 
+// Android fc04722f: a 401 on a non-default profile's key, per identity.
+do {
+    let def = DispatcharrIdentity.playlist("P")
+    let kid = DispatcharrIdentity(playlistID: "P", profileID: "KID")
+    let R = DispatcharrRelogin.self
+    // 1. Re-login only as the profile's own identity.
+    eq(R.plan(kid, ownPassword: true, playlistPassword: true), .asProfile, "a profile re-signs in as itself")
+    eq(R.plan(kid, ownPassword: false, playlistPassword: true), .none, "no own password: no re-login, never the playlist's password")
+    eq(R.plan(def, ownPassword: false, playlistPassword: true), .asPlaylist, "the playlist's own identity uses its password")
+    eq(R.plan(def, ownPassword: true, playlistPassword: false), .none, "the playlist never uses a profile's password")
+    check(!R.mayAdoptCloudKey(kid), "never the playlist's iCloud key for a profile")
+    check(R.mayAdoptCloudKey(def), "iCloud's key only for the playlist's own key")
+    eq(kid.key, "P|KID", "identity key: playlist and profile")
+    eq(def.key, "P", "the playlist's own identity is the playlist id (holds before profiles carry over)")
+
+    // 2. Shared login results are per identity.
+    var book = ReloginBook(window: 60)
+    eq(book.claim(def, now: 100), .mine, "the default re-signs in")
+    eq(book.finish(def, .key("K-DEF"), now: 101), "K-DEF", "and mints its key")
+    eq(book.claim(kid, now: 105), .mine, "a profile within the window gets its own attempt, not the default's key")
+    eq(book.claim(kid, now: 106), .wait, "its concurrent callers wait for its attempt")
+    eq(book.finish(kid, .key("K-KID"), now: 107), "K-KID", "the profile mints its own key")
+    eq(book.claim(def, now: 110), .shared("K-DEF", 10), "the default's result is reused by the default only")
+    eq(book.claim(kid, now: 110), .shared("K-KID", 5), "the profile's result is reused by the profile only")
+    eq(book.claim(def, now: 200), .mine, "after the window, a new attempt")
+    _ = book.finish(def, .rejected, now: 201)
+    check(book.isRejected(def, now: 202) && !book.isRejected(kid, now: 202), "a refused login parks that identity only")
+    if case .parked = book.claim(def, now: 210) {} else { check(false, "the parked identity waits") }
+    eq(book.claim(kid, now: 210), .mine, "the other identity is not parked")
+    book.noteNoKey(kid, now: 211)
+    check(book.foundNoKey(kid, now: 212) && !book.foundNoKey(def, now: 212), "no-key park per identity")
+    check(def.loginSlot(username: "u", password: "p") != kid.loginSlot(username: "u", password: "p"),
+          "the login share never hands one identity's login to another, even with the same credentials")
+    eq(kid.loginSlot(username: "u", password: "p"), kid.loginSlot(username: "u", password: "p"), "same identity, same slot")
+
+    // 3. A re-login that waited through a profile switch writes nothing.
+    check(R.overtaken(activeAtStart: kid, activeNow: def), "switched to the default while it waited: abort")
+    check(R.overtaken(activeAtStart: def, activeNow: kid), "switched to a profile while it waited: abort")
+    check(R.overtaken(activeAtStart: kid, activeNow: DispatcharrIdentity(playlistID: "P", profileID: "OTHER")),
+          "switched to another profile: abort")
+    check(!R.overtaken(activeAtStart: kid, activeNow: kid), "no switch: write")
+
+    // 4 and 5. A profile's key is held per identity; the playlist's repair never releases it.
+    let g = freshGate()
+    g.markKeyRejected(playlistID: "P", key: "DEF-K", playlistName: "Home", baseURL: "http://h:9191")
+    check(g.markKeyRejected(playlistID: "P", key: "KID-K", playlistName: "Home", baseURL: "http://h:9191", profileID: "KID"),
+          "the profile's key is held as its own")
+    eq(g.prompt?.profileID, "KID", "its prompt names the profile")
+    eq(g.prompt?.identity, kid, "prompt identity")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KID-K"], gate: g), .held, "its streams stop")
+    check(g.isKeyRejected("KID-K"), "its requests stop")
+    check(g.isIdentityRejected(kid) && g.isPlaylistRejected("P"), "both identities held")
+    g.clearPlaylist("P")
+    check(!g.isKeyRejected("DEF-K") && !g.isPlaylistRejected("P"), "Edit Playlist repairs the playlist's own key")
+    check(g.isKeyRejected("KID-K") && g.isIdentityRejected(kid), "and never releases the profile's held key")
+    eq(g.prompt?.profileID, "KID", "the profile's prompt stays")
+    g.markKeyRejected(playlistID: "P", key: "DEF-K2", playlistName: "Home", baseURL: "http://h:9191")
+    g.liftFixedLogin(playlistID: "P", oldKey: "DEF-K2", newKey: "DEF-K3")
+    check(!g.isKeyRejected("DEF-K2") && g.isKeyRejected("KID-K"), "Fix Login lifts the playlist's hold only")
+    if let r = g.allRechecks().first(where: { $0.identity == .playlist("P") }) {
+        g.finishProbe(r, accepted: true)
+    }
+    check(g.isKeyRejected("KID-K"), "the playlist's re-check passing does not release the profile's key")
+    let kr = g.allRechecks().first { $0.identity == kid }
+    eq(kr?.profileID, "KID", "the profile's re-check is its own")
+    g.clearIdentity(kid)
+    check(!g.isKeyRejected("KID-K") && !g.isIdentityRejected(kid), "its own sign-in releases it")
+    check(g.prompt == nil, "and its prompt")
+    g.markKeyRejected(playlistID: "P", key: "KID-K9", playlistName: "Home", profileID: "KID")
+    g.clearKey("KID-K9")
+    check(!g.isIdentityRejected(kid), "its own key proving good releases it")
+    // The prompt's buttons and body follow the role (Android): adult and non-default Child.
+    typealias K = KeySignInCopy
+    eq(K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: true), [.signIn, .editPlaylist, .notNow], "adult profile, phone")
+    eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true), [.updateFromPhone, .signIn, .notNow], "adult profile, TV")
+    eq(K.promptActions(isTV: false, canSignIn: false, canEditPlaylist: false), [.notNow], "non-default Child, phone")
+    eq(K.promptActions(isTV: true, canSignIn: false, canEditPlaylist: false), [.updateFromPhone, .notNow], "non-default Child, TV")
+    eq(DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: false,
+                                                      canSignIn: false, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server.", "non-default Child body")
+}
+
 // accepted memo
 do {
     let g = freshGate()

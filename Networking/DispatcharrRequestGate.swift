@@ -107,7 +107,8 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     private var pausedUntil: [String: TimeInterval] = [:]
     /// The server's reason for each pause (stream-429-spec.md UPDATE).
     private var pausedReason: [String: RateLimitReason] = [:]
-    /// Key hash -> playlist ids that saw it rejected.
+    /// Key hash -> the identities (DispatcharrIdentity.key) that saw it rejected:
+    /// the playlist's own ("<playlist>") or one of its profiles ("<playlist>|<profile>").
     private var rejected: [String: Set<String>] = [:]
     private var rechecks: [String: Recheck] = [:]
     private var acceptedAt: [String: (at: TimeInterval, mode: String)] = [:]
@@ -241,6 +242,11 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         /// The stored password signed in, but the account has no API key
         /// (removed on the server): the prompt says so (2026-11-11).
         var noKey: Bool = false
+        /// A non-default profile's own key (nil: the playlist's): its Sign In
+        /// signs that profile in, never the playlist (Android fc04722f).
+        var profileID: String? = nil
+
+        var identity: DispatcharrIdentity { DispatcharrIdentity(playlistID: playlistID, profileID: profileID) }
     }
 
     /// SHA-256 prefix (12 bytes, hex) of the trimmed key: what the gate
@@ -261,22 +267,25 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// slow re-check.
     @discardableResult
     func markKeyRejected(playlistID: String, key: String, playlistName: String = "",
-                         passwordToo: Bool = false, noKey: Bool = false, baseURL: String = "") -> Bool {
+                         passwordToo: Bool = false, noKey: Bool = false, baseURL: String = "",
+                         profileID: String? = nil) -> Bool {
         let hash = Self.keyHash(key)
+        let who = DispatcharrIdentity(playlistID: playlistID, profileID: profileID)
         lock.lock()
         var set = rejected[hash] ?? []
-        let fresh = set.insert(playlistID).inserted
+        let fresh = set.insert(who.key).inserted
         rejected[hash] = set
         var changed: Prompt?? = nil
         if fresh {
-            let p = Prompt(playlistID: playlistID, playlistName: playlistName, passwordToo: passwordToo, noKey: noKey)
+            let p = Prompt(playlistID: playlistID, playlistName: playlistName, passwordToo: passwordToo, noKey: noKey,
+                           profileID: profileID)
             pendingPrompt = p
             changed = .some(p)
             if !baseURL.isEmpty, rechecks[hash] == nil {
                 rechecks[hash] = Recheck(hash: hash, key: key.trimmingCharacters(in: .whitespacesAndNewlines),
                                          baseURL: baseURL, serverKey: Self.serverKey(baseURL),
                                          playlistID: playlistID, passwordToo: passwordToo,
-                                         rejectedAt: clock())
+                                         rejectedAt: clock(), profileID: profileID)
             }
         }
         acceptedAt[hash] = nil
@@ -369,22 +378,30 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         return !(rejected[hash]?.isEmpty ?? true)
     }
 
-    /// True while `playlistID` has a rejected key on record.
-    func isPlaylistRejected(_ playlistID: String) -> Bool {
+    /// True while the playlist's OWN key (the default profile's) is held as rejected.
+    func isPlaylistRejected(_ playlistID: String) -> Bool { isIdentityRejected(.playlist(playlistID)) }
+
+    /// True while [who]'s key is held as rejected.
+    func isIdentityRejected(_ who: DispatcharrIdentity) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return rejected.values.contains { $0.contains(playlistID) }
+        return rejected.values.contains { $0.contains(who.key) }
     }
 
-    /// An explicit save for the playlist: forget its rejection and any prompt for it.
-    func clearPlaylist(_ playlistID: String) {
+    /// An explicit save for the playlist: forget ITS OWN rejection and prompt.
+    /// A non-default profile's held key stays held (holds are per identity):
+    /// only that profile's own sign-in, or its key proving good, releases it.
+    func clearPlaylist(_ playlistID: String) { clearIdentity(.playlist(playlistID)) }
+
+    /// Forget [who]'s rejection and its prompt; every other identity's stays.
+    func clearIdentity(_ who: DispatcharrIdentity) {
         lock.lock()
         for (hash, ids) in rejected {
             var s = ids
-            s.remove(playlistID)
+            s.remove(who.key)
             rejected[hash] = s.isEmpty ? nil : s
         }
         rechecks = rechecks.filter { rejected[$0.key] != nil }
-        let cleared = pendingPrompt?.playlistID == playlistID
+        let cleared = pendingPrompt?.identity == who
         if cleared { pendingPrompt = nil }
         lock.unlock()
         if cleared { onPromptChange?(nil) }
@@ -398,7 +415,7 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         lock.lock()
         rechecks[hash] = nil
         let ids = rejected.removeValue(forKey: hash) ?? []
-        let cleared = pendingPrompt.map { ids.contains($0.playlistID) } ?? false
+        let cleared = pendingPrompt.map { ids.contains($0.identity.key) } ?? false
         if cleared { pendingPrompt = nil }
         lock.unlock()
         if cleared { onPromptChange?(nil) }
@@ -508,6 +525,9 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         let baseURL: String
         let serverKey: String
         let playlistID: String
+        /// A non-default profile's own key (nil: the playlist's): its probe is
+        /// that profile's own re-login, or one key probe, never the playlist's.
+        let profileID: String?
         /// Password playlist whose re-login was refused: the probe is one login.
         let passwordToo: Bool
         let rejectedAt: TimeInterval
@@ -517,15 +537,18 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         fileprivate(set) var inFlight = false
 
         init(hash: String, key: String, baseURL: String, serverKey: String,
-             playlistID: String, passwordToo: Bool, rejectedAt: TimeInterval) {
+             playlistID: String, passwordToo: Bool, rejectedAt: TimeInterval, profileID: String? = nil) {
             self.hash = hash
             self.key = key
             self.baseURL = baseURL
             self.serverKey = serverKey
             self.playlistID = playlistID
+            self.profileID = profileID
             self.passwordToo = passwordToo
             self.rejectedAt = rejectedAt
         }
+
+        var identity: DispatcharrIdentity { DispatcharrIdentity(playlistID: playlistID, profileID: profileID) }
     }
 
     /// Due time of scheduled probe number `done` (0-based) after `rejectedAt`.
@@ -591,7 +614,7 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         if accepted {
             if rechecks[r.hash] === r { rechecks[r.hash] = nil }
             let ids = rejected.removeValue(forKey: r.hash) ?? []
-            if let p = pendingPrompt, ids.contains(p.playlistID) || p.playlistID == r.playlistID {
+            if let p = pendingPrompt, ids.contains(p.identity.key) || p.identity == r.identity {
                 pendingPrompt = nil
                 cleared = true
             }
@@ -899,4 +922,125 @@ final class CredentialMergeBarrier: @unchecked Sendable {
         }
         return clock() - start
     }
+}
+
+// MARK: - Sign-in identity (Android fc04722f)
+
+/// Whose sign-in a key or a login belongs to: the playlist's own (the default
+/// profile's), or one non-default profile of it. Holds, the silent re-login,
+/// and login sharing are kept per identity, never per playlist alone, so the
+/// default's fresh login is never handed to a profile, nor the reverse.
+struct DispatcharrIdentity: Hashable, Sendable, CustomStringConvertible {
+    let playlistID: String
+    /// nil = the playlist's own sign-in (the default profile).
+    let profileID: String?
+
+    static func playlist(_ playlistID: String) -> DispatcharrIdentity {
+        DispatcharrIdentity(playlistID: playlistID, profileID: nil)
+    }
+
+    var isPlaylist: Bool { profileID == nil }
+
+    /// "<playlist>" or "<playlist>|<profile>".
+    var key: String { profileID.map { playlistID + "|" + $0 } ?? playlistID }
+
+    var description: String {
+        String(playlistID.prefix(8)) + (profileID.map { "/" + String($0.prefix(8)) } ?? "")
+    }
+
+    /// The login share's slot: this identity and these credentials.
+    func loginSlot(username: String, password: String) -> String {
+        let digest = SHA256.hash(data: Data((username + "\u{1F}" + password).utf8))
+        return key + "|" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Who may re-sign in after a key was proven rejected (Android fc04722f).
+enum DispatcharrRelogin {
+    enum Plan: Equatable, Sendable {
+        /// The playlist's own username and stored password (its own identity).
+        case asPlaylist
+        /// The non-default profile's own username and stored password.
+        case asProfile
+        /// Nobody: the key is held and the identity prompts.
+        case none
+    }
+
+    /// A non-default profile re-signs in ONLY as itself, with its own stored
+    /// password; with none, nobody does. Never the playlist's password for a
+    /// profile. The playlist's own identity uses the playlist's password.
+    static func plan(_ who: DispatcharrIdentity, ownPassword: Bool, playlistPassword: Bool) -> Plan {
+        if who.isPlaylist { return playlistPassword ? .asPlaylist : .none }
+        return ownPassword ? .asProfile : .none
+    }
+
+    /// iCloud carries the playlist's own key only: never adopted for a profile.
+    static func mayAdoptCloudKey(_ who: DispatcharrIdentity) -> Bool { who.isPlaylist }
+
+    /// A re-login that waited through a profile switch: the playlist's active
+    /// identity changed since it started, so it writes nothing.
+    static func overtaken(activeAtStart: DispatcharrIdentity, activeNow: DispatcharrIdentity) -> Bool {
+        activeAtStart != activeNow
+    }
+}
+
+/// The silent re-login rules, per identity (DispatcharrLoginGate): at most one
+/// attempt per identity per window, shared by concurrent callers and reused
+/// inside the window by that identity only; a rejected login parks that
+/// identity; a sign-in that found no API key parks it too. Pure; the gate
+/// holds the tasks and the lock.
+struct ReloginBook: Sendable {
+    enum Claim: Equatable, Sendable { case wait, parked(Int), shared(String?, Int), mine }
+    enum Outcome: Equatable, Sendable { case key(String), failed, rejected }
+
+    let window: TimeInterval
+    private var inFlight: Set<String> = []
+    private var lastAttemptAt: [String: TimeInterval] = [:]
+    private var lastKey: [String: String] = [:]
+    private var rejectedUntil: [String: TimeInterval] = [:]
+    private var noKeyUntil: [String: TimeInterval] = [:]
+
+    init(window: TimeInterval = 60) { self.window = window }
+
+    mutating func claim(_ who: DispatcharrIdentity, now: TimeInterval) -> Claim {
+        let k = who.key
+        if inFlight.contains(k) { return .wait }
+        if let until = rejectedUntil[k], until > now { return .parked(Int((until - now).rounded(.up))) }
+        if let last = lastAttemptAt[k], now - last < window { return .shared(lastKey[k], Int(now - last)) }
+        lastAttemptAt[k] = now
+        lastKey[k] = nil
+        inFlight.insert(k)
+        return .mine
+    }
+
+    /// The attempt [who] claimed finished; the key it minted, if any.
+    @discardableResult
+    mutating func finish(_ who: DispatcharrIdentity, _ outcome: Outcome, now: TimeInterval) -> String? {
+        let k = who.key
+        inFlight.remove(k)
+        switch outcome {
+        case .key(let key): lastKey[k] = key; return key
+        case .failed: return nil
+        case .rejected: rejectedUntil[k] = now + window; return nil
+        }
+    }
+
+    func isRejected(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (rejectedUntil[who.key] ?? 0) > now }
+
+    /// True when the park is new (log it once).
+    @discardableResult
+    mutating func noteRejected(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool {
+        if isRejected(who, now: now) { return false }
+        rejectedUntil[who.key] = now + window
+        return true
+    }
+
+    mutating func clearRejected(_ who: DispatcharrIdentity) {
+        rejectedUntil[who.key] = nil
+        noKeyUntil[who.key] = nil
+    }
+
+    mutating func noteNoKey(_ who: DispatcharrIdentity, now: TimeInterval) { noKeyUntil[who.key] = now + window }
+    func foundNoKey(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (noKeyUntil[who.key] ?? 0) > now }
+    mutating func clearNoKey(_ who: DispatcharrIdentity) { noKeyUntil[who.key] = nil }
 }

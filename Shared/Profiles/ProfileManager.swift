@@ -1365,6 +1365,77 @@ final class ProfileManager: ObservableObject {
     /// address changed: picking it opens the sign-in form first.
     func isHeld(_ profileId: String) -> Bool { holds.isHeld(profileId) }
 
+    /// The identity requests for [playlistId] run as now: the playlist's own
+    /// sign-in (the default profile), or its active non-default profile.
+    func activeIdentity(_ playlistId: String) -> DispatcharrIdentity {
+        DispatcharrIdentity(playlistID: playlistId, profileID: store.activeProfileId(playlistId))
+    }
+
+    /// Whether [profileId] has its own username and stored password to re-sign in with.
+    func hasOwnPassword(_ profileId: String) -> Bool {
+        guard let p = store.byId(profileId), !p.isDefault else { return false }
+        return !p.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && signIns.password(profileId, for: .tokenLogin) != nil
+    }
+
+    /// A 401 proved [who]'s own key rejected (a non-default profile, Android
+    /// fc04722f): re-sign in ONLY as that profile, with its own stored username
+    /// and password, and write the new key into that profile only. No own
+    /// password: no re-login. Never the playlist's password or iCloud key. A
+    /// profile switch while it waited: nothing is written. Returns the new key.
+    func reloginProfile(_ who: DispatcharrIdentity, rejectedKey: String) async -> String? {
+        guard let profileID = who.profileID, let p = store.byId(profileID), !p.isDefault,
+              let server = DsyncLocal.server(who.playlistID) else { return nil }
+        guard DispatcharrRelogin.plan(who, ownPassword: hasOwnPassword(profileID), playlistPassword: false) == .asProfile,
+              let password = signIns.password(profileID, for: .tokenLogin) else {
+            debugLog("[AUTH] re-login for profile \(who): no own password stored; not re-signing in (never the playlist's)")
+            return nil
+        }
+        let username = p.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = server.effectiveBaseURL
+        let ua = server.effectiveUserAgent
+        let sid = server.id
+        let atStart = activeIdentity(who.playlistID)
+        let minted = await DispatcharrLoginGate.shared.silentRelogin(identity: who) {
+            do {
+                let pair = try await DispatcharrLoginShare.shared.login(serverID: sid, baseURL: base, username: username,
+                                                                        password: password, userAgent: ua,
+                                                                        caller: "profile re-login", profileID: profileID)
+                let user = try await DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua).fetchCurrentUser()
+                // The profile is one Dispatcharr user: another account's sign-in is not its sign-in.
+                guard user.username.caseInsensitiveCompare(username) == .orderedSame else { return .rejected }
+                let k = user.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !k.isEmpty else {
+                    DispatcharrLoginGate.shared.noteNoKey(identity: who)
+                    return .failed
+                }
+                DispatcharrLoginGate.shared.clearNoKey(identity: who)
+                return .key(k)
+            } catch DispatcharrDirectConnectError.invalidCredentials {
+                return .rejected
+            } catch DispatcharrDirectConnectError.noAPIKeyForAccount {
+                DispatcharrLoginGate.shared.noteNoKey(identity: who)
+                return .failed
+            } catch {
+                return .failed
+            }
+        }
+        guard let minted, minted != rejectedKey.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            debugLog("[AUTH] re-login for profile \(who): no new key")
+            return nil
+        }
+        let now = activeIdentity(who.playlistID)
+        if DispatcharrRelogin.overtaken(activeAtStart: atStart, activeNow: now) {
+            debugLog("[AUTH] re-login for profile \(who): a profile switch happened while it waited (\(atStart) -> \(now)); nothing written")
+            return nil
+        }
+        guard store.byId(profileID) != nil else { return nil }
+        store.setApiKey(profileID, minted)
+        publish()
+        debugLog("[AUTH] re-login for profile \(who): signed in as its own user; new key written to that profile only")
+        return minted
+    }
+
     /// What [p]'s requests carry while it is active (ProfileHostHoldRules.activeSignIn).
     func activeSignIn(_ p: DispatcharrProfile) -> ProfileHostHoldRules.ActiveSignIn {
         ProfileHostHoldRules.activeSignIn(isDefault: p.isDefault, isHeld: holds.isHeld(p.id), storedKey: store.apiKey(p.id))
@@ -1568,9 +1639,19 @@ final class ProfileManager: ObservableObject {
     /// address: its key and password are replaced, only its hold lifts, and
     /// it is tagged with the default account there.
     func completeHeldSignIn(_ profileId: String, apiKey: String, password: String) async {
+        let oldKey = store.apiKey(profileId)
         store.setApiKey(profileId, apiKey)
         store.setPassword(profileId, password)
         guard let p = store.byId(profileId) else { return }
+        // Its own sign-in repairs its own held key only (holds are per identity):
+        // the hold and prompt lift, the new key counts as good, and requests
+        // still built with the old key go out with the new one.
+        let who = DispatcharrIdentity(playlistID: p.playlistId, profileID: profileId)
+        let gate = DispatcharrRequestGate.shared
+        gate.clearIdentity(who)
+        gate.clearKey(apiKey)
+        if let oldKey { gate.noteKeyReplaced(old: oldKey, new: apiKey) }
+        DispatcharrLoginGate.shared.clearRejected(identity: who)
         if holds.lift(profileId: profileId) {
             debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(p.playlistId)) profile=\(Self.tag(profileId)) (signed in)")
         }

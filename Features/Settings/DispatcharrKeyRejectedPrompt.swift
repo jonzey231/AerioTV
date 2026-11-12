@@ -177,9 +177,18 @@ final class DispatcharrKeyPromptModel: ObservableObject {
             debugLog("[AUTH] sign-in form not opened: this profile cannot sign in here")
             return
         }
-        debugLog("[AUTH] sign-in form opened for \(p.playlistID.prefix(8))")
+        debugLog("[AUTH] sign-in form opened for \(p.identity)")
         DispatcharrRequestGate.shared.consumePrompt()
         prompt = nil
+        // A non-default profile's own key: sign THAT profile in (its own user),
+        // never the playlist (holds are per identity, Android fc04722f).
+        if let pid = p.profileID {
+            guard let profile = ProfileManager.shared.store.byId(pid) else { return }
+            presentHosted(attempt: 0) { close in
+                AnyView(KeySignInView(playlistID: p.playlistID, heldProfile: profile, onClose: close, onSignedIn: close))
+            }
+            return
+        }
         presentHosted(attempt: 0) { close in
             AnyView(KeySignInView(playlistID: p.playlistID, onClose: close))
         }

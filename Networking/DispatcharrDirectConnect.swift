@@ -61,15 +61,14 @@ actor DispatcharrLoginShare {
     private var inFlight: [String: Task<DispatcharrJWTPair, Error>] = [:]
     private var recent: [String: (pair: DispatcharrJWTPair, at: Date)] = [:]
 
-    private static func slot(_ serverID: UUID, _ username: String, _ password: String) -> String {
-        let digest = SHA256.hash(data: Data((username + "\u{1F}" + password).utf8))
-        return serverID.uuidString + "|" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-    }
-
+    /// Shared and reused per identity (the playlist's own sign-in, or one of its
+    /// profiles) and credentials: the default's fresh login is never handed to a
+    /// profile within the window, nor the reverse (Android fc04722f).
     func login(serverID: UUID, baseURL: String, username: String, password: String,
-               userAgent: String, caller: String) async throws -> DispatcharrJWTPair {
-        let key = Self.slot(serverID, username, password)
-        let id8 = serverID.uuidString.prefix(8)
+               userAgent: String, caller: String, profileID: String? = nil) async throws -> DispatcharrJWTPair {
+        let who = DispatcharrIdentity(playlistID: serverID.uuidString, profileID: profileID)
+        let key = who.loginSlot(username: username, password: password)
+        let id8 = who.description
         if let r = recent[key], Date().timeIntervalSince(r.at) < Self.reuseWindow {
             debugLog("[AUTH] \(caller) for \(id8): reusing a login from \(Int(Date().timeIntervalSince(r.at)))s ago (no new login)")
             return r.pair
@@ -925,6 +924,9 @@ extension DispatcharrAPI {
             debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))), server is in API Key mode without saved credentials")
             return nil
         }
+        // The playlist's own identity (the default profile's sign-in): a re-login
+        // that waits through a profile switch writes nothing (Android fc04722f).
+        let atStart = await MainActor.run { ProfileManager.shared.activeIdentity(serverID.uuidString) }
         // One attempt per server per 60 s, shared by concurrent callers;
         // 429 and rejected logins park (DispatcharrLoginGate).
         return await DispatcharrLoginGate.shared.silentRelogin(serverID: serverID) {
@@ -937,11 +939,6 @@ extension DispatcharrAPI {
                 userAgent: userAgent,
                 caller: "silent re-login"
             )
-            DispatcharrTokenStore.shared.store(
-                serverID: serverID,
-                access: pair.access,
-                refresh: pair.refresh
-            )
             // Use the just-issued bearer to fetch the new api_key.
             let bearerAPI = DispatcharrAPI(
                 baseURL: baseURL,
@@ -949,6 +946,16 @@ extension DispatcharrAPI {
                 userAgent: userAgent
             )
             let user = try await bearerAPI.fetchCurrentUser()
+            let activeNow = await MainActor.run { ProfileManager.shared.activeIdentity(serverID.uuidString) }
+            if DispatcharrRelogin.overtaken(activeAtStart: atStart, activeNow: activeNow) {
+                debugLog("📺 silentRebootstrapApiKey: a profile switch happened while it waited (\(atStart) -> \(activeNow)); nothing written")
+                return .failed
+            }
+            DispatcharrTokenStore.shared.store(
+                serverID: serverID,
+                access: pair.access,
+                refresh: pair.refresh
+            )
             // Persist to both Keychain slots. Idempotent if iCloud
             // Keychain is off (the synchronizable write just lands
             // locally as if it were the regular slot, which Apple
@@ -1008,13 +1015,11 @@ final class DispatcharrLoginGate: @unchecked Sendable {
     static let defaultRetryAfter: TimeInterval = 60
 
     private let lock = NSLock()
-    private var inFlight: [UUID: Task<String?, Never>] = [:]
-    private var lastAttemptAt: [UUID: Date] = [:]
-    private var lastKey: [UUID: String] = [:]
-    private var rejectedUntil: [UUID: Date] = [:]
-    /// A silent re-login that signed in but found no API key on the account
-    /// (removed on the server), for the same window as a rejected login.
-    private var noKeyUntil: [UUID: Date] = [:]
+    /// Rules 1 and 3, per identity (the playlist's own sign-in or one of its
+    /// profiles, Android fc04722f): a fresh re-login is never handed to another
+    /// identity of the same playlist. Also the no-API-key park.
+    private var book = ReloginBook(window: attemptWindow)
+    private var tasks: [String: Task<String?, Never>] = [:]
     private var serverParkedUntil: [String: Date] = [:]
     /// The server's reason for each login park (stream-429-spec.md UPDATE).
     private var serverParkedReason: [String: RateLimitReason] = [:]
@@ -1058,60 +1063,73 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         debugLog("[AUTH] login throttled by the server; next attempt in \(Int(secs))s")
     }
 
-    func isRejected(serverID: UUID) -> Bool {
+    private static func now() -> TimeInterval { Date().timeIntervalSince1970 }
+
+    func isRejected(serverID: UUID) -> Bool { isRejected(identity: .playlist(serverID.uuidString)) }
+
+    func isRejected(identity who: DispatcharrIdentity) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return (rejectedUntil[serverID] ?? .distantPast) > Date()
+        return book.isRejected(who, now: Self.now())
     }
 
     /// The user signed in with a username and password that worked (the
     /// rejected-key prompt's Sign In): a parked rejection no longer applies,
     /// so a later key change can re-sign in silently again.
-    func clearRejected(serverID: UUID) {
+    func clearRejected(serverID: UUID) { clearRejected(identity: .playlist(serverID.uuidString)) }
+
+    func clearRejected(identity who: DispatcharrIdentity) {
         lock.lock()
-        rejectedUntil[serverID] = nil
-        noKeyUntil[serverID] = nil
+        book.clearRejected(who)
         lock.unlock()
     }
 
     /// The last silent re-login for `serverID` signed in but the account has no
     /// API key: the key is held like a refused re-login, so nothing keeps
     /// sending the dead key (2026-11-11, Android parity).
-    func noteNoKey(serverID: UUID) {
+    func noteNoKey(serverID: UUID) { noteNoKey(identity: .playlist(serverID.uuidString)) }
+
+    func noteNoKey(identity who: DispatcharrIdentity) {
         lock.lock()
-        noKeyUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
+        book.noteNoKey(who, now: Self.now())
         lock.unlock()
-        debugLog("[AUTH] re-login for \(serverID.uuidString.prefix(8)) signed in, but the account has no API key; the key is held")
+        debugLog("[AUTH] re-login for \(who) signed in, but the account has no API key; the key is held")
     }
 
-    func foundNoKey(serverID: UUID) -> Bool {
+    func foundNoKey(serverID: UUID) -> Bool { foundNoKey(identity: .playlist(serverID.uuidString)) }
+
+    func foundNoKey(identity who: DispatcharrIdentity) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return (noKeyUntil[serverID] ?? .distantPast) > Date()
+        return book.foundNoKey(who, now: Self.now())
     }
 
     /// A re-login that found a key: the account has one again.
-    func clearNoKey(serverID: UUID) {
+    func clearNoKey(serverID: UUID) { clearNoKey(identity: .playlist(serverID.uuidString)) }
+
+    func clearNoKey(identity who: DispatcharrIdentity) {
         lock.lock()
-        noKeyUntil[serverID] = nil
+        book.clearNoKey(who)
         lock.unlock()
     }
 
     /// A login outside `silentRelogin` (warmup) was rejected.
     func noteRejected(serverID: UUID) {
+        let who = DispatcharrIdentity.playlist(serverID.uuidString)
         lock.lock()
-        if (rejectedUntil[serverID] ?? .distantPast) > Date() { lock.unlock(); return }
-        rejectedUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
+        let fresh = book.noteRejected(who, now: Self.now())
         lock.unlock()
-        Self.surfaceRejected(serverID)
+        if fresh { Self.surfaceRejected(who) }
     }
 
-    private static func surfaceRejected(_ serverID: UUID) {
-        debugLog("[AUTH] login rejected for \(serverID.uuidString.prefix(8)); re-login parked for \(Int(attemptWindow))s. The user must enter a new key or password in Edit Playlist.")
+    private static func surfaceRejected(_ who: DispatcharrIdentity) {
+        debugLog("[AUTH] login rejected for \(who); re-login parked for \(Int(attemptWindow))s. "
+                 + (who.isPlaylist ? "The user must enter a new key or password in Edit Playlist."
+                    : "The profile must sign in again (its own sign-in)."))
     }
 
     /// Run `attempt` (a silent re-login returning the fresh api_key, or nil)
     /// under the rules above. `attempt` reports a rejected login by returning
     /// `.rejected`.
-    enum Outcome { case key(String), failed, rejected }
+    typealias Outcome = ReloginBook.Outcome
 
     private enum Claim {
         case wait(Task<String?, Never>)
@@ -1120,54 +1138,50 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         case mine(Task<String?, Never>)
     }
 
-    private func claim(_ serverID: UUID, _ attempt: @escaping @Sendable () async -> Outcome) -> Claim {
+    private func claim(_ who: DispatcharrIdentity, _ attempt: @escaping @Sendable () async -> Outcome) -> Claim {
         lock.lock(); defer { lock.unlock() }
-        if let task = inFlight[serverID] { return .wait(task) }
-        if let until = rejectedUntil[serverID], until > Date() {
-            return .parked(Int(until.timeIntervalSinceNow.rounded(.up)))
+        switch book.claim(who, now: Self.now()) {
+        case .wait:
+            if let task = tasks[who.key] { return .wait(task) }
+            return .shared(nil, 0)
+        case .parked(let left):
+            return .parked(left)
+        case .shared(let key, let ago):
+            return .shared(key, ago)
+        case .mine:
+            // Created and registered under the lock so a concurrent caller
+            // always finds it and waits instead of starting its own.
+            let task = Task<String?, Never> { self.finish(who, await attempt()) }
+            tasks[who.key] = task
+            return .mine(task)
         }
-        if let last = lastAttemptAt[serverID], Date().timeIntervalSince(last) < Self.attemptWindow {
-            return .shared(lastKey[serverID], Int(Date().timeIntervalSince(last)))
-        }
-        lastAttemptAt[serverID] = Date()
-        lastKey[serverID] = nil
-        // Created and registered under the lock so a concurrent caller
-        // always finds it and waits instead of starting its own.
-        let task = Task<String?, Never> { self.finish(serverID, await attempt()) }
-        inFlight[serverID] = task
-        return .mine(task)
     }
 
-    private func finish(_ serverID: UUID, _ outcome: Outcome) -> String? {
+    private func finish(_ who: DispatcharrIdentity, _ outcome: Outcome) -> String? {
         lock.lock()
-        inFlight[serverID] = nil
-        switch outcome {
-        case .key(let k):
-            lastKey[serverID] = k
-            lock.unlock()
-            return k
-        case .failed:
-            lock.unlock()
-            return nil
-        case .rejected:
-            rejectedUntil[serverID] = Date(timeIntervalSinceNow: Self.attemptWindow)
-            lock.unlock()
-            Self.surfaceRejected(serverID)
-            return nil
-        }
+        tasks[who.key] = nil
+        let key = book.finish(who, outcome, now: Self.now())
+        lock.unlock()
+        if outcome == .rejected { Self.surfaceRejected(who) }
+        return key
     }
 
     func silentRelogin(serverID: UUID, attempt: @escaping @Sendable () async -> Outcome) async -> String? {
-        let id8 = serverID.uuidString.prefix(8)
-        switch claim(serverID, attempt) {
+        await silentRelogin(identity: .playlist(serverID.uuidString), attempt: attempt)
+    }
+
+    /// One re-login per identity at a time and per window; the result is shared
+    /// with that identity's concurrent callers only.
+    func silentRelogin(identity who: DispatcharrIdentity, attempt: @escaping @Sendable () async -> Outcome) async -> String? {
+        switch claim(who, attempt) {
         case .wait(let task):
-            debugLog("[AUTH] re-login for \(id8) in flight; waiting for its result")
+            debugLog("[AUTH] re-login for \(who) in flight; waiting for its result")
             return await task.value
         case .parked(let left):
-            debugLog("[AUTH] re-login for \(id8) parked after a rejected login; next attempt in \(left)s")
+            debugLog("[AUTH] re-login for \(who) parked after a rejected login; next attempt in \(left)s")
             return nil
         case .shared(let key, let ago):
-            debugLog("[AUTH] re-login for \(id8) already ran \(ago)s ago; sharing its result")
+            debugLog("[AUTH] re-login for \(who) already ran \(ago)s ago; sharing its result")
             return key
         case .mine(let task):
             return await task.value
