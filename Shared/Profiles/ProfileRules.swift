@@ -596,6 +596,29 @@ enum LaunchLockRules {
     static func gateNeedsPresenting(locked: Bool, scenes: Int, scenesShowingGate: Int) -> Bool {
         locked && scenesShowingGate < max(scenes, 1)
     }
+
+    /// Apple TV: the lock's screen leaves without an animation, so no
+    /// transition is still running when the next screen presents (device log
+    /// 2026-11-12: the "Setting Up" cover was presented 55 ms after the PIN
+    /// passed, while the lock's screen was still animating away).
+    static let lockDismissAnimated = false
+
+    /// A cover closed by its state can still end up on screen, frozen, when it
+    /// was presented while another screen was leaving (device log 2026-11-12:
+    /// "Setting Up" stayed on "Loading EPG" after its state went false, and
+    /// Skip, which only sets that state, could not close it). It is closed when
+    /// its state has said closed for a moment (never racing the cover's own
+    /// close), it is on screen, and nothing is shown over it.
+    static func closesStrayCover(stateOpen: Bool, onScreen: Bool, coveredByAnother: Bool, closedFor: Double) -> Bool {
+        !stateOpen && onScreen && !coveredByAnother && closedFor >= strayCoverGrace
+    }
+
+    /// How long a cover's state must have been false before it counts as stray (seconds).
+    static let strayCoverGrace: Double = 0.5
+
+    /// When to look for a stray cover after its state went false (seconds): it
+    /// can finish presenting after the close.
+    static let strayCoverChecks: [Double] = [0.6, 1.5, 3.0]
 }
 
 // MARK: - Live TV landing group (Android dd2bb36f)

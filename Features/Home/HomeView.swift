@@ -4985,6 +4985,14 @@ struct MainTabView: View {
     /// "Skip did nothing"). Resets on cold launch, the next session
     /// re-evaluates whether the cover should appear.
     @State private var userDismissedInitialLoading = false
+    /// The Setting Up cover was closed for an error: it is not shown again
+    /// this session unless the playlists change. Closing a full-screen cover
+    /// makes MainTabView appear again, and with channels still empty that
+    /// re-showed the cover over the error view at once, with nothing loading
+    /// (simulator log 2026-11-12: closed and re-shown in the same millisecond).
+    @State private var initialLoadingClosedForError = false
+    /// When the Setting Up cover's state last went false (stray-cover grace).
+    @State private var initialLoadingClosedAt: Date?
     /// One-shot LAN/WAN failover guard for the channel/EPG orchestrator.
     /// When a channel load comes back empty (server down, or LAN host
     /// unreachable after travelling off the home network), we re-run the
@@ -5466,11 +5474,13 @@ struct MainTabView: View {
             debugLog("🔶 Initial sync, user dismissed this session, not re-showing")
             return
         }
+        guard !initialLoadingClosedForError else { return }
         if UserDefaults.standard.bool(forKey: "appBehaviorsSkipLoadingScreen") {
             debugLog("🔶 Initial sync, skip flag set in App Behaviors, skipping loading cover")
             return
         }
         showInitialEPGLoading = true
+        initialLoadingClosedAt = nil
         initialLoadingStartedAt = CFAbsoluteTimeGetCurrent()
         debugLog("🔶 Initial sync starting, showing loading screen (servers=\(allServers.count))")
     }
@@ -5827,6 +5837,22 @@ struct MainTabView: View {
         Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx, userInitiated: false) }
     }
 
+    /// Looks for a stray Setting Up cover a few times after its state went
+    /// false (it can finish presenting after the close) and closes it.
+    private func sweepStrayInitialLoading(_ reason: String) {
+        Task { @MainActor in
+            for seconds in LaunchLockRules.strayCoverChecks {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                InitialLoadingCoverGuard.closeIfStray(reason, stateOpen: showInitialEPGLoading, closedFor: strayClosedFor)
+            }
+        }
+    }
+
+    /// How long the Setting Up cover's state has been false (none recorded: long ago).
+    private var strayClosedFor: TimeInterval {
+        initialLoadingClosedAt.map { Date().timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+    }
+
     /// Called whenever `initialSyncKey` changes. Dismisses the
     /// Loading Guide screen once the Live-TV-critical signals are
     /// done, channels loaded, EPG loaded, DVR reconciled. **VOD is
@@ -5837,7 +5863,12 @@ struct MainTabView: View {
     /// The On Demand tab has its own loading state and will spin
     /// while `vodStore.isLoadingMovies` / `.isLoadingSeries` are true.
     private func tryDismissInitialLoading() {
-        guard showInitialEPGLoading else { return }
+        // Closed by its state, yet still on screen (a stray cover): close it now
+        // that loading moved on, e.g. after a held-key recovery (2026-11-12).
+        guard showInitialEPGLoading else {
+            InitialLoadingCoverGuard.closeIfStray("loading changed", stateOpen: false, closedFor: strayClosedFor)
+            return
+        }
 
         // Error path, channel fetch ended with an error and no data arrived.
         // Dismiss the loading screen so the underlying error view can render
@@ -5848,6 +5879,9 @@ struct MainTabView: View {
                 showInitialEPGLoading = false
             }
             debugLog("🔶 Initial sync ended with error, dismissing loading screen so error view can show")
+            initialLoadingClosedForError = true
+            initialLoadingClosedAt = Date()
+            sweepStrayInitialLoading("error close")
             return
         }
 
@@ -5865,6 +5899,8 @@ struct MainTabView: View {
         withAnimation(.easeOut(duration: 0.4)) {
             showInitialEPGLoading = false
         }
+        initialLoadingClosedAt = Date()
+        sweepStrayInitialLoading("complete")
         let elapsed = initialLoadingStartedAt.map {
             Int((CFAbsoluteTimeGetCurrent() - $0) * 1000)
         }
@@ -8069,6 +8105,8 @@ struct MainTabView: View {
         // the user would land on Live TV before channels/EPG/VOD/DVR
         // had finished syncing).
         .onChange(of: allServers.count) { _, _ in
+            // A playlist added or removed: the cover may show again after an error close.
+            initialLoadingClosedForError = false
             tryShowInitialLoading()
         }
         // Hold the initial loading screen until channels + EPG + VOD
@@ -8189,11 +8227,23 @@ struct MainTabView: View {
                         // make Skip look like a no-op (jesmannstl
                         // v1.6.22 report).
                         userDismissedInitialLoading = true
+                        let wasOpen = showInitialEPGLoading
                         showInitialEPGLoading = false
                         debugLog("🔶 User dismissed initial loading screen manually")
+                        // Skip always closes it: a stray cover (its state was
+                        // already false, so setting it changes nothing) is
+                        // closed directly (device report 2026-11-12).
+                        if !wasOpen {
+                            InitialLoadingCoverGuard.closeIfStray("Skip", stateOpen: false, closedFor: strayClosedFor)
+                        } else {
+                            initialLoadingClosedAt = Date()
+                        }
+                        sweepStrayInitialLoading("Skip")
                     }
                 )
             )
+            // Lets InitialLoadingCoverGuard find this cover if it outlives its state.
+            .background(InitialLoadingCoverMarker())
         }
         // v1.6.21: single orchestrator task running all four initial-sync
         // phases sequentially: channels, then EPG, then VOD movies, then
@@ -12034,3 +12084,53 @@ extension UIViewController {
     }
 }
 #endif
+
+// MARK: - Stray Setting Up cover (device report 2026-11-12)
+
+/// The initial "Setting Up" cover's own controller, found through a marker
+/// view inside it. On Apple TV the cover was presented while the launch PIN's
+/// screen was still leaving, and it stayed on screen after its state went false:
+/// frozen on "Loading EPG", and Skip, which only sets that state, could not
+/// close it. This closes it whenever its state says it is closed
+/// (LaunchLockRules.closesStrayCover).
+@MainActor
+enum InitialLoadingCoverGuard {
+    fileprivate static weak var marker: UIView?
+
+    private static func host() -> UIViewController? {
+        guard let marker, marker.window != nil else { return nil }
+        var r: UIResponder? = marker
+        while let cur = r {
+            if let vc = cur as? UIViewController, vc.presentingViewController != nil { return vc }
+            r = cur.next
+        }
+        return nil
+    }
+
+    static func closeIfStray(_ reason: String, stateOpen: Bool, closedFor: TimeInterval) {
+        let h = host()
+        let onScreen = h.map { !$0.isBeingDismissed && !$0.isBeingPresented } ?? false
+        let covered = h?.presentedViewController != nil
+        guard LaunchLockRules.closesStrayCover(stateOpen: stateOpen, onScreen: onScreen,
+                                               coveredByAnother: covered, closedFor: closedFor),
+              let h else {
+            if !stateOpen && onScreen && covered && closedFor >= LaunchLockRules.strayCoverGrace {
+                debugLog("🔶 Setting Up cover still up after it closed (\(reason)); another screen is over it, retrying later")
+            }
+            return
+        }
+        debugLog("🔶 Setting Up cover still up after it closed (\(reason)); closing it")
+        h.presentingViewController?.dismiss(animated: true)
+    }
+}
+
+/// Registers the cover's view with InitialLoadingCoverGuard.
+private struct InitialLoadingCoverMarker: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let v = UIView()
+        v.isUserInteractionEnabled = false
+        InitialLoadingCoverGuard.marker = v
+        return v
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}

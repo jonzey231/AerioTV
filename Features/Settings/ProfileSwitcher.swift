@@ -536,7 +536,9 @@ final class LaunchLockWindow {
     private func hide() {
         guard let h = host else { return }
         host = nil
-        h.presentingViewController?.dismiss(animated: true)
+        // No animation: the next screen (the Setting Up cover, What's New) can
+        // present right away without racing a transition (LaunchLockRules).
+        h.presentingViewController?.dismiss(animated: LaunchLockRules.lockDismissAnimated)
         debugLog("[PROFILE] launch lock passed; its screen is gone")
     }
     #else

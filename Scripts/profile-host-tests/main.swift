@@ -792,6 +792,23 @@ do {
     check(!L.gateNeedsPresenting(locked: false, scenes: 1, scenesShowingGate: 0), "unlocked: no gate")
 }
 
+// MARK: - A stray Setting Up cover is always closed (device report 2026-11-12)
+do {
+    let L = LaunchLockRules.self
+    check(!L.lockDismissAnimated, "the lock's screen leaves without an animation, so no transition races the next screen")
+    check(L.closesStrayCover(stateOpen: false, onScreen: true, coveredByAnother: false, closedFor: 120),
+          "closed by its state but still on screen: closed (Skip works, recovery completes)")
+    check(!L.closesStrayCover(stateOpen: false, onScreen: true, coveredByAnother: false, closedFor: 0.01),
+          "just closed: the cover's own close is never raced")
+    check(!L.closesStrayCover(stateOpen: true, onScreen: true, coveredByAnother: false, closedFor: 120), "a cover that should be up stays up")
+    check(!L.closesStrayCover(stateOpen: false, onScreen: false, coveredByAnother: false, closedFor: 120), "already gone: nothing to do")
+    check(!L.closesStrayCover(stateOpen: false, onScreen: true, coveredByAnother: true, closedFor: 120),
+          "a prompt shown over it is never closed with it; retried later")
+    check(L.strayCoverChecks.allSatisfy { $0 >= L.strayCoverGrace }, "every check after a close is past the grace")
+    check(!L.strayCoverChecks.isEmpty && L.strayCoverChecks == L.strayCoverChecks.sorted(), "checks run in order after the close")
+    check((L.strayCoverChecks.last ?? 0) <= 5, "the last check runs within 5 s")
+}
+
 // MARK: - Live TV landing group (Android dd2bb36f)
 do {
     let L = LiveTVLanding.self
