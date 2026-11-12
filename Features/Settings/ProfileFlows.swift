@@ -1043,3 +1043,20 @@ struct AddProfileFlow: View {
         }
     }
 }
+
+// MARK: - Refused profile action
+
+/// A refused profile action (owner 2026-11-12): the action's title, the reason
+/// word for word, and OK, on iPhone, iPad, and Apple TV (ProfileRefusal).
+struct ProfileRefusalDialog: View {
+    let refusal: ProfileRefusal
+    let onDone: () -> Void
+
+    var body: some View {
+        ProfileDialog(title: refusal.title, cancelLabel: nil,
+                      confirm: (ProfileRefusal.okLabel, true, false, onDone), onCancel: onDone) {
+            Text(refusal.message).scaledFont(ProfileUI.body).foregroundColor(.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}

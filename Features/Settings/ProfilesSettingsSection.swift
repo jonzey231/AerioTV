@@ -29,13 +29,14 @@ enum ProfileRoute: Equatable {
     case add
     case deviceSet
     case deviceRemove
+    /// A refused action: its title, the reason, and OK (ProfileRefusal).
+    case refused(ProfileRefusal)
 }
 
 @MainActor
 final class ProfilesFlowModel: ObservableObject {
     @Published var route: ProfileRoute?
     @Published var presented = false
-    @Published var status: String?
     /// Apple TV: a row is lifted for reorder; the rest of the page holds still.
     @Published var liftActive = false
 
@@ -44,10 +45,22 @@ final class ProfilesFlowModel: ObservableObject {
         presented = true
     }
 
-    func close(_ error: String? = nil) {
-        status = error
+    /// A flow ended. A refusal reason shows as a dialog titled with the action
+    /// ([title]), never as footer text; with no reason the presentation closes.
+    func close(_ error: String? = nil, title: String = "") {
+        if let r = ProfileRefusal.make(title: title, reason: error) {
+            refuse(r)
+            return
+        }
         presented = false
         route = nil
+    }
+
+    /// Show a refused action (also a refusal outside a flow, the Apple TV reorder).
+    func refuse(_ r: ProfileRefusal) {
+        debugLog("[PROFILES] refused: \(r.title)")
+        route = .refused(r)
+        presented = true
     }
 }
 
@@ -78,7 +91,8 @@ struct ProfileFlowHost: View {
             case .rename(let p): RenameProfileFlow(profile: p) { model.close() }
             case .avatar(let p):
                 AvatarPickerFlow(profile: p, onClose: { model.close() }) { spec in
-                    do { try manager.setAvatar(playlistId, p.id, spec); model.close() } catch { model.close(error.localizedDescription) }
+                    do { try manager.setAvatar(playlistId, p.id, spec); model.close() }
+                    catch { model.close(error.localizedDescription, title: ProfileActionTitle.avatar) }
                 }
             case .remove(let p):
                 ProfileDialog(title: "Remove Profile", confirm: ("Remove", true, true, {
@@ -90,12 +104,17 @@ struct ProfileFlowHost: View {
             case .removeAdminPin(let p):
                 AdminPinFlow(playlistId: playlistId, title: "Enter a PIN from an Admin or Standard profile to remove \(p.displayName)",
                              onDismiss: { model.close() }) { remove(p) }
-            case .setPin(let p): SetPinFlow(playlistId: playlistId, profile: p) { model.close($0) }
-            case .removePin(let p): RemovePinFlow(playlistId: playlistId, profile: p) { model.close($0) }
-            case .resetPin(let p): ResetPinFlow(playlistId: playlistId, profile: p) { model.close($0) }
-            case .role(let p): RoleFlow(playlistId: playlistId, profile: p) { model.close($0) }
-            case .channelProfiles(let p): ChannelProfilesFlow(playlistId: playlistId, profile: p) { model.close($0) }
-            case .switchTo(let p): ProfileSwitchFlow(playlistId: playlistId, profile: p) { model.close($0) }
+            case .setPin(let p):
+                SetPinFlow(playlistId: playlistId, profile: p) {
+                    model.close($0, title: ProfileActionTitle.setPin(hasPin: manager.hasPin(p.id)))
+                }
+            case .removePin(let p): RemovePinFlow(playlistId: playlistId, profile: p) { model.close($0, title: ProfileActionTitle.removePin) }
+            case .resetPin(let p): ResetPinFlow(playlistId: playlistId, profile: p) { model.close($0, title: ProfileActionTitle.resetPin) }
+            case .role(let p): RoleFlow(playlistId: playlistId, profile: p) { model.close($0, title: ProfileActionTitle.role) }
+            case .channelProfiles(let p):
+                ChannelProfilesFlow(playlistId: playlistId, profile: p) { model.close($0, title: ProfileActionTitle.channelProfiles) }
+            case .switchTo(let p):
+                ProfileSwitchFlow(playlistId: playlistId, profile: p) { model.close($0, title: ProfileActionTitle.switchProfile) }
             case .userQr(let p):
                 #if os(iOS)
                 UserQrFlow(playlistId: playlistId, profileId: p.id) { model.close() }
@@ -103,8 +122,12 @@ struct ProfileFlowHost: View {
                 EmptyView()
                 #endif
             case .add: AddProfileFlow(playlistId: playlistId) { model.close() }
-            case .deviceSet: DeviceAdminPinSetFlow(playlistId: playlistId) { model.close($0) }
-            case .deviceRemove: DeviceAdminPinRemoveFlow(playlistId: playlistId) { model.close($0) }
+            case .deviceSet:
+                let title = ProfileActionTitle.deviceAdminPin(has: manager.hasDeviceAdminPin(playlistId))
+                DeviceAdminPinSetFlow(playlistId: playlistId) { model.close($0, title: title) }
+            case .deviceRemove:
+                DeviceAdminPinRemoveFlow(playlistId: playlistId) { model.close($0, title: ProfileActionTitle.removeDeviceAdminPin) }
+            case .refused(let r): ProfileRefusalDialog(refusal: r) { model.close() }
             case nil: EmptyView()
             }
         }
@@ -112,7 +135,8 @@ struct ProfileFlowHost: View {
 
     private func remove(_ p: DispatcharrProfile) {
         Task {
-            do { try await manager.remove(p.id); model.close() } catch { model.close(error.localizedDescription) }
+            do { try await manager.remove(p.id); model.close() }
+            catch { model.close(error.localizedDescription, title: ProfileActionTitle.removeProfile) }
         }
     }
 }
@@ -184,7 +208,8 @@ struct ProfileActionsSheet: View {
     }
 
     private func move(_ p: DispatcharrProfile, _ how: ProfileOrder.Move) {
-        do { _ = try manager.move(playlistId, p.id, how); model.close() } catch { model.close(error.localizedDescription) }
+        do { _ = try manager.move(playlistId, p.id, how); model.close() }
+        catch { model.close(error.localizedDescription, title: how == .earlier ? ProfileActionTitle.moveUp : ProfileActionTitle.moveDown) }
     }
 }
 
@@ -255,7 +280,7 @@ struct ProfilesSettingsSection: View {
                     .listRowBackground(Color.cardBackground)
                 }
                 if g.isAdmin {
-                    Button { model.status = nil; model.open(.add) } label: {
+                    Button { model.open(.add) } label: {
                         Label { Text("Add Profile").fontWeight(.medium) } icon: { Image(systemName: "plus") }
                             .foregroundColor(.accentPrimary)
                     }
@@ -264,9 +289,6 @@ struct ProfilesSettingsSection: View {
                 }
                 if manager.switching {
                     ProgressView().tint(.accentPrimary).listRowBackground(Color.cardBackground)
-                }
-                if let s = model.status {
-                    Text(s).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor).listRowBackground(Color.cardBackground)
                 }
             } header: {
                 Text("Profiles").sectionHeaderStyle()
@@ -279,7 +301,7 @@ struct ProfilesSettingsSection: View {
     @ViewBuilder
     private var deviceAdminRows: some View {
         let has = manager.hasDeviceAdminPin(playlistId)
-        Button { model.status = nil; model.open(.deviceSet) } label: {
+        Button { model.open(.deviceSet) } label: {
             HStack(spacing: 12) {
                 Image(systemName: "lock.fill").foregroundColor(.accentPrimary)
                 VStack(alignment: .leading, spacing: 2) {
@@ -291,7 +313,7 @@ struct ProfilesSettingsSection: View {
         }
         .listRowBackground(Color.cardBackground)
         if has {
-            Button { model.status = nil; model.open(.deviceRemove) } label: {
+            Button { model.open(.deviceRemove) } label: {
                 Label("Remove Device Admin PIN", systemImage: "lock.fill").foregroundColor(ProfileUI.errorColor)
             }
             .listRowBackground(Color.cardBackground)
@@ -301,7 +323,6 @@ struct ProfilesSettingsSection: View {
     private func openActions(_ p: DispatcharrProfile) {
         guard !manager.switching else { return }
         debugLog("[PROFILES] actions opened")
-        model.status = nil
         model.open(.actions(p))
     }
 }
@@ -381,27 +402,24 @@ struct ProfilesTVSection: View {
                 )
                 if g.isAdmin {
                     TVSettingsTileActionRow(icon: "plus", title: "Add Profile", titleColor: .accentPrimary) {
-                        model.status = nil; model.open(.add)
+                        model.open(.add)
                     }
                     .disabled(liftedId != nil)
                     let has = manager.hasDeviceAdminPin(playlistId)
                     TVSettingsTileActionRow(icon: "lock.fill", title: has ? "Change Device Admin PIN" : "Set Device Admin PIN",
                                             subtitle: "Works on this device only, alongside Admin profile PINs. Never synced.") {
-                        model.status = nil; model.open(.deviceSet)
+                        model.open(.deviceSet)
                     }
                     .disabled(liftedId != nil)
                     if has {
                         TVSettingsTileActionRow(icon: "lock.fill", iconColor: ProfileUI.errorColor, title: "Remove Device Admin PIN",
                                                 titleColor: ProfileUI.errorColor) {
-                            model.status = nil; model.open(.deviceRemove)
+                            model.open(.deviceRemove)
                         }
                         .disabled(liftedId != nil)
                     }
                 }
                 if manager.switching { ProgressView().tint(.accentPrimary).padding(.horizontal, 20) }
-                if let s = model.status {
-                    Text(s).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor).padding(.horizontal, 20)
-                }
                 Text(ProfileCopy.sectionFooter)
                     .scaledFont(ProfileUI.small)
                     .foregroundColor(.textSecondary)
@@ -415,7 +433,6 @@ struct ProfilesTVSection: View {
         if liftedId != nil { placeLifted(); return }
         guard !manager.switching else { return }
         debugLog("[PROFILES] actions opened")
-        model.status = nil
         model.open(.actions(p))
     }
 
@@ -449,7 +466,8 @@ struct ProfilesTVSection: View {
         debugLog("[PROFILES] pick-up drop id=\(from) from=\(from) to=\(to) save=\(from != to)")
         // Placed where it started: nothing is saved and no sheet opens.
         if from != to {
-            do { _ = try manager.setOrder(playlistId, order) } catch { model.status = error.localizedDescription }
+            do { _ = try manager.setOrder(playlistId, order) }
+            catch { if let r = ProfileRefusal.make(title: ProfileActionTitle.profiles, reason: error.localizedDescription) { model.refuse(r) } }
         }
         focusedRow = id
     }
@@ -470,7 +488,7 @@ struct ProfilesTVSection: View {
 extension View {
     /// Presents the profiles flow for [playlistId] (one presentation for every step).
     func profilesFlowPresentation(_ playlistId: String?, model: ProfilesFlowModel) -> some View {
-        sheet(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close(model.status) } })) {
+        sheet(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close() } })) {
             if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
         }
     }
@@ -543,9 +561,13 @@ struct ChildManageProfilesView: View {
     @ObservedObject private var manager = ProfileManager.shared
     @State private var unlocked = false
     @State private var flow: Flow?
-    @State private var status: String?
 
-    private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet }
+    private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet, refused(ProfileRefusal) }
+
+    /// A flow ended: a refusal reason shows as its dialog (ProfileRefusal), never as page text.
+    private func finish(_ err: String?, title: String) {
+        flow = ProfileRefusal.make(title: title, reason: err).map { .refused($0) }
+    }
 
     var body: some View {
         let profiles = manager.profilesByPlaylist[playlistId] ?? []
@@ -556,7 +578,6 @@ struct ChildManageProfilesView: View {
                 VStack(alignment: .leading, spacing: ProfileUI.s(8, 14)) {
                     if !unlocked {
                         Button {
-                            status = nil
                             if manager.adminHasPin(playlistId) {
                                 flow = .adminPin
                             } else {
@@ -575,8 +596,7 @@ struct ChildManageProfilesView: View {
                             Button {
                                 // The active Child only when it needs its sign-in form (held, or no key).
                                 guard p.id != activeId || manager.needsSignIn(p.id), !manager.switching else { return }
-                                status = nil
-                                flow = .switchTo(p)
+                                    flow = .switchTo(p)
                             } label: {
                                 ProfileRowContent(profile: p, isActive: p.id == activeId, locked: manager.hasPin(p.id))
                             }
@@ -585,7 +605,6 @@ struct ChildManageProfilesView: View {
                         if manager.switching { ProgressView().tint(.accentPrimary) }
                         // Behind the Admin PIN a parent can add their own profile (a kid-only device).
                         Button {
-                            status = nil
                             manager.pickerAddUnlocked = playlistId
                             flow = .add
                         } label: {
@@ -593,14 +612,11 @@ struct ChildManageProfilesView: View {
                         }
                         .buttonStyle(ProfileRowButtonStyle())
                         if manager.hasDeviceAdminPin(playlistId) {
-                            Button { status = nil; flow = .deviceSet } label: {
+                            Button { flow = .deviceSet } label: {
                                 Label("Change Device Admin PIN", systemImage: "lock.fill").foregroundColor(.textPrimary)
                             }
                             .buttonStyle(ProfileRowButtonStyle())
                         }
-                    }
-                    if let status {
-                        Text(status).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor)
                     }
                 }
                 .padding(.horizontal, ProfileUI.s(16, 60))
@@ -616,8 +632,7 @@ struct ChildManageProfilesView: View {
                         }
                     case .switchTo(let p):
                         ProfileSwitchFlow(playlistId: playlistId, profile: p) { err in
-                            self.flow = nil
-                            status = err
+                            finish(err, title: ProfileActionTitle.switchProfile)
                         }
                     case .add:
                         AddProfileFlow(playlistId: playlistId) {
@@ -625,10 +640,12 @@ struct ChildManageProfilesView: View {
                             manager.pickerAddUnlocked = nil
                         }
                     case .deviceSet:
+                        let title = ProfileActionTitle.deviceAdminPin(has: manager.hasDeviceAdminPin(playlistId))
                         DeviceAdminPinSetFlow(playlistId: playlistId) { err in
-                            self.flow = nil
-                            status = err
+                            finish(err, title: title)
                         }
+                    case .refused(let r):
+                        ProfileRefusalDialog(refusal: r) { self.flow = nil }
                     }
                 }
             }

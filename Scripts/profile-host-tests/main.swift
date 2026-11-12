@@ -737,5 +737,32 @@ do {
     check(!g.isPlaylistRejected("P") && !g.isKeyRejected("DEF-OLD"), "a pass clears the playlist's own hold")
 }
 
+// MARK: - A refused profile action is a dialog (owner 2026-11-12)
+do {
+    // Changing the only full-access profile to Child: the role step's reason, word for word, titled "Role".
+    let reason: String? = {
+        if case .denied(let r) = RoleRules.roleChange(actor: .admin, from: .admin, to: .child, missingPins: 0,
+                                                       anyPinExists: true, targetIsLastFullAccess: true) { return r }
+        return nil
+    }()
+    eq(reason, "At least one profile must stay Admin or Standard.", "the existing reason")
+    let r = ProfileRefusal.make(title: ProfileActionTitle.role, reason: reason)
+    eq(r, ProfileRefusal(title: "Role", message: "At least one profile must stay Admin or Standard."),
+       "a dialog titled with the action, the reason word for word")
+    eq(ProfileRefusal.okLabel, "OK", "its only button")
+    check(ProfileRefusal.make(title: "Role", reason: nil) == nil, "no reason: the flow just closes")
+    check(ProfileRefusal.make(title: "Role", reason: "  ") == nil, "a blank reason shows nothing")
+    eq(ProfileRefusal.make(title: ProfileActionTitle.removePin, reason: RoleRules.KEEP_PIN_REASON)?.message, RoleRules.KEEP_PIN_REASON,
+       "Remove PIN refusal keeps its reason")
+    // The existing titles, per action.
+    eq([ProfileActionTitle.role, ProfileActionTitle.resetPin, ProfileActionTitle.removePin, ProfileActionTitle.removeProfile],
+       ["Role", "Reset PIN", "Remove PIN", "Remove Profile"], "role, PIN reset and remove, remove profile")
+    eq([ProfileActionTitle.setPin(hasPin: false), ProfileActionTitle.setPin(hasPin: true)], ["Set PIN", "Change PIN"], "set or change PIN")
+    eq([ProfileActionTitle.deviceAdminPin(has: false), ProfileActionTitle.deviceAdminPin(has: true), ProfileActionTitle.removeDeviceAdminPin],
+       ["Set Device Admin PIN", "Change Device Admin PIN", "Remove Device Admin PIN"], "Device Admin PIN actions")
+    eq([ProfileActionTitle.avatar, ProfileActionTitle.channelProfiles, ProfileActionTitle.switchProfile, ProfileActionTitle.moveUp,
+        ProfileActionTitle.moveDown], ["Avatar", "Channel Profiles", "Switch Profile", "Move Up", "Move Down"], "the other actions")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

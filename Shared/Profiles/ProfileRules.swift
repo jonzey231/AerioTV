@@ -539,3 +539,41 @@ enum SnapshotStaleness {
         return nil
     }
 }
+
+// MARK: - Refused profile actions (owner 2026-11-12, device testing)
+
+/// A refused profile action shows as a dialog, never as small red footer
+/// text users miss: the action's existing title, the reason word for word,
+/// and one button, "OK". No other new copy.
+struct ProfileRefusal: Equatable, Sendable {
+    let title: String
+    let message: String
+
+    static let okLabel = "OK"
+
+    /// nil when there is no reason (the flow simply closed).
+    static func make(title: String, reason: String?) -> ProfileRefusal? {
+        guard let reason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return ProfileRefusal(title: title, message: reason)
+    }
+}
+
+/// The existing titles of the profile actions, for their refusal dialogs.
+enum ProfileActionTitle {
+    static let role = "Role"
+    static let removePin = "Remove PIN"
+    static let resetPin = "Reset PIN"
+    static let removeProfile = "Remove Profile"
+    static let avatar = "Avatar"
+    static let rename = "Rename"
+    static let channelProfiles = "Channel Profiles"
+    static let switchProfile = "Switch Profile"
+    static let addProfile = "Add Profile"
+    static let removeDeviceAdminPin = "Remove Device Admin PIN"
+    static let moveUp = "Move Up"
+    static let moveDown = "Move Down"
+    static let profiles = "Profiles"
+
+    static func setPin(hasPin: Bool) -> String { hasPin ? "Change PIN" : "Set PIN" }
+    static func deviceAdminPin(has: Bool) -> String { has ? "Change Device Admin PIN" : "Set Device Admin PIN" }
+}
