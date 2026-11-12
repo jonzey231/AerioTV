@@ -1037,7 +1037,7 @@ final class ProfileManager: ObservableObject {
         if store.forPlaylist(winner).isEmpty {
             if PlaylistRoute.changed(oldBase: loserRoute.base, newBase: winnerRoute.base,
                                      oldLocal: loserRoute.local, newLocal: winnerRoute.local),
-               let rec = holds.hold(loser, profileIds: ProfileHostHoldRules.toHold(mine, hasStoredSignIn: signIns.hasStored),
+               let rec = holds.hold(loser, profileIds: ProfileHostHoldRules.toHold(mine),
                                     trustedHosts: PlaylistRoute.hosts(base: loserRoute.base, local: loserRoute.local),
                                     route: PlaylistRoute.key(base: winnerRoute.base, local: winnerRoute.local)) {
                 debugLog("[PROFILE-HOST] hold playlist=\(Self.tag(winner)) profiles=\(rec.profileIds.count)")
@@ -1356,7 +1356,7 @@ final class ProfileManager: ObservableObject {
     /// Places the hold. True when the active profile is now held.
     private func holdForRouteChange(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) -> Bool {
         guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return false }
-        let ids = ProfileHostHoldRules.toHold(store.forPlaylist(playlistId), hasStoredSignIn: signIns.hasStored)
+        let ids = ProfileHostHoldRules.toHold(store.forPlaylist(playlistId))
         guard let rec = holds.hold(playlistId, profileIds: ids,
                                    trustedHosts: PlaylistRoute.hosts(base: oldBase, local: oldLocal),
                                    route: PlaylistRoute.key(base: newBase, local: newLocal)) else { return false }

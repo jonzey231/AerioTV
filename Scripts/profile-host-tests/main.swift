@@ -111,15 +111,14 @@ do {
     store.upsert(profile("def", pl, "admin", isDefault: true))
     store.upsert(profile("kid", pl, "kid"))
     store.upsert(profile("guest", pl, "guest"))
-    store.upsert(profile("empty", pl, "nobody"))
     store.upsert(profile("elsewhere", other, "kid2"))
     store.setApiKey("kid", "K-KID"); store.setPassword("kid", "P-KID")
     store.setApiKey("guest", "K-GUEST")
     store.setApiKey("elsewhere", "K-ELSE"); store.setPassword("elsewhere", "P-ELSE")
     let signIns = ProfileSignIns(store: store, holds: holds)
 
-    let who = ProfileHostHoldRules.toHold(store.forPlaylist(pl), hasStoredSignIn: signIns.hasStored)
-    eq(Set(who), ["kid", "guest"], "a route change holds every non-default profile with a stored sign-in")
+    let who = ProfileHostHoldRules.toHold(store.forPlaylist(pl))
+    eq(Set(who), ["kid", "guest"], "a route change holds every non-default profile")
 
     holds.recordIdentity(pl, DefaultIdentity(userId: 1, username: "admin")!)
     let rec = holds.hold(pl, profileIds: who, trustedHosts: R.hosts(base: "https://old.example", local: ""),
@@ -127,7 +126,7 @@ do {
     eq(rec?.expected, DefaultIdentity(userId: 1, username: "admin"), "the hold keeps the identity recorded before the change")
     eq(rec?.trustedHosts, ["https://old.example:443"], "the hold keeps the hosts from before the change")
     check(holds.isHeld("kid") && holds.isHeld("guest"), "both held")
-    check(!holds.isHeld("def") && !holds.isHeld("empty") && !holds.isHeld("elsewhere"), "default, no-sign-in, and other playlists are not held")
+    check(!holds.isHeld("def") && !holds.isHeld("elsewhere"), "the default profile and other playlists are not held")
 
     for use in ProfileSignIns.Use.allCases {
         check(signIns.apiKey("kid", for: use) == nil, "held key never reaches \(use.rawValue)")
@@ -535,7 +534,7 @@ do {
     holds.recordIdentity("P", owner)
 
     // A cloud-pulled address change with the Child active (routeWillChangeNow): held, kept active, nothing sent.
-    holds.hold("P", profileIds: ProfileHostHoldRules.toHold(store.forPlaylist("P"), hasStoredSignIn: ProfileSignIns(store: store, holds: holds).hasStored),
+    holds.hold("P", profileIds: ProfileHostHoldRules.toHold(store.forPlaylist("P")),
                trustedHosts: [R.hostKey("https://old.example")], route: R.key(base: "https://new.example", local: ""))
     check(holds.isHeld("child"), "the Child is held")
     eq(store.activeProfileId("P"), "child", "and stays the active profile (no switch)")
@@ -563,6 +562,27 @@ do {
     eq(SameServerCheck.decide(expected: holds2.record("P")?.expected, answers: [.user(owner)]), .lift, "the same server passes")
     eq(holds2.liftMatching("P").lifted, ["child"], "the Child's hold lifts (its tag is the snapshot)")
     eq(ProfileSignIns(store: store2, holds: holds2).apiKey("child", for: .requestOverlay), "K-CHILD", "and its own key is used again")
+}
+
+// MARK: - Every non-default profile is held, keyless ones included (follow-up 9)
+
+do {
+    let (ud, suite) = freshDefaults("keyless")
+    defer { ud.removePersistentDomain(forName: suite) }
+    let store = ProfileStore(defaults: ud, secrets: MemorySecretBox())
+    let holds = ProfileHostHoldStore(defaults: ud)
+    store.upsert(profile("def", "K", "owner", isDefault: true))
+    store.upsert(profile("a", "K", "anna"))
+    store.upsert(profile("b", "K", "ben"))
+    let signIns = ProfileSignIns(store: store, holds: holds)
+    check(!signIns.hasStored("a") && !signIns.hasStored("b"), "only keyless extra profiles")
+    check(holds.record("K") == nil, "not paused before the change")
+    holds.hold("K", profileIds: ProfileHostHoldRules.toHold(store.forPlaylist("K")), trustedHosts: [], route: "new")
+    check(holds.isHeld("a") && holds.isHeld("b") && !holds.isHeld("def"), "a route change holds the keyless profiles")
+    check(holds.record("K") != nil && holds.heldPlaylistIds.contains("K"), "so the roster pause starts for that playlist")
+    check(!DsyncRosterPause.writes(.profiles, paused: holds.record("K") != nil), "and the roster is not written")
+    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("a"), hasStoredSignIn: signIns.hasStored("a")), .signInAgain,
+       "picking a keyless held profile shows the sign-in form with the line")
 }
 
 print("\(checks) checks, \(failures) failures")

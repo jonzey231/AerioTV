@@ -155,10 +155,12 @@ enum SignInTag: Equatable, Sendable {
 }
 
 enum ProfileHostHoldRules {
-    /// Who a route change holds: every non-default profile with a sign-in
-    /// stored here. Profiles with no stored sign-in behave as before.
-    static func toHold(_ profiles: [DispatcharrProfile], hasStoredSignIn: (String) -> Bool) -> [String] {
-        profiles.filter { !$0.isDefault && hasStoredSignIn($0.id) }.map(\.id)
+    /// Who a route change holds: EVERY non-default profile of the playlist,
+    /// with or without a sign-in stored here (follow-up 9). A keyless held
+    /// profile behaves like any held one: picking it shows the sign-in form
+    /// with the line, and the roster pause runs while it is held.
+    static func toHold(_ profiles: [DispatcharrProfile]) -> [String] {
+        profiles.filter { !$0.isDefault }.map(\.id)
     }
 
     /// A passing check releases only the held profiles whose tag is the
