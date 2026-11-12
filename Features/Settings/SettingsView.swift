@@ -38,6 +38,25 @@ struct SettingsView: View {
     /// the observer fixes the cascade by forcing re-render on every
     /// theme mutation.
     @ObservedObject private var theme = ThemeManager.shared
+    /// Follow-up 12: a Child sees exactly Android's Child Settings (RoleRules
+    /// CHILD_SETTINGS_SECTIONS plus Manage Profiles); nothing about playlists.
+    @ObservedObject private var profileManager = ProfileManager.shared
+    private var isChild: Bool { profileManager.activeRoleNow == .child }
+    private func shows(_ d: SettingsDestination) -> Bool {
+        RoleRules.settingsSectionVisible(profileManager.activeRoleNow, d.rawValue)
+    }
+    /// The active Dispatcharr playlist, whose profiles Manage Profiles shows.
+    private var childPlaylistId: String? { DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString }
+    /// Where a Child lands on the two-pane layouts (Android: Live TV).
+    private static let childRoot = SettingsRoute.category(.liveTV)
+    /// Whether [route] may show for the active role; a Child's hidden pages land on its root.
+    private func allowed(_ route: SettingsRoute) -> Bool {
+        guard isChild else { return route != .category(.manageProfiles) }
+        switch route {
+        case .category(let d): return d == .manageProfiles || shows(d)
+        case .server, .editServer: return false
+        }
+    }
     // Stored order, kept for the model and for iCloud sync. Every
     // playlist list in Settings presents `sortedServers` (alphabetical)
     // instead; nothing writes `sortOrder` from this screen any more.
@@ -160,6 +179,33 @@ struct SettingsView: View {
                 _ = SettingsDeepLink.shared.consumePending()
                 applySettingsDeepLink(page)
             }
+            // The role became Child (or left it): close every page the new role cannot see.
+            .onChange(of: isChild) { _, _ in closeHiddenPages() }
+            .onAppear { closeHiddenPages() }
+    }
+
+    /// Follow-up 12: no page, sheet, or selection a Child may not see stays open.
+    private func closeHiddenPages() {
+        guard isChild else {
+            #if os(tvOS)
+            if tvSelection == .category(.manageProfiles) { tvSelection = .category(.playlists) }
+            #else
+            if padSelection == .category(.manageProfiles) { padSelection = .category(.playlists) }
+            #endif
+            return
+        }
+        serverToEdit = nil
+        serverToDelete = nil
+        showDeleteAlert = false
+        showAddServer = false
+        #if os(tvOS)
+        navPath = NavigationPath()
+        if !allowed(tvSelection) { tvSelection = Self.childRoot }
+        #else
+        showSetUpTv = false
+        phonePath = NavigationPath()
+        if let sel = padSelection, !allowed(sel) { padSelection = Self.childRoot }
+        #endif
     }
 
     // MARK: - Settings deep link
@@ -167,7 +213,15 @@ struct SettingsView: View {
     /// Drives the existing navigation for a `aerio://settings/<page>` URL.
     /// Unknown pages arrive here already folded into `.root`.
     @MainActor
-    private func applySettingsDeepLink(_ page: SettingsDeepLinkPage) {
+    private func applySettingsDeepLink(_ requested: SettingsDeepLinkPage) {
+        var page = requested
+        // A Child opens only its own pages; anything else lands on the Settings root.
+        if !RoleRules.deepLinkAllowed(profileManager.activeRoleNow, page.rawValue) {
+            debugLog("🔗 SettingsView: deep link page=\(page.rawValue) is not for a Child; Settings root")
+            page = .root
+        }
+        // Manage Profiles outside Child mode is the playlist page (its Profiles section).
+        if page == .manageProfiles && !isChild { page = .playlistDetail }
         let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
         // Edit Playlist may name a playlist other than the active one.
         let editTarget = SettingsDeepLink.shared.takeEditPlaylistID()
@@ -182,8 +236,12 @@ struct SettingsView: View {
             switch page {
             case .root:
                 navPath = NavigationPath()
-                tvSelection = .category(.playlists)
+                tvSelection = isChild ? Self.childRoot : .category(.playlists)
                 railReturnToken += 1
+            case .manageProfiles:
+                navPath = NavigationPath()
+                tvSelection = .category(.manageProfiles)
+                tvDetailFocusToken += 1
             case .playlistDetail:
                 navPath = NavigationPath()
                 if let server = activeServer { tvSelection = .server(server.id) }
@@ -208,7 +266,14 @@ struct SettingsView: View {
             switch page {
             case .root:
                 phonePath = NavigationPath()
-                padSelection = .category(.playlists)
+                padSelection = isChild ? Self.childRoot : .category(.playlists)
+            case .manageProfiles:
+                if isPad {
+                    padSelection = .category(.manageProfiles)
+                } else {
+                    phonePath = NavigationPath()
+                    phonePath.append(SettingsRoute.category(.manageProfiles))
+                }
             case .playlistDetail:
                 guard let server = activeServer else { return }
                 if isPad {
@@ -255,6 +320,7 @@ struct SettingsView: View {
     private var settingsNavigationStack: some View {
         #if os(tvOS)
         NavigationStack(path: $navPath) { settingsContent }
+            .id(isChild)
             // Expose the dismiss stack to any classic-pushed destination
             // that opts in via `.trackedAsClassicSettingsChild()`.
             .environmentObject(dismissStack)
@@ -316,7 +382,7 @@ struct SettingsView: View {
                     if split {
                         padSplitRoot(availableWidth: width)
                     } else {
-                        NavigationStack(path: $phonePath) { settingsContent }
+                        NavigationStack(path: $phonePath) { settingsContent }.id(isChild)
                     }
                 }
                 .frame(width: width, height: height)
@@ -326,7 +392,7 @@ struct SettingsView: View {
                 }
             }
         } else {
-            NavigationStack(path: $phonePath) { settingsContent }
+            NavigationStack(path: $phonePath) { settingsContent }.id(isChild)
         }
         #endif
     }
@@ -344,7 +410,7 @@ struct SettingsView: View {
     private func applyPendingTVRestore(_ reason: String, onMount: Bool) {
         guard let restore = TVSettingsNavState.shared.takeRestore(onMount: onMount) else { return }
         SettingsFocusLog.log("restore (\(reason)): \(restore.selection) panes=\(restore.focusInPanes) detail=\(restore.focusInDetail)")
-        tvSelection = restore.selection
+        tvSelection = allowed(restore.selection) ? restore.selection : Self.childRoot
         guard restore.focusInPanes else { return }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(250))
@@ -424,7 +490,8 @@ struct SettingsView: View {
                             .listRowBackground(Color.clear)
                             .listRowSeparator(.hidden)
                     }
-                    // MARK: - Playlists Section
+                    // MARK: - Playlists Section (never for a Child)
+                    if !isChild {
                     Section {
                         if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
                             SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
@@ -517,6 +584,7 @@ struct SettingsView: View {
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
                     #endif
+                    }
 
                     // MARK: - App
                     Section {
@@ -534,6 +602,7 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        if shows(.moviesTV) {
                         NavigationLink(destination: MoviesTVSettingsView()) {
                             SettingsRow(icon: "film.fill", iconColor: .accentPrimary,
                                         title: "Movies & TV Shows", subtitle: "Library refresh, posters")
@@ -541,6 +610,8 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        }
+                        if shows(.dvr) {
                         NavigationLink(destination: DVRSettingsView()) {
                             SettingsRow(icon: "record.circle", iconColor: .red,
                                         title: "DVR", subtitle: "Recordings, buffers, storage")
@@ -548,6 +619,7 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        }
                     } header: {
                         Text("App")
                             .sectionHeaderStyle()
@@ -566,6 +638,7 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        if shows(.general) {
                         NavigationLink(destination: GeneralSettingsView()) {
                             SettingsRow(icon: "switch.2", iconColor: .accentPrimary,
                                         title: "General", subtitle: "Startup, refresh, network")
@@ -573,6 +646,8 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        }
+                        if shows(.sync) {
                         NavigationLink(destination: SyncSettingsView()) {
                             SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
                                         title: "Sync", subtitle: syncValueLabel)
@@ -580,6 +655,7 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        }
                     } header: {
                         Text("Device")
                             .sectionHeaderStyle()
@@ -591,6 +667,7 @@ struct SettingsView: View {
 
                     // MARK: - Developer & About
                     Section {
+                        if shows(.developer) {
                         NavigationLink(destination: DeveloperSettingsView()) {
                             SettingsRow(icon: "ladybug.fill", iconColor: .accentSecondary,
                                         title: "Developer",
@@ -599,6 +676,7 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        }
                         NavigationLink(destination: AboutSettingsView()) {
                             SettingsRow(icon: "info.circle.fill", iconColor: .accentPrimary,
                                         title: "About", subtitle: AboutInfo.version)
@@ -611,6 +689,22 @@ struct SettingsView: View {
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
                     #endif
+
+                    // MARK: - Manage Profiles (a Child's only way out, Admin PIN)
+                    if isChild, let pid = childPlaylistId {
+                        Section {
+                            NavigationLink(destination: ChildManageProfilesView(playlistId: pid)) {
+                                ChildManageProfilesRow()
+                            }
+                            #if os(iOS)
+                            .buttonStyle(PressableButtonStyle())
+                            #endif
+                        }
+                        .listRowBackground(Color.cardBackground)
+                        #if os(iOS)
+                        .listSectionSeparator(.hidden)
+                        #endif
+                    }
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
@@ -671,7 +765,16 @@ struct SettingsView: View {
             // `aerio://settings/<page>` deep link; the visible rows still
             // push their destinations directly.
             .navigationDestination(for: SettingsRoute.self) { route in
+                if !allowed(route) {
+                    // Not for this role (a Child): back to the Settings root.
+                    Color.clear.onAppear {
+                        debugLog("SettingsView: route \(route) is hidden for this profile; popping to root")
+                        phonePath = NavigationPath()
+                    }
+                } else {
                 switch route {
+                case .category(.manageProfiles):
+                    if let pid = childPlaylistId { ChildManageProfilesView(playlistId: pid) }
                 case .category(.liveTV):         LiveTVSettingsView()
                 case .category(.player):         PlayerSettingsView()
                 case .category(.moviesTV):       MoviesTVSettingsView()
@@ -698,12 +801,19 @@ struct SettingsView: View {
                         phonePath = NavigationPath()
                     }
                 }
+                }
             }
             #endif
             #if os(tvOS)
             .navigationDestination(for: SettingsRoute.self) { route in
                 Group {
+                if !allowed(route) {
+                    // Not for this role (a Child): back to the Settings root.
+                    Color.clear.onAppear { navPath = NavigationPath() }
+                } else {
                 switch route {
+                case .category(.manageProfiles):
+                    if let pid = childPlaylistId { ChildManageProfilesView(playlistId: pid) }
                 case .category(.liveTV):         LiveTVSettingsView()
                 case .category(.player):         PlayerSettingsView()
                 case .category(.moviesTV):       MoviesTVSettingsView()
@@ -728,6 +838,7 @@ struct SettingsView: View {
                     // Rail/sidebar target; ServerDetailView remains a
                     // classic push today.
                     EmptyView()
+                }
                 }
             }
             .settingsPushLog("route \(route)")
@@ -854,7 +965,7 @@ struct SettingsView: View {
                 // (was a flat 340). Matches the Android tablet rail.
                 .frame(width: SettingsMetrics.sidebarWidth(forAvailableWidth: availableWidth))
             NavigationStack {
-                padDetail(for: padSelection ?? .category(.playlists))
+                padDetail(for: effectivePadSelection)
                     // Readable-width cap, centered, reusing the tvOS
                     // reading column. Panes narrower than the cap simply
                     // fill, so 600 to 839 pt is unaffected.
@@ -891,6 +1002,12 @@ struct SettingsView: View {
         } message: {
             Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
         }
+    }
+
+    /// The pane to show: the selection, or a Child's root when it may not see it.
+    private var effectivePadSelection: SettingsRoute {
+        let sel = padSelection ?? (isChild ? Self.childRoot : .category(.playlists))
+        return allowed(sel) ? sel : Self.childRoot
     }
 
     /// Sidebar: Playlists as an ordinary item (matching the tvOS rail
@@ -938,9 +1055,11 @@ struct SettingsView: View {
                 // sidebar copy rendered the same offer twice (Android tablet
                 // shows only the dock card).
 
+                if !isChild {
                 padSidebarRow(.playlists, icon: "rectangle.stack.fill", iconColor: .accentPrimary,
                               title: "Playlists",
                               subtitle: servers.first(where: { $0.isActive })?.name)
+                }
 
                 Text("App")
                     .scaledFont(.title3.weight(.semibold))
@@ -953,10 +1072,14 @@ struct SettingsView: View {
                               title: "Live TV", subtitle: "Guide, groups, badges, colors")
                 padSidebarRow(.player, icon: "play.rectangle.fill", iconColor: .accentPrimary,
                               title: "Player", subtitle: "Info card, rewind, gestures, multiview")
-                padSidebarRow(.moviesTV, icon: "film.fill", iconColor: .accentPrimary,
-                              title: "Movies & TV Shows", subtitle: "Library refresh, posters")
-                padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
-                              title: "DVR", subtitle: "Recordings, buffers, storage")
+                if shows(.moviesTV) {
+                    padSidebarRow(.moviesTV, icon: "film.fill", iconColor: .accentPrimary,
+                                  title: "Movies & TV Shows", subtitle: "Library refresh, posters")
+                }
+                if shows(.dvr) {
+                    padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
+                                  title: "DVR", subtitle: "Recordings, buffers, storage")
+                }
 
                 Text("Device")
                     .scaledFont(.title3.weight(.semibold))
@@ -967,19 +1090,29 @@ struct SettingsView: View {
 
                 padSidebarRow(.appearance, icon: "paintbrush.fill", iconColor: .accentPrimary,
                               title: "Appearance", subtitle: "Theme, text size, time format")
-                padSidebarRow(.general, icon: "switch.2", iconColor: .accentPrimary,
-                              title: "General", subtitle: "Startup, refresh, network")
-                padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
-                              title: "Sync", subtitle: syncValueLabel)
+                if shows(.general) {
+                    padSidebarRow(.general, icon: "switch.2", iconColor: .accentPrimary,
+                                  title: "General", subtitle: "Startup, refresh, network")
+                }
+                if shows(.sync) {
+                    padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
+                                  title: "Sync", subtitle: syncValueLabel)
+                }
 
                 Divider()
                     .background(Color.borderSubtle)
                     .padding(.vertical, 12)
 
-                padSidebarRow(.developer, icon: "ladybug.fill", iconColor: .accentSecondary,
-                              title: "Developer", subtitle: "Debug logging & diagnostics")
+                if shows(.developer) {
+                    padSidebarRow(.developer, icon: "ladybug.fill", iconColor: .accentSecondary,
+                                  title: "Developer", subtitle: "Debug logging & diagnostics")
+                }
                 padSidebarRow(.about, icon: "info.circle.fill", iconColor: .accentPrimary,
                               title: "About", subtitle: AboutInfo.version)
+                if isChild {
+                    padSidebarRow(.manageProfiles, icon: "person.2.badge.gearshape", iconColor: .accentPrimary,
+                                  title: "Manage Profiles", subtitle: "Switch profiles, Admin PIN")
+                }
             }
             .padding(.horizontal, 12)
             .padding(.top, 24)
@@ -1000,6 +1133,8 @@ struct SettingsView: View {
     @ViewBuilder
     private func padDetail(for route: SettingsRoute) -> some View {
         switch route {
+        case .category(.manageProfiles):
+            if let pid = childPlaylistId { ChildManageProfilesView(playlistId: pid) } else { Color.appBackground }
         case .category(.playlists):      padPlaylistsPane
         case .category(.liveTV):         LiveTVSettingsView()
         case .category(.player):         PlayerSettingsView()
@@ -1123,6 +1258,13 @@ struct SettingsView: View {
     /// pane (the deep-link screenshot path).
     @State private var tvDetailFocusToken = 0
     private var tvRailItems: [TVSettingsRailItem] {
+        // A Child sees only its sections, then Manage Profiles (follow-up 12).
+        allTVRailItems.filter { allowed($0.route) } + (isChild ? [TVSettingsRailItem(
+            id: "manage-profiles", route: .category(.manageProfiles), label: "Manage Profiles",
+            icon: "person.2.badge.gearshape", iconColor: .accentPrimary, subtitle: "Switch profiles, Admin PIN")] : [])
+    }
+
+    private var allTVRailItems: [TVSettingsRailItem] {
         var items: [TVSettingsRailItem] = []
         // Playlists is an ordinary tab: its pane lists the playlists like
         // every other category (user ruling 2026-08-04, replacing the
@@ -1189,8 +1331,11 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private func tvDetailPaneContent(for route: SettingsRoute) -> some View {
+    private func tvDetailPaneContent(for requested: SettingsRoute) -> some View {
+        let route = allowed(requested) ? requested : Self.childRoot
         switch route {
+        case .category(.manageProfiles):
+            if let pid = childPlaylistId { ChildManageProfilesView(playlistId: pid) } else { Color.appBackground }
         case .server(let id):
             if let server = servers.first(where: { $0.id == id }) {
                 ServerDetailView(server: server)

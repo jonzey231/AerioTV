@@ -521,3 +521,126 @@ struct ChannelProfilesFlow: View {
         }
     }
 }
+
+// MARK: - Manage Profiles for a Child (follow-up 12, Android ManageProfilesRow / ManageProfilesPage)
+
+/// The bottom of a Child's Settings: its only way out, behind an Admin PIN.
+struct ChildManageProfilesRow: View {
+    var body: some View {
+        SettingsRow(icon: "person.2.badge.gearshape", iconColor: .accentPrimary,
+                    title: "Manage Profiles", subtitle: "Switch profiles, Admin PIN")
+    }
+}
+
+/// Manage Profiles for a Child: an Admin or Standard PIN first, then the
+/// profile list (pick one to switch; a profile with its own PIN asks for it,
+/// except the one whose PIN opened the page), Add Profile, and the Device Admin
+/// PIN. Nothing about other profiles shows before the PIN.
+struct ChildManageProfilesView: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let playlistId: String
+    @ObservedObject private var manager = ProfileManager.shared
+    @State private var unlocked = false
+    @State private var flow: Flow?
+    @State private var status: String?
+
+    private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet }
+
+    var body: some View {
+        let profiles = manager.profilesByPlaylist[playlistId] ?? []
+        let activeId = manager.activeProfileIdNow(playlistId)
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: ProfileUI.s(8, 14)) {
+                    if !unlocked {
+                        Button {
+                            status = nil
+                            if manager.adminHasPin(playlistId) {
+                                flow = .adminPin
+                            } else {
+                                // No Admin PIN exists (an inconsistent state, e.g. after a sync): never strand the Child.
+                                debugLog("[PROFILE] manage profiles: no Admin PIN exists; opening")
+                                unlocked = true
+                            }
+                        } label: {
+                            Label("Manage Profiles", systemImage: "lock.fill").foregroundColor(.textPrimary)
+                        }
+                        .buttonStyle(ProfileRowButtonStyle())
+                        Text("Enter a PIN from an Admin or Standard profile to switch profiles.")
+                            .scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+                    } else {
+                        ForEach(profiles) { p in
+                            Button {
+                                guard p.id != activeId, !manager.switching else { return }
+                                status = nil
+                                flow = .switchTo(p)
+                            } label: {
+                                ProfileRowContent(profile: p, isActive: p.id == activeId, locked: manager.hasPin(p.id))
+                            }
+                            .buttonStyle(ProfileRowButtonStyle())
+                        }
+                        if manager.switching { ProgressView().tint(.accentPrimary) }
+                        // Behind the Admin PIN a parent can add their own profile (a kid-only device).
+                        Button {
+                            status = nil
+                            manager.pickerAddUnlocked = playlistId
+                            flow = .add
+                        } label: {
+                            Label("Add Profile", systemImage: "plus").foregroundColor(.accentPrimary)
+                        }
+                        .buttonStyle(ProfileRowButtonStyle())
+                        if manager.hasDeviceAdminPin(playlistId) {
+                            Button { status = nil; flow = .deviceSet } label: {
+                                Label("Change Device Admin PIN", systemImage: "lock.fill").foregroundColor(.textPrimary)
+                            }
+                            .buttonStyle(ProfileRowButtonStyle())
+                        }
+                    }
+                    if let status {
+                        Text(status).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor)
+                    }
+                }
+                .padding(.horizontal, ProfileUI.s(16, 60))
+                .padding(.vertical, ProfileUI.s(12, 40))
+            }
+            if let flow {
+                ProfileDialogHost {
+                    switch flow {
+                    case .adminPin:
+                        AdminPinFlow(playlistId: playlistId, onDismiss: { self.flow = nil }) {
+                            self.flow = nil
+                            unlocked = true
+                        }
+                    case .switchTo(let p):
+                        ProfileSwitchFlow(playlistId: playlistId, profile: p) { err in
+                            self.flow = nil
+                            status = err
+                        }
+                    case .add:
+                        AddProfileFlow(playlistId: playlistId) {
+                            self.flow = nil
+                            manager.pickerAddUnlocked = nil
+                        }
+                    case .deviceSet:
+                        DeviceAdminPinSetFlow(playlistId: playlistId) { err in
+                            self.flow = nil
+                            status = err
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Manage Profiles")
+        // The same title treatment as the other Settings pages (About, Live TV).
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        // Locked again whenever the active profile is (again) a Child.
+        .onChange(of: manager.activeRoleNow) { _, role in if role == .child { unlocked = false } }
+        .onAppear { manager.notePickerOpened(playlistId, "switch") }
+    }
+}

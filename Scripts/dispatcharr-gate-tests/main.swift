@@ -529,15 +529,46 @@ do {
        DispatcharrRateLimitCopy.keyRejectedBody(playlistName: "Home", passwordToo: true), "other bodies unchanged")
 }
 
+// Follow-up 12: a Child's prompt body names only what it can do (Android parity, trimmed, no new words).
+do {
+    typealias C = DispatcharrRateLimitCopy
+    eq(C.keyRejectedBody(playlistName: "Home", passwordToo: false, canSignIn: true, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect.",
+       "default Child, key body: no Edit Playlist clause")
+    eq(C.keyRejectedBody(playlistName: "Home", passwordToo: true, canSignIn: true, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the sign-in for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect.",
+       "default Child, password body: no Edit Playlist clause")
+    eq(C.keyRejectedBody(playlistName: "Home", passwordToo: false, canSignIn: false, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server.",
+       "non-default Child, key body: ends after the server sentence")
+    eq(C.keyRejectedBody(playlistName: " ", passwordToo: true, canSignIn: false, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the sign-in for this playlist. It may have been changed on the server.",
+       "non-default Child, password body, blank name")
+    eq(C.keyRejectedBody(playlistName: "Home", passwordToo: false, canSignIn: false, canEditPlaylist: true),
+       C.keyRejectedBody(playlistName: "Home", passwordToo: false), "not a Child (app behind the launch PIN): body unchanged")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: false, canSignIn: false, canEditPlaylist: false),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server.", "prompt body passes the Child trim through")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: true, canSignIn: false, canEditPlaylist: false),
+       KeySignInCopy.noAPIKey, "no-key body unchanged for a Child")
+    for body in [C.keyRejectedBody(playlistName: "Home", passwordToo: false, canSignIn: true, canEditPlaylist: false),
+                 C.keyRejectedBody(playlistName: "Home", passwordToo: true, canSignIn: false, canEditPlaylist: false)] {
+        check(!body.contains("Edit Playlist"), "a Child's body never names Edit Playlist")
+    }
+}
+
 // Sign in from the prompt (2026-11-11): buttons per device, the form, its messages.
 do {
     typealias K = KeySignInCopy
-    eq(K.promptActions(isTV: false, canSignIn: true), [.signIn, .editPlaylist, .notNow], "phone prompt: Sign In, Edit Playlist, Not Now")
-    eq(K.promptActions(isTV: true, canSignIn: true), [.updateFromPhone, .signIn, .notNow], "TV prompt: Update from Phone, Sign In with Remote, Not Now")
-    eq(K.promptActions(isTV: false, canSignIn: false), [.editPlaylist, .notNow], "Child or locked phone: no Sign In")
-    eq(K.promptActions(isTV: true, canSignIn: false), [.updateFromPhone, .notNow], "Child or locked TV: no Sign In with Remote")
-    eq(K.promptActions(isTV: false, canSignIn: true).map { K.label($0, isTV: false) }, ["Sign In", "Edit Playlist", "Not Now"], "phone labels")
-    eq(K.promptActions(isTV: true, canSignIn: true).map { K.label($0, isTV: true) }, ["Update from Phone", "Sign In with Remote", "Not Now"], "TV labels")
+    eq(K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: true), [.signIn, .editPlaylist, .notNow], "phone prompt: Sign In, Edit Playlist, Not Now")
+    eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true), [.updateFromPhone, .signIn, .notNow], "TV prompt: Update from Phone, Sign In with Remote, Not Now")
+    eq(K.promptActions(isTV: false, canSignIn: false, canEditPlaylist: true), [.editPlaylist, .notNow], "locked phone: no Sign In, Edit Playlist kept")
+    eq(K.promptActions(isTV: true, canSignIn: false, canEditPlaylist: true), [.updateFromPhone, .notNow], "locked TV: no Sign In with Remote")
+    // Follow-up 12: a Child gets neither Sign In nor Edit Playlist (Android parity).
+    eq(K.promptActions(isTV: false, canSignIn: false, canEditPlaylist: false), [.notNow], "Child phone: Not Now only")
+    eq(K.promptActions(isTV: true, canSignIn: false, canEditPlaylist: false), [.updateFromPhone, .notNow], "Child TV: no Edit Playlist there anyway")
+    check(!K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: false).contains(.editPlaylist), "no Edit Playlist when it is not allowed")
+    eq(K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: true).map { K.label($0, isTV: false) }, ["Sign In", "Edit Playlist", "Not Now"], "phone labels")
+    eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true).map { K.label($0, isTV: true) }, ["Update from Phone", "Sign In with Remote", "Not Now"], "TV labels")
     eq(K.formTitle, "Sign in to Dispatcharr", "form title")
     eq([K.username, K.password, K.submit, K.cancel], ["Username", "Password", "Sign In", "Cancel"], "form fields and buttons")
     eq(K.footnote, "AerioTV keeps your password on this device so it can reconnect if the key changes again.", "footnote")

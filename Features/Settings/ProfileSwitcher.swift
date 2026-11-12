@@ -18,7 +18,9 @@ private func activeProfilesPlaylist() -> String? {
 @MainActor
 func openManageProfiles() {
     debugLog("[PROFILE] manage profiles from the switcher")
-    if let url = URL(string: "aerio://settings/\(SettingsDeepLinkPage.playlistDetail.rawValue)") {
+    // A Child has no playlist page (follow-up 12): its own PIN-gated Manage Profiles.
+    let page: SettingsDeepLinkPage = ProfileManager.shared.activeRoleNow == .child ? .manageProfiles : .playlistDetail
+    if let url = URL(string: "aerio://settings/\(page.rawValue)") {
         SettingsDeepLink.handle(url)
     }
 }

@@ -69,16 +69,22 @@ enum DispatcharrRateLimitCopy {
 
     /// Body of the rejected-key prompt (key-only playlist, or a password
     /// playlist whose re-login was refused too). Blank name: "this playlist".
-    /// Same on every device (sign-in from the prompt, 2026-11-11).
-    static func keyRejectedBody(playlistName: String, passwordToo: Bool) -> String {
+    /// Same on every device (sign-in from the prompt, 2026-11-11). A Child
+    /// (no Edit Playlist, follow-up 12) reads only the actions it can take, as
+    /// on Android: no Edit Playlist clause, and no sign-in sentence when it
+    /// cannot sign in either (a non-default Child). Trimmed only, no new words.
+    static func keyRejectedBody(playlistName: String, passwordToo: Bool,
+                                canSignIn: Bool = true, canEditPlaylist: Bool = true) -> String {
         let trimmed = playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = trimmed.isEmpty ? "this playlist" : playlistName
-        if passwordToo {
-            return "Dispatcharr no longer accepts the sign-in for \(name). It may have been changed on the server. "
-                + "Sign in with your Dispatcharr username and password to reconnect, or enter the current details in Edit Playlist."
+        let lead = passwordToo
+            ? "Dispatcharr no longer accepts the sign-in for \(name). It may have been changed on the server."
+            : "Dispatcharr no longer accepts the API key for \(name). It may have been changed on the server."
+        let signIn = "Sign in with your Dispatcharr username and password to reconnect"
+        if canEditPlaylist {
+            return lead + " " + signIn + (passwordToo ? ", or enter the current details in Edit Playlist." : ", or enter the current key in Edit Playlist.")
         }
-        return "Dispatcharr no longer accepts the API key for \(name). It may have been changed on the server. "
-            + "Sign in with your Dispatcharr username and password to reconnect, or enter the current key in Edit Playlist."
+        return canSignIn ? lead + " " + signIn + "." : lead
     }
 
     /// Sender status line while it checks the key it is about to send.
@@ -94,8 +100,11 @@ extension DispatcharrRateLimitCopy {
     /// The rejected-key prompt's body for what happened: the account has no
     /// API key (a stored password signed in, but the key was removed on the
     /// server), else the key-only or password-too body.
-    static func keyRejectedPromptBody(playlistName: String, passwordToo: Bool, noKey: Bool) -> String {
-        noKey ? KeySignInCopy.noAPIKey : keyRejectedBody(playlistName: playlistName, passwordToo: passwordToo)
+    static func keyRejectedPromptBody(playlistName: String, passwordToo: Bool, noKey: Bool,
+                                      canSignIn: Bool = true, canEditPlaylist: Bool = true) -> String {
+        noKey ? KeySignInCopy.noAPIKey
+            : keyRejectedBody(playlistName: playlistName, passwordToo: passwordToo,
+                              canSignIn: canSignIn, canEditPlaylist: canEditPlaylist)
     }
 }
 
@@ -139,10 +148,12 @@ enum KeySignInCopy {
     /// The prompt's buttons, in order. Phones and tablets: Sign In (primary),
     /// Edit Playlist, Not Now. TVs: Update from Phone (primary, default
     /// focus), Sign In with Remote, Not Now. A profile that may not open the
-    /// form (a Child, or the app behind the launch PIN) gets no sign-in button.
-    static func promptActions(isTV: Bool, canSignIn: Bool) -> [PromptAction] {
+    /// form (a Child, or the app behind the launch PIN) gets no sign-in button,
+    /// and a Child gets no Edit Playlist either (follow-up 12: a Child never
+    /// reaches a playlist's settings, as on Android).
+    static func promptActions(isTV: Bool, canSignIn: Bool, canEditPlaylist: Bool) -> [PromptAction] {
         if isTV { return canSignIn ? [.updateFromPhone, .signIn, .notNow] : [.updateFromPhone, .notNow] }
-        return canSignIn ? [.signIn, .editPlaylist, .notNow] : [.editPlaylist, .notNow]
+        return (canSignIn ? [.signIn] : []) + (canEditPlaylist ? [.editPlaylist] : []) + [.notNow]
     }
 
     static func label(_ a: PromptAction, isTV: Bool) -> String {

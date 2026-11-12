@@ -40,6 +40,9 @@ enum SettingsDestination: String, Hashable, CaseIterable {
     // Last section
     case developer      = "developer"
     case about          = "about"
+    /// A Child's only Settings way out (follow-up 12, Android ManageProfilesPage):
+    /// an Admin or Standard PIN, then the profile list. Shown to a Child only.
+    case manageProfiles = "manage-profiles"
 }
 
 /// Everything the Settings navigation can route to. `.category` covers the

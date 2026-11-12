@@ -75,20 +75,24 @@ final class DispatcharrKeyPromptModel: ObservableObject {
             }
             return
         }
-        let alert = UIAlertController(
-            title: DispatcharrRateLimitCopy.keyRejectedTitle,
-            message: DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: p.playlistName,
-                                                                    passwordToo: p.passwordToo, noKey: p.noKey),
-            preferredStyle: .alert)
         // Buttons per device (KeySignInCopy.promptActions): iPhone and iPad
         // Sign In (preferred), Edit Playlist, Not Now; Apple TV Update from
-        // Phone (preferred, default focus), Sign In with Remote, Not Now.
+        // Phone (preferred, default focus), Sign In with Remote, Not Now. A
+        // Child gets no Edit Playlist, and its body names only what it can do.
         #if os(tvOS)
         let isTV = true
         #else
         let isTV = false
         #endif
-        let actions = KeySignInCopy.promptActions(isTV: isTV, canSignIn: KeySignInGate.canOpen(playlistID: p.playlistID))
+        let canSignIn = KeySignInGate.canOpen(playlistID: p.playlistID)
+        let canEdit = KeySignInGate.canEditPlaylist(playlistID: p.playlistID)
+        let alert = UIAlertController(
+            title: DispatcharrRateLimitCopy.keyRejectedTitle,
+            message: DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: p.playlistName,
+                                                                    passwordToo: p.passwordToo, noKey: p.noKey,
+                                                                    canSignIn: canSignIn, canEditPlaylist: canEdit),
+            preferredStyle: .alert)
+        let actions = KeySignInCopy.promptActions(isTV: isTV, canSignIn: canSignIn, canEditPlaylist: canEdit)
         for (i, a) in actions.enumerated() {
             let action = UIAlertAction(title: KeySignInCopy.label(a, isTV: isTV), style: a == .notNow ? .cancel : .default) { _ in
                 Task { @MainActor in
@@ -230,6 +234,12 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     }
 
     func editPlaylist(_ p: DispatcharrRequestGate.Prompt) {
+        // A Child never opens a playlist's settings (the button is hidden; this
+        // covers a prompt that went up before the switch to the Child).
+        guard KeySignInGate.canEditPlaylist(playlistID: p.playlistID) else {
+            debugLog("[AUTH] Sign-in not accepted prompt: Edit Playlist refused for a Child")
+            return
+        }
         debugLog("[AUTH] Sign-in not accepted prompt: Edit Playlist for \(p.playlistID.prefix(8))")
         shown = nil
         shownPrompt = nil
@@ -258,6 +268,13 @@ enum KeySignInGate {
         guard pm.launchGate == nil else { return false }
         let active = pm.activeProfile(playlistID)
         return SetupProfileRules.canSetUpTv(activeRole: active?.effectiveRole.wire, activeIsDefault: active?.isDefault)
+    }
+
+    /// Edit Playlist: never while a Child is active, on the app or on that playlist
+    /// (RoleRules.playlistsVisible, the same rule that hides the Playlists block).
+    static func canEditPlaylist(playlistID: String) -> Bool {
+        let pm = ProfileManager.shared
+        return RoleRules.playlistsVisible(pm.activeRoleNow) && RoleRules.playlistsVisible(pm.activeRole(playlistID))
     }
 }
 

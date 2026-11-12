@@ -41,6 +41,8 @@ enum SettingsDeepLinkPage: String, CaseIterable {
     case playlistDetail = "playlist-detail"
     /// Edit Playlist for the active server.
     case editPlaylist   = "edit-playlist"
+    /// Manage Profiles: a Child's PIN-gated page; anyone else's is the playlist page.
+    case manageProfiles = "manage-profiles"
 
     /// The Settings category this page maps to, or nil for the two
     /// playlist pages (which need the active server's identity) and for
@@ -58,7 +60,7 @@ enum SettingsDeepLinkPage: String, CaseIterable {
         case .sync:          return .sync
         case .developer:     return .developer
         case .about:         return .about
-        case .root, .playlistDetail, .editPlaylist:
+        case .root, .playlistDetail, .editPlaylist, .manageProfiles:
             return nil
         }
     }

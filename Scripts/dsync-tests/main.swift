@@ -877,6 +877,27 @@ do {
     for s in ["LiveTV", "Player", "Appearance", "About"] { check(RoleRules.sectionVisible(C, s), "child sees \(s)") }
     for s in ["DvrSettings", "Sync", "Developer"] { check(!RoleRules.sectionVisible(C, s), "child hides \(s)") }
     check(RoleRules.deepLinkAllowed(C, "LiveTV") && !RoleRules.deepLinkAllowed(C, "Sync"), "child deep links")
+    // Follow-up 12: Apple's Settings for a Child match Android's exactly.
+    let childPanes = SettingsDestination.allCases.filter { RoleRules.settingsSectionVisible(C, $0.rawValue) }
+    eq(Set(childPanes), [.liveTV, .player, .appearance, .about], "child Settings panes: Live TV, Player, Appearance, About")
+    eq(childPanes.count, RoleRules.CHILD_SECTIONS.count, "same count as Android CHILD_SECTIONS")
+    for d in SettingsDestination.allCases {
+        check(RoleRules.settingsSectionVisible(U, d.rawValue) && RoleRules.settingsSectionVisible(A, d.rawValue)
+              && RoleRules.settingsSectionVisible(nil, d.rawValue), "full access and no profile see \(d.rawValue)")
+    }
+    for d: SettingsDestination in [.playlists, .moviesTV, .dvr, .general, .remoteControl, .sync, .syncCategories, .developer] {
+        check(!RoleRules.settingsSectionVisible(C, d.rawValue), "child hides \(d.rawValue)")
+    }
+    check(!RoleRules.playlistsVisible(C) && RoleRules.playlistsVisible(U) && RoleRules.playlistsVisible(nil), "Playlists block hidden for a Child only")
+    let childLinks = SettingsDeepLinkPage.allCases.filter { RoleRules.deepLinkAllowed(C, $0.rawValue) }
+    eq(Set(childLinks), [.root, .livetv, .player, .appearance, .about, .manageProfiles], "child deep links: root, its four panes, Manage Profiles")
+    for page: SettingsDeepLinkPage in [.playlists, .playlistDetail, .editPlaylist, .sync, .general, .movies, .dvr, .remote, .developer] {
+        check(!RoleRules.deepLinkAllowed(C, page.rawValue), "child deep link \(page.rawValue) lands on the root")
+    }
+    check(SettingsDeepLinkPage.allCases.allSatisfy { RoleRules.deepLinkAllowed(U, $0.rawValue) }, "Standard opens every deep link")
+    eq(SettingsDeepLinkPage(rawValue: "manage-profiles"), .manageProfiles, "manage-profiles link spelling")
+    check(SettingsDeepLinkPage.manageProfiles.category == nil, "Manage Profiles routes by role, not a category")
+    check(RoleRules.deepLinkAllowed(C, " Manage-Profiles "), "deep link page trimmed and lowercased")
     let holders = [RoleRules.PinHolder(id: "a", role: A, hasPin: true), RoleRules.PinHolder(id: "u1", role: U, hasPin: false),
                    RoleRules.PinHolder(id: "me", role: A, hasPin: false, isActor: true), RoleRules.PinHolder(id: "c", role: C, hasPin: false),
                    RoleRules.PinHolder(id: "u2", role: U, hasPin: false)]

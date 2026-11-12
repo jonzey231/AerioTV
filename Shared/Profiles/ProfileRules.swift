@@ -57,6 +57,18 @@ enum RoleRules {
     static func isFullAccess(_ role: ProfileRole?) -> Bool { role != nil && role != .child }
     static func canSeeSwitcher(_ active: ProfileRole?) -> Bool { active != .child }
     static func canManageProfiles(_ active: ProfileRole?) -> Bool { active != .child }
+
+    /// Settings for a Child, exactly Android's CHILD_SECTIONS (below) in Apple's
+    /// SettingsDestination raw values (follow-up 12): Live TV, Player, Appearance,
+    /// and About, plus Manage Profiles, the PIN-gated way out. Everything else
+    /// (the Playlists block and every playlist page, Movies and TV Shows, DVR,
+    /// General, Remote Control, Sync, Developer) is hidden. Deep links use
+    /// deepLinkAllowed and the Playlists block playlistsVisible.
+    static let CHILD_SETTINGS_SECTIONS: Set<String> = ["live-tv", "player", "appearance", "about"]
+
+    static func settingsSectionVisible(_ active: ProfileRole?, _ section: String) -> Bool {
+        active != .child || CHILD_SETTINGS_SECTIONS.contains(section)
+    }
     static func canChangeRoles(_ active: ProfileRole?) -> Bool { isFullAccess(active) }
 
     enum AddPath: Sendable { case serverList, manual }
