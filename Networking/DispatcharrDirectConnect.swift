@@ -598,7 +598,8 @@ extension DispatcharrAPI {
     static func login(baseURL: String,
                       username: String,
                       password: String,
-                      userAgent: String = DeviceInfo.defaultUserAgent) async throws -> DispatcharrJWTPair {
+                      userAgent: String = DeviceInfo.defaultUserAgent,
+                      heldCheck: Bool = false) async throws -> DispatcharrJWTPair {
         // v1.7.x diagnostic: log every login attempt + outcome so a
         // user with "can't sign in" reports can capture the exact
         // failure mode in Console.app. Neither the password nor the
@@ -624,6 +625,7 @@ extension DispatcharrAPI {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if heldCheck { DispatcharrHTTPGate.markHeldCheck(&request) }
         let body: [String: String] = ["username": username, "password": password]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
@@ -736,6 +738,7 @@ extension DispatcharrAPI {
         for (key, value) in headersForUserDetail() {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        if heldCheck { DispatcharrHTTPGate.markHeldCheck(&request) }
         // Through the key broker (2026-11-10, Android parity): the
         // permissions probe re-runs this from the DVR tab's 30 s refresh,
         // and a 401 here used to count as an ordinary failure, so a dead key

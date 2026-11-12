@@ -29,6 +29,12 @@ enum DispatcharrHTTPGate {
         request.setValue("1", forHTTPHeaderField: keyCheckHeader)
     }
 
+    /// Let this request reach a held playlist's address: the same-server check
+    /// and the held profile's sign-in form only (ProfileHostHold).
+    static func markHeldCheck(_ request: inout URLRequest) {
+        request.setValue("1", forHTTPHeaderField: DispatcharrRequestGate.HELD_CHECK_HEADER)
+    }
+
     /// Launch: a call carrying a key the iCloud credential merge may
     /// replace waits for that merge, bounded (CredentialMergeBarrier). The
     /// gate below then sends the adopted key in its place.
@@ -47,6 +53,8 @@ enum DispatcharrHTTPGate {
         var req = request
         let bypass = req.value(forHTTPHeaderField: keyCheckHeader) != nil
         if bypass { req.setValue(nil, forHTTPHeaderField: keyCheckHeader) }
+        let heldCheck = req.value(forHTTPHeaderField: DispatcharrRequestGate.HELD_CHECK_HEADER) != nil
+        if heldCheck { req.setValue(nil, forHTTPHeaderField: DispatcharrRequestGate.HELD_CHECK_HEADER) }
         guard let url = req.url else { return req }
         let method = req.httpMethod ?? "GET"
         let gate = DispatcharrRequestGate.shared
@@ -58,11 +66,14 @@ enum DispatcharrHTTPGate {
         }
         let sentKey = DispatcharrRequestGate.requestApiKey(xApiKey: req.value(forHTTPHeaderField: "X-API-Key"),
                                                            authorization: req.value(forHTTPHeaderField: "Authorization"))
-        // A held profile kept active (ProfileHostHold): nothing goes out, explicit key check or not.
-        if sentKey == DispatcharrRequestGate.HELD_PROFILE_KEY {
+        // A held profile kept active (a Child after a server change, ProfileHostHold): nothing
+        // goes to its playlist's addresses (as it or as the default profile), explicit key
+        // check or not, except the same-server check and its sign-in form. The existing
+        // "can't reach the server" state shows.
+        if sentKey == DispatcharrRequestGate.HELD_PROFILE_KEY || (!heldCheck && gate.isHeldServer(url.absoluteString)) {
             SkipLog.note("[PROFILE-HOST] skipped \(method) \(url.path): the active profile is held",
                          bucket: "held|\(DispatcharrRequestGate.serverKey(url.absoluteString))")
-            throw DispatcharrGateError.keyRejected
+            throw URLError(.cannotConnectToHost)
         }
         if !bypass, let key = sentKey, gate.isKeyRejected(key) {
             SkipLog.note("[AUTH] skipped \(method) \(url.path): this API key was rejected by the server; waiting for Edit Playlist",

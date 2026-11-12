@@ -2069,6 +2069,8 @@ struct XtreamSeriesItem: Decodable, Identifiable {
 
 // MARK: - Dispatcharr Native API
 struct DispatcharrAPI {
+    /// The same-server check or a held profile's sign-in form: may reach a held playlist's address.
+    var heldCheck = false
     enum Auth {
         /// Bearer-with-API-key, the "bearer" shape inside
         /// `DispatcharrAuthHeaderMode.bearer`. Sends

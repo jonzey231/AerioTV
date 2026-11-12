@@ -547,6 +547,15 @@ do {
     check(gate.isKeyRejected(DispatcharrRequestGate.HELD_PROFILE_KEY), "every request with the placeholder stops locally")
     eq(StreamKeyGate.headersForOpen(["X-API-Key": DispatcharrRequestGate.HELD_PROFILE_KEY], gate: gate), .held, "no stream opens")
     check(gate.prompt == nil && !gate.isPlaylistRejected("P"), "and no rejected-key prompt for it")
+    // Nor as the default profile: every request to the playlist's addresses stops at the gate
+    // (only the same-server check and the held sign-in form, marked HELD_CHECK_HEADER, go through).
+    gate.holdServers(playlistID: "P", [DispatcharrRequestGate.serverKey("https://new.example"),
+                                       DispatcharrRequestGate.serverKey("http://192.168.1.20:9191")])
+    check(gate.isHeldServer("https://new.example/api/channels/channels/"), "a request to the new server URL stops")
+    check(gate.isHeldServer("http://192.168.1.20:9191/api/accounts/users/me/"), "a request to the Local URL stops")
+    check(!gate.isHeldServer("https://other.example/api/"), "another server is untouched")
+    gate.releaseServers(playlistID: "P")
+    check(!gate.isHeldServer("https://new.example/api/channels/channels/"), "released when the hold lifts")
 
     // Relaunch: still the active profile, still held; the restore keeps it under its own rules.
     let store2 = ProfileStore(defaults: ud, secrets: secrets)

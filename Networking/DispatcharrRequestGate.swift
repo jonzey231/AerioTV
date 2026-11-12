@@ -291,6 +291,34 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// sends its held key nor falls back to the default profile's.
     static let HELD_PROFILE_KEY = "aerio-held-profile"
 
+    /// Marks the only requests that may reach a held playlist's addresses: the
+    /// same-server check and the held profile's sign-in form. Stripped before sending.
+    static let HELD_CHECK_HEADER = "X-Aerio-Held-Check"
+
+    /// Playlist id -> its server keys ("host:port") while a held profile is
+    /// its active one (a Child after a server change).
+    private var heldServers: [String: Set<String>] = [:]
+
+    /// While a held profile is [playlistID]'s active one, every Dispatcharr
+    /// request to [serverKeys] stops here unless marked HELD_CHECK_HEADER, so
+    /// nothing goes out as the held profile or as the default profile.
+    func holdServers(playlistID: String, _ serverKeys: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        heldServers[playlistID] = serverKeys.isEmpty ? nil : serverKeys
+    }
+
+    func releaseServers(playlistID: String) {
+        lock.lock(); defer { lock.unlock() }
+        heldServers[playlistID] = nil
+    }
+
+    /// True when a request to [url] must stop: it is a held playlist's address.
+    func isHeldServer(_ url: String) -> Bool {
+        let key = Self.serverKey(url)
+        lock.lock(); defer { lock.unlock() }
+        return heldServers.values.contains { $0.contains(key) }
+    }
+
     /// True while `key` is known rejected (any playlist), or is the held-profile placeholder.
     func isKeyRejected(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)

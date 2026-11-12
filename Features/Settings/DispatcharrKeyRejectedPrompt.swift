@@ -329,8 +329,11 @@ enum KeySignInService {
         let base = server.effectiveBaseURL
         let ua = server.effectiveUserAgent
         do {
-            let pair = try await DispatcharrAPI.login(baseURL: base, username: username, password: password, userAgent: ua)
-            let user = try await DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua).fetchCurrentUser()
+            // The held sign-in form may reach a held playlist's address (ProfileHostHold).
+            let pair = try await DispatcharrAPI.login(baseURL: base, username: username, password: password, userAgent: ua, heldCheck: true)
+            var meApi = DispatcharrAPI(baseURL: base, auth: .bearer(pair.access), userAgent: ua)
+            meApi.heldCheck = true
+            let user = try await meApi.fetchCurrentUser()
             // The profile is one Dispatcharr user: another account's sign-in is not its sign-in.
             guard user.username.caseInsensitiveCompare(profile.username) == .orderedSame else {
                 debugLog("[AUTH] \(tag): signed in as a different user than the profile's")

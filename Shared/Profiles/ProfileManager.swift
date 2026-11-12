@@ -131,6 +131,7 @@ final class ProfileManager: ObservableObject {
         for pid in by.keys { if let a = activeProfileIdNow(pid) { act[pid] = a } }
         if act != activeProfileIds { activeProfileIds = act }
         refreshRosterPause()
+        refreshHeldServers()
         var s: [String: [ProfileRow]] = [:]
         for (pid, rows) in rosterRows {
             // No suggestions while the playlist's roster sync is paused (a held profile).
@@ -147,6 +148,25 @@ final class ProfileManager: ObservableObject {
     func rosterSyncPaused(_ playlistId: String) -> Bool { holds.record(playlistId) != nil }
 
     private var rosterPaused = Set<String>()
+    private var heldServerPlaylists = Set<String>()
+
+    /// While a held profile is a playlist's active one (a Child after a
+    /// server change, follow-up 8), every Dispatcharr request to that
+    /// playlist's addresses stops at the request gate, so nothing goes out
+    /// as the held profile or as the default profile; only the same-server
+    /// check and the held sign-in form get through.
+    private func refreshHeldServers() {
+        var now = Set<String>()
+        for pid in holds.heldPlaylistIds {
+            guard let a = store.activeProfileId(pid), holds.isHeld(a), let s = DsyncLocal.server(pid) else { continue }
+            let keys = Set([s.normalizedBaseURL, s.localURL.isEmpty ? "" : s.normalizedLocalURL]
+                .filter { !$0.isEmpty }.map { DispatcharrRequestGate.serverKey($0) })
+            DispatcharrRequestGate.shared.holdServers(playlistID: pid, keys)
+            now.insert(pid)
+        }
+        for pid in heldServerPlaylists.subtracting(now) { DispatcharrRequestGate.shared.releaseServers(playlistID: pid) }
+        heldServerPlaylists = now
+    }
 
     /// Logs the pause and the resume once each; a resume asks Dispatcharr Sync to merge the roster again.
     private func refreshRosterPause() {
@@ -239,6 +259,9 @@ final class ProfileManager: ObservableObject {
             // left for the default profile before anything loads as it.
             for pid in Set(store.profiles.map(\.playlistId)) { await leaveHeldProfile(pid) }
             await activePlaylistMaybeChanged()
+            // Every start runs the same-server check for a playlist on hold (a held Child
+            // makes no default users/me of its own to trigger it).
+            for pid in holds.heldPlaylistIds.sorted() { await recheckHostHold(pid) }
             let ids = store.profiles.filter { !$0.isDefault }.map(\.id)
             let n = settings.seedExistingOnce(ids, source: settings.capture())
             if n > 0 { debugLog("[PROFILE] settings seeded for \(n) existing profile(s)") }
@@ -1391,6 +1414,8 @@ final class ProfileManager: ObservableObject {
     /// successful default users/me. One check per playlist at a time.
     func recheckHostHold(_ playlistId: String) async {
         guard holds.record(playlistId) != nil else { return }
+        // The address may have just been written: block the new one too.
+        refreshHeldServers()
         guard checking.insert(playlistId).inserted else {
             checkAgain.insert(playlistId)
             return
@@ -1424,7 +1449,9 @@ final class ProfileManager: ObservableObject {
         var answers: [SameServerCheck.Answer] = []
         for url in targets {
             do {
-                let me = try await DispatcharrAPI(baseURL: url, auth: .apiKey(key), userAgent: ua, authMode: mode).fetchCurrentUser()
+                var api = DispatcharrAPI(baseURL: url, auth: .apiKey(key), userAgent: ua, authMode: mode)
+                api.heldCheck = true
+                let me = try await api.fetchCurrentUser()
                 answers.append(DefaultIdentity(userId: me.id, username: me.username).map { .user($0) } ?? .failed("error"))
             } catch {
                 answers.append(.failed(Self.checkFailure(error)))
