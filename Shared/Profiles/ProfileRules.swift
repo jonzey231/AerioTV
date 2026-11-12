@@ -597,3 +597,22 @@ enum LaunchLockRules {
         locked && scenesShowingGate < max(scenes, 1)
     }
 }
+
+// MARK: - Live TV landing group (Android dd2bb36f)
+
+/// Where Live TV lands at launch, on a profile switch, and on a playlist add or
+/// switch: the pinned Default Group when it resolves (a group shown on this
+/// playlist, or a collection), else All (the fallback). The group already on
+/// screen is never kept. An "All" pin is stored as "" and lands on All.
+enum LiveTVLanding {
+    static func group(pin: String, shown: [String], fallback: String) -> String {
+        let p = pin.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !p.isEmpty && (shown.contains(p) || p.hasPrefix("collection:")) { return p }
+        return fallback
+    }
+
+    /// The log line for one landing decision.
+    static func logLine(reason: String, group: String, pin: String) -> String {
+        "[GROUPS] \(reason) landing group=\(group) (default=\(pin.isEmpty ? "unset" : "set"))"
+    }
+}

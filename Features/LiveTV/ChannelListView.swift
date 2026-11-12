@@ -577,6 +577,10 @@ struct ChannelListView: View {
     /// Empty = All. Applied once per playlist load.
     private let defaultChannelGroupKey = DefaultChannelGroupStore.key
     @State private var defaultGroupApplied = false
+    /// Why the next landing runs (launch, switch, playlist, sync), for its log line.
+    @State private var landingReason = "launch"
+    /// A playlist add or switch: the next landing waits for the new playlist's channels.
+    @State private var landingAwaitsChannels = false
     /// The group the list landed on when the default was last decided.
     @State private var landingGroup: String = "All"
     /// Mirrors the stored default so the pinned pill / drawer row re-renders
@@ -940,6 +944,9 @@ struct ChannelListView: View {
                     defaultGroupToken = DefaultChannelGroupStore.current
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
+                    // Channels already known (restored at launch, no change event to
+                    // come): land now, once (Android dd2bb36f).
+                    applyDefaultGroupIfNeeded()
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)
                     #if os(tvOS)
@@ -1033,10 +1040,14 @@ struct ChannelListView: View {
                     // a group the user picked is never replaced.
                     if previousDefault != defaultGroupToken, selectedGroup == landingGroup {
                         defaultGroupApplied = false
+                        landingReason = "sync"
                         applyDefaultGroupIfNeeded()
                     }
                     filterChannels()
                 }
+                .modifier(LiveTVLandingWiring(activePlaylistID: activePlaylistID,
+                                              onProfileSwitch: landOnProfileSwitch,
+                                              onPlaylistChange: landOnPlaylistChange))
                 // Cancel EPG prefetch the moment playback starts, network requests
                 // compete with the IPTV stream and cause buffering / stutter.
                 .onChange(of: nowPlaying.isActive) { _, active in
@@ -3068,6 +3079,8 @@ struct ChannelListView: View {
     /// just activated; only reset once the new group list is non-empty.
     /// Favorites and collection tokens are cross-playlist.
     private func reconcileSelectedGroupWithPlaylist() {
+        // The new playlist's channels arrived: its landing may run now.
+        if landingAwaitsChannels && !channelStore.orderedGroups.isEmpty { landingAwaitsChannels = false }
         if selectedGroup != "All",
            selectedGroup != favoritesToken,
            selectedGroup != recentlyWatchedToken,
@@ -3111,16 +3124,41 @@ struct ChannelListView: View {
         filterChannels()
     }
 
+    private var activePlaylistID: UUID? { servers.first(where: { $0.isActive })?.id }
+
+    /// A profile switch lands now, on the new profile's Default Group or All
+    /// (Android dd2bb36f). Not on the channel reload: two profiles can have
+    /// identical channel lists, and then no reload fires.
+    private func landOnProfileSwitch() {
+        defaultGroupToken = DefaultChannelGroupStore.current
+        defaultGroupApplied = false
+        landingReason = "switch"
+        applyDefaultGroupIfNeeded()
+        filterChannels()
+    }
+
+    /// A playlist add or switch: land again once its channels arrive.
+    private func landOnPlaylistChange() {
+        defaultGroupApplied = false
+        landingAwaitsChannels = true
+        landingReason = "playlist"
+        debugLog("[GROUPS] playlist changed; landing when its channels arrive")
+    }
+
+    /// Lands Live TV once per launch, profile switch, and playlist add or switch
+    /// (Android dd2bb36f): the pinned Default Group when it resolves, otherwise
+    /// All, never the group already on screen. Runs only once the group list is
+    /// known. Every decision is logged.
     private func applyDefaultGroupIfNeeded() {
         guard !defaultGroupApplied else { return }
+        guard !landingAwaitsChannels, !channelStore.orderedGroups.isEmpty else { return }
         defaultGroupApplied = true
-        defer { landingGroup = selectedGroup }
-        let wanted = DefaultChannelGroupStore.current
-        guard !wanted.isEmpty, wanted != selectedGroup else { return }
-        if groupTokens.contains(wanted) || wanted.hasPrefix("collection:") {
-            selectedGroup = wanted
-            debugLog("[GROUPS] default group applied: \(wanted)")
-        }
+        let pin = DefaultChannelGroupStore.current
+        let target = LiveTVLanding.group(pin: pin, shown: groupTokens, fallback: fallbackGroup)
+        debugLog(LiveTVLanding.logLine(reason: landingReason, group: target, pin: pin))
+        landingReason = "launch"
+        if selectedGroup != target { selectedGroup = target }
+        landingGroup = selectedGroup
     }
 
     /// Where a reset lands: All when shown, else the first visible group.
@@ -3694,6 +3732,20 @@ struct ChannelListView: View {
 // MARK: - Channel Display Item
 /// Shows `.aerioChannelListToast` messages through the list's toast
 /// state (tvOS draws it in the existing overlay; iOS draws it here).
+/// The Live TV landing triggers (Android dd2bb36f), kept out of the list's
+/// long modifier chain so the type checker stays inside its budget.
+private struct LiveTVLandingWiring: ViewModifier {
+    let activePlaylistID: UUID?
+    let onProfileSwitch: () -> Void
+    let onPlaylistChange: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .aerioProfileDidSwitch)) { _ in onProfileSwitch() }
+            .onChange(of: activePlaylistID) { _, _ in onPlaylistChange() }
+    }
+}
+
 private struct ChannelListToastHost: ViewModifier {
     @Binding var toast: String?
 

@@ -792,5 +792,19 @@ do {
     check(!L.gateNeedsPresenting(locked: false, scenes: 1, scenesShowingGate: 0), "unlocked: no gate")
 }
 
+// MARK: - Live TV landing group (Android dd2bb36f)
+do {
+    let L = LiveTVLanding.self
+    let shown = ["__favorites__", "All", "NBA", "News"]
+    eq(L.group(pin: "", shown: shown, fallback: "All"), "All", "an All pin (stored empty) lands on All, never the group on screen")
+    eq(L.group(pin: "__favorites__", shown: shown, fallback: "All"), "__favorites__", "a pinned Favorites lands on Favorites")
+    eq(L.group(pin: "NBA", shown: shown, fallback: "All"), "NBA", "a pinned group that resolves lands there")
+    eq(L.group(pin: "Sports", shown: shown, fallback: "All"), "All", "a pin missing on this playlist lands on All")
+    eq(L.group(pin: "collection:abc", shown: shown, fallback: "All"), "collection:abc", "a pinned collection lands there")
+    eq(L.group(pin: " ", shown: shown, fallback: "First"), "First", "no All shown: the first visible group")
+    eq(L.logLine(reason: "switch", group: "All", pin: ""), "[GROUPS] switch landing group=All (default=unset)", "switch log line")
+    eq(L.logLine(reason: "playlist", group: "NBA", pin: "NBA"), "[GROUPS] playlist landing group=NBA (default=set)", "playlist log line")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
