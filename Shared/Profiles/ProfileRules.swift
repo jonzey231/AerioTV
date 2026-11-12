@@ -117,7 +117,7 @@ enum RoleRules {
 
     static let ADMIN_IS_SERVER_SET = "Admin is set by the Dispatcharr server."
     static let SERVER_ADMIN_STAYS = "Dispatcharr admins are always Admin in AerioTV."
-    static let KEEP_PIN_REASON = "While a Child profile exists, Admin and Standard profiles keep a PIN."
+    static let KEEP_PIN_REASON = "While a Child profile exists, every Admin and Standard profile needs its own profile PIN."
 
     /// The role to store after the server reports newLevel; nil = no change.
     static func serverRoleChange(_ stored: ProfileRole?, _ newLevel: Int) -> ProfileRole? {
@@ -150,7 +150,7 @@ enum RoleRules {
         if !isFullAccess(actor) { return .denied("Only an Admin or Standard profile can reset a PIN.") }
         if actorHasPin { return .enterOwnPin }
         if !childExists { return .confirmOnly }
-        return .denied("Set a PIN on this profile first.")
+        return .denied("Set a PIN on your own profile first.")
     }
 
     static func showLaunchPicker(isTv: Bool, isDispatcharr: Bool, toggleOn: Bool, profileCount: Int, lastRole: ProfileRole?) -> Bool {
@@ -696,4 +696,45 @@ enum WhatsNewRules {
     /// The top edge of the list fades (about one line) only once it has
     /// scrolled away from the top, so at rest the first line is not faded.
     static func fadeActive(scrolledBy offset: Double) -> Bool { offset > 0.5 }
+}
+
+// MARK: - PIN wording (owner 2026-11-12, byte-identical with Android)
+
+/// Every PIN prompt and line, with two terms used everywhere: "profile PIN" (a
+/// PIN on one profile) and "Device Admin PIN" (always in full, never "Admin PIN"
+/// alone or "device PIN"). `name` is the profile's display name as the profile
+/// list shows it. RoleRules.KEEP_PIN_REASON and the reset refusal live with
+/// their rules.
+enum PinCopy {
+    /// The Admin pads (Manage Profiles gate, role change away from Child, the
+    /// Apple TV picker's Add Profile) and the refusals behind them.
+    static let adminPad = "Enter an Admin or Standard profile PIN, or the Device Admin PIN"
+    /// The gate sentence on a Child's Manage Profiles page.
+    static let manageGate = "To switch or add profiles, enter an Admin or Standard profile PIN, or the Device Admin PIN."
+    static func removeChild(_ name: String) -> String {
+        "Enter an Admin or Standard profile PIN, or the Device Admin PIN, to remove \(name)"
+    }
+    /// The Device Admin PIN row's subtitle, everywhere the row shows.
+    static let deviceAdminRow = "Lets a parent leave a Child profile and manage profiles on this device. Separate from profile PINs. Never synced."
+    /// The Manage Profiles row in a Child's Settings.
+    static let manageProfilesRow = "Switch or add profiles (PIN required)"
+    /// Onboarding "Who is this profile for?".
+    static let onboardingChildNote = "Pick Child and you'll set a Device Admin PIN next. A parent uses it to leave the Child profile on this device. It is never synced."
+    static func userQr(_ name: String) -> String { "Enter the PIN for \(name), or the Device Admin PIN, to show this code" }
+    static let childRole = "Sees only its own content and basic settings. Leaving it needs an Admin or Standard profile PIN, or the Device Admin PIN."
+    /// PIN Required when no PIN can leave a Child.
+    static let noWayOut = "Leaving a Child profile needs an Admin or Standard profile PIN, or the Device Admin PIN. Set one first."
+    static func setPin(_ name: String) -> String { "Set PIN for \(name)" }
+    static func changePin(_ name: String) -> String { "Change PIN for \(name)" }
+    static func confirmPin(_ name: String) -> String { "Confirm PIN for \(name)" }
+    static let confirmDeviceAdminPin = "Confirm Device Admin PIN"
+    static func currentPin(_ name: String) -> String { "Enter the current PIN for \(name)" }
+    static func resetActor(_ name: String) -> String { "Enter your profile PIN to reset the PIN for \(name)" }
+    static let deviceAdminOnlyWayOut = "The Device Admin PIN is the only way to leave a Child profile on this device, so it stays while any profile is a Child."
+    static func pinType(_ name: String) -> String { "PIN type for \(name)" }
+    static let deviceAdminPinType = "Device Admin PIN type"
+    static func removePin(_ name: String) -> String { "Remove PIN for \(name)" }
+    /// A switch refused without a PIN pass.
+    static func enterPinFor(_ name: String) -> String { "Enter the PIN for \(name)" }
+    static let pinLength = "Use 4 to 6 numbers or directions."
 }

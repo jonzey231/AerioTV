@@ -131,7 +131,7 @@ struct ProfileRoleStepView: View {
                         Text("Who is this profile for?")
                             .scaledFont(.system(size: stepIsTV ? 40 : 24, weight: .semibold))
                             .foregroundColor(.textPrimary)
-                        Text("A Child profile needs a Device Admin PIN, set next. It works on this device only and is never synced.")
+                        Text(PinCopy.onboardingChildNote)
                             .scaledFont(stepIsTV ? .system(size: 22).subtext() : .bodyMedium.subtext())
                             .foregroundColor(Color.contrastText(.textSecondary))
                             .fixedSize(horizontal: false, vertical: true)

@@ -59,11 +59,11 @@ enum ProfileCopy {
         switch r {
         case .admin: return "Full access in AerioTV. Has admin rights on the Dispatcharr server."
         case .user: return "Full access in AerioTV. A standard user on the Dispatcharr server."
-        case .child: return "Sees only its own content and basic settings. Switching from a Child profile to a non-Child profile requires PIN entry."
+        case .child: return PinCopy.childRole
         }
     }
 
-    static let adminPinTitle = "Enter a PIN from an Admin or Standard profile"
+    static let adminPinTitle = PinCopy.adminPad
     static let sectionFooter = "Each profile signs in as its own Dispatcharr user. Favorites, recordings, and watch history are kept per profile on this device."
 
     static func levelCaption(_ userLevel: Int) -> String {

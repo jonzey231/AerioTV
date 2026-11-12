@@ -76,7 +76,7 @@ struct UserQrFlow: View {
             UserQrCard(playlistId: playlistId, profileId: profileId, onClose: onClose)
         } else {
             ProfilePinEntry(
-                title: "Enter the PIN to show this code",
+                title: PinCopy.userQr(pm.store.byId(profileId)?.displayName ?? ""),
                 type: pm.pinType(profileId) ?? pm.deviceAdminPinType(playlistId) ?? .numbers,
                 // Either the profile's PIN or the Device Admin PIN unlocks it, so
                 // there is no single length: dots appear as digits are typed

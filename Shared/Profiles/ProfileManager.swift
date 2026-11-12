@@ -683,14 +683,14 @@ final class ProfileManager: ObservableObject {
         } else if !(onboarding || RoleRules.isFullAccess(activeRole(playlistId))) {
             throw fail("Only an Admin or Standard profile can set the Device Admin PIN.")
         }
-        guard pinStore.set(id, type, entries) else { throw fail("Enter 4 to 6") }
+        guard pinStore.set(id, type, entries) else { throw fail(PinCopy.pinLength) }
         debugLog("[PROFILE] device admin pin set on \(Self.tag(playlistId))")
     }
 
     /// Nil = removable; otherwise why the device PIN must stay.
     func deviceAdminPinRemovalBlock(_ playlistId: String) -> String? {
         RoleRules.canRemoveDevicePin(childExists: anyChild(playlistId), otherPins: adminPinHolders(playlistId).count) ? nil
-            : "This is the last PIN that can leave a Child profile, so it stays while any profile is a Child."
+            : PinCopy.deviceAdminOnlyWayOut
     }
 
     func removeDeviceAdminPin(_ playlistId: String, current: [String]) throws {
@@ -721,7 +721,7 @@ final class ProfileManager: ObservableObject {
         debugLog("[PROFILE] onboarding: \(Self.tag(base.id)) is a Child; device admin pin holds Admin")
     }
 
-    /// "Enter a PIN from an Admin or Standard profile": any full-access PIN (or the Device Admin PIN) passes.
+    /// "Enter an Admin or Standard profile PIN, or the Device Admin PIN": any full-access PIN (or the Device Admin PIN) passes.
     func verifyAnyAdminPin(_ playlistId: String, _ entries: [String]) -> PinCheck {
         let holders = adminPinIds(playlistId)
         guard !holders.isEmpty else { return .wrong }
@@ -794,7 +794,7 @@ final class ProfileManager: ObservableObject {
         case .confirmOnly: break
         }
         if let (type, entries) = replacement {
-            guard pinStore.set(profileId, type, entries) else { throw fail("Enter 4 to 6") }
+            guard pinStore.set(profileId, type, entries) else { throw fail(PinCopy.pinLength) }
             mutated(profileId, "pin reset")
             debugLog("[PROFILE] pin reset to a temporary pin for \(Self.tag(profileId))")
         } else {
@@ -811,7 +811,7 @@ final class ProfileManager: ObservableObject {
             guard verifyPin(profileId, current ?? []) == .ok else { throw fail("Wrong PIN") }
             switchTickets.remove(profileId)
         }
-        guard pinStore.set(profileId, type, entries) else { throw fail("Enter 4 to 6") }
+        guard pinStore.set(profileId, type, entries) else { throw fail(PinCopy.pinLength) }
         pendingPinAdds.remove(profileId)
         mutated(profileId, "pin set")
         debugLog("[PROFILE] pin \(had ? "changed" : "set") for \(Self.tag(profileId))")
@@ -848,7 +848,7 @@ final class ProfileManager: ObservableObject {
         switch roleChangeGate(playlistId, profileId, to: to) {
         case .denied(let r): throw fail(r)
         case .needsPinsCreated: throw fail(RoleRules.KEEP_PIN_REASON)
-        case .needsPinEntry: guard consumeAdminTicket(playlistId) else { throw fail("Enter a PIN from an Admin or Standard profile") }
+        case .needsPinEntry: guard consumeAdminTicket(playlistId) else { throw fail(PinCopy.adminPad) }
         case .allowed: break
         }
         store.update(profileId) { var c = $0; c.role = to; return c }
@@ -1340,7 +1340,7 @@ final class ProfileManager: ObservableObject {
         guard !p.isDefault else { throw fail("The default profile cannot be removed.") }
         guard RoleRules.isFullAccess(activeRole(p.playlistId)) else { throw fail("Only an Admin or Standard profile can remove profiles.") }
         if RoleRules.removeNeedsPin(p.effectiveRole) {
-            guard consumeAdminTicket(p.playlistId) else { throw fail("Enter a PIN from an Admin or Standard profile") }
+            guard consumeAdminTicket(p.playlistId) else { throw fail(PinCopy.adminPad) }
         }
         // A held profile (server address change) goes from this device only, with no tombstone.
         let held = holds.isHeld(p.id)
@@ -1739,7 +1739,9 @@ final class ProfileManager: ObservableObject {
     /// Picker choice at launch. A locked profile has already passed verifyPin (its ticket).
     func pickAtLaunch(_ profileId: String) async throws {
         guard let pk = launchPicker else { return }
-        if pinStore.hasPin(profileId) && !switchTickets.contains(profileId) { throw fail("Enter PIN") }
+        if pinStore.hasPin(profileId) && !switchTickets.contains(profileId) {
+            throw fail(PinCopy.enterPinFor(store.byId(profileId)?.displayName ?? ""))
+        }
         if profileId == activeProfileIdNow(pk.playlistId) {
             switchTickets.remove(profileId)
             launchPicker = nil
@@ -1764,7 +1766,9 @@ final class ProfileManager: ObservableObject {
     /// channel reload (leaving a held profile on a playlist that is not on screen).
     func switchTo(_ playlistId: String, _ profileId: String, bypassPin: Bool = false, reload: Bool = true) async throws {
         if !bypassPin && pinStore.hasPin(profileId) {
-            guard switchTickets.remove(profileId) != nil else { throw fail("Enter PIN") }
+            guard switchTickets.remove(profileId) != nil else {
+                throw fail(PinCopy.enterPinFor(store.byId(profileId)?.displayName ?? ""))
+            }
         }
         guard let target = store.byId(profileId) else { throw fail("Profile not found") }
         guard let server = DsyncLocal.server(playlistId) else { throw fail("Playlist not found") }

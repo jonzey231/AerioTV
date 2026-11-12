@@ -102,7 +102,7 @@ struct ProfileFlowHost: View {
                         .scaledFont(ProfileUI.body).foregroundColor(.textPrimary)
                 }
             case .removeAdminPin(let p):
-                AdminPinFlow(playlistId: playlistId, title: "Enter a PIN from an Admin or Standard profile to remove \(p.displayName)",
+                AdminPinFlow(playlistId: playlistId, title: PinCopy.removeChild(p.displayName),
                              onDismiss: { model.close() }) { remove(p) }
             case .setPin(let p):
                 SetPinFlow(playlistId: playlistId, profile: p) {
@@ -312,7 +312,7 @@ struct ProfilesSettingsSection: View {
                 Image(systemName: "lock.fill").foregroundColor(.accentPrimary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(has ? "Change Device Admin PIN" : "Set Device Admin PIN").foregroundColor(.textPrimary)
-                    Text("Works on this device only, alongside Admin profile PINs. Never synced.")
+                    Text(PinCopy.deviceAdminRow)
                         .scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
                 }
             }
@@ -413,7 +413,7 @@ struct ProfilesTVSection: View {
                     .disabled(liftedId != nil)
                     let has = manager.hasDeviceAdminPin(playlistId)
                     TVSettingsTileActionRow(icon: "lock.fill", title: has ? "Change Device Admin PIN" : "Set Device Admin PIN",
-                                            subtitle: "Works on this device only, alongside Admin profile PINs. Never synced.") {
+                                            subtitle: PinCopy.deviceAdminRow) {
                         model.open(.deviceSet)
                     }
                     .disabled(liftedId != nil)
@@ -556,7 +556,7 @@ struct ChannelProfilesFlow: View {
 struct ChildManageProfilesRow: View {
     var body: some View {
         SettingsRow(icon: "person.2.badge.gearshape", iconColor: .accentPrimary,
-                    title: "Manage Profiles", subtitle: "Switch profiles, Admin PIN")
+                    title: "Manage Profiles", subtitle: PinCopy.manageProfilesRow)
     }
 }
 
@@ -572,7 +572,7 @@ struct ChildManageProfilesView: View {
     @State private var unlocked = false
     @State private var flow: Flow?
 
-    private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet, refused(ProfileRefusal) }
+    private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet, deviceRemove, refused(ProfileRefusal) }
 
     /// "Enter PIN": the same PIN pad as before (Admin, Standard, or Device Admin PIN).
     private func openGate() {
@@ -603,7 +603,7 @@ struct ChildManageProfilesView: View {
                         .font(.system(size: ProfileUI.s(44, 80), weight: .semibold))
                         .foregroundColor(.accentPrimary)
                         .accessibilityHidden(true)
-                    Text("Enter a PIN from an Admin or Standard profile to switch profiles.")
+                    Text(PinCopy.manageGate)
                         .scaledFont(ProfileUI.body)
                         .foregroundColor(.textPrimary)
                         .multilineTextAlignment(.center)
@@ -642,9 +642,24 @@ struct ChildManageProfilesView: View {
                             Label("Add Profile", systemImage: "plus").foregroundColor(.accentPrimary)
                         }
                         .buttonStyle(ProfileRowButtonStyle())
+                        // The full Device Admin PIN row, as on the playlist's Profiles page and on
+                        // Android: Change with its line, and Remove (refused while it is the only
+                        // way out of a Child, PinCopy.deviceAdminOnlyWayOut).
                         if manager.hasDeviceAdminPin(playlistId) {
                             Button { flow = .deviceSet } label: {
-                                Label("Change Device Admin PIN", systemImage: "lock.fill").foregroundColor(.textPrimary)
+                                HStack(spacing: ProfileUI.s(12, 18)) {
+                                    Image(systemName: "lock.fill").foregroundColor(.accentPrimary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Change Device Admin PIN").foregroundColor(.textPrimary)
+                                        Text(PinCopy.deviceAdminRow)
+                                            .scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                            .buttonStyle(ProfileRowButtonStyle())
+                            Button { flow = .deviceRemove } label: {
+                                Label("Remove Device Admin PIN", systemImage: "lock.fill").foregroundColor(ProfileUI.errorColor)
                             }
                             .buttonStyle(ProfileRowButtonStyle())
                         }
@@ -675,6 +690,10 @@ struct ChildManageProfilesView: View {
                         let title = ProfileActionTitle.deviceAdminPin(has: manager.hasDeviceAdminPin(playlistId))
                         DeviceAdminPinSetFlow(playlistId: playlistId) { err in
                             finish(err, title: title)
+                        }
+                    case .deviceRemove:
+                        DeviceAdminPinRemoveFlow(playlistId: playlistId) { err in
+                            finish(err, title: ProfileActionTitle.removeDeviceAdminPin)
                         }
                     case .refused(let r):
                         ProfileRefusalDialog(refusal: r) { self.flow = nil }

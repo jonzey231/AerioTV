@@ -846,5 +846,37 @@ do {
     check(!R.showsManualFormHeading(suggestionRows: 2, formFollows: false), "no form below (the user list, onboarding): no heading")
 }
 
+// MARK: - PIN wording: exact text, byte-identical with Android (owner 2026-11-12)
+do {
+    eq(PinCopy.adminPad, "Enter an Admin or Standard profile PIN, or the Device Admin PIN", "PIN copy #1")
+    eq(PinCopy.manageGate, "To switch or add profiles, enter an Admin or Standard profile PIN, or the Device Admin PIN.", "PIN copy #2")
+    eq(PinCopy.removeChild("Sam"), "Enter an Admin or Standard profile PIN, or the Device Admin PIN, to remove Sam", "PIN copy #3")
+    eq(PinCopy.deviceAdminRow, "Lets a parent leave a Child profile and manage profiles on this device. Separate from profile PINs. Never synced.", "PIN copy #4")
+    eq(PinCopy.manageProfilesRow, "Switch or add profiles (PIN required)", "PIN copy #5")
+    eq(PinCopy.onboardingChildNote, "Pick Child and you'll set a Device Admin PIN next. A parent uses it to leave the Child profile on this device. It is never synced.", "PIN copy #6")
+    eq(PinCopy.userQr("Sam"), "Enter the PIN for Sam, or the Device Admin PIN, to show this code", "PIN copy #7")
+    eq(PinCopy.childRole, "Sees only its own content and basic settings. Leaving it needs an Admin or Standard profile PIN, or the Device Admin PIN.", "PIN copy #8")
+    eq(RoleRules.KEEP_PIN_REASON, "While a Child profile exists, every Admin and Standard profile needs its own profile PIN.", "PIN copy #9")
+    eq(PinCopy.noWayOut, "Leaving a Child profile needs an Admin or Standard profile PIN, or the Device Admin PIN. Set one first.", "PIN copy #10")
+    eq(PinCopy.setPin("Sam"), "Set PIN for Sam", "PIN copy #11")
+    eq(PinCopy.changePin("Sam"), "Change PIN for Sam", "PIN copy #11")
+    eq(PinCopy.confirmPin("Sam"), "Confirm PIN for Sam", "PIN copy #12")
+    eq(PinCopy.confirmDeviceAdminPin, "Confirm Device Admin PIN", "PIN copy #12")
+    eq(PinCopy.currentPin("Sam"), "Enter the current PIN for Sam", "PIN copy #13")
+    eq(PinCopy.resetActor("Sam"), "Enter your profile PIN to reset the PIN for Sam", "PIN copy #14")
+    eq(PinCopy.deviceAdminOnlyWayOut, "The Device Admin PIN is the only way to leave a Child profile on this device, so it stays while any profile is a Child.", "PIN copy #16")
+    eq(PinCopy.pinType("Sam"), "PIN type for Sam", "PIN copy #17")
+    eq(PinCopy.deviceAdminPinType, "Device Admin PIN type", "PIN copy #17")
+    eq(PinCopy.removePin("Sam"), "Remove PIN for Sam", "PIN copy #18")
+    eq(PinCopy.adminPad, "Enter an Admin or Standard profile PIN, or the Device Admin PIN", "PIN copy #19")
+    eq(PinCopy.enterPinFor("Sam"), "Enter the PIN for Sam", "PIN copy #20")
+    eq(PinCopy.pinLength, "Use 4 to 6 numbers or directions.", "PIN copy #21")
+    // #15: the reset refusal when the actor has no PIN while a Child exists.
+    eq(RoleRules.resetGate(actor: .user, actorHasPin: false, childExists: true), .denied("Set a PIN on your own profile first."), "PIN copy #15")
+    for s in [PinCopy.adminPad, PinCopy.manageGate, PinCopy.deviceAdminRow, PinCopy.manageProfilesRow, PinCopy.childRole, PinCopy.noWayOut] {
+        check(!s.contains("device PIN") && !s.replacingOccurrences(of: "Device Admin PIN", with: "").contains("Admin PIN"), "never \"Admin PIN\" alone or \"device PIN\": \(s)")
+    }
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

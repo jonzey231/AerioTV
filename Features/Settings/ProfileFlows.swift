@@ -13,7 +13,7 @@ import SwiftUI
 
 // MARK: - PIN flows
 
-/// "Enter a PIN from an Admin or Standard profile": any full-access profile's PIN passes.
+/// "Enter an Admin or Standard profile PIN, or the Device Admin PIN": any full-access profile's PIN passes.
 struct AdminPinFlow: View {
     let playlistId: String
     var title = ProfileCopy.adminPinTitle
@@ -62,10 +62,12 @@ struct SwitchPinFlow: View {
 
 /// The PIN type step (radio rows).
 private struct PinTypeStep: View {
+    /// "PIN type for {name}" (a profile) or "Device Admin PIN type".
+    let title: String
     let onPick: (PinType) -> Void
     let onCancel: () -> Void
     var body: some View {
-        ProfileDialog(title: "PIN type", onCancel: onCancel) {
+        ProfileDialog(title: title, onCancel: onCancel) {
             ForEach(PinType.allCases, id: \.self) { t in
                 ProfileChoiceRow(label: t.label, checked: false) { onPick(t) }
             }
@@ -89,11 +91,12 @@ struct SetPinFlow: View {
     @State private var needsCurrent: Bool?
 
     var body: some View {
-        let title = pm.hasPin(profile.id) && onChosen == nil ? "Change PIN" : "Set PIN"
+        let name = profile.displayName
+        let title = pm.hasPin(profile.id) && onChosen == nil ? PinCopy.changePin(name) : PinCopy.setPin(name)
         Group {
             if needsCurrent == true && current == nil {
                 ProfilePinEntry(
-                    title: "Enter PIN", type: pm.pinType(profile.id) ?? .numbers, pinLength: pm.pinLength(profile.id),
+                    title: PinCopy.currentPin(name), type: pm.pinType(profile.id) ?? .numbers, pinLength: pm.pinLength(profile.id),
                     lockSeconds: { pm.pinLockSeconds(profile.id) }, onDismiss: { onClose(nil) },
                     onEntered: { seq in
                         let r = pm.verifyPin(profile.id, seq)
@@ -102,16 +105,16 @@ struct SetPinFlow: View {
                     }
                 ).id("current")
             } else if type == nil {
-                PinTypeStep(onPick: { type = $0 }, onCancel: { onClose(nil) })
+                PinTypeStep(title: PinCopy.pinType(name), onPick: { type = $0 }, onCancel: { onClose(nil) })
             } else if first == nil {
                 ProfilePinEntry(
-                    title: "\(title): Enter PIN", type: type!, setting: true, initialError: mismatch,
+                    title: title, type: type!, setting: true, initialError: mismatch,
                     onDismiss: { onClose(nil) },
                     onEntered: { seq in first = seq; mismatch = nil; return nil }
                 ).id("first-\(mismatch ?? "")")
             } else {
                 ProfilePinEntry(
-                    title: "Confirm PIN", type: type!, pinLength: first!.count, onDismiss: { onClose(nil) },
+                    title: PinCopy.confirmPin(name), type: type!, pinLength: first!.count, onDismiss: { onClose(nil) },
                     onEntered: { seq in
                         if seq != first { mismatch = "PINs do not match"; first = nil; return nil }
                         let t = type!
@@ -141,7 +144,7 @@ struct RemovePinFlow: View {
             }
         } else if needsCurrent == true {
             ProfilePinEntry(
-                title: "Remove PIN", type: pm.pinType(profile.id) ?? .numbers, pinLength: pm.pinLength(profile.id),
+                title: PinCopy.removePin(profile.displayName), type: pm.pinType(profile.id) ?? .numbers, pinLength: pm.pinLength(profile.id),
                 lockSeconds: { pm.pinLockSeconds(profile.id) }, onDismiss: { onClose(nil) },
                 onEntered: { seq in
                     let r = pm.verifyPin(profile.id, seq)
@@ -187,7 +190,7 @@ struct ResetPinFlow: View {
             case .enterOwnPin:
                 if let admin = pm.activeProfile(playlistId) {
                     ProfilePinEntry(
-                        title: "Enter your PIN to reset the PIN for \(profile.displayName)",
+                        title: PinCopy.resetActor(profile.displayName),
                         type: pm.pinType(admin.id) ?? .numbers, pinLength: pm.pinLength(admin.id),
                         lockSeconds: { pm.pinLockSeconds(admin.id) }, onDismiss: { onClose(nil) },
                         onEntered: { seq in
@@ -237,7 +240,7 @@ struct ChildNeedsAdminPin: View {
             Color.clear.onAppear { onDone(true) }
         } else {
             ProfileDialog(title: "PIN Required", cancelLabel: nil, confirm: ("OK", true, false, { onDone(false) }), onCancel: { onDone(false) }) {
-                Text("A Child profile needs a PIN from an Admin or Standard profile to leave it. Set a PIN on an Admin or Standard profile first.")
+                Text(PinCopy.noWayOut)
                     .scaledFont(ProfileUI.body).foregroundColor(.textPrimary)
             }
         }
@@ -283,14 +286,14 @@ struct DeviceAdminPinSetFlow: View {
                     }
                 ).id("current")
             } else if type == nil {
-                PinTypeStep(onPick: { type = $0 }, onCancel: { onClose(nil) })
+                PinTypeStep(title: PinCopy.deviceAdminPinType, onPick: { type = $0 }, onCancel: { onClose(nil) })
             } else if first == nil {
                 ProfilePinEntry(title: "\(title): Enter PIN", type: type!, setting: true, initialError: mismatch,
                                 onDismiss: { onClose(nil) }, onEntered: { seq in first = seq; mismatch = nil; return nil })
                     .id("first-\(mismatch ?? "")")
             } else {
                 ProfilePinEntry(
-                    title: "Confirm PIN", type: type!, pinLength: first!.count, onDismiss: { onClose(nil) },
+                    title: PinCopy.confirmDeviceAdminPin, type: type!, pinLength: first!.count, onDismiss: { onClose(nil) },
                     onEntered: { seq in
                         if seq != first { mismatch = "PINs do not match"; first = nil; return nil }
                         do { try pm.setDeviceAdminPin(playlistId, type!, seq, current: current, onboarding: onboarding); onClose(nil) }

@@ -1111,7 +1111,7 @@ struct SettingsView: View {
                               title: "About", subtitle: AboutInfo.version)
                 if isChild {
                     padSidebarRow(.manageProfiles, icon: "person.2.badge.gearshape", iconColor: .accentPrimary,
-                                  title: "Manage Profiles", subtitle: "Switch profiles, Admin PIN")
+                                  title: "Manage Profiles", subtitle: PinCopy.manageProfilesRow)
                 }
             }
             .padding(.horizontal, 12)
@@ -1261,7 +1261,7 @@ struct SettingsView: View {
         // A Child sees only its sections, then Manage Profiles (follow-up 12).
         allTVRailItems.filter { allowed($0.route) } + (isChild ? [TVSettingsRailItem(
             id: "manage-profiles", route: .category(.manageProfiles), label: "Manage Profiles",
-            icon: "person.2.badge.gearshape", iconColor: .accentPrimary, subtitle: "Switch profiles, Admin PIN")] : [])
+            icon: "person.2.badge.gearshape", iconColor: .accentPrimary, subtitle: PinCopy.manageProfilesRow)] : [])
     }
 
     private var allTVRailItems: [TVSettingsRailItem] {
