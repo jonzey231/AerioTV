@@ -116,7 +116,17 @@ final class PlayerSession: ObservableObject {
     ///   channel so CarPlay / lockscreen keep working, the bridge
     ///   gating in Phase 1d routes remote commands to whichever tile
     ///   holds audio.
+    /// Nothing plays, audio included, behind the launch PIN gate (or the Apple
+    /// TV launch picker): Resume Last Channel, a Top Shelf link, or any other
+    /// start waits for the PIN (security fix 2026-11-12, Android parity).
+    static func refusedByLaunchLock(_ what: String) -> Bool {
+        guard ProfileManager.shared.launchLocked else { return false }
+        debugLog("[PROFILE] playback not started behind the launch PIN gate: \(what)")
+        return true
+    }
+
     func enterMultiview(seeding current: ChannelDisplayItem?, server: ServerConnection?, isLive: Bool = true) {
+        if Self.refusedByLaunchLock("multiview") { return }
         // Refcount float. SwiftUI's swap from the old single
         // `PlayerView` to `MultiviewContainerView` happens across one
         // (or more) render passes; the ordering of unmount-old vs
@@ -330,6 +340,7 @@ final class PlayerSession: ObservableObject {
     /// float so the 0->1 bounce never drops the (48kHz-pinned) session
     /// between the outgoing and incoming players.
     func beginCatchup(_ pb: CatchupPlayback) {
+        if Self.refusedByLaunchLock("catch-up") { return }
         #if os(iOS)
         // Replaces the session without exit(): hand foreground PiP over to
         // the replay (no-op when PiP isn't up).
@@ -975,6 +986,7 @@ final class PlayerSession: ObservableObject {
                   kind: TilePlaybackKind = .vod,
                   dvrScheduledEnd: Date? = nil,
                   dvrChannelID: String? = nil) -> Bool {
+        if Self.refusedByLaunchLock("on demand \(title)") { return false }
         guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
         let ext = streamURL.pathExtension.lowercased()
         // m3u8 = HLS-shaped (in-progress DVR windows, HLS-fronted VOD);
@@ -1053,6 +1065,7 @@ final class PlayerSession: ObservableObject {
                server: ServerConnection?,
                isLive: Bool = true,
                bypassNativeRouter: Bool = false) -> Bool {
+        if Self.refusedByLaunchLock("channel \(item.name)") { return false }
         // Engine routing now happens INSIDE the container: every session
         // (single or multiview, AVPlayer or mpv) enters MultiviewStore,
         // and `enterMultiview` calls `resolveEngine` to lock the engine

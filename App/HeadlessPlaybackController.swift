@@ -200,6 +200,8 @@ final class HeadlessPlaybackController: ObservableObject {
     /// blocks it.
     func start(item: ChannelDisplayItem, server: ServerConnection?, isLive: Bool,
                videoCapable: Bool = false) {
+        // Nothing plays behind the launch PIN gate, the car included.
+        if PlayerSession.refusedByLaunchLock("car \(item.name)") { return }
         guard NowPlayingManager.shared.isCarPlayConnected,
               !PlaybackEngineRegistry.shared.hasLiveCoordinator
         else {

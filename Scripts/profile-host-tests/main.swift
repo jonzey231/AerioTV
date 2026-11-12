@@ -764,5 +764,33 @@ do {
         ProfileActionTitle.moveDown], ["Avatar", "Channel Profiles", "Switch Profile", "Move Up", "Move Down"], "the other actions")
 }
 
+// MARK: - The launch PIN gate comes first (security fix 2026-11-12)
+do {
+    let L = LaunchLockRules.self
+    check(L.locked(gateArmed: true, pickerUp: false) && L.locked(gateArmed: false, pickerUp: true), "the gate or the launch picker locks the app")
+    check(!L.promptMayShow(gateArmed: true, pickerUp: false), "the rejected-key prompt waits while the PIN gate is up")
+    check(!L.promptMayShow(gateArmed: false, pickerUp: true), "and while the Apple TV launch picker is up")
+    check(L.promptMayShow(gateArmed: false, pickerUp: false), "it shows once the PIN passes")
+    // Ordering at launch: a held key's prompt is pending, the gate is armed first.
+    var gate = true
+    let pending = true
+    var shown: [String] = []
+    if gate { shown.append("gate") }
+    if pending && L.promptMayShow(gateArmed: gate, pickerUp: false) { shown.append("prompt") }
+    eq(shown, ["gate"], "only the PIN gate is on screen at launch")
+    gate = false
+    if pending && L.promptMayShow(gateArmed: gate, pickerUp: false) { shown.append("prompt") }
+    eq(shown, ["gate", "prompt"], "the PIN first, then the prompt")
+    // After the PIN, the prompt has its normal role-based buttons, Sign In included.
+    eq(KeySignInCopy.promptActions(isTV: false, canSignIn: !gate, canEditPlaylist: !gate), [.signIn, .editPlaylist, .notNow],
+       "a Standard profile's prompt after the PIN: Sign In, Edit Playlist, Not Now")
+    // Nothing reachable from a prompt while locked: the gate's window is put back until it is on screen.
+    check(L.gateNeedsPresenting(locked: true, scenes: 1, scenesShowingGate: 0), "a dropped gate is presented again")
+    check(L.gateNeedsPresenting(locked: true, scenes: 0, scenesShowingGate: 0), "no scene yet: keep trying")
+    check(L.gateNeedsPresenting(locked: true, scenes: 2, scenesShowingGate: 1), "every scene gets the gate")
+    check(!L.gateNeedsPresenting(locked: true, scenes: 1, scenesShowingGate: 1), "on screen: nothing to do")
+    check(!L.gateNeedsPresenting(locked: false, scenes: 1, scenesShowingGate: 0), "unlocked: no gate")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

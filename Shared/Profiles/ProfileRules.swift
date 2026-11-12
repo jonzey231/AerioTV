@@ -577,3 +577,23 @@ enum ProfileActionTitle {
     static func setPin(hasPin: Bool) -> String { hasPin ? "Change PIN" : "Set PIN" }
     static func deviceAdminPin(has: Bool) -> String { has ? "Change Device Admin PIN" : "Set Device Admin PIN" }
 }
+
+// MARK: - Launch lock (security fix 2026-11-12)
+
+/// While the launch PIN gate (or the Apple TV launch picker) is up, the app is
+/// locked: nothing is usable until the PIN passes. Every modal prompt (the
+/// rejected-key prompt and what it opens, the sync offers, "data is missing",
+/// What's New, a Child's sign-in form) waits until the lock is gone, so none can
+/// be presented first and keep the gate off screen, and none is reachable
+/// through it.
+enum LaunchLockRules {
+    static func locked(gateArmed: Bool, pickerUp: Bool) -> Bool { gateArmed || pickerUp }
+
+    /// A modal prompt may be presented now.
+    static func promptMayShow(gateArmed: Bool, pickerUp: Bool) -> Bool { !locked(gateArmed: gateArmed, pickerUp: pickerUp) }
+
+    /// The gate is on screen when every foreground scene shows it; otherwise it is presented again.
+    static func gateNeedsPresenting(locked: Bool, scenes: Int, scenesShowingGate: Int) -> Bool {
+        locked && scenesShowingGate < max(scenes, 1)
+    }
+}

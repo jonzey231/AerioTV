@@ -280,10 +280,23 @@ final class ProfileManager: ObservableObject {
     // MARK: Lifecycle
 
     /// Migration, launch restore, and active-playlist tracking. Idempotent.
+    /// The launch PIN gate (or the Apple TV launch picker) is up: the app is locked.
+    var launchLocked: Bool { LaunchLockRules.locked(gateArmed: launchGate != nil, pickerUp: launchPicker != nil) }
+
+    private var launchRestored = false
+
+    /// Launch, right after the container opens (AerioApp.init): the PIN gate is
+    /// armed before any view or prompt exists, so nothing can show ahead of it.
+    func armLaunchGate() {
+        guard !launchRestored else { return }
+        launchRestored = true
+        restoreAtLaunch()
+    }
+
     func start() {
         guard !started else { return }
         started = true
-        restoreAtLaunch()
+        armLaunchGate()
         // A held Child's addresses are refused from the first request on
         // (the playlists can be read now), keyless ones included.
         refreshHeldServers()
@@ -308,6 +321,9 @@ final class ProfileManager: ObservableObject {
 
     /// Synchronous launch restore (Android restoreSync): the launch picker or the PIN gate.
     private func restoreAtLaunch() {
+        defer {
+            if launchGate != nil || launchPicker != nil { debugLog("[PROFILE] launch lock armed; prompts wait until it passes") }
+        }
         guard let pid = store.lastActivePlaylistId else { return }
         let all = store.forPlaylist(pid)
         // A held profile is not restored (start() leaves it for the default profile), except a

@@ -3919,6 +3919,18 @@ private struct AutoResumeWiring: ViewModifier {
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 onScenePhaseChange(oldPhase, newPhase)
             }
+            // The launch PIN passed: Resume Last Channel may run now (security fix 2026-11-12).
+            .onReceive(Self.unlocked) { unlocked in
+                if unlocked { onResumeAttempt() }
+            }
+    }
+
+    private static var unlocked: AnyPublisher<Bool, Never> {
+        let pm = ProfileManager.shared
+        return pm.$launchGate.combineLatest(pm.$launchPicker)
+            .map { LaunchLockRules.promptMayShow(gateArmed: $0 != nil, pickerUp: $1 != nil) }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
     }
 }
 
@@ -5488,6 +5500,11 @@ struct MainTabView: View {
     ///   active server changed since last play).
     private func attemptAutoResume() {
         guard !didAttemptAutoResume else { return }
+        // Behind the launch PIN gate nothing plays; the attempt runs again once it passes.
+        guard !ProfileManager.shared.launchLocked else {
+            debugLog("🎮 Auto-resume: waits for the launch PIN")
+            return
+        }
 
         // Settings gate. Reading via UserDefaults rather than
         // @AppStorage so the property doesn't need to live on

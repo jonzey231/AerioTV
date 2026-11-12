@@ -342,6 +342,8 @@ struct SyncProvidersOfferHost: ViewModifier {
         Task { @MainActor in
             // Let the cover finish closing so the alert has a window to present on.
             try? await Task.sleep(nanoseconds: 800_000_000)
+            // The offer waits for the launch PIN gate (security fix 2026-11-12).
+            while ProfileManager.shared.launchLocked { try? await Task.sleep(nanoseconds: 500_000_000) }
             offer = evaluate()
         }
     }
@@ -600,9 +602,12 @@ struct DsyncRecordMissingHost: ViewModifier {
     @ObservedObject private var dsync = DispatcharrSyncManager.shared
     @ObservedObject private var player = PlayerSession.shared
     @ObservedObject private var multiview = MultiviewStore.shared
+    @ObservedObject private var profiles = ProfileManager.shared
 
     private var showing: Bool {
+        // Waits for the launch PIN gate too (security fix 2026-11-12).
         (dsync.recordMissingPrompt || simulated) && !onboardingVisible && player.mode == .idle && multiview.tiles.isEmpty
+            && !profiles.launchLocked
     }
 
     /// DEBUG only: `-dsyncMissingRecordSimulate YES` shows the prompt for simulator checks;

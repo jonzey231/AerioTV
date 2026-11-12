@@ -563,6 +563,10 @@ struct AerioApp: App {
             DispatcharrKeyBroker.install(container: self.sharedModelContainer)
             // Held or keyless profile addresses: refused before the first load.
             ProfileManager.shared.registerRefusedAddresses()
+            // The launch PIN gate: armed before any view or prompt, in its own
+            // window above every alert and sheet (LaunchLockWindow).
+            ProfileManager.shared.armLaunchGate()
+            LaunchLockWindow.shared.install()
         } catch {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
@@ -1577,6 +1581,8 @@ struct RootView: View {
                     && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 600_000_000)
+                        // What's New waits for the launch PIN gate (security fix 2026-11-12).
+                        while ProfileManager.shared.launchLocked { try? await Task.sleep(nanoseconds: 500_000_000) }
                         // Re-check after the delay: if the user
                         // backgrounded the app or onboarding raced in
                         // during the wait, skip silently.

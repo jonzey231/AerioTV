@@ -7,6 +7,8 @@
 //  ProfilePinUi.kt ProfileLaunchGate, and the MainActivity switch scrim).
 
 import SwiftUI
+import Combine
+import SwiftData
 
 /// The active Dispatcharr playlist id, when it has profiles.
 @MainActor
@@ -419,33 +421,155 @@ struct ProfileRootChrome: ViewModifier {
                     .transition(.opacity)
                 }
             }
-            // A locked restored profile covers everything until its PIN is entered.
-            .fullScreenCover(isPresented: Binding(get: { manager.launchGate != nil }, set: { _ in })) {
-                if let p = manager.launchGate {
-                    ZStack {
-                        Color.black.opacity(0.92).ignoresSafeArea()
-                        ProfilePinEntry(
-                            title: "Enter PIN for \(p.displayName)", type: manager.pinType(p.id) ?? .numbers,
-                            pinLength: manager.pinLength(p.id), lockSeconds: { manager.pinLockSeconds(p.id) },
-                            onDismiss: nil,
-                            onEntered: { ProfileCopy.pinCheckMessage(manager.unlockLaunchGate($0)) }
-                        )
-                    }
-                    .interactiveDismissDisabled()
-                }
-            }
-            #if os(tvOS)
-            // Apple TV "Who is watching?" at launch (showLaunchPicker).
-            .fullScreenCover(isPresented: Binding(get: { manager.launchPicker != nil }, set: { _ in })) {
-                if let pk = manager.launchPicker {
-                    WhoIsWatchingView(playlistId: pk.playlistId, mode: .launch, lastProfileId: pk.lastProfileId) {}
-                }
-            }
-            #endif
+            // The launch PIN gate and the Apple TV launch picker live in their own
+            // window above every alert and sheet (LaunchLockWindow), never a cover
+            // another presentation could block or drop (security fix 2026-11-12).
             .onAppear {
                 manager.isPlaying = { PlayerSession.shared.mode != .idle }
+                LaunchLockWindow.shared.install()
             }
     }
+}
+
+/// What the launch lock window shows: the restored profile's PIN entry, or the
+/// Apple TV "Who is watching?" picker at launch.
+struct LaunchLockView: View {
+    @ObservedObject private var themeLive = ThemeManager.shared
+    @ObservedObject private var manager = ProfileManager.shared
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            if let p = manager.launchGate {
+                // A locked restored profile covers everything until its PIN is entered.
+                Color.black.opacity(0.92).ignoresSafeArea()
+                ProfilePinEntry(
+                    title: "Enter PIN for \(p.displayName)", type: manager.pinType(p.id) ?? .numbers,
+                    pinLength: manager.pinLength(p.id), lockSeconds: { manager.pinLockSeconds(p.id) },
+                    onDismiss: nil,
+                    onEntered: { ProfileCopy.pinCheckMessage(manager.unlockLaunchGate($0)) }
+                )
+            } else if let pk = manager.launchPicker {
+                #if os(tvOS)
+                // Apple TV "Who is watching?" at launch (showLaunchPicker).
+                WhoIsWatchingView(playlistId: pk.playlistId, mode: .launch, lastProfileId: pk.lastProfileId) {}
+                #else
+                let _ = pk
+                #endif
+            }
+        }
+    }
+}
+
+/// The launch lock's own window, one per foreground scene, at a level above
+/// alerts: an alert, sheet, or cover in the app's window can neither block nor
+/// drop it, and nothing under it is usable until the PIN passes. A watchdog
+/// puts it back on screen whenever a scene lacks it while locked.
+@MainActor
+final class LaunchLockWindow {
+    static let shared = LaunchLockWindow()
+    private init() {}
+
+    private var windows: [ObjectIdentifier: UIWindow] = [:]
+    private var bag: [AnyCancellable] = []
+    private var watchdog: Task<Void, Never>?
+    private var installed = false
+
+    func install() {
+        guard !installed else { return }
+        installed = true
+        let pm = ProfileManager.shared
+        pm.$launchGate.combineLatest(pm.$launchPicker)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] gate, picker in self?.update(locked: gate != nil || picker != nil) }
+            .store(in: &bag)
+        for name in [UIScene.didActivateNotification, UIScene.willEnterForegroundNotification] {
+            NotificationCenter.default.publisher(for: name)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in self?.update(locked: ProfileManager.shared.launchLocked) }
+                .store(in: &bag)
+        }
+    }
+
+    private var scenes: [UIWindowScene] {
+        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState != .unattached && $0.activationState != .background }
+    }
+
+    private func update(locked: Bool) {
+        guard locked else { hide(); return }
+        show()
+        guard watchdog == nil else { return }
+        watchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled, ProfileManager.shared.launchLocked {
+                self?.show()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            self?.watchdog = nil
+            self?.hide()
+        }
+    }
+
+    #if os(tvOS)
+    /// Apple TV: the lock is presented over the app's topmost controller, the
+    /// same proven path as the rejected-key prompt and Fix Login (focus moves
+    /// to it); the watchdog presents it again whenever it is not on screen.
+    private var host: UIViewController?
+
+    private func show() {
+        if let h = host, h.viewIfLoaded?.window != nil { return }
+        let all = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows).filter { $0.windowLevel == .normal && !$0.isHidden }
+        guard var top = (all.first { $0.isKeyWindow } ?? all.first)?.rootViewController else { return }
+        while let next = top.presentedViewController, next !== host { top = next }
+        guard !top.isBeingDismissed, !top.isBeingPresented, !(top is UIAlertController) else { return }
+        var root: AnyView = AnyView(LaunchLockView())
+        if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
+        let h = UIHostingController(rootView: root)
+        h.modalPresentationStyle = .fullScreen
+        h.isModalInPresentation = true
+        host = h
+        top.present(h, animated: false)
+        debugLog("[PROFILE] launch lock on screen (presented over the topmost screen)")
+    }
+
+    private func hide() {
+        guard let h = host else { return }
+        host = nil
+        h.presentingViewController?.dismiss(animated: true)
+        debugLog("[PROFILE] launch lock passed; its screen is gone")
+    }
+    #else
+    /// Puts the lock on every foreground scene that lacks it.
+    private func show() {
+        let live = scenes
+        let showing = live.filter { s in windows[ObjectIdentifier(s)].map { !$0.isHidden && $0.windowScene === s } ?? false }.count
+        guard LaunchLockRules.gateNeedsPresenting(locked: ProfileManager.shared.launchLocked, scenes: live.count,
+                                                 scenesShowingGate: showing) else { return }
+        for scene in live where windows[ObjectIdentifier(scene)].map({ $0.isHidden || $0.windowScene !== scene }) ?? true {
+            var root: AnyView = AnyView(LaunchLockView())
+            if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
+            let host = UIHostingController(rootView: root)
+            let w = UIWindow(windowScene: scene)
+            w.windowLevel = .alert + 1
+            w.rootViewController = host
+            w.makeKeyAndVisible()
+            windows[ObjectIdentifier(scene)] = w
+            debugLog("[PROFILE] launch lock on screen (its own window above every alert and sheet)")
+        }
+    }
+
+    private func hide() {
+        guard !windows.isEmpty else { return }
+        for (_, w) in windows {
+            w.isHidden = true
+            // Hand the keyboard and focus back to the app's own window.
+            w.windowScene?.windows.first { $0 !== w && !$0.isHidden && $0.windowLevel == .normal }?.makeKey()
+        }
+        windows.removeAll()
+        debugLog("[PROFILE] launch lock passed; its window is gone")
+    }
+    #endif
 }
 
 #if os(tvOS)

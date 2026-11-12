@@ -21,6 +21,7 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import Combine
 
 @MainActor
 final class DispatcharrKeyPromptModel: ObservableObject {
@@ -32,6 +33,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     private weak var fixHost: UIViewController?
     private var shownPrompt: DispatcharrRequestGate.Prompt?
     private var retry: Task<Void, Never>?
+    private var lockBag: AnyCancellable?
 
     private init() {
         prompt = DispatcharrRequestGate.shared.prompt
@@ -46,6 +48,19 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     /// Touch once at launch so the gate's callback is wired before any 401.
     func install() {
         ProfileManager.shared.onActiveSignInNeeded = { [weak self] pid, profile in self?.presentProfileSignIn(pid, profile) }
+        // The prompt waits for the launch PIN gate (and the Apple TV launch
+        // picker), then shows with its normal buttons, Sign In included.
+        if lockBag == nil {
+            let pm = ProfileManager.shared
+            lockBag = pm.$launchGate.combineLatest(pm.$launchPicker)
+                .map { LaunchLockRules.locked(gateArmed: $0 != nil, pickerUp: $1 != nil) }
+                .removeDuplicates()
+                .receive(on: RunLoop.main)
+                .sink { [weak self] locked in
+                    guard !locked else { return }
+                    self?.sync()
+                }
+        }
         sync()
         // The launch check may have run before this hook was in place.
         ProfileManager.shared.promptActiveSignInIfNeeded("launch")
@@ -75,9 +90,19 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         present(now, attempt: 0)
     }
 
+    /// The launch lock is up: no prompt, and nothing it opens, until it passes.
+    private var launchLocked: Bool {
+        let pm = ProfileManager.shared
+        return !LaunchLockRules.promptMayShow(gateArmed: pm.launchGate != nil, pickerUp: pm.launchPicker != nil)
+    }
+
     private func present(_ p: DispatcharrRequestGate.Prompt, attempt: Int) {
         retry?.cancel()
         guard DispatcharrRequestGate.shared.prompt == p else { return }
+        guard !launchLocked else {
+            debugLog("[AUTH] Sign-in not accepted prompt waits for the launch PIN")
+            return
+        }
         guard let top = Self.topController(), !top.isBeingDismissed, !top.isBeingPresented,
               !(top is UIAlertController) else {
             // Another presentation is settling (a sheet closing, another
@@ -142,7 +167,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         retry = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled, DispatcharrRequestGate.shared.prompt == p, self.shown === alert else { return }
+                guard !Task.isCancelled, DispatcharrRequestGate.shared.prompt == p, self.shown === alert, !self.launchLocked else { return }
                 if alert.viewIfLoaded?.window == nil, !alert.isBeingPresented {
                     debugLog("[AUTH] Sign-in not accepted prompt was not on screen; showing it again")
                     self.shown = nil
@@ -154,10 +179,12 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     }
 
     private static func topController() -> UIViewController? {
-        let window = UIApplication.shared.connectedScenes
+        // The app's own window, never the launch lock's (above every alert).
+        let all = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows)
-            .first { $0.isKeyWindow }
+            .filter { $0.windowLevel == .normal && !$0.isHidden }
+        let window = all.first { $0.isKeyWindow } ?? all.first
         var top = window?.rootViewController
         while let next = top?.presentedViewController { top = next }
         return top
@@ -176,6 +203,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     /// works lifts the hold. Gated like Set up: never for a Child profile or
     /// behind the launch PIN.
     func signIn(_ p: DispatcharrRequestGate.Prompt) {
+        guard !launchLocked else { debugLog("[AUTH] sign-in form refused: the launch PIN comes first"); return }
         shown = nil
         shownPrompt = nil
         guard KeySignInGate.canOpen(playlistID: p.playlistID) else {
@@ -201,6 +229,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
 
     /// Apple TV: open the receive screen in Fix Login mode for this playlist.
     func updateFromPhone(_ p: DispatcharrRequestGate.Prompt) {
+        guard !launchLocked else { debugLog("[SETUP] fix login refused: the launch PIN comes first"); return }
         // Fix Login writes the playlist's own sign-in: never for a non-default
         // adult profile's own key (the button is hidden; APP7-1).
         if p.profileID != nil && KeySignInGate.canOpen(playlistID: p.playlistID) {
@@ -240,6 +269,14 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     private func presentHosted(attempt: Int, fullScreen: Bool = false,
                                make: @escaping (@escaping () -> Void) -> AnyView) {
         guard fixHost == nil else { return }
+        // Nothing opens over or under the launch lock: wait until it passes.
+        if launchLocked {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                self.presentHosted(attempt: attempt, fullScreen: fullScreen, make: make)
+            }
+            return
+        }
         guard let top = Self.topController(), !top.isBeingDismissed, !top.isBeingPresented,
               !(top is UIAlertController), let container = AerioApp.sharedContainer else {
             guard attempt < 40 else {
@@ -268,6 +305,7 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     }
 
     func editPlaylist(_ p: DispatcharrRequestGate.Prompt) {
+        guard !launchLocked else { debugLog("[AUTH] Edit Playlist refused: the launch PIN comes first"); return }
         // A Child never opens a playlist's settings (the button is hidden; this
         // covers a prompt that went up before the switch to the Child).
         guard KeySignInGate.canEditPlaylist(playlistID: p.playlistID) else {
@@ -314,6 +352,8 @@ enum KeySignInGate {
     /// (RoleRules.playlistsVisible, the same rule that hides the Playlists block).
     static func canEditPlaylist(playlistID: String) -> Bool {
         let pm = ProfileManager.shared
+        // Never behind the launch PIN gate (security fix 2026-11-12).
+        guard !pm.launchLocked else { return false }
         return RoleRules.playlistsVisible(pm.activeRoleNow) && RoleRules.playlistsVisible(pm.activeRole(playlistID))
     }
 }
