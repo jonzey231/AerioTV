@@ -23,6 +23,13 @@ enum ProfileUI {
     static var small: AerioFont { .system(size: s(13, 21)) }
     static var label: AerioFont { .system(size: s(13, 21), weight: .semibold) }
     static let errorColor = Color(red: 0.94, green: 0.33, blue: 0.31)
+    /// Text on an accent fill (Android onPrimary): the app background in dark,
+    /// white in light. Never `Color.contrastText(accent)`: that is the Text
+    /// Contrast blend, which returns the accent itself at 0%, so the label
+    /// disappears into its fill.
+    static func onAccent(_ scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color.appBackground : .white
+    }
     /// Apple TV's screen height in points (1920 x 1080 at every output resolution).
     static let tvScreenHeight: CGFloat = 1080
     /// Apple TV dialog card width: never narrower than the system alert ("API
@@ -223,7 +230,7 @@ struct ProfilePillStyle: ButtonStyle {
     /// the tint itself at zero text contrast, so the label vanished on its fill.
     private var onFill: Color {
         if destructive { return .white }
-        return scheme == .dark ? Color.appBackground : .white
+        return ProfileUI.onAccent(scheme)
     }
     func makeBody(configuration: Configuration) -> some View {
         let tint = destructive ? ProfileUI.errorColor : Color.accentPrimary
@@ -752,9 +759,13 @@ private struct ProfilePadKeyStyle: ButtonStyle {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
     @Environment(\.isFocused) private var focused
+    @Environment(\.colorScheme) private var scheme
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(focused ? Color.contrastText(.accentPrimary) : .textPrimary)
+            // The focused key's digit (and Clear, OK) on its accent fill: the
+            // on-accent color, so it reads clearly (Apple TV device report
+            // 2026-11-12: the digit was the accent on the accent, barely visible).
+            .foregroundColor(focused ? ProfileUI.onAccent(scheme) : .textPrimary)
             .background(Capsule().fill(focused ? Color.accentPrimary : Color.elevatedBackground))
             .overlay(Capsule().stroke(Color.textSecondary.opacity(ProfileUI.isTv ? 0 : 0.25), lineWidth: 1))
             .scaleEffect(focused ? 1.06 : (configuration.isPressed ? 0.94 : 1))
