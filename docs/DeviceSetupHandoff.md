@@ -3,6 +3,26 @@
 Wire format version 1. This file is identical in the Android repo
 (`docs/DeviceSetupHandoff.md`) and the Apple repo
 (`docs/DeviceSetupHandoff.md`). Change both in the same session.
+Checked against Apple `6527977` and Android `de85e07f` on 2026-11-11.
+"Receiver apply" step 1 also describes the phones after this release's
+later fixes: keyless profiles held, an active Child kept, and the saved
+sync copy discarded (Apple `4ecddec`, `8812f05`, `62510db`, and `0d67843`;
+Android `ab45038e`, `aa22d817`, and `c48fbef9`; no request to a held
+address, logos included, Apple `150a1e1`, Android `cf7cb482`). Fix
+Login "On the TV" items 1, 4, and 5 describe the phones after this
+release's fix that reconnects only the playlist's current account
+(Apple `5568737`, Android `9baa05f4`), with the prompt for a Child
+(Android `b106e0bc`; the rest, Apple `dbeb080`, Android `1bedca29`).
+Fix Login item 4 also lifts only the playlist's own rejected-key
+hold, never a profile's (Apple `78cabaf`, Android `1198bfe2`). Item 1
+also describes the prompt for an active non-default profile's own
+refused key, whose Sign In signs in only that profile (Apple
+`78cabaf`, Android `7186006e`). After this release's last fixes, item 1
+also drops that prompt's Edit Playlist clause and, for an Admin or
+Standard profile, its "Edit Playlist" and "Update from Phone" buttons,
+and a switch to a profile whose key is held as rejected opens that
+profile's form first (Apple `cd2be4d` and `1359259`, Android `48d88962`
+and `10055663`).
 
 ## Why
 
@@ -17,7 +37,7 @@ tablet) over the local network.
 | Side | Who | What it does |
 |------|-----|--------------|
 | Receiver | Every device (Android TV, Apple TV, Android phone and tablet, iPhone, iPad) | Welcome > "Set up from another device", and on phones and tablets also Add Playlist > "Set up from another device". On TVs also the rejected-key prompt's "Update from Phone" (see Fix Login). Generates a code and key pair, listens, advertises, shows a QR code and the code, applies the payload. |
-| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up another device" (list and playlist detail; Admin or default profile only), a dock card directly above the tab bar while another device is advertising (that device's name and type icon, "Waiting for setup, key XXXX", Set up, and dismiss; it shares a row with the Control a TV button when that button shows), a banner at the top of the Settings root for the same device (same lines, Set up, and dismiss; one shared discovery, gating, and dismissal with the dock card), and "Set up another device with this playlist" on the phone onboarding's Add Profiles step. The dock card and banner read "Fix Login" for a TV asking for a sign-in (see Fix Login). A device never lists its own advert. |
+| Sender | Phone or tablet (Android, iPhone, iPad) | Settings > Playlists > "Set up another device" (list and playlist detail; an Admin or Standard profile, or the default profile), a dock card directly above the tab bar while another device is advertising (one row: that device's name, Set up, and dismiss; it shares a row with the Control a TV button when that button shows), a banner at the top of the Settings root for the same device (the device-type icon, the name, Set up, and dismiss; one shared discovery, gating, and dismissal with the dock card; the key check is on the next screen, "Check that the device shows XXXX"), and "Set up another device with this playlist" on the phone onboarding's Add Profiles step. The dock card and banner read "Fix Login" for a TV asking for a sign-in (see Fix Login). A device never lists its own advert. |
 
 ## Receiver session
 
@@ -202,9 +222,7 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
     "type": "dispatcharr | xtream | m3u",
     "name": "Home",
     "url": "https://server.example",
-    "xmltvUrl": null,
-    "localUrl": "http://192.168.1.10:9191",
-    "userAgent": null,
+    "localUrl": "http://<lan-address>:<port>",
     "guideDays": 7,
     "catchupOffsetMinutes": 0,
     "vodEnabled": true,
@@ -220,7 +238,6 @@ Unknown keys are ignored by readers; absent keys take the defaults shown.
       "avatar": { "icon": "initial", "color": "" },
       "order": 0,
       "isDefault": true,
-      "credential": null,
       "pinType": "numbers | directions | none",
       "pinHash": "<64 hex>",
       "pinSalt": "<32 hex>"
@@ -250,13 +267,19 @@ Notes:
   profile's API key and/or username and password on Dispatcharr, the
   account login on Xtream Codes, absent on M3U. Only non-empty fields are
   sent.
+- `xmltvUrl`, `localUrl`, and `userAgent` are sent only when set; senders never write `null`.
 - `guideDays` uses the stored Guide Days value (1 to 14, or 0 for All
   Available). `channelProfileIds` holds the playlist's Dispatcharr Channel
   Profile (empty = all channels).
 - Profiles: `credential` is absent on the default profile and carries
-  `apiKey` or `password` otherwise. PIN fields are the same v2 hash and
-  salt Dispatcharr Sync carries in the `profiles` key; a PIN set before
-  sync that has not been re-entered yet is sent as `none`.
+  `apiKey`, `password`, or both otherwise (a receiver tries the key
+  first). PIN fields are the same v2 hash and salt Dispatcharr Sync
+  carries in the `profiles` key; a PIN set before sync that has not been
+  re-entered yet is sent as `none`. `order` is the profile's position
+  among every local profile of the playlist.
+- "Import this user only" sends one entry, marked `isDefault` true with
+  `order` 0 and no `credential`; `playlist.credential` carries that
+  user's sign-in.
 - XC and M3U playlists send `playlist` only.
 - `sync` is present only when the user chose to turn it on.
 - `mode` is optional: absent = a setup (every sender before Fix Login);
@@ -279,13 +302,51 @@ Non-interactive, with a progress line on screen:
    created with the sender's `playlist.id`, its default profile with the
    default entry's `id`, and each added profile with its `id` (an id
    already used here gets a new one). Without ids, today's behavior.
-2. "Adding profiles": the default profile first (name, role, avatar,
-   order, PIN), then Admins, then the rest, each through the roster add
-   path (signs in once with the sent credential, then applies role, PIN,
-   avatar, display name, and order). A profile that fails is skipped and
-   logged; the rest continue.
-3. "Syncing": when `sync.enabled`, select Dispatcharr Sync (Google Drive
-   sync goes off, as in Settings) and wait for the first pull.
+   When the update changes the scheme, host, or port of the playlist's
+   server URL or local URL, every non-default profile is held, with or
+   without a stored sign-in (a held sign-in is never sent), a non-default
+   active profile switches to the default (an active Child instead stays
+   active and held, and leaving it needs the usual PIN; while it is held,
+   no request of any kind, logos included, goes to the playlist's
+   addresses except the same-server check and its own sign-in form), and
+   the saved Dispatcharr Sync copy of the server's record is discarded for
+   every profile of the playlist, all before anything but requests with
+   the payload's own playlist sign-in goes to the new address. When
+   `users/me` at the new address, with the default profile's sign-in,
+   returns the user id and username recorded before the change began (no
+   `users/me` made during the change, or while any profile is held,
+   updates that record), the holds lift for the profiles last signed in
+   at that server; otherwise a held profile asks to sign in again when
+   picked, and that sign-in must name the profile's own user (another
+   account is refused and nothing is written).
+2. "Adding profiles": entries sorted default first, then every non-Child
+   (Admin and Standard together), then Child, each group by `order`
+   (-1 last). Child last lets the rule "while a Child exists, every Admin
+   and Standard profile holds a PIN" pass, because their PINs arrive
+   first.
+   - Default entry: applied to the local default profile: display name
+     when not blank, role when the wire value is valid (resolved against
+     the server level), order when 0 or more, the avatar when present, and
+     the PIN when `pinType` is `numbers` or `directions` with a
+     64-character hash and a 32-character salt (Apple accepts any
+     non-empty salt here). Android stamps its synced roster row; Apple does
+     not.
+   - Any other entry: when a profile with that username already exists
+     here, Android skips it and Apple applies its name, role, avatar,
+     order, and PIN to the existing profile. Otherwise it goes through the
+     roster add path (signs in once with the sent credential, `/me/` must
+     name the same user, then applies role, PIN, avatar, display name, and
+     order, and keeps the sent `id` when it is free here).
+   A profile that fails is skipped and logged; the rest continue.
+3. Dispatcharr Sync: `sync.enabled` never turns it on. When the payload
+   carries `sync` with `provider` `dispatcharr` and `enabled` true,
+   Dispatcharr Sync is off here, and the owner has not declined before,
+   the receiver asks once after the apply, "Dispatcharr Sync is on for
+   this account" / "Another device already syncs this account through
+   Dispatcharr. Turn it on here too?" (Android with Google Drive on: "Turn
+   it on here too, alongside Google Drive?"; Apple with iCloud on: "Turn
+   it on here too, alongside iCloud?"), with Turn On and Not Now. Turning
+   it on never changes Google Drive or iCloud.
 4. Continue into the onboarding Add Profiles step (server user list,
    search, and QR import), so users whose credentials were not sent can be
    added exactly as in onboarding. Then finish onboarding, or return to
@@ -306,10 +367,49 @@ across platforms (an iPhone can fix an Android TV and the reverse).
 
 On the TV:
 
-1. The rejected-key prompt (title "API key no longer valid", body
-   unchanged) has, on TVs, the buttons "Update from Phone" (primary, default
-   focus), "Update with Remote" (opens Edit Playlist), and "Not Now", in
-   that order. Phones and tablets keep Edit Playlist and Not Now.
+1. The rejected-key prompt (title "API key no longer valid") says "Dispatcharr no longer accepts
+   the API key for <playlist>. It may have been changed on the server. Sign in with your
+   Dispatcharr username and password to reconnect, or enter the current key in Edit Playlist."
+   When a stored password was refused too, it says "the sign-in for <playlist>" and "the current
+   details". When a stored password signs in but the account has no API key, it says "This account
+   has no API key yet. Ask your Dispatcharr administrator to turn on API access for it." Buttons on
+   TVs: "Update from Phone" (primary, default focus), "Sign In with Remote" (opens the "Sign in to
+   Dispatcharr" form), and "Not Now", in that order. Phones and tablets: "Sign In" (primary, the
+   same form), "Edit Playlist", and "Not Now". A profile that fails the Set up gate (a Child that
+   is not the default profile), or the app behind the launch PIN, gets no sign-in button.
+   For a Child, the first two bodies above are cut, with no new words: when Sign In is offered (a
+   default Child) the body ends "... Sign in with your Dispatcharr username and password to
+   reconnect.", and when it is not, the body ends after "It may have been changed on the server."
+   A Child gets no "Edit Playlist" button (Apple `dbeb080`, Android `b106e0bc`; the cut body,
+   Apple `dbeb080`, Android `1bedca29`). For the playlist's own refused key (the default
+   profile's), the form reconnects only the playlist's current account. After the login and
+   `users/me`, and before anything is written, `users/me` must name the playlist's known user: the
+   default profile's recorded account (user id and username, see "Receiver apply" step 1), else
+   the playlist's own stored username, else the default profile's username, never a value a
+   non-default profile could have written. Usernames compare without regard to case, and the user
+   id too whenever one is recorded. Any other account is refused with "Dispatcharr did not accept
+   that username or password.", its token is dropped, and nothing is written. With no known user,
+   a Child (active or default) is refused and anyone else may sign in, as before. Changing which
+   account a playlist uses stays in Edit Playlist, which a Child cannot open (Apple `5568737`,
+   Android `9baa05f4`; the known-user order, Apple `1c8430e`, Android `ff7ad987`).
+   When the refused key is an active non-default profile's own, the prompt belongs to that
+   profile: its Sign In (offered under the same Set up gate, so never to a Child) opens the form
+   for that profile's own username, which signs in only that user (another account is refused and
+   nothing is written); a passed sign-in stores that profile's new key and password and lifts only
+   that profile's hold (Apple `78cabaf`, Android `7186006e`). Its body drops the Edit Playlist
+   clause, as a default Child's does, so it ends "... Sign in with your Dispatcharr username and
+   password to reconnect." (a non-default Child's body is cut further, as above). For an Admin or
+   Standard profile it shows no "Edit Playlist" or "Update from Phone" button, because those
+   repair only the playlist's own sign-in: its buttons are "Sign In" (phones and tablets) or "Sign
+   In with Remote" (TVs), then "Not Now". A non-default Child keeps the buttons it had: "Not Now"
+   on phones and tablets, and "Update from Phone" and "Not Now" on TVs. Choosing a profile whose
+   key is held as rejected, in the switcher or the launch picker, opens its "Sign in to
+   Dispatcharr" form once its PIN passes, before playback stops or anything is sent: that
+   profile's own form (its username only) for a non-default profile, or the form above (the
+   playlist's known user) for the default profile. A passed sign-in replaces only that profile's
+   key and lifts only its hold, and Cancel keeps the current profile. A Child target gets the form
+   too, because an Admin or Standard profile, or a PIN from one, made the choice (Apple `cd2be4d`
+   and `1359259`, Android `48d88962` and `10055663`).
 2. "Update from Phone" opens the receive screen (QR code, code, key
    fingerprint, device name) for that playlist with the header "Update from
    your phone" and the line "On your phone, open AerioTV and tap Fix Login."
@@ -318,16 +418,27 @@ On the TV:
 4. Apply: only the sign-in of the playlist with `playlist.id`, which must be
    the playlist the screen was opened for (ids compare without case): the
    API key, and the username and password when sent. A field not sent, or
-   sent blank, keeps its stored value. Profiles, settings, and other
+   sent blank, keeps its stored value. Before anything is written, the TV
+   verifies the sent sign-in at the playlist's address (`users/me` with
+   the sent key, or a login with the sent password) and applies the
+   account check of item 1: another account, or a sign-in that does not
+   verify, fails as in item 5 and nothing is written. So Fix Login also
+   fails while the server cannot be reached, or while the profile active
+   on the TV is held (no request goes to a held address) (Apple
+   `5568737`, Android `9baa05f4`). Profiles, settings, and other
    playlists never change; a Fix Login screen takes only
    `playlist.credential` from whatever it receives. The progress line is
-   "Signing in". Then the rejected-key hold and its prompt are lifted for
-   that playlist, requests still built with the old key go out with the new
+   "Signing in". Then the playlist's own rejected-key hold and its prompt
+   are lifted (a profile's own held key stays held until that profile
+   signs in as itself or its re-check passes; Apple `78cabaf`, Android
+   `1198bfe2`), requests still built with the old key go out with the new
    one, the channels reload, and the screen shows "Signed in. Loading
    channels." for 2 seconds and closes.
-5. No playlist here with that id (or no sign-in in the payload): "Setup did
-   not finish" with "The sign-in that was sent is not for a playlist on this
-   device.", Retry (a new code), and Cancel; the screen stays open.
+5. No playlist here with that id, no sign-in in the payload, or a sent
+   sign-in that is not the playlist's current account or cannot be
+   verified (item 4): "Setup did not finish" with "The sign-in that was
+   sent is not for a playlist on this device.", Retry (a new code), and
+   Cancel; the screen stays open.
 
 On the phone or tablet:
 
@@ -338,8 +449,8 @@ On the phone or tablet:
    one-playlist identity rule, exactly one Dispatcharr playlist that signs
    in as the account sync reported for `pl`. That playlist must have a
    sign-in to send, and its own key must not be held as rejected here. The
-   sender gate applies to that playlist (Admin or default profile, never
-   while the launch PIN is up). The device list in Set up another device
+   sender gate applies to that playlist (an Admin or Standard profile, or
+   the default profile; never while the launch PIN is up). The device list in Set up another device
    lists setup receivers only.
 2. Fix Login opens the sheet titled "Fix Login": the code, then the
    pre-send key check, then the sealed send. No scope, profile, or sync
@@ -405,8 +516,8 @@ code" or "Choose from Photos" accepts it unchanged:
   buttons (Scan QR code, Choose from Photos, Import file) wherever they
   appear together: the Set up another device screen, Add Playlist, the
   Dispatcharr connect form, and Add Profile. The profile roster also
-  offers it for the active profile, and an Admin may show it for any
-  profile. It is hidden when the profile has no saved API key. TVs do not
+  offers it for the active profile, and an Admin or Standard profile may
+  show it for any profile. It is hidden when the profile has no saved API key. TVs do not
   show it anywhere.
 - Gate: when a Device Admin PIN or that profile's PIN exists, either one
   must be entered first ("Enter the PIN to show this code"); with no PIN
@@ -469,6 +580,6 @@ unchanged and no server path is used; everything stays on the LAN.
 | Platform | Receiver | Sender |
 |----------|----------|--------|
 | Android TV | Done (`kind` = `tv`) | n/a |
-| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |
+| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |
 | Apple TV | Done (`kind` = `tv`) | n/a |
 | iPhone and iPad | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |
