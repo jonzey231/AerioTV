@@ -100,13 +100,18 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         #endif
         let canSignIn = KeySignInGate.canOpen(playlistID: p.playlistID)
         let canEdit = KeySignInGate.canEditPlaylist(playlistID: p.playlistID)
+        // A non-default profile's own refused key (APP7-1): its own Sign In only,
+        // and the body without the Edit Playlist clause (trimmed, no new words).
+        let profileKey = p.profileID != nil
         let alert = UIAlertController(
             title: DispatcharrRateLimitCopy.keyRejectedTitle,
             message: DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: p.playlistName,
                                                                     passwordToo: p.passwordToo, noKey: p.noKey,
-                                                                    canSignIn: canSignIn, canEditPlaylist: canEdit),
+                                                                    canSignIn: canSignIn,
+                                                                    canEditPlaylist: KeySignInCopy.bodyNamesEditPlaylist(
+                                                                        canEditPlaylist: canEdit, profileKey: profileKey)),
             preferredStyle: .alert)
-        let actions = KeySignInCopy.promptActions(isTV: isTV, canSignIn: canSignIn, canEditPlaylist: canEdit)
+        let actions = KeySignInCopy.promptActions(isTV: isTV, canSignIn: canSignIn, canEditPlaylist: canEdit, profileKey: profileKey)
         for (i, a) in actions.enumerated() {
             let action = UIAlertAction(title: KeySignInCopy.label(a, isTV: isTV), style: a == .notNow ? .cancel : .default) { _ in
                 Task { @MainActor in
@@ -196,6 +201,12 @@ final class DispatcharrKeyPromptModel: ObservableObject {
 
     /// Apple TV: open the receive screen in Fix Login mode for this playlist.
     func updateFromPhone(_ p: DispatcharrRequestGate.Prompt) {
+        // Fix Login writes the playlist's own sign-in: never for a non-default
+        // adult profile's own key (the button is hidden; APP7-1).
+        if p.profileID != nil && KeySignInGate.canOpen(playlistID: p.playlistID) {
+            debugLog("[SETUP] fix login refused: the refused key is a profile's own")
+            return
+        }
         debugLog("[SETUP] fix login screen opened from the rejected-key prompt for \(p.playlistID.prefix(8))")
         shown = nil
         shownPrompt = nil
@@ -261,6 +272,12 @@ final class DispatcharrKeyPromptModel: ObservableObject {
         // covers a prompt that went up before the switch to the Child).
         guard KeySignInGate.canEditPlaylist(playlistID: p.playlistID) else {
             debugLog("[AUTH] Sign-in not accepted prompt: Edit Playlist refused for a Child")
+            return
+        }
+        // Edit Playlist writes the playlist's own sign-in: never from a
+        // non-default profile's own refused key (the button is hidden; APP7-1).
+        guard p.profileID == nil else {
+            debugLog("[AUTH] Sign-in not accepted prompt: Edit Playlist refused for a profile's own key")
             return
         }
         debugLog("[AUTH] Sign-in not accepted prompt: Edit Playlist for \(p.playlistID.prefix(8))")

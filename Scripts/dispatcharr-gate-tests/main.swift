@@ -743,6 +743,42 @@ do {
        "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server.", "non-default Child body")
 }
 
+// APP7-1: a non-default profile's own refused key never offers the playlist's sign-in.
+do {
+    typealias K = KeySignInCopy
+    typealias C = DispatcharrRateLimitCopy
+    // Adult non-default profile: its own Sign In and Not Now only, body without the Edit Playlist clause.
+    eq(K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: true, profileKey: true), [.signIn, .notNow],
+       "adult profile key, phone: no Edit Playlist")
+    eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true, profileKey: true), [.signIn, .notNow],
+       "adult profile key, TV: no Update from Phone")
+    check(!K.bodyNamesEditPlaylist(canEditPlaylist: true, profileKey: true), "its body drops the Edit Playlist clause")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: false, canSignIn: true,
+                               canEditPlaylist: K.bodyNamesEditPlaylist(canEditPlaylist: true, profileKey: true)),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect.",
+       "adult profile key body, key")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: true, noKey: false, canSignIn: true,
+                               canEditPlaylist: K.bodyNamesEditPlaylist(canEditPlaylist: true, profileKey: true)),
+       "Dispatcharr no longer accepts the sign-in for Home. It may have been changed on the server. Sign in with your Dispatcharr username and password to reconnect.",
+       "adult profile key body, password")
+    // Non-default Child: unchanged.
+    eq(K.promptActions(isTV: false, canSignIn: false, canEditPlaylist: false, profileKey: true), [.notNow], "Child profile key, phone: as before")
+    eq(K.promptActions(isTV: true, canSignIn: false, canEditPlaylist: false, profileKey: true), [.updateFromPhone, .notNow],
+       "Child profile key, TV: as before")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: false, canSignIn: false,
+                               canEditPlaylist: K.bodyNamesEditPlaylist(canEditPlaylist: false, profileKey: true)),
+       "Dispatcharr no longer accepts the API key for Home. It may have been changed on the server.", "Child profile key body: as before")
+    // The default profile's (playlist's) prompt: unchanged.
+    eq(K.promptActions(isTV: false, canSignIn: true, canEditPlaylist: true, profileKey: false), [.signIn, .editPlaylist, .notNow],
+       "playlist key, phone: unchanged")
+    eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true, profileKey: false), [.updateFromPhone, .signIn, .notNow],
+       "playlist key, TV: unchanged")
+    check(K.bodyNamesEditPlaylist(canEditPlaylist: true, profileKey: false), "playlist key body keeps its clause")
+    eq(C.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: false, canSignIn: true,
+                               canEditPlaylist: K.bodyNamesEditPlaylist(canEditPlaylist: true, profileKey: false)),
+       C.keyRejectedBody(playlistName: "Home", passwordToo: false), "playlist key body unchanged")
+}
+
 // accepted memo
 do {
     let g = freshGate()

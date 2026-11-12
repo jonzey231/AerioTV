@@ -156,10 +156,21 @@ enum KeySignInCopy {
     /// focus), Sign In with Remote, Not Now. A profile that may not open the
     /// form (a Child, or the app behind the launch PIN) gets no sign-in button,
     /// and a Child gets no Edit Playlist either (follow-up 12: a Child never
-    /// reaches a playlist's settings, as on Android).
-    static func promptActions(isTV: Bool, canSignIn: Bool, canEditPlaylist: Bool) -> [PromptAction] {
+    /// reaches a playlist's settings, as on Android). A non-default adult
+    /// profile's OWN refused key (APP7-1): Sign In (its own form) and Not Now
+    /// only; Edit Playlist and Update from Phone write the playlist's (default
+    /// profile's) sign-in, so they are left out. A non-default Child keeps its
+    /// buttons; the playlist's own prompt is unchanged.
+    static func promptActions(isTV: Bool, canSignIn: Bool, canEditPlaylist: Bool, profileKey: Bool = false) -> [PromptAction] {
+        if profileKey && canSignIn { return [.signIn, .notNow] }
         if isTV { return canSignIn ? [.updateFromPhone, .signIn, .notNow] : [.updateFromPhone, .notNow] }
         return (canSignIn ? [.signIn] : []) + (canEditPlaylist ? [.editPlaylist] : []) + [.notNow]
+    }
+
+    /// The prompt body's Edit Playlist clause stays only where the button does:
+    /// never for a Child, never for a non-default profile's own refused key.
+    static func bodyNamesEditPlaylist(canEditPlaylist: Bool, profileKey: Bool) -> Bool {
+        canEditPlaylist && !profileKey
     }
 
     static func label(_ a: PromptAction, isTV: Bool) -> String {
