@@ -951,6 +951,14 @@ extension DispatcharrAPI {
                 debugLog("📺 silentRebootstrapApiKey: a profile switch happened while it waited (\(atStart) -> \(activeNow)); nothing written")
                 return .failed
             }
+            // One request checks the key before anything stores or sends it.
+            let refused = await DispatcharrKeyBroker.mintedKeyRefused(user.apiKey, serverID: serverID,
+                                                                       baseURL: baseURL, userAgent: userAgent)
+            if case .keyRefused = DispatcharrRelogin.outcome(minted: user.apiKey, proofRefused: refused) {
+                debugLog("📺 silentRebootstrapApiKey: signed in, but the server refused the key it issued "
+                         + "(server=\(serverID.uuidString.prefix(8))); not stored")
+                return .keyRefused
+            }
             DispatcharrTokenStore.shared.store(
                 serverID: serverID,
                 access: pair.access,
@@ -1111,6 +1119,24 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// The key [who]'s re-login issued was refused by the server: hold it, and
+    /// no re-login or caller hands it out again for the window (ReloginBook).
+    func noteKeyRefused(serverID: UUID) { noteKeyRefused(identity: .playlist(serverID.uuidString)) }
+
+    func noteKeyRefused(identity who: DispatcharrIdentity) {
+        lock.lock()
+        book.noteKeyRefused(who, now: Self.now())
+        lock.unlock()
+        debugLog("[AUTH] re-login for \(who) signed in, but the server refused the key it issued; the key is held")
+    }
+
+    func foundRefusedKey(serverID: UUID) -> Bool { foundRefusedKey(identity: .playlist(serverID.uuidString)) }
+
+    func foundRefusedKey(identity who: DispatcharrIdentity) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return book.foundRefusedKey(who, now: Self.now())
+    }
+
     /// A login outside `silentRelogin` (warmup) was rejected.
     func noteRejected(serverID: UUID) {
         let who = DispatcharrIdentity.playlist(serverID.uuidString)
@@ -1163,6 +1189,10 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         let key = book.finish(who, outcome, now: Self.now())
         lock.unlock()
         if outcome == .rejected { Self.surfaceRejected(who) }
+        if outcome == .keyRefused {
+            debugLog("[AUTH] re-login for \(who) signed in, but the server refused the key it issued; "
+                     + "the key is held and no re-login runs for \(Int(Self.attemptWindow))s")
+        }
         return key
     }
 

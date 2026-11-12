@@ -46,6 +46,30 @@ enum DispatcharrKeyBroker {
     /// The saved Dispatcharr playlist that uses `key` (its own key or the
     /// active profile's), preferring `serverID`. Keychain reads happen here,
     /// on a 401 path only, never on a steady-state request.
+    /// A key a silent re-login just read from the account: EXACTLY one request
+    /// (/api/core/version/, past the rejected-key gate, in the playlist's header
+    /// shape) decides whether it may be stored and sent. False only when the
+    /// server refused it; no answer counts as usable (DispatcharrRelogin.outcome).
+    static func mintedKeyRefused(_ key: String, serverID: UUID, baseURL: String, userAgent: String) async -> Bool {
+        let mode = await MainActor.run { headerMode(serverID: serverID) } ?? .xapikey
+        let probe = await DispatcharrAPI(baseURL: baseURL, auth: .apiKey(key), userAgent: userAgent, authMode: mode).probeApiKeyOnce()
+        switch probe {
+        case .rejected:
+            return true
+        case .accepted(let m):
+            DispatcharrRequestGate.shared.noteKeyAccepted(key, mode: m.rawValue)
+            return false
+        case .unknown:
+            return false
+        }
+    }
+
+    @MainActor private static func headerMode(serverID: UUID) -> DispatcharrAuthHeaderMode? {
+        guard let container else { return nil }
+        let all = (try? container.mainContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        return all.first { $0.id == serverID }?.dispatcharrHeaderMode
+    }
+
     @MainActor static func playlist(forKey key: String, serverID: UUID?) -> PlaylistInfo? {
         guard let container else { return nil }
         let ctx = container.mainContext
@@ -217,6 +241,8 @@ enum DispatcharrKeyBroker {
             newKey = await DispatcharrAPI.silentRebootstrapApiKey(serverID: target.id, baseURL: info.baseURL,
                                                                   username: target.username, userAgent: info.userAgent)
             if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
+            // The re-login's own key came back and is the one just refused: hold it.
+            if newKey == key { DispatcharrLoginGate.shared.noteKeyRefused(serverID: target.id) }
         }
         let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
         if outcome == .held { _ = await holdIfProven(key: key, serverID: info.id, baseURL: info.baseURL) }
@@ -250,9 +276,13 @@ enum DispatcharrKeyBroker {
         // A stored password that signed in on an account with no API key
         // ends the road too: re-signing in can never mint a key (2026-11-11).
         let noKey = info.hasPassword && DispatcharrLoginGate.shared.foundNoKey(serverID: info.id)
+        // A re-login that signed in but whose key the server refused ends the road
+        // too: re-signing in mints the same refused key (2026-11-12, Android parity).
+        let keyRefused = info.hasPassword && DispatcharrLoginGate.shared.foundRefusedKey(serverID: info.id)
         if info.hasPassword {
-            guard DispatcharrLoginGate.shared.isRejected(serverID: info.id) || noKey else { return false }
-            passwordToo = !noKey
+            let loginRefused = DispatcharrLoginGate.shared.isRejected(serverID: info.id)
+            guard loginRefused || noKey || keyRefused else { return false }
+            passwordToo = loginRefused && !noKey
         } else {
             passwordToo = false
         }
@@ -260,7 +290,8 @@ enum DispatcharrKeyBroker {
                                 passwordToo: passwordToo, noKey: noKey, baseURL: info.baseURL) {
             debugLog("[AUTH] API key for \(info.id.uuidString.prefix(8)) rejected by the server; holding every API call "
                      + "for this playlist locally (no network) until Edit Playlist changes the key or credentials"
-                     + (noKey ? " (the account has no API key)" : passwordToo ? " (re-login refused too)" : ""))
+                     + (noKey ? " (the account has no API key)" : passwordToo ? " (re-login refused too)"
+                        : keyRefused ? " (the key a re-login issued was refused too)" : ""))
         }
         return true
     }
@@ -410,10 +441,13 @@ final class DispatcharrKeyRecheck {
             let fresh = await DispatcharrAPI.silentRebootstrapApiKey(serverID: info.id, baseURL: info.baseURL,
                                                                      username: info.username, userAgent: info.userAgent)
             if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }
+            // The re-login's key was checked before it came back (one request);
+            // a key the server refused comes back as none and the hold stays.
             accepted = fresh != nil && fresh != r.key
             outcome = accepted ? "accepted (re-login issued a key)"
                 : DispatcharrLoginGate.shared.isRejected(serverID: info.id) ? "rejected (login refused)"
-                : DispatcharrLoginGate.shared.foundNoKey(serverID: info.id) ? "rejected (the account has no API key)" : "unknown"
+                : DispatcharrLoginGate.shared.foundNoKey(serverID: info.id) ? "rejected (the account has no API key)"
+                : DispatcharrLoginGate.shared.foundRefusedKey(serverID: info.id) ? "rejected (the key the re-login issued was refused)" : "unknown"
         } else {
             let api = DispatcharrAPI(baseURL: r.baseURL, auth: .apiKey(r.key),
                                      userAgent: info?.userAgent ?? DeviceInfo.defaultUserAgent,

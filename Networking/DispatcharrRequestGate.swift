@@ -982,6 +982,18 @@ enum DispatcharrRelogin {
     static func overtaken(activeAtStart: DispatcharrIdentity, activeNow: DispatcharrIdentity) -> Bool {
         activeAtStart != activeNow
     }
+
+    /// A re-login signed in and read the account's key: EXACTLY one request
+    /// checks that key before anything stores or sends it. The server refusing
+    /// it ends the re-login as `.keyRefused`: the identity parks for the
+    /// window, no caller gets the key, and the old key is held, so a key the
+    /// server still refuses never goes out again (2026-11-12, Android parity:
+    /// it was never held, and about 15 refused requests went out in a second,
+    /// tripping Dispatcharr's 10 per minute IP lockout). No answer (network,
+    /// 5xx) is not a refusal: the key is used.
+    static func outcome(minted key: String, proofRefused: Bool) -> ReloginBook.Outcome {
+        proofRefused ? .keyRefused : .key(key)
+    }
 }
 
 /// The silent re-login rules, per identity (DispatcharrLoginGate): at most one
@@ -991,7 +1003,11 @@ enum DispatcharrRelogin {
 /// holds the tasks and the lock.
 struct ReloginBook: Sendable {
     enum Claim: Equatable, Sendable { case wait, parked(Int), shared(String?, Int), mine }
-    enum Outcome: Equatable, Sendable { case key(String), failed, rejected }
+    enum Outcome: Equatable, Sendable {
+        case key(String), failed, rejected
+        /// Signed in, but the server refused the key it issued (DispatcharrRelogin.outcome).
+        case keyRefused
+    }
 
     let window: TimeInterval
     private var inFlight: Set<String> = []
@@ -999,6 +1015,7 @@ struct ReloginBook: Sendable {
     private var lastKey: [String: String] = [:]
     private var rejectedUntil: [String: TimeInterval] = [:]
     private var noKeyUntil: [String: TimeInterval] = [:]
+    private var keyRefusedUntil: [String: TimeInterval] = [:]
 
     init(window: TimeInterval = 60) { self.window = window }
 
@@ -1006,6 +1023,9 @@ struct ReloginBook: Sendable {
         let k = who.key
         if inFlight.contains(k) { return .wait }
         if let until = rejectedUntil[k], until > now { return .parked(Int((until - now).rounded(.up))) }
+        // Its last re-login minted a key the server refused: no new attempt, and
+        // nobody gets that key, for the window.
+        if let until = keyRefusedUntil[k], until > now { return .parked(Int((until - now).rounded(.up))) }
         if let last = lastAttemptAt[k], now - last < window { return .shared(lastKey[k], Int(now - last)) }
         lastAttemptAt[k] = now
         lastKey[k] = nil
@@ -1022,6 +1042,7 @@ struct ReloginBook: Sendable {
         case .key(let key): lastKey[k] = key; return key
         case .failed: return nil
         case .rejected: rejectedUntil[k] = now + window; return nil
+        case .keyRefused: lastKey[k] = nil; keyRefusedUntil[k] = now + window; return nil
         }
     }
 
@@ -1038,7 +1059,17 @@ struct ReloginBook: Sendable {
     mutating func clearRejected(_ who: DispatcharrIdentity) {
         rejectedUntil[who.key] = nil
         noKeyUntil[who.key] = nil
+        keyRefusedUntil[who.key] = nil
     }
+
+    /// A key [who]'s re-login issued was refused after it was handed out (a
+    /// caller got it back as the shared result and the server refused it): park
+    /// like a refused proof, and nobody gets that key again for the window.
+    mutating func noteKeyRefused(_ who: DispatcharrIdentity, now: TimeInterval) {
+        lastKey[who.key] = nil
+        keyRefusedUntil[who.key] = now + window
+    }
+    func foundRefusedKey(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (keyRefusedUntil[who.key] ?? 0) > now }
 
     mutating func noteNoKey(_ who: DispatcharrIdentity, now: TimeInterval) { noKeyUntil[who.key] = now + window }
     func foundNoKey(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (noKeyUntil[who.key] ?? 0) > now }

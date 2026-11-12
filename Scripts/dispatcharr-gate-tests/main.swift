@@ -1073,5 +1073,64 @@ do {
     check(CredentialMergeBarrier.maxWait <= 5, "the wait is bounded to a few seconds")
 }
 
+// MARK: - A re-login that mints a key the server refuses never loops (2026-11-12, Android parity)
+do {
+    // The rule: one check of the minted key; a refusal is .keyRefused.
+    eq(DispatcharrRelogin.outcome(minted: "k", proofRefused: true), .keyRefused, "a refused minted key ends the re-login as keyRefused")
+    eq(DispatcharrRelogin.outcome(minted: "k", proofRefused: false), .key("k"), "a minted key that passes is used")
+
+    // The book: nobody gets a refused minted key; the identity parks for the window.
+    var book = ReloginBook(window: 60)
+    let who = DispatcharrIdentity.playlist("P1")
+    eq(book.claim(who, now: 100), .mine, "the first 401 runs the re-login")
+    eq(book.claim(who, now: 100.1), .wait, "a concurrent 401 waits for it")
+    eq(book.finish(who, .keyRefused, now: 101), nil, "every waiter gets no key back")
+    check(book.foundRefusedKey(who, now: 101), "the refused key is recorded (the old key is held)")
+    if case .parked = book.claim(who, now: 130) { check(true, "no second re-login inside the minute") } else { check(false, "no second re-login inside the minute") }
+    if case .parked = book.claim(who, now: 160.9) { check(true, "still parked just inside the minute") } else { check(false, "still parked just inside the minute") }
+    eq(book.claim(who, now: 161.1), .mine, "at most one re-login per slot per minute")
+    var b2 = ReloginBook(window: 60)
+    _ = b2.claim(who, now: 0); _ = b2.finish(who, .key("k1"), now: 1)
+    eq(b2.claim(who, now: 5), .shared("k1", 5), "a good key is shared inside the window")
+    b2.noteKeyRefused(who, now: 6)
+    if case .parked = b2.claim(who, now: 7) { check(true, "a shared key the server then refused is never handed out again") } else { check(false, "a shared key the server then refused is never handed out again") }
+    b2.clearRejected(who)
+    check(!b2.foundRefusedKey(who, now: 8), "the user's own sign-in clears it")
+
+    // End to end with the real request gate: the old key and the key the
+    // re-login issues are both refused. Fifteen 401s in a burst (what Android
+    // saw) send at most 2 refused requests in total: one probe of the old key
+    // (shared per key) and one check of the minted key. The old key is then
+    // held and nothing else is sent.
+    let gate = DispatcharrRequestGate()
+    var relogins = ReloginBook(window: 60)
+    let old = "old-key", minted = "minted-key"
+    var refusedSent = 0
+    var oldProbed = false
+    var reloginsRun = 0
+    var now: TimeInterval = 1000
+    for _ in 0..<15 {
+        // A held key never goes out (DispatcharrHTTPGate.prepare refuses it locally).
+        if gate.isKeyRejected(old) { now += 0.05; continue }
+        if !oldProbed { oldProbed = true; refusedSent += 1 }        // the one probe of the old key: refused
+        var got: String?
+        switch relogins.claim(who, now: now) {
+        case .mine:
+            reloginsRun += 1
+            refusedSent += 1                                        // the one check of the minted key: refused
+            got = relogins.finish(who, DispatcharrRelogin.outcome(minted: minted, proofRefused: true), now: now)
+        case .shared(let k, _): got = k
+        case .wait, .parked: got = nil
+        }
+        if let k = got { refusedSent += 1; _ = k }                  // a retry with a handed-out key (never happens)
+        else { gate.markKeyRejected(playlistID: "P1", key: old) }  // no key: the old key is held
+        now += 0.05
+    }
+    check(refusedSent <= 2, "a re-login returning a refused key sends at most 2 refused requests in total (sent \(refusedSent))")
+    eq(reloginsRun, 1, "one re-login for the whole burst")
+    check(gate.isKeyRejected(old), "the old key is held: no background load sends it")
+    check(!gate.isKeyRejected(minted), "the refused minted key was never stored or handed out, so it needs no hold")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

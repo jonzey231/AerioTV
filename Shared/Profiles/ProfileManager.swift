@@ -1426,7 +1426,9 @@ final class ProfileManager: ObservableObject {
                     return .failed
                 }
                 DispatcharrLoginGate.shared.clearNoKey(identity: who)
-                return .key(k)
+                // One request checks the key before it is stored or sent.
+                let refused = await DispatcharrKeyBroker.mintedKeyRefused(k, serverID: sid, baseURL: base, userAgent: ua)
+                return DispatcharrRelogin.outcome(minted: k, proofRefused: refused)
             } catch DispatcharrDirectConnectError.invalidCredentials {
                 return .rejected
             } catch DispatcharrDirectConnectError.noAPIKeyForAccount {
@@ -1437,6 +1439,9 @@ final class ProfileManager: ObservableObject {
             }
         }
         guard let minted, minted != rejectedKey.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            // The re-login's own key came back and is the one just refused: nobody
+            // gets it again for the window; the caller holds it (2026-11-12).
+            if minted != nil { DispatcharrLoginGate.shared.noteKeyRefused(identity: who) }
             debugLog("[AUTH] re-login for profile \(who): no new key")
             return nil
         }
