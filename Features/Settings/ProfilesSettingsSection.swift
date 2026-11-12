@@ -158,51 +158,57 @@ struct ProfileActionsSheet: View {
         let canPin = manager.canManagePin(playlistId, p.id)
         let list = manager.profilesByPlaylist[playlistId] ?? []
         let at = list.firstIndex { $0.id == p.id } ?? -1
-        ProfileDialog(title: p.displayName, onCancel: { model.close() }) {
-            Text([isActive ? "Active" : nil, p.effectiveRole.label, hasPin ? "PIN" : nil].compactMap { $0 }.joined(separator: "  "))
-                .scaledFont(ProfileUI.small).foregroundColor(.accentPrimary)
-            Text(p.username).scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+        ProfileDialog(title: p.displayName, actionStack: true, onCancel: { model.close() }) {
+            // Header block: these lines describe the title, so they are centered with it.
+            VStack(spacing: 2) {
+                Text([isActive ? "Active" : nil, p.effectiveRole.label, hasPin ? "PIN" : nil].compactMap { $0 }.joined(separator: "  "))
+                    .scaledFont(ProfileUI.small).foregroundColor(.accentPrimary)
+                Text(p.username).scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+            }
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.bottom, ProfileUI.s(4, 6))
             if !isActive {
-                ProfileChoiceRow(label: "Switch to this profile") {
+                ProfileActionButton(label: "Switch to this profile") {
                     debugLog("[PROFILES] switch from actions")
                     model.route = .switchTo(p)
                 }
             }
-            ProfileChoiceRow(label: "Rename") { model.route = .rename(p) }
+            ProfileActionButton(label: "Rename") { model.route = .rename(p) }
             if g.isRoleAdmin {
                 // Dispatcharr admins are always Admin: no Role picker.
                 if !ProfileRole.isServerAdmin(p.userLevel) {
-                    ProfileChoiceRow(label: "Role: \(p.effectiveRole.label)") { model.route = .role(p) }
+                    ProfileActionButton(label: "Role: \(p.effectiveRole.label)") { model.route = .role(p) }
                 }
                 // Apple TV reorders by hold on the row; iPhone and iPad keep these.
                 if !ProfileUI.isTv && at > 0 {
-                    ProfileChoiceRow(label: "Move Up") { move(p, .earlier) }
+                    ProfileActionButton(label: "Move Up") { move(p, .earlier) }
                 }
                 if !ProfileUI.isTv && at >= 0 && at < list.count - 1 {
-                    ProfileChoiceRow(label: "Move Down") { move(p, .later) }
+                    ProfileActionButton(label: "Move Down") { move(p, .later) }
                 }
             }
             if g.canEditAvatar(p.id) {
-                ProfileChoiceRow(label: "Avatar") { model.route = .avatar(p) }
+                ProfileActionButton(label: "Set Avatar") { model.route = .avatar(p) }
             }
             if canPin {
-                ProfileChoiceRow(label: hasPin ? "Change PIN" : "Set PIN") { model.route = .setPin(p) }
-                if hasPin { ProfileChoiceRow(label: "Remove PIN") { model.route = .removePin(p) } }
+                ProfileActionButton(label: hasPin ? "Change PIN" : "Set PIN") { model.route = .setPin(p) }
+                if hasPin { ProfileActionButton(label: "Remove PIN") { model.route = .removePin(p) } }
                 // An Admin resets another profile's forgotten PIN.
                 if hasPin && g.isRoleAdmin && !isActive {
-                    ProfileChoiceRow(label: "Reset PIN") { model.route = .resetPin(p) }
+                    ProfileActionButton(label: "Reset PIN") { model.route = .resetPin(p) }
                 }
             }
             if manager.canAssignChannelProfiles(playlistId) {
-                ProfileChoiceRow(label: "Channel Profiles") { model.route = .channelProfiles(p) }
+                ProfileActionButton(label: "Channel Profiles") { model.route = .channelProfiles(p) }
             }
             #if os(iOS)
             if (isActive || g.isRoleAdmin) && UserQrPayload.code(playlistId: playlistId, profileId: p.id) != nil {
-                ProfileChoiceRow(label: "Show User QR Code") { model.route = .userQr(p) }
+                ProfileActionButton(label: "Show User QR Code") { model.route = .userQr(p) }
             }
             #endif
             if g.isAdmin && !p.isDefault {
-                ProfileChoiceRow(label: "Remove", destructive: true) { model.route = .remove(p) }
+                ProfileActionButton(label: "Remove", destructive: true, newGroup: true) { model.route = .remove(p) }
             }
         }
     }
@@ -488,9 +494,17 @@ struct ProfilesTVSection: View {
 extension View {
     /// Presents the profiles flow for [playlistId] (one presentation for every step).
     func profilesFlowPresentation(_ playlistId: String?, model: ProfilesFlowModel) -> some View {
+        #if os(iOS)
+        // A card centered on screen over a dim, sized to its content (owner
+        // 2026-11-12), not a full-height sheet.
+        fullScreenCover(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close() } })) {
+            if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
+        }
+        #else
         sheet(isPresented: Binding(get: { model.presented }, set: { if !$0 { model.close() } })) {
             if let playlistId { ProfileFlowHost(playlistId: playlistId, model: model) }
         }
+        #endif
     }
 }
 
@@ -564,6 +578,17 @@ struct ChildManageProfilesView: View {
 
     private enum Flow { case adminPin, switchTo(DispatcharrProfile), add, deviceSet, refused(ProfileRefusal) }
 
+    /// "Enter PIN": the same PIN pad as before (Admin, Standard, or Device Admin PIN).
+    private func openGate() {
+        if manager.adminHasPin(playlistId) {
+            flow = .adminPin
+        } else {
+            // No Admin PIN exists (an inconsistent state, e.g. after a sync): never strand the Child.
+            debugLog("[PROFILE] manage profiles: no Admin PIN exists; opening")
+            unlocked = true
+        }
+    }
+
     /// A flow ended: a refusal reason shows as its dialog (ProfileRefusal), never as page text.
     private func finish(_ err: String?, title: String) {
         flow = ProfileRefusal.make(title: title, reason: err).map { .refused($0) }
@@ -574,24 +599,34 @@ struct ChildManageProfilesView: View {
         let activeId = manager.activeProfileIdNow(playlistId)
         ZStack {
             Color.appBackground.ignoresSafeArea()
+            if !unlocked {
+                // The gate (owner 2026-11-12): a centered lock, the explanation, and one
+                // prominent "Enter PIN" button (Admin, Standard, and Device Admin PINs all work).
+                VStack(spacing: ProfileUI.s(16, 32)) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: ProfileUI.s(44, 80), weight: .semibold))
+                        .foregroundColor(.accentPrimary)
+                        .accessibilityHidden(true)
+                    Text("Enter a PIN from an Admin or Standard profile to switch profiles.")
+                        .scaledFont(ProfileUI.body)
+                        .foregroundColor(.textPrimary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button { openGate() } label: {
+                        Text("Enter PIN")
+                            .scaledFont(ProfileUI.bodyStrong)
+                            .frame(minWidth: ProfileUI.s(200, 400))
+                            .padding(.vertical, ProfileUI.s(4, 8))
+                    }
+                    .buttonStyle(ProfilePillStyle())
+                }
+                .frame(maxWidth: ProfileUI.s(420, 900))
+                .padding(.horizontal, ProfileUI.s(24, 60))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: ProfileUI.s(8, 14)) {
-                    if !unlocked {
-                        Button {
-                            if manager.adminHasPin(playlistId) {
-                                flow = .adminPin
-                            } else {
-                                // No Admin PIN exists (an inconsistent state, e.g. after a sync): never strand the Child.
-                                debugLog("[PROFILE] manage profiles: no Admin PIN exists; opening")
-                                unlocked = true
-                            }
-                        } label: {
-                            Label("Manage Profiles", systemImage: "lock.fill").foregroundColor(.textPrimary)
-                        }
-                        .buttonStyle(ProfileRowButtonStyle())
-                        Text("Enter a PIN from an Admin or Standard profile to switch profiles.")
-                            .scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
-                    } else {
+                    Group {
                         ForEach(profiles) { p in
                             Button {
                                 // The active Child only when it needs its sign-in form (held, or no key).
@@ -621,6 +656,7 @@ struct ChildManageProfilesView: View {
                 }
                 .padding(.horizontal, ProfileUI.s(16, 60))
                 .padding(.vertical, ProfileUI.s(12, 40))
+            }
             }
             if let flow {
                 ProfileDialogHost {

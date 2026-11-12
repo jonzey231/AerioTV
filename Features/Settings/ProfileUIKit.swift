@@ -23,6 +23,10 @@ enum ProfileUI {
     static var small: AerioFont { .system(size: s(13, 21)) }
     static var label: AerioFont { .system(size: s(13, 21), weight: .semibold) }
     static let errorColor = Color(red: 0.94, green: 0.33, blue: 0.31)
+    /// Action capsules: the gap between two in one group, and the one larger gap
+    /// that opens the next group (Remove, then Cancel; owner 2026-11-12).
+    static var actionGap: CGFloat { s(8, 16) }
+    static var actionGroupGap: CGFloat { s(20, 36) }
 }
 
 // MARK: - Copy shared with Android (word for word)
@@ -45,7 +49,6 @@ enum ProfileCopy {
         }
     }
 
-    static let roleFooter = "A Child profile sees only its own content and basic settings. Switching from a Child profile to a non-Child profile requires PIN entry."
     static let adminPinTitle = "Enter a PIN from an Admin or Standard profile"
     static let sectionFooter = "Each profile signs in as its own Dispatcharr user. Favorites, recordings, and watch history are kept per profile on this device."
 
@@ -177,10 +180,14 @@ struct ProfileRowButtonStyle: ButtonStyle {
     var lifted = false
     var destructive = false
     @Environment(\.isFocused) private var focused
+    @Environment(\.inProfileDialog) private var inDialog
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: ProfileUI.s(12, 16), style: .continuous)
         return configuration.label
-            .padding(.horizontal, ProfileUI.s(14, 24))
+            // Inside a profile dialog on iPhone and iPad the row has no inset of its
+            // own, so its text shares the card's one left edge (owner 2026-11-12).
+            // Apple TV keeps it: its focus platter needs the room.
+            .padding(.horizontal, inDialog && !ProfileUI.isTv ? 0 : ProfileUI.s(14, 24))
             .padding(.vertical, ProfileUI.s(10, 16))
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(shape.fill(Color.elevatedBackground.opacity(ProfileUI.isTv ? 1 : 0.001)))
@@ -226,7 +233,51 @@ struct ProfilePillStyle: ButtonStyle {
     }
 }
 
-/// One choice row (Android ChoiceRow): radio for one-of-N, plain for actions.
+/// One full-width action capsule, for dialogs that are a plain list of actions
+/// (owner 2026-11-12: they read as buttons, matching the stacked buttons of the
+/// "API key no longer valid" prompt). Neutral secondary fill (13% of the text
+/// color, measured from that prompt), centered label, red label for a
+/// destructive action. Apple TV: accent focus ring and a brighter fill, no
+/// scale (the dialog's scroll view would clip a grown capsule).
+struct ProfileActionButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    var destructive = false
+    @Environment(\.isFocused) private var focused
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = Capsule(style: .continuous)
+        return configuration.label
+            .scaledFont(ProfileUI.bodyStrong)
+            .foregroundColor(destructive ? ProfileUI.errorColor : .textPrimary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, ProfileUI.s(16, 28))
+            .padding(.vertical, ProfileUI.s(8, 12))
+            .frame(maxWidth: .infinity, minHeight: ProfileUI.s(48, 66))
+            .background(shape.fill(Color.textPrimary.opacity(configuration.isPressed || focused ? 0.22 : 0.13)))
+            .overlay(shape.stroke(focused ? Color.accentPrimary : .clear, lineWidth: ProfileUI.s(2, 3)))
+            .contentShape(shape)
+            .opacity(enabled ? 1 : 0.45)
+            .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+
+/// An action capsule (ProfileActionButtonStyle) with its label. [newGroup]
+/// opens a group: the larger gap above it instead of the usual one.
+struct ProfileActionButton: View {
+    let label: String
+    var destructive = false
+    var newGroup = false
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) { Text(label) }
+            .buttonStyle(ProfileActionButtonStyle(destructive: destructive))
+            .padding(.top, newGroup ? ProfileUI.actionGroupGap - ProfileUI.actionGap : 0)
+    }
+}
+
+/// One choice row (Android ChoiceRow) with a radio for one-of-N. A dialog that is
+/// a plain list of actions uses ProfileActionButton instead.
 struct ProfileChoiceRow: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -293,61 +344,163 @@ struct ProfileDialog<Content: View>: View {
     var subtitle: String? = nil
     var cancelLabel: String? = "Cancel"
     var confirm: (label: String, enabled: Bool, destructive: Bool, action: () -> Void)? = nil
+    /// A plain list of actions (ProfileActionButton rows): Cancel is the last
+    /// capsule of the stack, kept outside the scroll so it is always reachable,
+    /// instead of the small button at the bottom right.
+    var actionStack = false
     let onCancel: () -> Void
     @ViewBuilder let content: () -> Content
+    /// The content's own height: the card hugs it and scrolls only past the cap.
+    @State private var contentHeight: CGFloat = 0
+    @Environment(\.profileDialogMaxHeight) private var maxHeight
 
+    // One rule for every profile dialog (owner 2026-11-12): the title (and its
+    // subtitle) centered; rows and text below stay leading. `centeredTitle` is
+    // kept for its call sites and no longer changes anything.
     var body: some View {
-        VStack(alignment: centeredTitle ? .center : .leading, spacing: ProfileUI.s(12, 22)) {
+        // Capsules sit 8 pt apart on iPhone and iPad, like the prompt's buttons;
+        // Cancel is its own group, so the larger gap sits above it.
+        let gap = actionStack ? ProfileUI.actionGap : ProfileUI.s(6, 12)
+        let inset = ProfileUI.s(2, 12)
+        VStack(alignment: .center, spacing: ProfileUI.s(12, 22)) {
             Text(title)
                 .scaledFont(ProfileUI.title)
                 .foregroundColor(.textPrimary)
-                .multilineTextAlignment(centeredTitle ? .center : .leading)
-                .frame(maxWidth: .infinity, alignment: centeredTitle ? .center : .leading)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
                 .fixedSize(horizontal: false, vertical: true)
             if let subtitle {
                 Text(subtitle)
                     .scaledFont(ProfileUI.small)
                     .foregroundColor(.textSecondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity, alignment: .center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ScrollView {
-                VStack(alignment: .leading, spacing: ProfileUI.s(6, 12)) { content() }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, ProfileUI.s(2, 12))
-                    .padding(.horizontal, ProfileUI.s(0, 12))
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            HStack(spacing: ProfileUI.s(12, 24)) {
-                Spacer(minLength: 0)
-                if let cancelLabel {
-                    Button(cancelLabel, action: onCancel).buttonStyle(ProfilePillStyle(filled: false))
+            // Sized to its content (like "Sign in to Dispatcharr"); it scrolls only
+            // when the card would pass about 80% of the screen.
+            VStack(spacing: max(0, (actionStack ? ProfileUI.actionGroupGap : gap) - inset)) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: gap) { content() }
+                        .environment(\.inProfileDialog, true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, inset)
+                        .padding(.horizontal, ProfileUI.s(0, 12))
+                        .onGeometryChange(for: CGFloat.self, of: { $0.size.height }) { h in contentHeight = h }
                 }
-                if let confirm {
-                    // Never disabled (a disabled focused TV button drops focus); dimmed and inert instead.
-                    Button(confirm.label) { if confirm.enabled { confirm.action() } }
-                        .buttonStyle(ProfilePillStyle(destructive: confirm.destructive))
-                        .opacity(confirm.enabled ? 1 : 0.45)
+                .scrollBounceBehavior(.basedOnSize)
+                // Past the cap the cut can fall exactly between two capsules; the
+                // flash (once the content is measured) shows there is more to
+                // scroll. A no-op when it all fits.
+                .scrollIndicatorsFlash(trigger: contentHeight)
+                .frame(maxHeight: max(contentHeight, 1))
+                if actionStack, let cancelLabel {
+                    ProfileActionButton(label: cancelLabel, action: onCancel)
+                        .padding(.horizontal, ProfileUI.s(0, 12))
+                }
+            }
+            if !actionStack {
+                HStack(spacing: ProfileUI.s(12, 24)) {
+                    Spacer(minLength: 0)
+                    if let cancelLabel {
+                        Button(cancelLabel, action: onCancel).buttonStyle(ProfilePillStyle(filled: false))
+                    }
+                    if let confirm {
+                        // Never disabled (a disabled focused TV button drops focus); dimmed and inert instead.
+                        Button(confirm.label) { if confirm.enabled { confirm.action() } }
+                            .buttonStyle(ProfilePillStyle(destructive: confirm.destructive))
+                            .opacity(confirm.enabled ? 1 : 0.45)
+                    }
                 }
             }
         }
         .padding(ProfileUI.s(20, 48))
         .frame(maxWidth: ProfileUI.s(520, 1000))
         .background(RoundedRectangle(cornerRadius: ProfileUI.s(20, 28), style: .continuous).fill(Color.cardBackground))
+        // The cap only limits what the card is offered (its content scrolls past
+        // it); the card itself stays the size of its content.
+        .frame(maxHeight: maxHeight)
         .padding(ProfileUI.s(16, 60))
+        // A tap on the host's backdrop is this Cancel; with no Cancel, nothing.
+        .profileDialogDismiss(cancelLabel == nil ? nil : onCancel)
         #if os(tvOS)
         .onExitCommand(perform: onCancel)
         #endif
     }
 }
 
-/// Hosts a dialog full screen over a dimmed backdrop (one presentation for every step of a flow).
+/// The tallest a profile dialog card grows before its content scrolls.
+private struct ProfileDialogMaxHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = .infinity
+}
+
+/// True for views inside a profile dialog's content (its rows lose their own inset).
+private struct InProfileDialogKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+/// The Cancel of the dialog on screen, for its host's backdrop. Only a dialog
+/// with a Cancel publishes one (ProfileDialog with a Cancel button, a PIN entry
+/// with onDismiss); everything else leaves the backdrop inert.
+struct ProfileDialogDismiss {
+    let action: () -> Void
+}
+
+private struct ProfileDialogDismissKey: PreferenceKey {
+    static var defaultValue: ProfileDialogDismiss? { nil }
+    static func reduce(value: inout ProfileDialogDismiss?, nextValue: () -> ProfileDialogDismiss?) {
+        value = nextValue() ?? value
+    }
+}
+
+extension View {
+    /// Publishes [action] as what a tap outside the card does (nil: nothing).
+    func profileDialogDismiss(_ action: (() -> Void)?) -> some View {
+        preference(key: ProfileDialogDismissKey.self, value: action.map(ProfileDialogDismiss.init))
+    }
+}
+
+extension EnvironmentValues {
+    var profileDialogMaxHeight: CGFloat {
+        get { self[ProfileDialogMaxHeightKey.self] }
+        set { self[ProfileDialogMaxHeightKey.self] = newValue }
+    }
+
+    var inProfileDialog: Bool {
+        get { self[InProfileDialogKey.self] }
+        set { self[InProfileDialogKey.self] = newValue }
+    }
+}
+
+/// Hosts a dialog centered over a dimmed backdrop (one presentation for every
+/// step of a flow). The card is sized to its content and capped at about 80%
+/// of the screen.
+///
+/// iPhone and iPad (owner 2026-11-12, Android parity: SettingsAlertDialog's
+/// default dismiss on an outside click): a tap on the backdrop does exactly
+/// what the dialog's Cancel does, the same handler, so every Cancel side effect
+/// (PIN Required undoing the add that opened it) is the same. A dialog with no
+/// Cancel publishes nothing and the tap does nothing. Taps on the card land on
+/// the card, never the backdrop. Apple TV has no touch backdrop; Menu is the
+/// dialog's Cancel there (onExitCommand).
 struct ProfileDialogHost<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var body: some View {
-        ZStack {
-            Color.black.opacity(0.6).ignoresSafeArea()
-            content()
+        GeometryReader { geo in
+            ZStack {
+                content()
+                    .environment(\.profileDialogMaxHeight, geo.size.height * 0.8)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .backgroundPreferenceValue(ProfileDialogDismissKey.self) { dismiss in
+                #if os(iOS)
+                Color.black.opacity(0.6).ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { dismiss?.action() }
+                #else
+                Color.black.opacity(0.6).ignoresSafeArea()
+                #endif
+            }
         }
         .presentationBackground(.clear)
     }
@@ -431,6 +584,8 @@ struct ProfilePinEntry: View {
         .frame(maxWidth: ProfileUI.s(360, 640))
         .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.cardBackground))
         .padding(16)
+        // A tap on the host's backdrop is this Cancel; nil (the launch gate): nothing.
+        .profileDialogDismiss(onDismiss)
         .onAppear {
             openedAt = Date(); error = initialError
             padFocus = type == .numbers ? "1" : "dir"

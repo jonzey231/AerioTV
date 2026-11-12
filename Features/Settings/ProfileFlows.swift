@@ -361,8 +361,6 @@ struct RoleFlow: View {
                         }
                     }
                 }
-                Text(ProfileCopy.roleFooter).scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -405,7 +403,7 @@ struct ProfileRoleChip: View {
 
 // MARK: - Avatar
 
-/// Row menu "Avatar": a live preview, the 8 colors, and the icon grid.
+/// Row menu "Set Avatar": a live preview, the 8 colors, and the icon grid.
 struct AvatarPickerFlow: View {
     let profile: DispatcharrProfile
     let onClose: () -> Void

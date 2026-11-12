@@ -564,7 +564,7 @@ enum ProfileActionTitle {
     static let removePin = "Remove PIN"
     static let resetPin = "Reset PIN"
     static let removeProfile = "Remove Profile"
-    static let avatar = "Avatar"
+    static let avatar = "Set Avatar"
     static let rename = "Rename"
     static let channelProfiles = "Channel Profiles"
     static let switchProfile = "Switch Profile"

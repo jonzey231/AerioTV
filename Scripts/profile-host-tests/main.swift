@@ -761,7 +761,7 @@ do {
     eq([ProfileActionTitle.deviceAdminPin(has: false), ProfileActionTitle.deviceAdminPin(has: true), ProfileActionTitle.removeDeviceAdminPin],
        ["Set Device Admin PIN", "Change Device Admin PIN", "Remove Device Admin PIN"], "Device Admin PIN actions")
     eq([ProfileActionTitle.avatar, ProfileActionTitle.channelProfiles, ProfileActionTitle.switchProfile, ProfileActionTitle.moveUp,
-        ProfileActionTitle.moveDown], ["Avatar", "Channel Profiles", "Switch Profile", "Move Up", "Move Down"], "the other actions")
+        ProfileActionTitle.moveDown], ["Set Avatar", "Channel Profiles", "Switch Profile", "Move Up", "Move Down"], "the other actions")
 }
 
 // MARK: - The launch PIN gate comes first (security fix 2026-11-12)

@@ -1275,7 +1275,7 @@ final class ProfileManager: ObservableObject {
 
     // MARK: Edit
 
-    /// Row menu "Avatar". Stamps the synced row like a rename.
+    /// Row menu "Set Avatar". Stamps the synced row like a rename.
     func setAvatar(_ playlistId: String, _ profileId: String, _ avatar: AvatarSpec?) throws {
         guard let target = store.byId(profileId) else { throw fail("Profile not found") }
         let isOwn = activeProfileIdNow(playlistId) == profileId

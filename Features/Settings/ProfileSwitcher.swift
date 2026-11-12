@@ -330,10 +330,10 @@ struct WhoIsWatchingView: View {
                               onClose: { flow = nil; focus = p.id }, onSignedIn: { flow = nil; afterSignIn(p) })
             case .move(let p):
                 let at = profiles.firstIndex { $0.id == p.id } ?? -1
-                ProfileDialog(title: p.displayName, onCancel: { flow = nil; focus = p.id }) {
-                    if at > 0 { ProfileChoiceRow(label: "Move Left") { move(p, .earlier) } }
-                    if at >= 0 && at < profiles.count - 1 { ProfileChoiceRow(label: "Move Right") { move(p, .later) } }
-                    if at > 0 { ProfileChoiceRow(label: "Move to Front") { move(p, .first) } }
+                ProfileDialog(title: p.displayName, actionStack: true, onCancel: { flow = nil; focus = p.id }) {
+                    if at > 0 { ProfileActionButton(label: "Move Left") { move(p, .earlier) } }
+                    if at >= 0 && at < profiles.count - 1 { ProfileActionButton(label: "Move Right") { move(p, .later) } }
+                    if at > 0 { ProfileActionButton(label: "Move to Front") { move(p, .first) } }
                 }
             case nil:
                 VStack(spacing: ProfileUI.s(28, 48)) {
