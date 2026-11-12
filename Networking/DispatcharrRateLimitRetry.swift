@@ -127,9 +127,11 @@ enum KeySignInCopy {
     static let noAPIKey = "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it."
 
     /// Above the fields when a profile's sign-in is held after its
-    /// playlist's server address changed (ProfileHostHold, 2026-11-11).
+    /// playlist's server address changed (ProfileHostHold, 2026-11-11). A
+    /// blank name reads "this playlist", as on Android.
     static func hostChanged(playlistName: String) -> String {
-        "The server address for \(playlistName) changed. Sign in again to use this profile."
+        let name = playlistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "The server address for \(name.isEmpty ? "this playlist" : name) changed. Sign in again to use this profile."
     }
 
     enum PromptAction: Equatable, Sendable { case signIn, editPlaylist, updateFromPhone, notNow }

@@ -549,6 +549,10 @@ do {
     check(K.canSubmit(username: "a", password: " "), "a password is never trimmed")
     eq(K.hostChanged(playlistName: "Home"),
        "The server address for Home changed. Sign in again to use this profile.", "held profile: the line above the fields")
+    for blank in ["", "  ", "\t\n"] {
+        eq(K.hostChanged(playlistName: blank),
+           "The server address for this playlist changed. Sign in again to use this profile.", "a blank playlist name reads this playlist")
+    }
 }
 
 // accepted memo
