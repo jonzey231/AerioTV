@@ -1443,11 +1443,35 @@ final class ProfileManager: ObservableObject {
 
     /// Picking or reopening [profileId] opens its sign-in form first: held, or
     /// a non-default profile with nothing stored (treated exactly like held).
-    func needsSignIn(_ profileId: String) -> Bool {
-        guard let p = store.byId(profileId) else { return false }
-        return ProfileHostHoldRules.onPick(isHeld: holds.isHeld(p.id), hasStoredSignIn: signIns.hasStored(p.id),
-                                           isDefault: p.isDefault) == .signInAgain
-            || activeSignIn(p) == .refused && store.activeProfileId(p.playlistId) == p.id
+    func needsSignIn(_ profileId: String) -> Bool { pickForm(profileId) != .none }
+
+    /// The sign-in form choosing [profileId] opens first, if any: held, keyless,
+    /// or (a profile other than the current one) its key held as rejected, so
+    /// nothing is sent with the held key. The default profile's is the
+    /// playlist's own sign-in; any other's is its own form.
+    func pickForm(_ profileId: String) -> ProfileHostHoldRules.PickForm {
+        guard let p = store.byId(profileId) else { return .none }
+        let current = (store.activeProfileId(p.playlistId) ?? store.forPlaylist(p.playlistId).first(where: \.isDefault)?.id) == p.id
+        if ProfileHostHoldRules.onPick(isHeld: holds.isHeld(p.id), hasStoredSignIn: signIns.hasStored(p.id),
+                                       isDefault: p.isDefault) == .signInAgain
+            || activeSignIn(p) == .refused && current {
+            return .profileForm
+        }
+        return ProfileHostHoldRules.pickForm(isDefault: p.isDefault, keyHeld: keyHeldAsRejected(p), isCurrent: current)
+    }
+
+    /// [p]'s key is held as rejected: the playlist's own key for the default
+    /// profile, the profile's own stored key for any other.
+    func keyHeldAsRejected(_ p: DispatcharrProfile) -> Bool {
+        let gate = DispatcharrRequestGate.shared
+        if p.isDefault {
+            if gate.isPlaylistRejected(p.playlistId) { return true }
+            guard let s = DsyncLocal.server(p.playlistId) else { return false }
+            let k = s.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !k.isEmpty && gate.isKeyRejected(k)
+        }
+        guard let k = store.apiKey(p.id) else { return false }
+        return gate.isKeyRejected(k)
     }
 
     /// A successful users/me with the DEFAULT profile's sign-in for

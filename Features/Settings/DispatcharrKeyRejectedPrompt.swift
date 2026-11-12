@@ -381,7 +381,7 @@ enum KeySignInService {
             meApi.heldCheck = true
             let user = try await meApi.fetchCurrentUser()
             // The profile is one Dispatcharr user: another account's sign-in is not its sign-in.
-            guard user.username.caseInsensitiveCompare(profile.username) == .orderedSame else {
+            guard KeySignInAccount.acceptsProfile(username: user.username, profileUsername: profile.username) else {
                 debugLog("[AUTH] \(tag): signed in as a different user than the profile's")
                 return .wrongCredentials
             }
@@ -596,7 +596,9 @@ struct KeySignInView: View {
             if let line = KeySignInCopy.message(outcome) {
                 error = line
                 password = ""
-            } else if heldProfile != nil, let onSignedIn {
+            } else if let onSignedIn {
+                // A held profile signed in again, or a switch to a profile whose key
+                // was held: the switch goes on.
                 onSignedIn()
             } else {
                 onClose()

@@ -215,6 +215,28 @@ enum ProfileHostHoldRules {
     /// away from a Child.
     static func leavesForDefault(activeRole: ProfileRole?) -> Bool { activeRole != .child }
 
+    /// Which sign-in form choosing a profile opens (switcher, launch picker).
+    enum PickForm: Equatable, Sendable {
+        /// None: the switch as before.
+        case none
+        /// The profile's own "Sign in to Dispatcharr" form (its username, only its user accepted).
+        case profileForm
+        /// The playlist's own sign-in (the default profile, the known-user chain).
+        case playlistForm
+    }
+
+    /// Choosing a profile whose key is held as rejected (Roku spec 8.4 step 4,
+    /// the phones match it): after the PIN the switch already needs, and before
+    /// any sync flush or playback stop, its sign-in form opens and nothing is
+    /// sent with the held key. A non-default profile gets its own form; the
+    /// default profile the playlist's own sign-in. A Child target too (an adult,
+    /// or an adult's PIN, chose it). The current profile is left to the flows it
+    /// has today (an active Child gets only what it gets today).
+    static func pickForm(isDefault: Bool, keyHeld: Bool, isCurrent: Bool) -> PickForm {
+        guard keyHeld, !isCurrent else { return .none }
+        return isDefault ? .playlistForm : .profileForm
+    }
+
     enum Reopen: Equatable, Sendable {
         /// Signed in: nothing to do.
         case asIs

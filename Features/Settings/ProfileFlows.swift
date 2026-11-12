@@ -521,6 +521,8 @@ struct ProfileSwitchFlow: View {
     @State private var confirmed = false
     @State private var signedIn = false
     @State private var started = false
+    /// The form choosing this profile opens, fixed when it first shows.
+    @State private var form: ProfileHostHoldRules.PickForm?
 
     private func run() {
         guard !started else { return }
@@ -532,14 +534,17 @@ struct ProfileSwitchFlow: View {
     }
 
     var body: some View {
+        // The PIN the switch needs, then (held, keyless, or its key held as
+        // rejected) the sign-in form before any flush or playback stop, then the
+        // stop-playback confirm, then the switch. Cancel anywhere stays put.
         if pm.hasPin(profile.id) && !pinPassed && !pm.hasSwitchTicket(profile.id) {
             SwitchPinFlow(profile: profile, onDismiss: { onClose(nil) }) { pinPassed = true }
+        } else if !signedIn, let kind = form ?? Optional(pm.pickForm(profile.id)), kind != .none {
+            KeySignInView(playlistID: playlistId, heldProfile: kind == .playlistForm ? nil : profile,
+                          hosted: false, onClose: { onClose(nil) }, onSignedIn: { signedIn = true })
+                .onAppear { if form == nil { form = kind } }
         } else if PlayerSession.shared.mode != .idle && !confirmed {
             StopPlaybackConfirm(name: profile.displayName, onCancel: { onClose(nil) }) { confirmed = true }
-        } else if !signedIn,
-                  pm.needsSignIn(profile.id) {
-            KeySignInView(playlistID: playlistId, heldProfile: profile, hosted: false,
-                          onClose: { onClose(nil) }, onSignedIn: { signedIn = true })
         } else {
             ProgressView().tint(.accentPrimary).scaleEffect(ProfileUI.s(1.2, 2)).onAppear(perform: run)
         }

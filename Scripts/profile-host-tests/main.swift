@@ -683,5 +683,59 @@ do {
        "signed in again: its own key, nothing refused")
 }
 
+// MARK: - Choosing a profile whose key is held as rejected (Roku spec 8.4 step 4)
+do {
+    let R = ProfileHostHoldRules.self
+    eq(R.pickForm(isDefault: false, keyHeld: true, isCurrent: false), .profileForm, "a non-default target opens its own form")
+    eq(R.pickForm(isDefault: true, keyHeld: true, isCurrent: false), .playlistForm, "the default opens the playlist's own sign-in")
+    eq(R.pickForm(isDefault: false, keyHeld: false, isCurrent: false), .none, "a good key switches as before")
+    eq(R.pickForm(isDefault: false, keyHeld: true, isCurrent: true), .none, "the current profile keeps today's flows")
+
+    let (ud, suite) = freshDefaults("pickheld")
+    defer { ud.removePersistentDomain(forName: suite) }
+    let store = ProfileStore(defaults: ud, secrets: MemorySecretBox())
+    store.upsert(profile("def", "P", "parent", isDefault: true))
+    store.upsert(profile("kid", "P", "kid"))
+    store.setApiKey("kid", "KID-OLD")
+    let g = DispatcharrRequestGate()
+    let kid = DispatcharrIdentity(playlistID: "P", profileID: "kid")
+    g.markKeyRejected(playlistID: "P", key: "DEF-OLD", playlistName: "Home")
+    g.markKeyRejected(playlistID: "P", key: "KID-OLD", playlistName: "Home", profileID: "kid")
+    check(g.isKeyRejected(store.apiKey("kid") ?? ""), "the target's key is held: the form opens, nothing is sent with it")
+
+    // Cancel: stays on the current profile with nothing changed.
+    let activeBefore = store.activeProfileId("P")
+    eq(store.activeProfileId("P"), activeBefore, "cancel keeps the current profile")
+    eq(store.apiKey("kid"), "KID-OLD", "cancel changes no key")
+    check(g.isKeyRejected("KID-OLD") && g.isIdentityRejected(kid) && g.isPlaylistRejected("P"), "cancel lifts no hold")
+
+    // The wrong user: refused, nothing written.
+    check(!KeySignInAccount.acceptsProfile(username: "parent", profileUsername: "kid"), "another user's sign-in is refused")
+    check(!KeySignInAccount.acceptsProfile(username: "kid", profileUsername: " "), "no profile username, nothing accepted")
+    eq(store.apiKey("kid"), "KID-OLD", "a refused sign-in writes nothing")
+    check(g.isIdentityRejected(kid), "and its hold stays")
+
+    // The non-default pass: its own user (any case) replaces its key and password, clears only its own hold.
+    check(KeySignInAccount.acceptsProfile(username: "KID", profileUsername: "kid"), "its own user, compared without regard to case")
+    store.setApiKey("kid", "KID-NEW")
+    store.setPassword("kid", "kid-pass")
+    g.clearIdentity(kid)
+    g.clearKey("KID-NEW")
+    g.noteKeyReplaced(old: "KID-OLD", new: "KID-NEW")
+    check(!g.isIdentityRejected(kid) && !g.isKeyRejected("KID-NEW"), "its own hold clears; the switch goes on")
+    eq(store.apiKey("kid"), "KID-NEW", "its key replaced")
+    eq(store.password("kid"), "kid-pass", "its password replaced")
+    check(g.isPlaylistRejected("P") && g.isKeyRejected("DEF-OLD"), "the default's hold is untouched")
+
+    // The default target: the playlist's own sign-in with the known-user chain.
+    let A = KeySignInAccount.self
+    let known = A.known(recorded: (userId: 1, username: "parent"), row: "parent", defaultProfile: "parent")
+    check(A.accepts(username: "Parent", userId: 1, known: known, childInvolved: false), "the playlist's known user signs in")
+    check(!A.accepts(username: "kid", userId: 5, known: known, childInvolved: true), "any other account is refused")
+    check(!A.accepts(username: "parent", userId: 2, known: known, childInvolved: false), "the recorded id is compared")
+    g.clearPlaylist("P")
+    check(!g.isPlaylistRejected("P") && !g.isKeyRejected("DEF-OLD"), "a pass clears the playlist's own hold")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

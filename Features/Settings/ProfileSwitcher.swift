@@ -227,7 +227,9 @@ struct WhoIsWatchingView: View {
     @State private var flow: Flow?
     @FocusState private var focus: String?
 
-    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add, move(DispatcharrProfile), signIn(DispatcharrProfile) }
+    /// signIn: the profile, and whether its form is the playlist's own sign-in
+    /// (the default profile whose key is held), fixed when the form opens.
+    enum Flow { case pin(DispatcharrProfile), confirm(DispatcharrProfile), adminPin, add, move(DispatcharrProfile), signIn(DispatcharrProfile, asPlaylist: Bool) }
 
     /// The hold that opened Move also ends in a Select release; that one is swallowed.
     @State private var swallowNextSelect = false
@@ -247,7 +249,7 @@ struct WhoIsWatchingView: View {
         // Held after a server address change: sign in again first (Cancel keeps the current profile).
         if manager.needsSignIn(p.id) {
             error = nil
-            flow = .signIn(p)
+            flow = .signIn(p, asPlaylist: manager.pickForm(p.id) == .playlistForm)
             return
         }
         busy = true; error = nil
@@ -270,6 +272,18 @@ struct WhoIsWatchingView: View {
         // The current profile, unless it is held (a Child kept after a server change): then its sign-in form.
         if mode == .switcher && current && !manager.needsSignIn(p.id) { onClose(); return }
         if manager.hasPin(p.id) && !manager.hasSwitchTicket(p.id) { flow = .pin(p); return }
+        afterPin(p)
+    }
+
+    /// After the PIN: the sign-in form first when the profile needs one (held,
+    /// keyless, or its key held as rejected; nothing sent with the held key),
+    /// then the stop-playback confirm, then the switch.
+    private func afterPin(_ p: DispatcharrProfile) {
+        if manager.needsSignIn(p.id) { error = nil; flow = .signIn(p, asPlaylist: manager.pickForm(p.id) == .playlistForm); return }
+        afterSignIn(p)
+    }
+
+    private func afterSignIn(_ p: DispatcharrProfile) {
         if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p); return }
         choose(p)
     }
@@ -297,7 +311,7 @@ struct WhoIsWatchingView: View {
             case .pin(let p):
                 SwitchPinFlow(profile: p, onDismiss: { flow = nil }) {
                     flow = nil
-                    if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p) } else { choose(p) }
+                    afterPin(p)
                 }
             case .confirm(let p):
                 StopPlaybackConfirm(name: p.displayName, onCancel: { flow = nil }) { flow = nil; choose(p) }
@@ -308,9 +322,10 @@ struct WhoIsWatchingView: View {
                 }
             case .add:
                 AddProfileFlow(playlistId: playlistId) { flow = nil; manager.pickerAddUnlocked = nil }
-            case .signIn(let p):
-                KeySignInView(playlistID: playlistId, heldProfile: p, hosted: false,
-                              onClose: { flow = nil; focus = p.id }, onSignedIn: { flow = nil; choose(p) })
+            case .signIn(let p, let asPlaylist):
+                // A non-default profile's own form, or the playlist's own sign-in for the default.
+                KeySignInView(playlistID: playlistId, heldProfile: asPlaylist ? nil : p, hosted: false,
+                              onClose: { flow = nil; focus = p.id }, onSignedIn: { flow = nil; afterSignIn(p) })
             case .move(let p):
                 let at = profiles.firstIndex { $0.id == p.id } ?? -1
                 ProfileDialog(title: p.displayName, onCancel: { flow = nil; focus = p.id }) {

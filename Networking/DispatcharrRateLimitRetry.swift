@@ -224,6 +224,14 @@ enum KeySignInAccount {
         return nil
     }
 
+    /// A non-default profile's own form signs in only that profile's own user:
+    /// the account users/me names must be its username, without regard to case.
+    static func acceptsProfile(username: String, profileUsername: String) -> Bool {
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = profileUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !p.isEmpty && u.caseInsensitiveCompare(p) == .orderedSame
+    }
+
     /// Whether the account users/me named after the sign-in may be written to
     /// the playlist: the known user (username without regard to case) and,
     /// whenever an id is recorded, the same user id. With no known account, a
