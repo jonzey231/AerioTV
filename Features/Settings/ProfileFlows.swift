@@ -997,6 +997,14 @@ struct AddProfileFlow: View {
         }
     }
 
+    private func manualRoleRow(_ r: ProfileRole) -> some View {
+        ProfileChoiceRow(label: r.label, checked: r == manualRole) {
+            if r == .child && !Self.childGateClear(playlistId) {
+                step = .childGate(onDone: { ok in step = nil; if ok { manualRole = .child } })
+            } else { manualRole = r }
+        }
+    }
+
     private var manualForm: some View {
         let secretOk = !mSecret.trimmingCharacters(in: .whitespaces).isEmpty && (useKey || !mUser.trimmingCharacters(in: .whitespaces).isEmpty)
         return ProfileDialog(title: "Add Profile", confirm: ("Add Profile", secretOk && !busy, false, {
@@ -1011,16 +1019,19 @@ struct AddProfileFlow: View {
                     added(p)
                 } catch { busy = false; self.error = error.localizedDescription.isEmpty ? "Could not add profile" : error.localizedDescription }
             }
-        }), onCancel: onClose) {
+        }), form: true, onCancel: onClose) {
             RosterSuggestionsView(playlistId: playlistId, users: nil, enabled: !busy, onAdded: onClose, step: $step)
             Text("Role").scaledFont(ProfileUI.label).foregroundColor(.textSecondary)
-            ForEach(ProfileRole.optionsFor(serverAdmin: nil), id: \.self) { r in
-                ProfileChoiceRow(label: r.label, checked: r == manualRole) {
-                    if r == .child && !Self.childGateClear(playlistId) {
-                        step = .childGate(onDone: { ok in step = nil; if ok { manualRole = .child } })
-                    } else { manualRole = r }
-                }
+            #if os(tvOS)
+            // One row on Apple TV: "Standard   Child" (Admin when it applies),
+            // still radios, each focusable with its ring (owner 2026-11-12).
+            HStack(spacing: 24) {
+                ForEach(ProfileRole.optionsFor(serverAdmin: nil), id: \.self) { r in manualRoleRow(r).fixedSize() }
+                Spacer(minLength: 0)
             }
+            #else
+            ForEach(ProfileRole.optionsFor(serverAdmin: nil), id: \.self) { r in manualRoleRow(r) }
+            #endif
             Text(ProfileCopy.roleDescription(manualRole)).scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
             HStack(spacing: ProfileUI.s(8, 16)) {
                 Button("Username & Password") { useKey = false; mUser = ""; mSecret = ""; error = nil }

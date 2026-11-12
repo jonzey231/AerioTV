@@ -355,6 +355,10 @@ struct ProfileDialog<Content: View>: View {
     /// capsule of the stack, kept outside the scroll so it is always reachable,
     /// instead of the small button at the bottom right.
     var actionStack = false
+    /// A form (Add Profile). Apple TV: tighter spacing and up to about 90% of
+    /// the screen, so the whole form fits without scrolling at 1080p (owner
+    /// 2026-11-12). iPhone and iPad: unchanged.
+    var form = false
     let onCancel: () -> Void
     @ViewBuilder let content: () -> Content
     /// The content's own height: the card hugs it and scrolls only past the cap.
@@ -367,9 +371,10 @@ struct ProfileDialog<Content: View>: View {
     var body: some View {
         // Capsules sit 8 pt apart on iPhone and iPad, like the prompt's buttons;
         // Cancel is its own group, so the larger gap sits above it.
-        let gap = actionStack ? ProfileUI.actionGap : ProfileUI.s(6, 12)
+        let tvForm = form && ProfileUI.isTv
+        let gap = actionStack ? ProfileUI.actionGap : (tvForm ? 8 : ProfileUI.s(6, 12))
         let inset = ProfileUI.s(2, 12)
-        VStack(alignment: .center, spacing: ProfileUI.s(12, 22)) {
+        VStack(alignment: .center, spacing: tvForm ? 14 : ProfileUI.s(12, 22)) {
             Text(title)
                 .scaledFont(ProfileUI.title)
                 .foregroundColor(.textPrimary)
@@ -421,13 +426,17 @@ struct ProfileDialog<Content: View>: View {
                 }
             }
         }
-        .padding(ProfileUI.s(20, 48))
+        .padding(.horizontal, ProfileUI.s(20, 48))
+        .padding(.vertical, tvForm ? 32 : ProfileUI.s(20, 48))
         .modifier(ProfileDialogCardWidth())
         .background(RoundedRectangle(cornerRadius: ProfileUI.s(20, 28), style: .continuous).fill(Color.cardBackground))
         // The cap only limits what the card is offered (its content scrolls past
-        // it); the card itself stays the size of its content.
-        .frame(maxHeight: maxHeight)
-        .padding(ProfileUI.s(16, 60))
+        // it); the card itself stays the size of its content. An Apple TV form
+        // may use about 90% of the screen: no outer padding above and below, so
+        // it can fill the safe area (960 of 1080 pt) before it scrolls.
+        .frame(maxHeight: tvForm ? ProfileUI.tvScreenHeight * 0.9 : maxHeight)
+        .padding(.horizontal, ProfileUI.s(16, 60))
+        .padding(.vertical, tvForm ? 0 : ProfileUI.s(16, 60))
         // A tap on the host's backdrop is this Cancel; with no Cancel, nothing.
         .profileDialogDismiss(cancelLabel == nil ? nil : onCancel)
         #if os(tvOS)
