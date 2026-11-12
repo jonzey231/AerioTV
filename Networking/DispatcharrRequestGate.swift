@@ -285,10 +285,17 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         return fresh
     }
 
-    /// True while `key` is known rejected (any playlist).
+    /// Laid over the requests of a held profile kept active (a Child after a
+    /// server address change, ProfileHostHold): never a real key, never sent.
+    /// Every request and stream carrying it stops here, so the Child neither
+    /// sends its held key nor falls back to the default profile's.
+    static let HELD_PROFILE_KEY = "aerio-held-profile"
+
+    /// True while `key` is known rejected (any playlist), or is the held-profile placeholder.
     func isKeyRejected(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        if trimmed == Self.HELD_PROFILE_KEY { return true }
         let hash = Self.keyHash(trimmed)
         lock.lock(); defer { lock.unlock() }
         return !(rejected[hash]?.isEmpty ?? true)

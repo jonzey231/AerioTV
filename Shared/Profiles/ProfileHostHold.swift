@@ -182,6 +182,14 @@ enum ProfileHostHoldRules {
         isHeld ? .signInAgain : .switchNow
     }
 
+    /// A route change, or a relaunch, with a held profile active: it is left
+    /// for the default profile (as removing the active profile does), except a
+    /// Child (follow-up 8). A Child stays active and held, so nothing it holds
+    /// is sent and its requests go nowhere until the hold lifts; leaving it is
+    /// the normal switch with its PIN. No forced switch ever bypasses a PIN
+    /// away from a Child.
+    static func leavesForDefault(activeRole: ProfileRole?) -> Bool { activeRole != .child }
+
     /// Removing a profile (Remove Profile): a HELD profile goes from this
     /// device only, with no tombstone. Its row was never part of the new
     /// server's roster, and a tombstone sent there once the roster sync

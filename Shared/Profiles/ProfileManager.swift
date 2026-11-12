@@ -164,9 +164,15 @@ final class ProfileManager: ObservableObject {
     private func refreshOverlay(_ act: [String: String]) {
         var next: [String: ProfileOverlay.Values] = [:]
         for (pid, id) in act {
-            // A held sign-in is never laid over a request (ProfileHostHold).
-            guard let p = store.byId(id), !p.isDefault, let key = signIns.apiKey(id, for: .requestOverlay), !key.isEmpty else { continue }
+            guard let p = store.byId(id), !p.isDefault else { continue }
             let ids = p.accountProfileIds.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            // A held profile still active (a Child after a server change, follow-up 8): its
+            // requests stop at the gate, never with its held key nor the default profile's.
+            if holds.isHeld(id) {
+                next[pid] = ProfileOverlay.Values(profileId: id, apiKey: DispatcharrRequestGate.HELD_PROFILE_KEY, channelProfileIds: ids)
+                continue
+            }
+            guard let key = signIns.apiKey(id, for: .requestOverlay), !key.isEmpty else { continue }
             next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
         }
         if ProfileOverlay.set(next) { debugLog("[PROFILE] request overlay: \(next.count) playlist(s) on a non-default profile") }
@@ -243,8 +249,11 @@ final class ProfileManager: ObservableObject {
     private func restoreAtLaunch() {
         guard let pid = store.lastActivePlaylistId else { return }
         let all = store.forPlaylist(pid)
-        // A held profile is never restored: start() leaves it for the default profile.
-        let active = store.activeProfileId(pid).flatMap(store.byId).flatMap { holds.isHeld($0.id) ? nil : $0 }
+        // A held profile is not restored (start() leaves it for the default profile), except a
+        // Child: it stays the active profile, still held, under its own launch rules (follow-up 8).
+        let active = store.activeProfileId(pid).flatMap(store.byId).flatMap {
+            holds.isHeld($0.id) && ProfileHostHoldRules.leavesForDefault(activeRole: $0.effectiveRole) ? nil : $0
+        }
         let restored = (active?.playlistId == pid ? active : nil) ?? all.first { $0.isDefault }
         if RoleRules.showLaunchPicker(isTv: DsyncLocal.isTv, isDispatcharr: !all.isEmpty, toggleOn: store.askAtLaunch(pid),
                                       profileCount: all.count, lastRole: restored?.effectiveRole) {
@@ -1358,10 +1367,15 @@ final class ProfileManager: ObservableObject {
         return store.activeProfileId(playlistId).map(holds.isHeld) ?? false
     }
 
-    /// The active profile is held: switch to the default profile first.
+    /// The active profile is held: switch to the default profile first. Never
+    /// for a Child: it stays active and held, and leaving it needs its PIN.
     func leaveHeldProfile(_ playlistId: String) async {
         guard let a = store.activeProfileId(playlistId), holds.isHeld(a),
               let def = store.forPlaylist(playlistId).first(where: \.isDefault) else { return }
+        guard ProfileHostHoldRules.leavesForDefault(activeRole: store.byId(a)?.effectiveRole) else {
+            debugLog("[PROFILE-HOST] held Child \(Self.tag(a)) stays active on \(Self.tag(playlistId)); nothing is sent until the hold lifts")
+            return
+        }
         // The channel reload only for the playlist on screen (it would load this one in its place).
         let onScreen = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString == playlistId
         try? await switchTo(playlistId, def.id, bypassPin: true, reload: onScreen)
@@ -1430,6 +1444,8 @@ final class ProfileManager: ObservableObject {
             let r = holds.liftMatching(playlistId)
             debugLog("[PROFILE-HOST] lifted playlist=\(tag) profiles=\(r.lifted.count) kept=\(r.kept.count) (same server)")
             publish()
+            // A held profile kept active (a Child) carries on: load again with its own key.
+            if let a = store.activeProfileId(playlistId), r.lifted.contains(a) { await reloadIfOnScreen(live) }
         case .keep(let why):
             failed(why)
         }
@@ -1458,7 +1474,17 @@ final class ProfileManager: ObservableObject {
             debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(p.playlistId)) profile=\(Self.tag(profileId)) (signed in)")
         }
         publish()
-        if let server = DsyncLocal.server(p.playlistId) { await tagSignIn(profileId, server) }
+        if let server = DsyncLocal.server(p.playlistId) {
+            await tagSignIn(profileId, server)
+            // Signed in again while still the active profile (a held Child): load again with its new key.
+            if store.activeProfileId(p.playlistId) == profileId { await reloadIfOnScreen(server) }
+        }
+    }
+
+    /// The channel reload a switch does, only for the playlist on screen.
+    private func reloadIfOnScreen(_ server: ServerConnection) async {
+        guard DsyncLocal.activeDispatcharrPlaylist()?.id == server.id else { return }
+        await reloadAfterSwitch(server)
     }
 
     /// The playlist was deleted: its hold and recorded identity go with it.

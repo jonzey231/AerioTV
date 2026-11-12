@@ -515,5 +515,55 @@ do {
     eq(put(from: newServer), [DsyncKey.favorites.suffix, DsyncKey.recents.suffix], "after a read at the new address, the PUT carries that server's categories only")
 }
 
+// MARK: - A Child stays where it is on a server address change (follow-up 8)
+
+do {
+    check(!ProfileHostHoldRules.leavesForDefault(activeRole: .child), "a held Child is never switched to the default (no PIN bypass)")
+    check(ProfileHostHoldRules.leavesForDefault(activeRole: .user) && ProfileHostHoldRules.leavesForDefault(activeRole: .admin),
+          "an Admin or Standard profile is left for the default as before")
+
+    let (ud, suite) = freshDefaults("child")
+    defer { ud.removePersistentDomain(forName: suite) }
+    let secrets = MemorySecretBox()
+    let store = ProfileStore(defaults: ud, secrets: secrets)
+    let holds = ProfileHostHoldStore(defaults: ud)
+    var child = profile("child", "P", "kid"); child.userLevel = 1; child.role = .child
+    store.upsert(profile("def", "P", "owner", isDefault: true)); store.upsert(child)
+    store.setApiKey("child", "K-CHILD"); store.setPassword("child", "P-CHILD")
+    store.setActiveProfileId("P", "child")
+    let owner = DefaultIdentity(userId: 1, username: "owner")!
+    holds.recordIdentity("P", owner)
+
+    // A cloud-pulled address change with the Child active (routeWillChangeNow): held, kept active, nothing sent.
+    holds.hold("P", profileIds: ProfileHostHoldRules.toHold(store.forPlaylist("P"), hasStoredSignIn: ProfileSignIns(store: store, holds: holds).hasStored),
+               trustedHosts: [R.hostKey("https://old.example")], route: R.key(base: "https://new.example", local: ""))
+    check(holds.isHeld("child"), "the Child is held")
+    eq(store.activeProfileId("P"), "child", "and stays the active profile (no switch)")
+    let signIns = ProfileSignIns(store: store, holds: holds)
+    for use in ProfileSignIns.Use.allCases {
+        check(signIns.apiKey("child", for: use) == nil && signIns.password("child", for: use) == nil, "nothing the Child holds is sent (\(use.rawValue))")
+    }
+    // Its requests go nowhere: the placeholder laid over them stops at the gate, and is never the default's key.
+    let gate = DispatcharrRequestGate()
+    check(gate.isKeyRejected(DispatcharrRequestGate.HELD_PROFILE_KEY), "every request with the placeholder stops locally")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": DispatcharrRequestGate.HELD_PROFILE_KEY], gate: gate), .held, "no stream opens")
+    check(gate.prompt == nil && !gate.isPlaylistRejected("P"), "and no rejected-key prompt for it")
+
+    // Relaunch: still the active profile, still held; the restore keeps it under its own rules.
+    let store2 = ProfileStore(defaults: ud, secrets: secrets)
+    let holds2 = ProfileHostHoldStore(defaults: ud)
+    eq(store2.activeProfileId("P"), "child", "after a relaunch the Child is still the active profile (no reset to the default)")
+    check(holds2.isHeld("child"), "and still held")
+    check(!ProfileHostHoldRules.leavesForDefault(activeRole: store2.byId("child")?.effectiveRole), "the launch restore keeps it (no switch, no PIN bypass)")
+
+    // A different server: the hold stays; leaving the Child is the normal switch (its PIN step), never forced.
+    eq(SameServerCheck.decide(expected: holds2.record("P")?.expected, answers: [.user(DefaultIdentity(userId: 2, username: "stranger")!)]),
+       .keep("different-user"), "a different server keeps the Child held")
+    // The same server: the hold lifts and the Child carries on.
+    eq(SameServerCheck.decide(expected: holds2.record("P")?.expected, answers: [.user(owner)]), .lift, "the same server passes")
+    eq(holds2.liftMatching("P").lifted, ["child"], "the Child's hold lifts (its tag is the snapshot)")
+    eq(ProfileSignIns(store: store2, holds: holds2).apiKey("child", for: .requestOverlay), "K-CHILD", "and its own key is used again")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

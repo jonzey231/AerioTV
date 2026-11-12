@@ -56,10 +56,15 @@ enum DispatcharrHTTPGate {
             req.setValue(swapped.xApiKey, forHTTPHeaderField: "X-API-Key")
             req.setValue(swapped.authorization, forHTTPHeaderField: "Authorization")
         }
-        if !bypass,
-           let key = DispatcharrRequestGate.requestApiKey(xApiKey: req.value(forHTTPHeaderField: "X-API-Key"),
-                                                          authorization: req.value(forHTTPHeaderField: "Authorization")),
-           gate.isKeyRejected(key) {
+        let sentKey = DispatcharrRequestGate.requestApiKey(xApiKey: req.value(forHTTPHeaderField: "X-API-Key"),
+                                                           authorization: req.value(forHTTPHeaderField: "Authorization"))
+        // A held profile kept active (ProfileHostHold): nothing goes out, explicit key check or not.
+        if sentKey == DispatcharrRequestGate.HELD_PROFILE_KEY {
+            SkipLog.note("[PROFILE-HOST] skipped \(method) \(url.path): the active profile is held",
+                         bucket: "held|\(DispatcharrRequestGate.serverKey(url.absoluteString))")
+            throw DispatcharrGateError.keyRejected
+        }
+        if !bypass, let key = sentKey, gate.isKeyRejected(key) {
             SkipLog.note("[AUTH] skipped \(method) \(url.path): this API key was rejected by the server; waiting for Edit Playlist",
                          bucket: "auth|\(DispatcharrRequestGate.serverKey(url.absoluteString))")
             throw DispatcharrGateError.keyRejected

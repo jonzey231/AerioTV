@@ -93,7 +93,8 @@ private struct SwitchProfileSheet: View {
                         .padding(.horizontal, 20).padding(.vertical, 8)
                     ForEach(profiles) { p in
                         Button {
-                            guard p.id != activeId, !manager.switching else { return }
+                            // The active profile only when it is held (its sign-in form).
+                            guard p.id != activeId || manager.isHeld(p.id), !manager.switching else { return }
                             error = nil
                             target = p
                         } label: {
@@ -264,7 +265,8 @@ struct WhoIsWatchingView: View {
     private func picked(_ p: DispatcharrProfile, current: Bool) {
         if swallowNextSelect { swallowNextSelect = false; return }
         guard !busy else { return }
-        if mode == .switcher && current { onClose(); return }
+        // The current profile, unless it is held (a Child kept after a server change): then its sign-in form.
+        if mode == .switcher && current && !manager.isHeld(p.id) { onClose(); return }
         if manager.hasPin(p.id) && !manager.hasSwitchTicket(p.id) { flow = .pin(p); return }
         if mode == .switcher && PlayerSession.shared.mode != .idle { flow = .confirm(p); return }
         choose(p)
