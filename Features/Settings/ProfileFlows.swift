@@ -537,7 +537,7 @@ struct ProfileSwitchFlow: View {
         } else if PlayerSession.shared.mode != .idle && !confirmed {
             StopPlaybackConfirm(name: profile.displayName, onCancel: { onClose(nil) }) { confirmed = true }
         } else if !signedIn,
-                  ProfileHostHoldRules.onPick(isHeld: pm.isHeld(profile.id), hasStoredSignIn: pm.signIns.hasStored(profile.id)) == .signInAgain {
+                  pm.needsSignIn(profile.id) {
             KeySignInView(playlistID: playlistId, heldProfile: profile, hosted: false,
                           onClose: { onClose(nil) }, onSignedIn: { signedIn = true })
         } else {

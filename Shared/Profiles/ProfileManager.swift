@@ -21,6 +21,7 @@
 
 import Foundation
 import Combine
+import SwiftData
 
 /// The Keychain behind the profile stores (KeychainHelper, device only).
 final class KeychainSecretBox: ProfileSecretBox {
@@ -93,6 +94,14 @@ final class ProfileManager: ObservableObject {
     var onRosterSyncResumed: ((_ playlistId: String) -> Void)?
     /// Dispatcharr Sync: the playlist's route is about to change (discard its saved server copies).
     var onRouteWillChange: ((_ playlistId: String) -> Void)?
+    /// The UI: a held or keyless Child kept active at launch or on a playlist
+    /// change; open its "Sign in to Dispatcharr" form (DispatcharrKeyPromptModel).
+    var onActiveSignInNeeded: ((_ playlistId: String, _ profile: DispatcharrProfile) -> Void)?
+    /// Children whose form opened since the last launch or playlist change.
+    private var signInPrompted = Set<String>()
+    /// The launch checks (leaving held profiles, the same-server check) are done:
+    /// no form opens for a hold the check is about to lift.
+    private var launchChecked = false
     /// Dispatcharr Sync: a route change finished (a session may start at the new address).
     var onRouteChangeEnded: ((_ playlistId: String) -> Void)?
     /// True while anything is playing (main player, mini player, background audio).
@@ -157,12 +166,13 @@ final class ProfileManager: ObservableObject {
     /// check and the held sign-in form get through.
     private func refreshHeldServers() {
         var now = Set<String>()
-        for pid in holds.heldPlaylistIds {
-            guard let a = store.activeProfileId(pid), holds.isHeld(a) else { continue }
+        for pid in holds.heldPlaylistIds.union(store.profiles.map(\.playlistId)) {
+            // Held, or an active non-default profile with no stored key: refused alike.
+            guard let a = store.activeProfileId(pid), let p = store.byId(a), activeSignIn(p) == .refused else { continue }
             // Before the playlists can be read (launch), the hold's own route
             // names the addresses, so nothing reaches them in the meantime.
             let urls: [String]
-            if let s = DsyncLocal.server(pid) {
+            if let s = serverRow(pid) {
                 urls = [s.normalizedBaseURL, s.localURL.isEmpty ? "" : s.normalizedLocalURL]
             } else {
                 urls = (holds.record(pid)?.route ?? "").split(separator: "|").map(String.init)
@@ -174,6 +184,19 @@ final class ProfileManager: ObservableObject {
         for pid in heldServerPlaylists.subtracting(now) { DispatcharrRequestGate.shared.releaseServers(playlistID: pid) }
         heldServerPlaylists = now
     }
+
+    /// The playlist row, from the app's container before the UI's context exists (launch).
+    private func serverRow(_ pid: String) -> ServerConnection? {
+        if let s = DsyncLocal.server(pid) { return s }
+        guard let c = AerioApp.sharedContainer, let id = UUID(uuidString: pid) else { return nil }
+        let d = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == id })
+        return (try? c.mainContext.fetch(d))?.first
+    }
+
+    /// Launch, right after the container opens (AerioApp.init): the held and
+    /// keyless addresses are refused before the first load, keyless requests
+    /// (the reachability HEAD, logos) included.
+    func registerRefusedAddresses() { refreshHeldServers() }
 
     /// Logs the pause and the resume once each; a resume asks Dispatcharr Sync to merge the roster again.
     private func refreshRosterPause() {
@@ -193,14 +216,17 @@ final class ProfileManager: ObservableObject {
         for (pid, id) in act {
             guard let p = store.byId(id), !p.isDefault else { continue }
             let ids = p.accountProfileIds.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            // A held profile still active (a Child after a server change, follow-up 8): its
-            // requests stop at the gate, never with its held key nor the default profile's.
-            if holds.isHeld(id) {
+            // A held profile still active (a Child after a server change, follow-up 8), or
+            // one with no stored key: its requests stop at the gate, never with its held
+            // key nor the default profile's.
+            switch activeSignIn(p) {
+            case .own(let key):
+                next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
+            case .refused:
                 next[pid] = ProfileOverlay.Values(profileId: id, apiKey: DispatcharrRequestGate.HELD_PROFILE_KEY, channelProfileIds: ids)
+            case .playlist:
                 continue
             }
-            guard let key = signIns.apiKey(id, for: .requestOverlay), !key.isEmpty else { continue }
-            next[pid] = ProfileOverlay.Values(profileId: id, apiKey: key, channelProfileIds: ids)
         }
         if ProfileOverlay.set(next) { debugLog("[PROFILE] request overlay: \(next.count) playlist(s) on a non-default profile") }
         var caps: [String: ProfileCapsOverlay.Values] = [:]
@@ -272,6 +298,8 @@ final class ProfileManager: ObservableObject {
             // Every start runs the same-server check for a playlist on hold (a held Child
             // makes no default users/me of its own to trigger it).
             for pid in holds.heldPlaylistIds.sorted() { await recheckHostHold(pid) }
+            launchChecked = true
+            promptActiveSignInIfNeeded("launch")
             let ids = store.profiles.filter { !$0.isDefault }.map(\.id)
             let n = settings.seedExistingOnce(ids, source: settings.capture())
             if n > 0 { debugLog("[PROFILE] settings seeded for \(n) existing profile(s)") }
@@ -285,7 +313,7 @@ final class ProfileManager: ObservableObject {
         // A held profile is not restored (start() leaves it for the default profile), except a
         // Child: it stays the active profile, still held, under its own launch rules (follow-up 8).
         let active = store.activeProfileId(pid).flatMap(store.byId).flatMap {
-            holds.isHeld($0.id) && ProfileHostHoldRules.leavesForDefault(activeRole: $0.effectiveRole) ? nil : $0
+            activeSignIn($0) == .refused && ProfileHostHoldRules.leavesForDefault(activeRole: $0.effectiveRole) ? nil : $0
         }
         let restored = (active?.playlistId == pid ? active : nil) ?? all.first { $0.isDefault }
         if RoleRules.showLaunchPicker(isTv: DsyncLocal.isTv, isDispatcharr: !all.isEmpty, toggleOn: store.askAtLaunch(pid),
@@ -311,6 +339,24 @@ final class ProfileManager: ObservableObject {
             followServerRole(base.id, server.dispatcharrIsSuperuser || server.dispatcharrIsStaff ? 10 : server.dispatcharrUserLevel)
         }
         publish()
+        // Reopened on a playlist change: a held or keyless profile falls back to the
+        // default, except a Child, which stays (nothing sent) and gets its sign-in form.
+        signInPrompted.removeAll()
+        await leaveHeldProfile(pid)
+        promptActiveSignInIfNeeded("playlist change")
+    }
+
+    /// A held or keyless Child kept active (launch, playlist change, launch PIN
+    /// passed): its "Sign in to Dispatcharr" form opens, once each time. Signing
+    /// in as its own user unblocks it; leaving it is the normal switch with its PIN.
+    func promptActiveSignInIfNeeded(_ why: String) {
+        guard launchChecked, launchGate == nil, launchPicker == nil,
+              let pid = DsyncLocal.activeDispatcharrPlaylist()?.id.uuidString,
+              let p = activeProfile(pid),
+              ProfileHostHoldRules.onReopen(isDefault: p.isDefault, role: p.effectiveRole, refused: activeSignIn(p) == .refused) == .staySignIn,
+              signInPrompted.insert(p.id).inserted else { return }
+        debugLog("[PROFILE-HOST] \(why): \(holds.isHeld(p.id) ? "held" : "keyless") Child \(Self.tag(p.id)) stays on \(Self.tag(pid)); its sign-in form opens")
+        onActiveSignInNeeded?(pid, p)
     }
 
     /// Every Dispatcharr playlist has exactly one default profile.
@@ -559,6 +605,7 @@ final class ProfileManager: ObservableObject {
         if r == .ok {
             switchTickets.remove(g.id)
             launchGate = nil
+            promptActiveSignInIfNeeded("launch PIN passed")
         }
         return r
     }
@@ -1318,6 +1365,20 @@ final class ProfileManager: ObservableObject {
     /// address changed: picking it opens the sign-in form first.
     func isHeld(_ profileId: String) -> Bool { holds.isHeld(profileId) }
 
+    /// What [p]'s requests carry while it is active (ProfileHostHoldRules.activeSignIn).
+    func activeSignIn(_ p: DispatcharrProfile) -> ProfileHostHoldRules.ActiveSignIn {
+        ProfileHostHoldRules.activeSignIn(isDefault: p.isDefault, isHeld: holds.isHeld(p.id), storedKey: store.apiKey(p.id))
+    }
+
+    /// Picking or reopening [profileId] opens its sign-in form first: held, or
+    /// a non-default profile with nothing stored (treated exactly like held).
+    func needsSignIn(_ profileId: String) -> Bool {
+        guard let p = store.byId(profileId) else { return false }
+        return ProfileHostHoldRules.onPick(isHeld: holds.isHeld(p.id), hasStoredSignIn: signIns.hasStored(p.id),
+                                           isDefault: p.isDefault) == .signInAgain
+            || activeSignIn(p) == .refused && store.activeProfileId(p.playlistId) == p.id
+    }
+
     /// A successful users/me with the DEFAULT profile's sign-in for
     /// [playlistId]: record who answered (frozen while anything on the
     /// playlist is held), and run the same-server check again when it has a hold.
@@ -1405,10 +1466,11 @@ final class ProfileManager: ObservableObject {
     /// The active profile is held: switch to the default profile first. Never
     /// for a Child: it stays active and held, and leaving it needs its PIN.
     func leaveHeldProfile(_ playlistId: String) async {
-        guard let a = store.activeProfileId(playlistId), holds.isHeld(a),
+        // A profile with no stored key is treated exactly like a held one.
+        guard let a = store.activeProfileId(playlistId), let p = store.byId(a), activeSignIn(p) == .refused,
               let def = store.forPlaylist(playlistId).first(where: \.isDefault) else { return }
-        guard ProfileHostHoldRules.leavesForDefault(activeRole: store.byId(a)?.effectiveRole) else {
-            debugLog("[PROFILE-HOST] held Child \(Self.tag(a)) stays active on \(Self.tag(playlistId)); nothing is sent until the hold lifts")
+        guard ProfileHostHoldRules.onReopen(isDefault: p.isDefault, role: p.effectiveRole, refused: true) == .fallBackToDefault else {
+            debugLog("[PROFILE-HOST] \(holds.isHeld(a) ? "held" : "keyless") Child \(Self.tag(a)) stays active on \(Self.tag(playlistId)); nothing is sent until it signs in")
             return
         }
         // The channel reload only for the playlist on screen (it would load this one in its place).

@@ -44,7 +44,21 @@ final class DispatcharrKeyPromptModel: ObservableObject {
     }
 
     /// Touch once at launch so the gate's callback is wired before any 401.
-    func install() { sync() }
+    func install() {
+        ProfileManager.shared.onActiveSignInNeeded = { [weak self] pid, profile in self?.presentProfileSignIn(pid, profile) }
+        sync()
+        // The launch check may have run before this hook was in place.
+        ProfileManager.shared.promptActiveSignInIfNeeded("launch")
+    }
+
+    /// A held or keyless Child kept active (launch or a playlist change): its own
+    /// "Sign in to Dispatcharr" form, the server-change line only when it is held.
+    func presentProfileSignIn(_ playlistID: String, _ profile: DispatcharrProfile) {
+        debugLog("[AUTH] sign-in form opened for profile \(profile.id.prefix(8))")
+        presentHosted(attempt: 0) { close in
+            AnyView(KeySignInView(playlistID: playlistID, heldProfile: profile, onClose: close, onSignedIn: close))
+        }
+    }
 
     private func sync() {
         let now = DispatcharrRequestGate.shared.prompt
@@ -488,7 +502,8 @@ struct KeySignInView: View {
                 .scaledFont(ProfileUI.title)
                 .foregroundColor(.textPrimary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if heldProfile != nil {
+            // The server-change line only for a held profile (a keyless one gets the form alone).
+            if let heldProfile, ProfileManager.shared.isHeld(heldProfile.id) {
                 Text(KeySignInCopy.hostChanged(playlistName: playlistName))
                     .scaledFont(ProfileUI.body)
                     .foregroundColor(.textPrimary)

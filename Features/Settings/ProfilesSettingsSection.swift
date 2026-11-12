@@ -573,7 +573,8 @@ struct ChildManageProfilesView: View {
                     } else {
                         ForEach(profiles) { p in
                             Button {
-                                guard p.id != activeId, !manager.switching else { return }
+                                // The active Child only when it needs its sign-in form (held, or no key).
+                                guard p.id != activeId || manager.needsSignIn(p.id), !manager.switching else { return }
                                 status = nil
                                 flow = .switchTo(p)
                             } label: {

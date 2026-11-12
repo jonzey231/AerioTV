@@ -2010,19 +2010,28 @@ extension ServerConnection {
         enum Field: Sendable { case apiKey, password }
         let key: String
         let fallback: String
+        /// The playlist, for the active profile's request overlay (API key only).
+        let overlayPlaylistID: String?
 
         init(_ server: ServerConnection, field: Field) {
             switch field {
             case .apiKey:
                 key = "apiKey_\(server.id.uuidString)"
                 fallback = server.apiKey
+                overlayPlaylistID = server.id.uuidString
             case .password:
                 key = "password_\(server.id.uuidString)"
                 fallback = server.password
+                overlayPlaylistID = nil
             }
         }
 
+        /// The API key requests use: the ACTIVE profile's (its own key, or the
+        /// held placeholder when it is held or has none, read when the request
+        /// is built), never the playlist's own key in a non-default profile's
+        /// place (security fix 2026-11-12, effectiveApiKey's rule).
         func resolveOffMain() async -> String {
+            if let pid = overlayPlaylistID, let o = ProfileOverlay.values(pid) { return o.apiKey }
             let key = key, fallback = fallback
             return await Task.detached(priority: .userInitiated) {
                 ServerConnection.resolveCredential(key: key, fallback: fallback)

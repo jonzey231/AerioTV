@@ -561,6 +561,8 @@ struct AerioApp: App {
             // first launch-time API call can 401 (measured 2026-11-10: the
             // channel load starts before RootView appears).
             DispatcharrKeyBroker.install(container: self.sharedModelContainer)
+            // Held or keyless profile addresses: refused before the first load.
+            ProfileManager.shared.registerRefusedAddresses()
         } catch {
             fatalError("Could not initialize ModelContainer: \(error)")
         }

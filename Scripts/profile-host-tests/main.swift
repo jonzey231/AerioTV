@@ -372,12 +372,15 @@ do {
     store.setApiKey("gone", nil)   // the Keychain item went away while held
     let signIns = ProfileSignIns(store: store, holds: holds)
     check(signIns.apiKey("pw", for: .profileSwitch) == nil, "a password-only profile has no stored key")
-    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("pw"), hasStoredSignIn: signIns.hasStored("pw")), .signInAgain,
+    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("pw"), hasStoredSignIn: signIns.hasStored("pw"), isDefault: false), .signInAgain,
        "held with no stored key: the form with the line")
-    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("gone"), hasStoredSignIn: signIns.hasStored("gone")), .signInAgain,
+    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("gone"), hasStoredSignIn: signIns.hasStored("gone"), isDefault: false), .signInAgain,
        "held with nothing stored any more: the form with the line")
-    eq(ProfileHostHoldRules.onPick(isHeld: false, hasStoredSignIn: false), .switchNow, "not held, nothing stored: as before")
-    eq(ProfileHostHoldRules.onPick(isHeld: false, hasStoredSignIn: true), .switchNow, "not held: as before")
+    eq(ProfileHostHoldRules.onPick(isHeld: false, hasStoredSignIn: false, isDefault: false), .signInAgain,
+       "not held, nothing stored: the sign-in form (treated exactly like held)")
+    eq(ProfileHostHoldRules.onPick(isHeld: false, hasStoredSignIn: false, isDefault: true), .switchNow,
+       "the default profile uses the playlist's own sign-in")
+    eq(ProfileHostHoldRules.onPick(isHeld: false, hasStoredSignIn: true, isDefault: false), .switchNow, "not held: as before")
     eq(KeySignInCopy.hostChanged(playlistName: "Home"),
        "The server address for Home changed. Sign in again to use this profile.", "the line above the fields")
 }
@@ -601,11 +604,10 @@ do {
     check(holds.isHeld("a") && holds.isHeld("b") && !holds.isHeld("def"), "a route change holds the keyless profiles")
     check(holds.record("K") != nil && holds.heldPlaylistIds.contains("K"), "so the roster pause starts for that playlist")
     check(!DsyncRosterPause.writes(.profiles, paused: holds.record("K") != nil), "and the roster is not written")
-    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("a"), hasStoredSignIn: signIns.hasStored("a")), .signInAgain,
+    eq(ProfileHostHoldRules.onPick(isHeld: holds.isHeld("a"), hasStoredSignIn: signIns.hasStored("a"), isDefault: false), .signInAgain,
        "picking a keyless held profile shows the sign-in form with the line")
 }
 
-print("\(checks) checks, \(failures) failures")
 // Held addresses before the playlists can be read (launch): the hold's own
 // route names the same server keys the playlist's URLs would.
 do {
@@ -618,4 +620,68 @@ do {
        ["a.example:9191"], "a playlist with no local address holds one")
 }
 
+// MARK: - An active keyless non-default profile (security fix, 2026-11-12)
+// It never falls back to the default's (playlist's) key or password: it is
+// treated exactly like a held profile, so nothing is sent with the default's key.
+do {
+    let (ud, suite) = freshDefaults("keyless")
+    defer { ud.removePersistentDomain(forName: suite) }
+    let secrets = MemorySecretBox()
+    let store = ProfileStore(defaults: ud, secrets: secrets)
+    let holds = ProfileHostHoldStore(defaults: ud)
+    store.upsert(profile("def", "K", "parent", isDefault: true))
+    store.upsert(profile("kid", "K", "kid"))
+    store.setApiKey("kid", "K-KID")
+    store.setActiveProfileId("K", "kid")
+    store.setApiKey("kid", nil)   // lost to a pulled credential change while active
+    let R = ProfileHostHoldRules.self
+    let kid = store.byId("kid")!
+    let decision = R.activeSignIn(isDefault: kid.isDefault, isHeld: holds.isHeld("kid"), storedKey: store.apiKey("kid"))
+    eq(decision, .refused, "an active keyless non-default profile is refused, never the playlist's sign-in")
+    // What the request overlay lays over the playlist for it, and what that sends.
+    let overlayKey: String? = {
+        switch decision {
+        case .own(let k): return k
+        case .refused: return DispatcharrRequestGate.HELD_PROFILE_KEY
+        case .playlist: return nil   // would be the default's key
+        }
+    }()
+    check(overlayKey != nil, "an overlay is laid, so the default's key is never used in its place")
+    let defaultKey = "DEFAULT-KEY"
+    let sent = overlayKey ?? defaultKey
+    check(sent != defaultKey, "nothing is sent with the default's key")
+    let g = DispatcharrRequestGate()
+    check(g.isKeyRejected(sent), "the placeholder stops every request at the gate")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": sent], gate: g), .held, "and every stream open")
+    check(StreamKeyGate.isProfileHeld(["X-API-Key": sent]), "with the held line (Could not reach your Dispatcharr server)")
+    // The other combinations.
+    eq(R.activeSignIn(isDefault: false, isHeld: false, storedKey: "  "), .refused, "a blank key is no key")
+    eq(R.activeSignIn(isDefault: false, isHeld: false, storedKey: " K-KID "), .own("K-KID"), "a stored key is the profile's own")
+    eq(R.activeSignIn(isDefault: false, isHeld: true, storedKey: "K-KID"), .refused, "held, key or not: refused")
+    eq(R.activeSignIn(isDefault: true, isHeld: false, storedKey: nil), .playlist, "only the default uses the playlist's sign-in")
+    for held in [false, true] {
+        for key in [nil, "", "K"] as [String?] {
+            check(R.activeSignIn(isDefault: false, isHeld: held, storedKey: key) != .playlist,
+                  "a non-default profile never gets the playlist's sign-in (held=\(held) key=\(key ?? "nil"))")
+        }
+    }
+    // Picking or reopening it shows the sign-in form; leaving a Child keeps its PIN (leavesForDefault).
+    let signIns = ProfileSignIns(store: store, holds: holds)
+    eq(R.onPick(isHeld: holds.isHeld("kid"), hasStoredSignIn: signIns.hasStored("kid"), isDefault: false), .signInAgain,
+       "picking the keyless profile shows the sign-in form")
+    check(!R.leavesForDefault(activeRole: .child), "a keyless Child is never switched away without its PIN")
+    check(R.leavesForDefault(activeRole: .user), "a keyless adult leaves for the default, as a held one does")
+    // Reopened at launch or on a playlist change (Android b542c797).
+    eq(R.onReopen(isDefault: false, role: .child, refused: true), .staySignIn, "a Child stays, and its sign-in form opens")
+    eq(R.onReopen(isDefault: false, role: .user, refused: true), .fallBackToDefault, "a Standard profile falls back to the default")
+    eq(R.onReopen(isDefault: false, role: .admin, refused: true), .fallBackToDefault, "an Admin profile falls back to the default")
+    eq(R.onReopen(isDefault: false, role: .child, refused: false), .asIs, "a signed-in Child stays as is")
+    eq(R.onReopen(isDefault: true, role: .child, refused: true), .asIs, "the default profile uses the playlist's own sign-in")
+    // Signing in as its own user unblocks it: a stored key is its own again.
+    store.setApiKey("kid", "K-KID-NEW")
+    eq(R.activeSignIn(isDefault: false, isHeld: holds.isHeld("kid"), storedKey: store.apiKey("kid")), .own("K-KID-NEW"),
+       "signed in again: its own key, nothing refused")
+}
+
+print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

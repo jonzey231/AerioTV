@@ -179,9 +179,32 @@ enum ProfileHostHoldRules {
     }
 
     /// Picking a profile in a switcher: a held profile always gets the form
-    /// with the line, whether or not it still has a stored sign-in.
-    static func onPick(isHeld: Bool, hasStoredSignIn: Bool) -> Pick {
-        isHeld ? .signInAgain : .switchNow
+    /// with the line, whether or not it still has a stored sign-in. A
+    /// non-default profile with nothing stored gets the form too (it is
+    /// treated exactly like a held one); the default uses the playlist's own.
+    static func onPick(isHeld: Bool, hasStoredSignIn: Bool, isDefault: Bool) -> Pick {
+        isHeld || (!isDefault && !hasStoredSignIn) ? .signInAgain : .switchNow
+    }
+
+    /// What an ACTIVE profile's requests carry. A non-default profile's own
+    /// key, or nothing at all: never the default's (playlist's) key or
+    /// password in its place. An active non-default profile with no stored
+    /// key (lost to a pulled credential change, or restored on relaunch) is
+    /// treated exactly like a held one.
+    enum ActiveSignIn: Equatable, Sendable {
+        /// The default profile: the playlist's own sign-in.
+        case playlist
+        /// The profile's own key.
+        case own(String)
+        /// Held, or no key stored: no request to the playlist's addresses.
+        case refused
+    }
+
+    static func activeSignIn(isDefault: Bool, isHeld: Bool, storedKey: String?) -> ActiveSignIn {
+        if isDefault { return .playlist }
+        if isHeld { return .refused }
+        let k = storedKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return k.isEmpty ? .refused : .own(k)
     }
 
     /// A route change, or a relaunch, with a held profile active: it is left
@@ -191,6 +214,22 @@ enum ProfileHostHoldRules {
     /// the normal switch with its PIN. No forced switch ever bypasses a PIN
     /// away from a Child.
     static func leavesForDefault(activeRole: ProfileRole?) -> Bool { activeRole != .child }
+
+    enum Reopen: Equatable, Sendable {
+        /// Signed in: nothing to do.
+        case asIs
+        /// Anyone but a Child: the default profile takes over.
+        case fallBackToDefault
+        /// A Child stays (nothing sent, the unreachable line) and its sign-in form opens.
+        case staySignIn
+    }
+
+    /// The active profile reopened at launch or on a playlist change while it
+    /// is held or has no stored key (activeSignIn == .refused).
+    static func onReopen(isDefault: Bool, role: ProfileRole?, refused: Bool) -> Reopen {
+        guard !isDefault, refused else { return .asIs }
+        return leavesForDefault(activeRole: role) ? .fallBackToDefault : .staySignIn
+    }
 
     /// Removing a profile (Remove Profile): a HELD profile goes from this
     /// device only, with no tombstone. Its row was never part of the new
