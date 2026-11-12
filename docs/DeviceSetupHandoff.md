@@ -143,7 +143,7 @@ has AerioTV sync data, and if so Dispatcharr Sync is offered as a restore.
 2. Pick a device from this list, the dock card, or the banner.
 3. Dispatcharr only (other playlist types skip this step): choose the
    scope, one of two radio buttons:
-   - "Copy entire setup from this device" (default): the playlist plus
+   - "Copy this playlist and its profiles" (default): the playlist plus
      every profile on this device with its credentials, roles, avatars,
      PINs, and order, with every sendable profile and the sync choice
      preselected in step 5.
@@ -160,7 +160,7 @@ has AerioTV sync data, and if so Dispatcharr Sync is offered as a restore.
    one of its 3 attempts). A QR link skips code entry.
 5. Choose what to send:
    - The playlist, always.
-   - Dispatcharr, "Copy entire setup" only: a checkbox per local profile
+   - Dispatcharr, "Copy this playlist and its profiles" only: a checkbox per local profile
      of that playlist. The default profile is always sent (it signs in
      with the playlist login). Each row says "API key saved", "Password
      saved", or that no sign-in is saved here (such a row cannot be sent).
@@ -535,7 +535,7 @@ code" or "Choose from Photos" accepts it unchanged:
 ### Copy a setup from a user QR
 
 When the device showing the code is on the same network, the scanner can
-copy that device's whole setup instead of one user. The QR payload is
+copy that device's playlist and its profiles instead of one user. The QR payload is
 unchanged and no server path is used; everything stays on the LAN.
 
 - Showing device ("source"), only while User QR Code is open with a code:
@@ -558,7 +558,7 @@ unchanged and no server path is used; everything stays on the LAN.
   "Send setup to {name}?" ("This copies this device's playlist, profiles,
   and preferences to {name}.", Send / Don't send). Don't send, 120 seconds
   without an answer, or closing the screen replies `declined`. Send builds
-  the same full payload as "Copy entire setup from this device" (every
+  the same full payload as "Copy this playlist and its profiles" (every
   profile with a saved sign-in, sync on when Dispatcharr Sync is on there)
   and sends it to the link with the normal sealed `POST /setup`. Blur,
   PIN gate, 60 second hide, and capture blocking are unchanged.
@@ -566,9 +566,9 @@ unchanged and no server path is used; everything stays on the LAN.
   browses for up to 3 seconds ("Looking for the device showing this
   code") for `role`=`source` with a matching `uq`. Not found (a
   screenshot, the Dispatcharr web UI code, or another network) imports
-  the user as before. Found: "Copy from {name}", subtitle "Copy every playlist and profile
-  from {name}, or add just the user in this code.", with "Copy entire setup
-  from this device" (default) or "Import this user only". Entire setup
+  the user as before. Found: "Copy from {name}", subtitle "Copy the playlist and its profiles
+  from {name}, or add just the user in this code.", with "Copy this playlist
+  and its profiles" (default) or "Import this user only". The first choice
   starts the normal receiver (advertised, as on Welcome, so other
   devices show the waiting banner), posts its link with the
   proof (150 second timeout), shows "Waiting for {name}", then applies the
