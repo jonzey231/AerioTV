@@ -190,28 +190,11 @@ struct AddServerView: View {
         .navigationBarTitleDisplayMode(typeChosen || addProfilesFor != nil ? .large : .inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        #if os(iOS)
         .toolbar {
             if typeChosen && addProfilesFor == nil {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            typeChosen = false
-                            #if os(iOS)
-                            showScanDetails = false
-                            #endif
-                            viewModel.reset()
-                        }
-                    } label: {
-                        #if os(tvOS)
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                                .scaledFont(.system(size: 13, weight: .semibold))
-                            Text("Choose Server Type")
-                        }
-                        .foregroundColor(.accentPrimary)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                        #else
+                    Button { backToServerTypes() } label: {
                         // Android ConfigureSourceScreen: back arrow only, no title.
                         Image(systemName: "chevron.left")
                             .scaledFont(.system(size: 17, weight: .semibold))
@@ -219,11 +202,17 @@ struct AddServerView: View {
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                             .accessibilityLabel("Back")
-                        #endif
                     }
                 }
             }
         }
+        #else
+        // Apple TV: no back button drawn at the top left (it sat over the page,
+        // device report 2026-11-12; Android TV shows none). Menu is the way back:
+        // on Configure it returns to the server types; otherwise it is not
+        // handled here, so it pops or closes the page as before.
+        .onExitCommand(perform: typeChosen && addProfilesFor == nil ? { backToServerTypes() } : nil)
+        #endif
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: typeChosen)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: viewModel.verificationSuccess)
         .fullScreenCover(item: $savedServer) { server in
@@ -284,6 +273,17 @@ struct AddServerView: View {
         #if os(iOS)
         scannedPlaylistDetails
         #endif
+    }
+
+    /// Configure back to the server types (the back arrow; Menu on Apple TV).
+    private func backToServerTypes() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            typeChosen = false
+            #if os(iOS)
+            showScanDetails = false
+            #endif
+            viewModel.reset()
+        }
     }
 
     /// Android's Configure screen has no title on phones and tablets.
