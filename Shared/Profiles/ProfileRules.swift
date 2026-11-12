@@ -184,6 +184,18 @@ enum PinRules {
     static let MIN_LENGTH = 4
     static let MAX_LENGTH = 6
 
+    /// How many dots a PIN pad shows. A known length: that many. Setting a PIN:
+    /// at least the minimum, one more per digit up to the maximum. An unknown
+    /// length (a PIN that arrived through Dispatcharr Sync, which syncs only the
+    /// hash and salt): one dot per digit typed, never a fixed row of empty dots
+    /// (owner 2026-11-12: a 4-digit PIN showed 6). The first correct entry stores
+    /// the length on this device (ProfilePinStore.check).
+    static func dotCount(knownLength: Int?, setting: Bool, typed: Int) -> Int {
+        if let n = knownLength { return min(max(n, MIN_LENGTH), MAX_LENGTH) }
+        if setting { return min(max(typed, MIN_LENGTH), MAX_LENGTH) }
+        return min(max(typed, 0), MAX_LENGTH)
+    }
+
     /// Digits for Numbers, U/D/L/R letters for Directions; nil when invalid.
     static func normalize(_ type: PinType, _ entries: [String]) -> String? {
         guard (MIN_LENGTH...MAX_LENGTH).contains(entries.count) else { return nil }

@@ -1087,7 +1087,18 @@ do {
     let rec = pins.syncRecord("x")!
     let other = ProfilePinStore(defaults: UserDefaults(suiteName: suite + ".2")!, secrets: MemorySecretBox())
     other.importSynced("x", rec.type, hash: rec.hash, salt: rec.salt!)
+    eq(other.length("x"), nil, "a synced PIN arrives with no length (only the hash and salt sync)")
+    check(!other.check("x", ["1", "2", "3", "5"]), "a wrong entry on the synced PIN fails")
+    eq(other.length("x"), nil, "a wrong entry teaches no length")
     check(other.check("x", ["1", "2", "3", "4"]), "a synced v2 record verifies on another device")
+    eq(other.length("x"), 4, "the first correct entry stores the length: the pad shows 4 dots from then on")
+    // The pad's dots (owner 2026-11-12): unknown length shows one per digit typed.
+    eq(PinRules.dotCount(knownLength: nil, setting: false, typed: 0), 0, "unknown length: no fixed row of empty dots")
+    eq(PinRules.dotCount(knownLength: nil, setting: false, typed: 3), 3, "unknown length: a dot per digit typed")
+    eq(PinRules.dotCount(knownLength: nil, setting: false, typed: 9), PinRules.MAX_LENGTH, "never more than the maximum")
+    eq(PinRules.dotCount(knownLength: 4, setting: false, typed: 1), 4, "a known length shows that many")
+    eq(PinRules.dotCount(knownLength: nil, setting: true, typed: 2), PinRules.MIN_LENGTH, "setting a PIN starts at the minimum")
+    eq(PinRules.dotCount(knownLength: nil, setting: true, typed: 5), 5, "and grows as digits are typed")
     UserDefaults(suiteName: suite + ".2")!.removePersistentDomain(forName: suite + ".2")
     pins.writeLegacyForTesting("y", .directions, ["Up", "Up", "Left", "Right"])
     check(pins.isLegacy("y") && pins.syncRecord("y") == nil, "v1 record is legacy, not synced")

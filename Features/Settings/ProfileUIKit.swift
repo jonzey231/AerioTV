@@ -644,13 +644,16 @@ struct ProfilePinEntry: View {
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: ProfileUI.s(12, 20)) {
-                let count = fixed ?? (setting ? min(max(entries.count, PinRules.MIN_LENGTH), PinRules.MAX_LENGTH) : PinRules.MAX_LENGTH)
+                // Unknown length (a synced PIN): dots appear as digits are typed.
+                let count = PinRules.dotCount(knownLength: fixed, setting: setting, typed: entries.count)
                 ForEach(0..<count, id: \.self) { i in
                     Circle()
                         .fill(i < entries.count ? Color.accentPrimary : Color.textSecondary.opacity(0.35))
                         .frame(width: ProfileUI.s(14, 22), height: ProfileUI.s(14, 22))
                 }
             }
+            // The row keeps its height while empty, so nothing moves on the first digit.
+            .frame(height: ProfileUI.s(14, 22))
             Text(error ?? " ")
                 .scaledFont(ProfileUI.small)
                 .foregroundColor(ProfileUI.errorColor)
