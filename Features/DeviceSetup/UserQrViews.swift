@@ -78,7 +78,10 @@ struct UserQrFlow: View {
             ProfilePinEntry(
                 title: "Enter the PIN to show this code",
                 type: pm.pinType(profileId) ?? pm.deviceAdminPinType(playlistId) ?? .numbers,
-                pinLength: pm.hasPin(profileId) && !pm.hasDeviceAdminPin(playlistId) ? pm.pinLength(profileId) : nil,
+                // Either the profile's PIN or the Device Admin PIN unlocks it, so
+                // there is no single length: dots appear as digits are typed
+                // (PinRules.dotCount), as on Android (2026-11-12).
+                pinLength: nil,
                 lockSeconds: {
                     [pm.hasPin(profileId) ? pm.pinLockSeconds(profileId) : nil,
                      pm.hasDeviceAdminPin(playlistId) ? pm.pinLockSeconds(deviceId) : nil].compactMap { $0 }.min() ?? 0
