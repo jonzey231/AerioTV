@@ -606,4 +606,16 @@ do {
 }
 
 print("\(checks) checks, \(failures) failures")
+// Held addresses before the playlists can be read (launch): the hold's own
+// route names the same server keys the playlist's URLs would.
+do {
+    let route = PlaylistRoute.key(base: "https://Remote.example/", local: "http://192.168.1.5:9191")
+    let fromRoute = Set(route.split(separator: "|").map(String.init).filter { !$0.isEmpty }.map { DispatcharrRequestGate.serverKey($0) })
+    let fromURLs = Set(["https://remote.example", "http://192.168.1.5:9191"].map { DispatcharrRequestGate.serverKey($0) })
+    eq(fromRoute, fromURLs, "route fallback holds the same addresses")
+    let noLocal = PlaylistRoute.key(base: "http://a.example:9191", local: "")
+    eq(Set(noLocal.split(separator: "|").map(String.init).filter { !$0.isEmpty }.map { DispatcharrRequestGate.serverKey($0) }),
+       ["a.example:9191"], "a playlist with no local address holds one")
+}
+
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

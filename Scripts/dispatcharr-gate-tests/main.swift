@@ -645,6 +645,22 @@ do {
        "a rejected key keeps the rejected-key text")
 }
 
+// Held addresses: no request of any kind, logos and artwork included.
+do {
+    let g = DispatcharrRequestGate.shared
+    g.holdServers(playlistID: "HELD-T", [DispatcharrRequestGate.serverKey("http://held.example:9191")])
+    let logo = URL(string: "http://held.example:9191/api/channels/logos/7/cache/")!
+    check(g.isHeldServer(logo), "a logo on a held address is refused")
+    check(DispatcharrRequestGate.unlessHeld(logo) == nil, "AsyncImage gets no URL for it (placeholder)")
+    let cdn = URL(string: "https://image.tmdb.org/t/p/w342/x.jpg")!
+    eq(DispatcharrRequestGate.unlessHeld(cdn), cdn, "artwork elsewhere still loads")
+    check(!g.isHeldServer(nil as URL?), "no URL, nothing to refuse")
+    check(g.isHeldServer(URL(string: "http://HELD.example:9191/")), "host matched without regard to case")
+    check(!g.isHeldServer(URL(string: "http://held.example:9192/")), "another port is another address")
+    g.releaseServers(playlistID: "HELD-T")
+    check(!g.isHeldServer(logo), "released: the address loads again")
+}
+
 // accepted memo
 do {
     let g = freshGate()

@@ -1367,7 +1367,7 @@ final class AerioCastController: NSObject, ObservableObject {
         if let sub = content.subtitle, !sub.isEmpty {
             metadata.setString(sub, forKey: kGCKMetadataKeySubtitle)
         }
-        if let art = content.artURL, let url = URL(string: art) {
+        if let art = content.artURL, let url = URL(string: art), !DispatcharrRequestGate.shared.isHeldServer(url) {
             metadata.addImage(GCKImage(url: url, width: 480, height: 270))
         }
         // entity is what the receiver's Cast Connect load handler deep-links on,
@@ -1405,7 +1405,7 @@ final class AerioCastController: NSObject, ObservableObject {
         if let sub = content.subtitle, !sub.isEmpty {
             metadata.setString(sub, forKey: kGCKMetadataKeySubtitle)
         }
-        if let art = content.artURL, let url = URL(string: art) {
+        if let art = content.artURL, let url = URL(string: art), !DispatcharrRequestGate.shared.isHeldServer(url) {
             metadata.addImage(GCKImage(url: url, width: 480, height: 270))
         }
 
@@ -3029,7 +3029,7 @@ struct RemoteControlScreen: View {
     private var header: some View {
         VStack(spacing: 2) {
             if let art = artURL, let url = URL(string: art) {
-                AsyncImage(url: url) { image in
+                AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                     image.resizable().scaledToFit()
                 } placeholder: {
                     glyphIcon
@@ -3504,7 +3504,7 @@ struct RemoteSessionSheet: View {
     private var header: some View {
         VStack(spacing: 4) {
             if let art = artURL, let url = URL(string: art) {
-                AsyncImage(url: url) { image in
+                AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                     image.resizable().scaledToFit()
                 } placeholder: {
                     transportGlyph
@@ -5499,7 +5499,7 @@ struct RemoteSessionCard: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.black.opacity(0.25))
                 if let artURL, let url = URL(string: artURL) {
-                    AsyncImage(url: url) { image in
+                    AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                         image.resizable().scaledToFit()
                     } placeholder: {
                         Image(systemName: transport.glyph)
@@ -6069,7 +6069,7 @@ struct MultiviewStagedSheet: View {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .fill(Color.black.opacity(0.25))
                                 if let url = tile.item.logoURL {
-                                    AsyncImage(url: url) { image in
+                                    AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                                         image.resizable().scaledToFit()
                                     } placeholder: {
                                         Image(systemName: "tv")
@@ -6268,7 +6268,7 @@ struct KeptLiveCard: View {
             RoundedRectangle(cornerRadius: cornerRadius ?? box / 5.5, style: .continuous)
                 .fill(Color.black.opacity(0.25))
             if let url = ch.logoURL {
-                AsyncImage(url: url) { image in
+                AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                     image.resizable().scaledToFit()
                 } placeholder: {
                     Image(systemName: "tv")
@@ -6345,7 +6345,7 @@ struct KeptLiveCard: View {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .fill(Color.black.opacity(0.25))
                         if let url = ch.logoURL {
-                            AsyncImage(url: url) { image in
+                            AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { image in
                                 image.resizable().scaledToFit()
                             } placeholder: {
                                 Image(systemName: "tv")

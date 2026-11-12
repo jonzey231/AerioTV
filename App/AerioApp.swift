@@ -1201,6 +1201,12 @@ final class TVLANProbe: ObservableObject {
                 guard !Task.isCancelled else { return }
                 let key = Self.reachabilityKey(for: baseURL)
                 if reachable.contains(key) { continue }
+                // A held playlist's address (a held Child): no request of any
+                // kind; its last verdict stands.
+                if DispatcharrRequestGate.shared.isHeldServer(baseURL) {
+                    if (UserDefaults.standard.stringArray(forKey: Self.reachableURLsKey) ?? []).contains(key) { reachable.insert(key) }
+                    continue
+                }
                 // Per-candidate HEAD request with a 2s timeout. Some
                 // home routers (notably Ubiquiti) respond slowly to the
                 // first connection to a host the ARP table doesn't know

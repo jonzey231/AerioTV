@@ -99,7 +99,9 @@ enum HLSSessionResolver {
     }
 
     static func resolve(entry: URL, headers: [String: String]) async -> Outcome {
-        await withCheckedContinuation { (cont: CheckedContinuation<Outcome, Never>) in
+        // A held playlist's address: no request of any kind.
+        if DispatcharrRequestGate.shared.isHeldServer(entry) { return .unknown }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Outcome, Never>) in
             let box = ResolveBox(cont)
             var request = URLRequest(url: entry)
             request.timeoutInterval = 15
@@ -113,6 +115,7 @@ enum HLSSessionResolver {
 
     /// Best effort: stops the server-side client for `token`. Logs only.
     static func endSession(token: String, playlistURL: URL, headers: [String: String]) {
+        guard !DispatcharrRequestGate.shared.isHeldServer(playlistURL) else { return }
         guard var comps = URLComponents(url: playlistURL, resolvingAgainstBaseURL: false) else { return }
         comps.path = "/api/proxy/hls/sessions/\(token)/"
         comps.query = nil
@@ -528,6 +531,10 @@ final class DispatcharrLimitProbe: NSObject, URLSessionDataDelegate, @unchecked 
 
     static func run(url: URL, headers: [String: String], owner: String,
                     completion: @escaping @Sendable (LiveStopNotice?, String) -> Void) {
+        guard !DispatcharrRequestGate.shared.isHeldServer(url) else {
+            completion(nil, "held profile")
+            return
+        }
         guard DispatcharrConnectionLimit.directConnectActive else {
             completion(nil, "not Direct Connect")
             return
@@ -867,6 +874,7 @@ final class HLSCapabilityStore: NSObject {
     /// HEADERS (a non-capable server would otherwise stream endless TS),
     /// and any briefly-started channel is reaped by the ghost window.
     func probeIfNeeded(streamURL: URL, headers: [String: String]) {
+        guard !DispatcharrRequestGate.shared.isHeldServer(streamURL) else { return }
         guard let key = hostKey(streamURL),
               !probedThisSession.contains(key),
               !inFlight.contains(key) else { return }
@@ -934,6 +942,7 @@ final class HLSCapabilityStore: NSObject {
     /// later play retries, and never blocks beyond the cap. On a LAN server
     /// the 302 returns in milliseconds.
     func probeBlocking(streamURL: URL, headers: [String: String], timeout: TimeInterval = 1.5) -> Bool {
+        guard !DispatcharrRequestGate.shared.isHeldServer(streamURL) else { return false }
         guard let key = hostKey(streamURL) else { return false }
         if probedThisSession.contains(key) || capable.contains(key) {
             return capable.contains(key)
@@ -4114,6 +4123,7 @@ struct DispatcharrAPI {
     /// Resolve Dispatcharr proxy URLs that redirect to a session-based path.
     /// Some media players (and some CDN/proxy setups) behave better when given the final URL up-front.
     func resolveFinalURLForPlayback(_ url: URL) async throws -> URL {
+        if DispatcharrRequestGate.shared.isHeldServer(url) { throw DispatcharrRequestGate.heldRefusal() }
         var current = url
         var redirects = 0
 

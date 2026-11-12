@@ -541,7 +541,7 @@ struct SearchView: View {
                 // Thumbnail: fixed 50x70 box so nothing shifts when art lands.
                 switch result {
                 case .vod:
-                    AsyncImage(url: validatedPosterURL(result)) { phase in
+                    AsyncImage(url: DispatcharrRequestGate.unlessHeld(validatedPosterURL(result))) { phase in
                         if case .success(let img) = phase {
                             img.resizable().aspectRatio(contentMode: .fill)
                                 .frame(width: Self.posterSize.width, height: Self.posterSize.height)
@@ -945,7 +945,7 @@ private struct SearchProgramThumb: View {
             .frame(width: 50, height: 70)
             .overlay {
                 if let url {
-                    AsyncImage(url: url) { phase in
+                    AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { phase in
                         switch phase {
                         case .success(let img):
                             img.resizable().aspectRatio(contentMode: .fit)
@@ -1181,7 +1181,7 @@ private struct LiveProgramHitRow: View {
                     .frame(width: artWidth, height: cardHeight - 20)
                     .overlay {
                         if let url = art ?? channel?.logoURL {
-                            AsyncImage(url: url) { phase in
+                            AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { phase in
                                 switch phase {
                                 case .success(let img):
                                     img.resizable().aspectRatio(contentMode: .fit)
@@ -1213,7 +1213,7 @@ private struct LiveProgramHitRow: View {
                     }
                     HStack(spacing: 6) {
                         if let logo = channel?.logoURL {
-                            AsyncImage(url: logo) { phase in
+                            AsyncImage(url: DispatcharrRequestGate.unlessHeld(logo)) { phase in
                                 if case .success(let img) = phase {
                                     img.resizable().aspectRatio(contentMode: .fit)
                                 } else {
@@ -1293,7 +1293,7 @@ private struct LiveChannelHitRow: View {
                     .frame(width: 72, height: 72)
                     .overlay {
                         if let url = channel.logoURL {
-                            AsyncImage(url: url) { phase in
+                            AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { phase in
                                 if case .success(let img) = phase {
                                     img.resizable().aspectRatio(contentMode: .fit).padding(4)
                                 } else {

@@ -54,6 +54,8 @@ struct AuthPosterImage: View {
                 onImageLoaded?(cached.size)
                 return
             }
+            // A held playlist's address: no request; the placeholder stays.
+            if DispatcharrRequestGate.shared.isHeldServer(url) { return }
             var req = URLRequest(url: url, timeoutInterval: 20)
             // SECURITY: attach the server's credential headers ONLY when the
             // image is on one of the configured server's OWN hosts (public

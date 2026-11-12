@@ -344,6 +344,14 @@ final class DispatcharrRequestGate: @unchecked Sendable {
         heldServers[playlistID] = nil
     }
 
+    /// [url] is a held playlist's address: nothing may be requested from it,
+    /// logos and artwork included (their placeholder shows).
+    func isHeldServer(_ url: URL?) -> Bool { url.map { isHeldServer($0.absoluteString) } ?? false }
+
+    /// [url], or nil when it is a held playlist's address: loaders outside
+    /// HTTPRouter (AsyncImage) then show their placeholder with no request.
+    static func unlessHeld(_ url: URL?) -> URL? { shared.isHeldServer(url) ? nil : url }
+
     /// True when a request to [url] must stop: it is a held playlist's address.
     func isHeldServer(_ url: String) -> Bool {
         let key = Self.serverKey(url)

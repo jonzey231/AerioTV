@@ -158,9 +158,16 @@ final class ProfileManager: ObservableObject {
     private func refreshHeldServers() {
         var now = Set<String>()
         for pid in holds.heldPlaylistIds {
-            guard let a = store.activeProfileId(pid), holds.isHeld(a), let s = DsyncLocal.server(pid) else { continue }
-            let keys = Set([s.normalizedBaseURL, s.localURL.isEmpty ? "" : s.normalizedLocalURL]
-                .filter { !$0.isEmpty }.map { DispatcharrRequestGate.serverKey($0) })
+            guard let a = store.activeProfileId(pid), holds.isHeld(a) else { continue }
+            // Before the playlists can be read (launch), the hold's own route
+            // names the addresses, so nothing reaches them in the meantime.
+            let urls: [String]
+            if let s = DsyncLocal.server(pid) {
+                urls = [s.normalizedBaseURL, s.localURL.isEmpty ? "" : s.normalizedLocalURL]
+            } else {
+                urls = (holds.record(pid)?.route ?? "").split(separator: "|").map(String.init)
+            }
+            let keys = Set(urls.filter { !$0.isEmpty }.map { DispatcharrRequestGate.serverKey($0) })
             DispatcharrRequestGate.shared.holdServers(playlistID: pid, keys)
             now.insert(pid)
         }
@@ -251,6 +258,9 @@ final class ProfileManager: ObservableObject {
         guard !started else { return }
         started = true
         restoreAtLaunch()
+        // A held Child's addresses are refused from the first request on
+        // (the playlists can be read now), keyless ones included.
+        refreshHeldServers()
         ChannelStore.shared.$channels
             .sink { [weak self] _ in Task { @MainActor in await self?.activePlaylistMaybeChanged() } }
             .store(in: &cancellables)

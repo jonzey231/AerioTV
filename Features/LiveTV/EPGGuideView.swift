@@ -10661,7 +10661,7 @@ struct RadioModeBannerSlot: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.black.opacity(0.25))
                 if let url = ch.logoURL {
-                    AsyncImage(url: url) { $0.resizable().scaledToFit() } placeholder: {
+                    AsyncImage(url: DispatcharrRequestGate.unlessHeld(url)) { $0.resizable().scaledToFit() } placeholder: {
                         Image(systemName: RadioModeSession.menuSymbol)
                             .foregroundColor(.accentPrimary)
                     }
