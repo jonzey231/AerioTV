@@ -424,7 +424,10 @@ struct ServerListRow: View {
     private let statusDotSize: CGFloat = 12
     private let chevronSize: CGFloat = 22
     #else
-    private let checkmarkSize: CGFloat = 22
+    /// The same 20 pt as the Add Playlist icon beside it, so the circle and
+    /// the name sit on the same leading edge as the rows above and below
+    /// (owner 2026-11-13: they were about 23 pt further right).
+    private let checkmarkSize: CGFloat = 20
     private let statusDotSize: CGFloat = 8
     private let chevronSize: CGFloat = 13
     #endif
@@ -480,10 +483,11 @@ struct ServerListRow: View {
         #if os(iOS)
         if let onActivate, !server.isActive {
             Button(action: onActivate) {
+                // The symbol's own frame, as the Add Playlist icon has, so
+                // the names line up exactly.
                 indicatorGlyph
-                    // 44pt target without changing the drawn size.
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+                    // A 44 pt target without widening the row's leading column.
+                    .contentShape(Rectangle().inset(by: -12))
             }
             // .borderless keeps the button out of the row's
             // NavigationLink: a plain Image or a default-styled button
@@ -491,10 +495,8 @@ struct ServerListRow: View {
             .buttonStyle(.borderless)
             .accessibilityLabel("Set as active playlist")
         } else {
-            // Already active (or no action supplied): same 44pt box so
-            // every row's leading column measures the same, but inert.
+            // Already active (or no action supplied): the same glyph, inert.
             indicatorGlyph
-                .frame(width: 44, height: 44)
                 .accessibilityHidden(!server.isActive)
                 .accessibilityLabel("Active playlist")
         }
@@ -506,7 +508,8 @@ struct ServerListRow: View {
     }
 
     private var rowContent: some View {
-        HStack(spacing: 14) {
+        // iPhone and iPad: the Add Playlist row's 12 pt gap after the icon.
+        HStack(spacing: rowSpacing) {
             // Active playlist indicator. On iOS it is also a control
             // (Logan 2026-09-18): tapping the radio activates the
             // playlist through the same `performSetActiveServer` path as
@@ -519,14 +522,18 @@ struct ServerListRow: View {
             // radio as the leading element a second leading tile read as
             // two competing markers, and the type now says its name in
             // the subtitle. Same single-leading-element look as Android.
-            VStack(alignment: .leading, spacing: 3) {
+            // The standard row's title and subtitle (SettingsRow): the same
+            // size, spacing, and secondary contrast, so the subtitle follows
+            // Text Contrast like every other row's (it was a smaller, much
+            // fainter tertiary line).
+            VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text(subtitleText)
-                    .scaledFont(.labelSmall.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .scaledFont(.bodySmall)
+                    .foregroundColor(Color.contrastText(.textSecondary))
                     .lineLimit(1)
             }
 
@@ -547,9 +554,16 @@ struct ServerListRow: View {
         #if os(tvOS)
         .padding(.vertical, 16)
         #else
-        .padding(.vertical, 4)
+        // SettingsRow's vertical padding: the same height as its neighbors.
+        .padding(.vertical, 2)
         #endif
     }
+
+    #if os(tvOS)
+    private let rowSpacing: CGFloat = 14
+    #else
+    private let rowSpacing: CGFloat = 12
+    #endif
 }
 
 // MARK: - LAN / WAN Badge

@@ -469,6 +469,12 @@ struct SettingsView: View {
     }
     #endif
 
+    /// Space added above the first section's header so the gap under the
+    /// large title reads like the gap between sections (owner 2026-11-13,
+    /// measured on iPhone 17: title to PLAYLISTS about 26 pt of air against
+    /// about 32 pt from a card to the next header).
+    static let firstHeaderTopPad: CGFloat = 6
+
     @ViewBuilder
     private var settingsContent: some View {
             ZStack {
@@ -479,14 +485,11 @@ struct SettingsView: View {
                 #else
                 ScrollViewReader { rootProxy in
                 List {
-                    // Re-tap-the-tab anchor: a zero-height, inset-free,
-                    // separator-free row, so the list looks exactly as before.
-                    Color.clear
-                        .frame(height: 0)
-                        .listRowInsets(EdgeInsets())
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .id("settings.top")
+                    // The re-tap-the-tab anchor is the first section's header
+                    // ("settings.top"). It used to be a zero-height row of its
+                    // own, which still made an empty section: the gap under the
+                    // large title was about twice the gap between sections
+                    // (owner 2026-11-13).
                     // MARK: - Set up a TV banner
                     // The TV the dock card offers (one shared discovery and
                     // gating), at the top of the Settings root.
@@ -569,6 +572,8 @@ struct SettingsView: View {
                     } header: {
                         Text("Playlists")
                             .sectionHeaderStyle()
+                            .padding(.top, Self.firstHeaderTopPad)
+                            .id("settings.top")
                     } footer: {
                         if !servers.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
@@ -630,8 +635,16 @@ struct SettingsView: View {
                         #endif
                         }
                     } header: {
-                        Text("App")
-                            .sectionHeaderStyle()
+                        // A Child has no Playlists section: App comes first.
+                        if isChild {
+                            Text("App")
+                                .sectionHeaderStyle()
+                                .padding(.top, Self.firstHeaderTopPad)
+                                .id("settings.top")
+                        } else {
+                            Text("App")
+                                .sectionHeaderStyle()
+                        }
                     }
                     .listRowBackground(Color.cardBackground)
                     #if os(iOS)
