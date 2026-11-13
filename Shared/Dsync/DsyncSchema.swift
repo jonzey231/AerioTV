@@ -16,11 +16,13 @@ import CryptoKit
 
 enum DsyncKey: String, CaseIterable, Sendable {
     case favorites, recents, progress, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder,
-         settings, remoteMap, radioDefault, collections, profiles
+         settings, remoteMap, radioDefault, collections, profiles, tmdbKey
 
     var suffix: String { rawValue }
 
-    /// Which Sync Categories toggle gates this key; nil = always (profiles).
+    /// Which Sync Categories toggle gates this key; nil = always (profiles,
+    /// and tmdbKey, which syncs whenever Dispatcharr Sync is on and never
+    /// through iCloud or Drive: section 4.13).
     var category: DsyncCategory? {
         switch self {
         case .favorites, .recents, .collections: return .favorites
@@ -28,7 +30,7 @@ enum DsyncKey: String, CaseIterable, Sendable {
         case .reminders: return .reminders
         case .watchlist, .hiddenTitles: return .watchlist
         case .hiddenGroups, .groupOrder, .settings, .remoteMap, .radioDefault: return .preferences
-        case .profiles: return nil
+        case .profiles, .tmdbKey: return nil
         }
     }
 
@@ -559,6 +561,31 @@ enum DsyncPayloads {
     }
     static func encodeRadioDefault(_ base: DsyncObject?, _ on: Bool) -> DsyncObject { base.with(("on", .bool(on))) }
 
+    // tmdbKey (section 4.13): the user's TMDB API key or read access token,
+    // trimmed; "" (or a missing member) = no key, so clearing syncs too.
+    // A non-string apiKey is malformed.
+    static func decodeTMDBKey(_ data: DsyncObject) -> String? {
+        guard let v = data["apiKey"] else { return "" }
+        return v.asStr?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    static func encodeTMDBKey(_ base: DsyncObject?, _ key: String) -> DsyncObject {
+        base.with(("apiKey", .string(key.trimmingCharacters(in: .whitespacesAndNewlines))))
+    }
+
+    /// Newest edit wins for the TMDB key, checked when a newer remote value
+    /// arrives (section 4.13): true = keep this device's key and send it.
+    /// [localEditedAt] is when the key was last set or cleared on this
+    /// device by its user, or applied from the server (Unix seconds; 0 =
+    /// unknown: set before this build, or arrived through iCloud Keychain).
+    /// With an unknown time a key beats a clear, so a stale clear on the
+    /// server never wipes a key (a Keychain delete would spread to every
+    /// Apple device).
+    static func tmdbKeepsLocal(local: String, remote: String, localEditedAt: Int64, remoteAt: Int64) -> Bool {
+        if local == remote { return false }
+        if localEditedAt > 0 { return localEditedAt > remoteAt }
+        return remote.isEmpty && !local.isEmpty
+    }
+
     // collections
     static func decodeCollections(_ data: DsyncObject) -> [CollectionRow]? {
         mapRows(data) { r in
@@ -913,7 +940,7 @@ enum DsyncCoexistence {
     /// with a category maps; an unmapped one traps, never a default.
     static func cloudFileFor(_ key: DsyncKey) -> DsyncCategory? {
         switch key {
-        case .profiles: return nil
+        case .profiles, .tmdbKey: return nil
         case .remoteMap, .radioDefault: return .preferences
         default:
             guard let f = SetupSourceChoice.cloudFile(key.suffix) else { preconditionFailure("no cloud file for \(key.suffix)") }

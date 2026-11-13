@@ -64,7 +64,7 @@ see the same favorites, progress, and reminders.
 
 ONE App Data key, `<user>.aeriotv` (section 2.1), holds every category as a sub-object (section 3): settings,
 profiles, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder, collections, remoteMap,
-radioDefault, favorites, recents, progress, and syncProviders (section 10b). It is written with the profile's own token to
+radioDefault, tmdbKey, favorites, recents, progress, and syncProviders (section 10b). It is written with the profile's own token to
 `users/me/app-data/<user>.aeriotv/`. Before 2026-11-05 the key was `app.molinete.aerio` (the
 legacy key, moved by section 6.5); the v1 and v2 key names below keep that legacy prefix.
 
@@ -117,6 +117,7 @@ Categories (the "Key" column below is the v1 key name; in v2 the category name i
 | `app.molinete.aerio.radioDefault` | Radio Mode by Default | Yes | Off | Per-device listening choice unless the user opts in (matches iCloud default) |
 | `app.molinete.aerio.collections` | Channel Collections (named channel sets shown as Live TV filter pills) | Yes | On | Exists on both platforms (Apple ChannelCollectionsStore in Features/Home/FavoritesStore.swift, Android `channel_collections` in AppPreferences); device-local today on both |
 | `app.molinete.aerio.profiles` | Profile roster (written by Admin and Standard profiles, section 4.12) | Yes | On | Device pickers (section 5) |
+| `tmdbKey` (v3 only, no v1 key) | TMDB API key (section 4.13) | Yes | On, no Sync Categories row | Owner exception (2026-11-13): the one secret synced here, so a user's key reaches all their devices |
 
 Device-local, never synced here (nor through iCloud or Drive), and why:
 - Kept Live / background Radio auto-start: tied to one device's power and network.
@@ -126,7 +127,6 @@ Device-local, never synced here (nor through iCloud or Drive), and why:
 - Learned remote buttons: tied to one physical remote.
 - Debug and developer options, update checks: per install.
 - Playlist URLs and credentials: Drive and iCloud Keychain only, never Dispatcharr (section 10).
-- TMDB API key: a secret; Drive stopped carrying it in cleartext on 2026-10-27 (section 10.2).
 - The Drive Sync and Dispatcharr Sync switches, Sync Categories choices (`syncScope.<item>`, `syncItem.<item>`), and the active profile: per device by design.
 - Channel profile selection: server-side state (admin assigns it per user).
 - DVR recordings: server-side (Dispatcharr) or local files.
@@ -434,7 +434,8 @@ wrong type is ignored and the local setting is left unchanged:
 Excluded from settings (own keys or device-local, section 2): `remoteControlMap`, `radioModeByDefault`,
 `favoriteChannelIDs`, `favoriteOrder`, `channelGroupOrder*`, `hiddenChannelGroups` and siblings,
 `streamBufferSize`, `networkTimeout`, `maxRetries`, `bgRefresh*`, display matching, passthrough, DVR
-storage, learned remote buttons, debug and update options, `tmdbApiKey`, `preferAVPlayer`.
+storage, learned remote buttons, debug and update options, `tmdbApiKey` (its own category, `tmdbKey`,
+section 4.13), `preferAVPlayer`.
 Parity rule: an "(Apple only)" or "(Android only)" row is a parity gap to close, not a design choice;
 until closed, the other platform round-trips it (6.2).
 
@@ -652,6 +653,32 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   Playlists > Profiles (Admin and Standard profiles) or Manage Profiles behind the PIN, both needing the current
   Device Admin PIN; it stays while any profile is a Child and no Admin or Standard profile has a PIN.
 
+### 4.13 tmdbKey (owner exception, 2026-11-13)
+```json
+{"apiKey":"0123456789abcdef0123456789abcdef"}
+```
+- `apiKey`: the user's TMDB credential as entered, trimmed (a v3 API key or a v4 read access token);
+  `""` = no key. A missing `apiKey` reads as `""`; any other type is malformed.
+- The one secret Dispatcharr Sync carries. Every password, Dispatcharr API key, token, and other
+  secret stays out (section 9).
+- Gate: syncs whenever Dispatcharr Sync is on, for every profile role. No Sync Categories row. Never
+  in the iCloud or Drive snapshots (Apple keeps the key in the iCloud Keychain; Drive does not carry
+  it, section 10.2), never forced, never trimmed.
+- Writes: a device writes the category when its user saves or clears the key on that device, and
+  seeds an absent category from its own key. A device with no key never creates the category: a fresh
+  `""` would read as a clear newer than every other device's key. A key that reaches an Apple device
+  through iCloud Keychain is not an edit there; the device that edited it sends it.
+- Merge: newest edit wins (section 6.1, rule 3, by the category's `updatedAt`). When a newer remote
+  value differs from the device's key, the device keeps and sends its own value if its last local
+  edit time (the last save, clear, or applied pull, in Unix seconds) is later than that `updatedAt`.
+  With no known local edit time, a key beats a remote clear, and otherwise the remote value applies.
+  Applying `""` clears the key on the device; applying a pull records its `updatedAt` as the local
+  edit time.
+- One key per device: on a device with several profiles, the key in use is the one last saved or
+  applied there, and a profile whose user has no `tmdbKey` yet is seeded from it.
+- Logs never carry the key: `[DSYNC] tmdbKey: set from the server`, `cleared from the server`, or
+  `kept this device's key (newer than the server's clear); sending it`.
+
 ## 5. Profiles flow
 
 1. An Admin or Standard device adds profiles (from the server users list when its base login and
@@ -778,6 +805,7 @@ Per-category estimates (unchanged from v1):
 | settings | about 110 names x 35 B in `v`, up to 40 names in each of `tv` and `mobile`, plus customCategories up to 4 KiB | 10.7 KB | Yes |
 | remoteMap | about 20 entries | 0.8 KB | Yes |
 | radioDefault | | 0.2 KB | Yes |
+| tmdbKey | one key (32 characters, or a token of about 250) | 0.4 KB | Yes |
 | profiles | 6 x 130 B rows plus up to 25 x 30 B `removed` tombstones | 1.8 KB | Yes |
 | collections | 10 collections x (60 B header + 40 members x 5 B) | 2.8 KB | Yes |
 | Total | | about 59 KB (worst case about 62 KB) | Under 128 KiB (new per-key cap) |
@@ -787,15 +815,16 @@ Trim order on a 413, one step per retry (no trimming before the first PUT):
 2. recents: down to 25.
 3. watchlist and hiddenTitles: oldest first down to 300 each, then down to 150 each.
 4. favorites: down to 500 (from the end of the list).
-Reminders, settings, collections, hiddenGroups, groupOrder, profiles, remoteMap, and radioDefault are
-never trimmed. After the last step still fails: "Sync data too large".
+Reminders, settings, collections, hiddenGroups, groupOrder, profiles, remoteMap, radioDefault, and
+tmdbKey are never trimmed. After the last step still fails: "Sync data too large".
 
 ## 9. Security
 
-- Nothing secret is stored. Admins can read every key in the Dispatcharr web UI and through
-  `/api/accounts/users/<id>/app-data/<key>/`, and any credential of a user can read all of that
-  user's keys. That is why credentials are never stored here, by decision (2026-11-10).
-- Never stored: passwords, API keys, JWTs, refresh tokens, TMDB keys, playlist URLs, LAN URLs, SSIDs, raw PINs.
+- Nothing secret is stored but the TMDB API key (section 4.13, owner exception 2026-11-13). Admins can
+  read every key in the Dispatcharr web UI and through `/api/accounts/users/<id>/app-data/<key>/`, and
+  any credential of a user can read all of that user's keys. That is why credentials are never stored
+  here, by decision (2026-11-10).
+- Never stored: passwords, Dispatcharr API keys, JWTs, refresh tokens, playlist URLs, LAN URLs, SSIDs, raw PINs, or any other secret.
 - PIN: SHA-256 with a per-user random 16-byte salt (section 4.12). This deters casual viewing
   only: a 4 to 6 digit or direction PIN is brute-forceable offline, so a PIN gates profiles in the
   app, never protects data. Copy in Settings states that admins can view synced data.
@@ -819,6 +848,7 @@ never trimmed. After the last step still fails: "Sync data too large".
 | prefs dictionary allowlist | settings.v | Table 4.9 |
 | `RemoteControlStore.mapKey` | remoteMap.tv | Must match the 4.10 shape exactly |
 | `RadioModeSession.byDefaultKey` | radioDefault.on | |
+| Keychain `tmdbAPIKey` (iCloud Keychain) | tmdbKey.apiKey | Not in iCloud KVS; `tmdbAPIKeyEditedAt` (UserDefaults, Unix seconds) holds the last local edit time |
 | servers, credentials categories | not synced here | Stay on iCloud |
 
 ### 10.2 Android (DriveSyncManager.kt, SyncSnapshots.kt)
@@ -1060,7 +1090,7 @@ replace cancelled: Drive backup did not apply (<category>)`. The flag
 clears per key on a successful PUT. Log lines:
 `[DSYNC] force push <key> rows=<n> (user chose Google Drive)` and, for an
 empty key, `[DSYNC] force push <key> rows=0 (empty, mirrors Google Drive)`.
-Profiles, remoteMap, and radioDefault are not forced.
+Profiles, remoteMap, radioDefault, and tmdbKey are not forced.
 
 Mirror details (2026-11-01). Every shared Drive file applies with replace
 semantics for this choice. Preferences: a setting, recents list,
@@ -1285,8 +1315,8 @@ synced" line) and "Pull from Dispatcharr" after Sync Now, which is
 unchanged. With Google Drive also on (and signed in), "Push to both"
 follows. Each asks first (Push or Pull, and Cancel). The keys covered are
 the forced-replace keys (`DsyncCoexistence.FORCE_KEYS`) whose Sync
-Categories item is not Off (`DsyncManual.keys`); Profiles, remoteMap, and
-radioDefault are never forced, and an Off item neither pushes nor pulls.
+Categories item is not Off (`DsyncManual.keys`); Profiles, remoteMap,
+radioDefault, and tmdbKey are never forced, and an Off item neither pushes nor pulls.
 1. Push to Dispatcharr: the forced replace (Rule 4 semantics, empty keys
    included, no server rows merged) for the base user, sent at once. Log
    `[DSYNC] manual push <key> rows=<n>` then the put status line. A key

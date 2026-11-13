@@ -158,6 +158,8 @@ final class DispatcharrSyncManager: ObservableObject {
     private var pathMonitor: NWPathMonitor?
     private var pathSatisfied = true
     private var scanTask: Task<Void, Never>?
+    /// The TMDB key was saved or cleared on this device since the last scan.
+    private var tmdbKeyEdited = false
     private var catalogQuietTask: Task<Void, Never>?
     private var lastCatalogRecheckMs: Int64 = 0
     private var choiceHoldUntil: Int64 = 0
@@ -195,6 +197,14 @@ final class DispatcharrSyncManager: ObservableObject {
         nc.publisher(for: .remindersDidChange)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in Task { @MainActor in self?.scheduleScan(swiftData: false) } }
+            .store(in: &cancellables)
+        // The TMDB key lives in the Keychain, which raises no UserDefaults change.
+        nc.publisher(for: .tmdbAPIKeyDidChange)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in Task { @MainActor in
+                self?.tmdbKeyEdited = true
+                self?.scheduleScan(swiftData: false)
+            } }
             .store(in: &cancellables)
         ChannelStore.shared.$channels
             .sink { [weak self] _ in Task { @MainActor in self?.channelsChanged() } }
@@ -500,9 +510,13 @@ final class DispatcharrSyncManager: ObservableObject {
                 guard let old = s.signatures[key] else { s.signatures[key] = sig; continue }
                 if old == sig { continue }
                 s.signatures[key] = sig
+                // A key that changed without an edit here came through iCloud
+                // Keychain; the device that edited it sends it.
+                if key == .tmdbKey && !tmdbKeyEdited { continue }
                 if key == .recents { stampRecents(s) }
                 onLocalChange(s, key)
             }
+            if !swiftData { tmdbKeyEdited = false }
             return
         }
         // Between sessions: mark the change on the last session's persisted keys so the next one sends it.
@@ -512,9 +526,11 @@ final class DispatcharrSyncManager: ObservableObject {
             let sig = DsyncLocal.signature(key, old.playlistId)
             guard let prev = old.signatures[key], prev != sig else { continue }
             old.signatures[key] = sig
+            if key == .tmdbKey && !tmdbKeyEdited { continue }
             if !isDirty(old, key) { debugLog("[DSYNC] \(key.suffix) dirty; no session (kept for the next one)") }
             setDirty(old, key, true)
         }
+        if !swiftData { tmdbKeyEdited = false }
     }
 
     // MARK: - Rule 4: setup source choice
@@ -1891,6 +1907,12 @@ final class DispatcharrSyncManager: ObservableObject {
             return DsyncPayloads.encodeRemoteMap(base, merged)
         case .radioDefault:
             return DsyncPayloads.encodeRadioDefault(base, DsyncLocal.radioDefault())
+        case .tmdbKey:
+            // A device with no key never starts the category: a fresh "" would
+            // read as a clear newer than every other device's key.
+            let apiKey = DsyncLocal.tmdbKey()
+            if apiKey.isEmpty && base == nil { return nil }
+            return DsyncPayloads.encodeTMDBKey(base, apiKey)
         case .collections:
             let m = DsyncLocal.channelMap(pid)
             let local = DsyncLocal.collections()
@@ -2058,6 +2080,20 @@ final class DispatcharrSyncManager: ObservableObject {
         case .radioDefault:
             guard let on = DsyncPayloads.decodeRadioDefault(d) else { return .malformed }
             DsyncLocal.setRadioDefault(on)
+        case .tmdbKey:
+            // Never logs the key, only whether it is set.
+            guard let remote = DsyncPayloads.decodeTMDBKey(d) else { return .malformed }
+            let local = DsyncLocal.tmdbKey()
+            if DsyncPayloads.tmdbKeepsLocal(local: local, remote: remote,
+                                            localEditedAt: DsyncLocal.tmdbKeyEditedAt(), remoteAt: env.updatedAt) {
+                debugLog("[DSYNC] tmdbKey: kept this device's \(local.isEmpty ? "clear" : "key") (newer than the server's \(remote.isEmpty ? "clear" : "key")); sending it")
+                setDirty(s, key, true)
+                schedule(s, key, 0)
+            } else if local != remote {
+                DsyncLocal.setTMDBKey(remote, at: env.updatedAt)
+                debugLog("[DSYNC] tmdbKey: \(remote.isEmpty ? "cleared" : "set") from the server")
+            }
+            s.signatures[key] = DsyncLocal.signature(key, pid)
         case .collections:
             guard let rows = DsyncPayloads.decodeCollections(d) else { return .malformed }
             let m = DsyncLocal.channelMap(pid)

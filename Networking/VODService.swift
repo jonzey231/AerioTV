@@ -947,9 +947,11 @@ final class VODService {
 /// Opt-in TMDB program-poster settings. OFF by default. The user
 /// supplies their own free TMDB v3 API key (Settings > App Behaviors).
 /// The key lives in the iCloud Keychain (synchronizable) so it follows
-/// the user to their other devices, never in UserDefaults or git. When
-/// disabled or unkeyed, the whole TMDB path is inert and only
-/// server-provided posters show.
+/// the user to their other devices, never in UserDefaults or git. With
+/// Dispatcharr Sync on it also syncs per Dispatcharr user (the
+/// `tmdbKey` category, docs/DispatcharrSyncSchema.md section 4.13), the
+/// one secret that sync carries. When disabled or unkeyed, the whole
+/// TMDB path is inert and only server-provided posters show.
 enum TMDBPosters {
     /// `@AppStorage` / UserDefaults key for the enable toggle. Synced
     /// across devices via `SyncManager.syncBoolKeys` so it follows the API
@@ -979,8 +981,16 @@ enum TMDBPosters {
 
     /// Persist (or clear) the key in the iCloud Keychain so it syncs
     /// across the user's devices; any stale local-only copy is removed
-    /// so the synced one is authoritative.
-    static func saveAPIKey(_ key: String) {
+    /// so the synced one is authoritative. `notify` posts
+    /// `.tmdbAPIKeyDidChange` so Dispatcharr Sync sends the edit (the
+    /// Keychain raises no UserDefaults change); its own apply of a pulled
+    /// key passes false.
+    /// When the key was last set or cleared on this device (Unix seconds;
+    /// absent = unknown), for Dispatcharr Sync's newest-edit-wins rule.
+    /// A time, never the key.
+    static let editedAtDefaultsKey = "tmdbAPIKeyEditedAt"
+
+    static func saveAPIKey(_ key: String, notify: Bool = true) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         KeychainHelper.delete(keychainKey, synchronizable: false)
         if trimmed.isEmpty {
@@ -988,7 +998,16 @@ enum TMDBPosters {
         } else {
             KeychainHelper.save(trimmed, for: keychainKey, synchronizable: true)
         }
+        if notify {
+            UserDefaults.standard.set(Int(Date().timeIntervalSince1970), forKey: editedAtDefaultsKey)
+            NotificationCenter.default.post(name: .tmdbAPIKeyDidChange, object: nil)
+        }
     }
+}
+
+extension Notification.Name {
+    /// The user saved or cleared the TMDB key on this device.
+    static let tmdbAPIKeyDidChange = Notification.Name("aerio.tmdbAPIKeyDidChange")
 }
 
 // MARK: - TMDB client (poster-by-title + key validation)

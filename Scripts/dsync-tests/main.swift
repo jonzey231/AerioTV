@@ -100,7 +100,7 @@ do {
     eq(DsyncCoexistence.rowCount(.settings, DsyncPayloads.encodeSettingsLanes(serverBase, mirror)), 11, "old merge produced extra rows")
 
     // cloudFileFor maps every key with a category (DriveFileMappingTest).
-    for k in DsyncKey.allCases where k != .profiles { check(DsyncCoexistence.cloudFileFor(k) != nil, "cloud file for \(k)") }
+    for k in DsyncKey.allCases where k.category != nil { check(DsyncCoexistence.cloudFileFor(k) != nil, "cloud file for \(k)") }
     eq(DsyncCoexistence.cloudFileFor(.recents), .preferences, "recents ride the Preferences file")
     eq(DsyncCoexistence.cloudFileFor(.collections), .preferences, "collections ride the Preferences file")
     eq(DsyncCoexistence.cloudFileFor(.profiles), nil, "profiles have no cloud file")
@@ -1139,6 +1139,36 @@ do {
     check(DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: true, anyBucketListed: false), "missing after first read prompts")
     check(!DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: false, anyBucketListed: false), "first read of an absent record seeds")
     check(!DsyncPullRules.recordMissingAfterFirstRead(hadFirstRead: true, anyBucketListed: true), "present record syncs")
+}
+
+// MARK: - tmdbKey (schema section 4.13, owner exception 2026-11-13)
+
+do {
+    // Category and placement: its own sub-object, ungated by Sync Categories, never mirrored to iCloud.
+    eq(DsyncKey.tmdbKey.suffix, "tmdbKey", "category name")
+    check(DsyncKey.tmdbKey.category == nil, "no Sync Categories toggle")
+    check(DsyncCoexistence.cloudFileFor(.tmdbKey) == nil, "never in an iCloud snapshot")
+    check(!DsyncCoexistence.FORCE_KEYS.contains(.tmdbKey), "not a setup-choice key")
+
+    // Codec: apiKey string, trimmed; missing = cleared; wrong type = malformed; unknown members round-trip.
+    eq(DsyncPayloads.decodeTMDBKey(obj(#"{"apiKey":"abc123"}"#)), "abc123", "decode a key")
+    eq(DsyncPayloads.decodeTMDBKey(obj(#"{"apiKey":"  abc123 "}"#)), "abc123", "decode trims")
+    eq(DsyncPayloads.decodeTMDBKey(obj(#"{"apiKey":""}"#)), "", "decode a clear")
+    eq(DsyncPayloads.decodeTMDBKey(obj(#"{}"#)), "", "missing member reads as cleared")
+    check(DsyncPayloads.decodeTMDBKey(obj(#"{"apiKey":42}"#)) == nil, "non-string is malformed")
+    eq(DsyncJSONEncoder.encode(DsyncPayloads.encodeTMDBKey(nil, " k1 ")), #"{"apiKey":"k1"}"#, "encode trims")
+    eq(DsyncJSONEncoder.encode(DsyncPayloads.encodeTMDBKey(nil, "")), #"{"apiKey":""}"#, "encode a clear")
+    eq(DsyncPayloads.encodeTMDBKey(obj(#"{"apiKey":"old","x":1}"#), "new"), obj(#"{"apiKey":"new","x":1}"#), "unknown members round-trip")
+
+    // Newest edit wins (checked when a newer remote value arrives).
+    check(!DsyncPayloads.tmdbKeepsLocal(local: "k", remote: "k", localEditedAt: 500, remoteAt: 100), "same value: nothing to keep")
+    check(DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "k1", localEditedAt: 500, remoteAt: 400), "local edit newer: keep and send")
+    check(!DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "k1", localEditedAt: 300, remoteAt: 400), "remote edit newer: take it")
+    check(!DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "", localEditedAt: 300, remoteAt: 400), "a newer clear clears")
+    check(DsyncPayloads.tmdbKeepsLocal(local: "", remote: "k1", localEditedAt: 500, remoteAt: 400), "a newer local clear is kept and sent")
+    check(!DsyncPayloads.tmdbKeepsLocal(local: "", remote: "k1", localEditedAt: 0, remoteAt: 400), "no key, unknown time: take the server's key")
+    check(!DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "k1", localEditedAt: 0, remoteAt: 400), "unknown time, two keys: the server's wins")
+    check(DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "", localEditedAt: 0, remoteAt: 400), "unknown time: a key beats a clear")
 }
 
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

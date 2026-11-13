@@ -187,7 +187,7 @@ struct MoviesTVSettingsView: View {
                 Text("The Movie Database").sectionHeaderStyle()
             } footer: {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
+                    Text("Your key is saved to your Keychain and, with iCloud Keychain on, syncs to your other Apple devices. With Dispatcharr Sync on, this key syncs to your other devices signed in as this user. Get a free key at themoviedb.org under Settings, then API; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
                         .scaledFont(.labelSmall.subtext()).foregroundColor(Color.contrastText(.textTertiary))
                     TMDBAttributionView(style: .short)
                 }
@@ -310,7 +310,7 @@ struct MoviesTVSettingsView: View {
                     }
                     .padding(.horizontal, 20)
 
-                    Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
+                    Text("Your key is saved to your Keychain and, with iCloud Keychain on, syncs to your other Apple devices. With Dispatcharr Sync on, this key syncs to your other devices signed in as this user. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
                         .scaledFont(.system(size: 22).subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 20)

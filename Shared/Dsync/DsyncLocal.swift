@@ -22,12 +22,14 @@
 //    hiddenGroups  hiddenChannelGroups, hiddenMovieGroups, hiddenSeriesGroups
 //    groupOrder    channelGroupOrder, channelGroupOrder.sortMode
 //    radioDefault  radioModeByDefault
+//    tmdbKey       TMDBPosters key (the Keychain item tmdbAPIKey)
 //    remoteMap     remoteControlMap.tv (tvOS writes and applies; phones round-trip)
 //    settings      DsyncSettingsMap names to their Apple keys
 //    profiles      ProfileManager (Shared/Profiles), merged per row
 
 import Foundation
 import SwiftData
+import CryptoKit
 
 @MainActor
 enum DsyncLocal {
@@ -341,6 +343,23 @@ enum DsyncLocal {
 
     static func setRadioDefault(_ on: Bool) { UserDefaults.standard.set(on, forKey: RadioModeSession.byDefaultKey) }
 
+    /// The TMDB key this device uses ("" = none). The one secret Dispatcharr
+    /// Sync carries (owner exception 2026-11-13, schema section 4.13).
+    static func tmdbKey() -> String { TMDBPosters.loadAPIKey().trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// Saves or clears a pulled key, quietly: the Keychain write does not
+    /// post the edit notice, so applying it is not taken for an edit here.
+    /// The edit time becomes the server copy's stamp.
+    static func setTMDBKey(_ key: String, at stamp: Int64) {
+        TMDBPosters.saveAPIKey(key, notify: false)
+        UserDefaults.standard.set(Int(stamp), forKey: TMDBPosters.editedAtDefaultsKey)
+        // As Save in Settings does: lookups (misses included) were keyed to the old key.
+        TMDBService.clearCache()
+    }
+
+    /// When the key was last set, cleared, or applied here (0 = unknown).
+    static func tmdbKeyEditedAt() -> Int64 { Int64(UserDefaults.standard.integer(forKey: TMDBPosters.editedAtDefaultsKey)) }
+
     /// The TV map as stored (nil when the stored value does not parse).
     static func remoteMap() -> DsyncObject? {
         guard let data = UserDefaults.standard.data(forKey: RemoteControlStore.mapKey) else { return DsyncObject() }
@@ -408,6 +427,8 @@ enum DsyncLocal {
                 scopes().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.rawValue)" }.joined(separator: ",")
         case .remoteMap: return remoteMap().map(DsyncJSONEncoder.encode) ?? "?"
         case .radioDefault: return radioDefault() ? "1" : "0"
+        // A digest, never the key itself.
+        case .tmdbKey: return SHA256.hash(data: Data(tmdbKey().utf8)).map { String(format: "%02x", $0) }.joined()
         case .collections: return collections().map { "\($0.id)|\($0.name)|\($0.placement.rawValue)|\($0.memberIDs)" }.joined(separator: ",")
         case .profiles: return ""
         }
