@@ -787,6 +787,10 @@ enum PlaylistSaveRunner {
             || !server.apiKey.isEmpty
         if routeChange { ProfileManager.shared.beginRouteChange(server.id.uuidString) }
         defer { if routeChange { ProfileManager.shared.endRouteChange(server.id.uuidString) } }
+        // Long-running jobs walking the old address stop now, and start again
+        // once the new one is written (or the save fails) (RouteChangeJobs).
+        if hostChanged { RouteChangeJobs.started(server.id.uuidString) }
+        defer { if hostChanged { RouteChangeJobs.landed(server.id.uuidString) } }
         // A rename, a User-Agent edit or a Guide Days change costs no login
         // round trip at all, only a credential swap or a new URL does.
         let needsVerify = credentialsChanged || (urlChanged && server.type != .m3uPlaylist)
@@ -816,6 +820,7 @@ enum PlaylistSaveRunner {
         }
 
         commitStaged()
+        if hostChanged { RouteChangeJobs.landed(server.id.uuidString) }
         if routeChange, typedSecret, needsVerify { ProfileManager.shared.noteTypedSignIn(server.id.uuidString, at: typedBaseURL) }
 
         if credentialsChanged {

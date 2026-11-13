@@ -695,3 +695,57 @@ struct ProfileSignIns {
         store.apiKey(profileId) != nil || store.password(profileId) != nil
     }
 }
+
+// MARK: - Long-running jobs across a server address change (Android 8eda1c6b)
+
+/// On Demand catalog sweeps and the guide's background re-sweep read the
+/// playlist's address once, when they start, and walk it to the end. After
+/// an Edit Playlist save moved the playlist to another address, a sweep went
+/// on paging the OLD server for minutes (Android, 2026-11-12). So while a
+/// change is in progress on the active playlist, no such job walks it: the
+/// running ones stop when the change starts, one asked for during the change
+/// waits, and when the change lands the stopped and waiting ones start at the
+/// current address, unless one is running by then.
+struct RouteStoppedSweeps: Sendable {
+    struct Sweeps: Equatable, Sendable {
+        var movies = false
+        var series = false
+        var guide = false
+        var any: Bool { movies || series || guide }
+        static let none = Sweeps()
+        static func + (a: Sweeps, b: Sweeps) -> Sweeps {
+            Sweeps(movies: a.movies || b.movies, series: a.series || b.series, guide: a.guide || b.guide)
+        }
+    }
+
+    private var stopped: [String: Sweeps] = [:]
+    private var changing = Set<String>()
+
+    /// A change on [playlistId] starts: the running jobs to stop now (only
+    /// on the active playlist; another playlist's address runs nothing).
+    mutating func onStart(_ playlistId: String, activeId: String?, running: Sweeps) -> Sweeps {
+        changing.insert(playlistId)
+        guard playlistId == activeId, running.any else { return .none }
+        stopped[playlistId] = (stopped[playlistId] ?? .none) + running
+        return running
+    }
+
+    /// A job is about to start on [activeId]. True when its address is
+    /// changing: it waits for the landing instead.
+    mutating func holdStart(activeId: String?, _ job: Sweeps) -> Bool {
+        guard let activeId, changing.contains(activeId) else { return false }
+        stopped[activeId] = (stopped[activeId] ?? .none) + job
+        return true
+    }
+
+    func isChanging(_ playlistId: String) -> Bool { changing.contains(playlistId) }
+
+    /// The change on [playlistId] landed (or its save failed): the jobs to
+    /// start now, at the current address.
+    mutating func onLanded(_ playlistId: String, activeId: String?, running: Sweeps) -> Sweeps {
+        changing.remove(playlistId)
+        guard let s = stopped.removeValue(forKey: playlistId), playlistId == activeId else { return .none }
+        return Sweeps(movies: s.movies && !running.movies, series: s.series && !running.series,
+                      guide: s.guide && !running.guide)
+    }
+}

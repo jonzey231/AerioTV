@@ -403,7 +403,22 @@ final class VODStore: ObservableObject {
         }
     }
 
+    /// A movie or series sweep (foreground or background) is paging the server.
+    var isMovieSweepRunning: Bool { isRefillingMovies || backgroundSweepTask != nil }
+    var isSeriesSweepRunning: Bool { isRefillingSeries || backgroundSweepTask != nil }
+
+    /// The active playlist's address is changing (RouteChangeJobs): every
+    /// running sweep read the old address when it started, so they stop. The
+    /// catalog on screen and on disk stays.
+    func stopSweepsForRouteChange() {
+        cancelBackgroundSweep(reason: "the playlist's address is changing")
+        moviesTask?.cancel(); moviesTask = nil
+        seriesTask?.cancel(); seriesTask = nil
+        debugLog("[VOD] stopped the sweeps for the old address (the playlist's address is changing)")
+    }
+
     func refreshMovies(servers: [ServerConnection]) {
+        if RouteChangeJobs.holdStart(.init(movies: true), what: "movie sweep") { return }
         // A user refresh also re-checks a held API key (at most once a minute).
         DispatcharrKeyRecheck.shared.userRefresh()
         moviesTask?.cancel()
@@ -411,6 +426,7 @@ final class VODStore: ObservableObject {
     }
 
     func refreshSeries(servers: [ServerConnection]) {
+        if RouteChangeJobs.holdStart(.init(series: true), what: "series sweep") { return }
         DispatcharrKeyRecheck.shared.userRefresh()
         seriesTask?.cancel()
         seriesTask = Task { await loadSeries(servers: servers) }
@@ -593,6 +609,7 @@ final class VODStore: ObservableObject {
     /// either of those stops being true.
     func scheduleBackgroundSweep(servers: [ServerConnection], reason: String) {
         guard !servers.isEmpty else { return }
+        if RouteChangeJobs.holdStart(.init(movies: true, series: true), what: "background sweep (\(reason))") { return }
         // One sweep at a time: a foreground return while a sweep is still
         // walking pages is not a reason to start a second walk.
         if let task = backgroundSweepTask, !task.isCancelled {
@@ -1606,6 +1623,67 @@ final class VODStore: ObservableObject {
 // Owned by MainTabView as a @StateObject.  Pre-fetches channels (and EPG) as
 // soon as any server is available and re-fetches whenever the server list
 // changes, so the Live TV tab is already populated before the user taps it.
+/// Long-running per-playlist jobs across a server address change (Android
+/// 8eda1c6b; RouteStoppedSweeps). The On Demand sweeps and the guide's
+/// re-sweep and window walk read the address once, when they start: a change
+/// on the active playlist stops them when it starts, one asked for during the
+/// change waits, and both start at the current address when it lands. The
+/// Edit Playlist save, an iCloud merge, and a setup that updates a playlist in
+/// place mark the start and the landing.
+@MainActor
+enum RouteChangeJobs {
+    private static var book = RouteStoppedSweeps()
+
+    private static func servers() -> [ServerConnection] {
+        guard let c = AerioApp.sharedContainer else { return [] }
+        return ((try? c.mainContext.fetch(FetchDescriptor<ServerConnection>())) ?? []).filter { !$0.isGone }
+    }
+
+    private static func activeID() -> String? {
+        ChannelStore.shared.channelServerID?.uuidString ?? servers().first(where: \.isActive)?.id.uuidString
+    }
+
+    private static func running() -> RouteStoppedSweeps.Sweeps {
+        .init(movies: VODStore.shared.isMovieSweepRunning, series: VODStore.shared.isSeriesSweepRunning,
+              guide: GuideStore.shared.isGridWorkRunning)
+    }
+
+    private static func describe(_ s: RouteStoppedSweeps.Sweeps) -> String {
+        [s.movies ? "movies" : nil, s.series ? "series" : nil, s.guide ? "guide" : nil].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// A server address change on [playlistId] starts (before anything goes to the new address).
+    static func started(_ playlistId: String) {
+        let stop = book.onStart(playlistId, activeId: activeID(), running: running())
+        guard stop.any else { return }
+        if stop.movies || stop.series { VODStore.shared.stopSweepsForRouteChange() }
+        if stop.guide { GuideStore.shared.stopGridWorkForRouteChange() }
+        debugLog("[ROUTE] address change started on \(playlistId.prefix(8)): stopped \(describe(stop)) for the old address")
+    }
+
+    /// True when [job] for the active playlist must wait for the change to land.
+    static func holdStart(_ job: RouteStoppedSweeps.Sweeps, what: String) -> Bool {
+        guard book.holdStart(activeId: activeID(), job) else { return false }
+        debugLog("[ROUTE] \(what) waits: the playlist's address is changing")
+        return true
+    }
+
+    /// The change on [playlistId] landed (the new address is written), or its
+    /// save failed: what was stopped or waited starts now, at the current address.
+    static func landed(_ playlistId: String) {
+        let start = book.onLanded(playlistId, activeId: activeID(), running: running())
+        guard start.any else { return }
+        let all = servers()
+        debugLog("[ROUTE] address change landed on \(playlistId.prefix(8)): starting \(describe(start)) at the current address")
+        if start.movies { VODStore.shared.refreshMovies(servers: all) }
+        if start.series { VODStore.shared.refreshSeries(servers: all) }
+        if start.guide, let server = all.first(where: { $0.id.uuidString == playlistId }) {
+            Task { await GuideStore.shared.considerBackgroundGridSweep(server: server, channels: ChannelStore.shared.channels,
+                                                                       reason: "address changed", force: true) }
+        }
+    }
+}
+
 @MainActor
 final class ChannelStore: ObservableObject {
     static let shared = ChannelStore()

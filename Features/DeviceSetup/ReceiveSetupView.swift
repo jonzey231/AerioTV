@@ -245,7 +245,11 @@ final class SetupApplyModel: ObservableObject {
             // Replace in place: same row id, so cached channels, EPG, and favorites stay.
             let jwt = vm.pendingJWTPair
             vm.pendingJWTPair = nil
+            let moved = PlaylistRoute.changed(oldBase: target.baseURL, newBase: incoming.baseURL,
+                                              oldLocal: target.localURL, newLocal: incoming.localURL)
+            if moved { RouteChangeJobs.started(target.id.uuidString) }
             SetupPlaylistMatch.copy(from: incoming, into: target)
+            if moved { RouteChangeJobs.landed(target.id.uuidString) }
             if let jwt { DispatcharrTokenStore.shared.store(serverID: target.id, access: jwt.access, refresh: jwt.refresh) }
             server = target
             replaced = true

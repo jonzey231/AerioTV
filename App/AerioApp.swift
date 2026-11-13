@@ -2128,6 +2128,14 @@ struct RootView: View {
                         // same-server check follow once this merge has written it.
                         ProfileManager.shared.routeWillChangeNow(local.id.uuidString, oldBase: local.baseURL, oldLocal: local.localURL,
                                                                  newBase: remote.baseURL, newLocal: remote.localURL)
+                        // Jobs walking the old address stop; they start again on the
+                        // next turn, once this merge has written the new one.
+                        if PlaylistRoute.changed(oldBase: local.baseURL, newBase: remote.baseURL,
+                                                 oldLocal: local.localURL, newLocal: remote.localURL) {
+                            let pid = local.id.uuidString
+                            RouteChangeJobs.started(pid)
+                            Task { @MainActor in RouteChangeJobs.landed(pid) }
+                        }
                     }
                     local.name = remote.name
                     local.baseURL = remote.baseURL

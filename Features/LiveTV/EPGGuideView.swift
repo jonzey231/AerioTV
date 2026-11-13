@@ -1968,10 +1968,12 @@ final class GuideStore: ObservableObject {
             // only about who waits. Android shipped the same restructure
             // (grid in 4.1s, 31,625 history rows merged 104s later in
             // background, measured on the affected server).
-            if !upstreamLayeringInFlight {
+            if !upstreamLayeringInFlight,
+               // The playlist's address is changing: the walk waits for the new one.
+               !RouteChangeJobs.holdStart(.init(guide: true), what: "guide window walk") {
                 upstreamLayeringInFlight = true
                 let gridWindowCapable = server.dispatcharrVersionAtLeast("0.30.0")
-                Task { [weak self] in
+                upstreamLayeringTask = Task { [weak self] in
                     guard let self else { return }
                     guard !server.isGone else {
                         self.upstreamLayeringInFlight = false
@@ -2523,6 +2525,23 @@ final class GuideStore: ObservableObject {
     /// mid-pass must not start a second one: the feeds are identical and the
     /// downloads are enormous.
     private var upstreamLayeringInFlight = false
+    /// The window walk or upstream layering launched by fetchUpcoming.
+    private var upstreamLayeringTask: Task<Void, Never>?
+
+    /// A background re-sweep or a window walk is paging the server.
+    var isGridWorkRunning: Bool { backgroundSweepTask != nil || upstreamLayeringInFlight }
+
+    /// The playlist's address is changing (RouteChangeJobs): the re-sweep and
+    /// the window walk read the old address when they started, so they stop.
+    func stopGridWorkForRouteChange() {
+        cancelBackgroundGridSweep(reason: "the playlist's address is changing")
+        if upstreamLayeringInFlight {
+            upstreamLayeringTask?.cancel()
+            upstreamLayeringTask = nil
+            upstreamLayeringInFlight = false
+            debugLog("[EPG grid window] window walk stopped: the playlist's address is changing")
+        }
+    }
 
     /// Upstream Dispatcharr XMLTV feeds layered for catch-up depth (task #210).
     /// Was 8. Each is a FULL XMLTV download on every EPG load, and the value of
@@ -3085,6 +3104,7 @@ final class GuideStore: ObservableObject {
               server.dispatcharrVersionAtLeast("0.30.0") else { return }
         guard let maps = lastDispatcharrMaps, maps.serverID == server.id.uuidString else { return }
         if backgroundSweepTask != nil { return }
+        if RouteChangeJobs.holdStart(.init(guide: true), what: "guide re-sweep") { return }
         if !force, let last = lastEPGSourceGateCheckAt,
            Date().timeIntervalSince(last) < Self.epgSourceGateInterval { return }
         guard let probe = await fetchEPGSourcesFingerprint(server: server) else { return }

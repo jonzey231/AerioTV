@@ -997,5 +997,35 @@ do {
           "the saved password works there again (silent re-login after a later 401)")
 }
 
+// MARK: - Long-running jobs across a server address change (Android 8eda1c6b)
+do {
+    typealias S = RouteStoppedSweeps.Sweeps
+    let all = S(movies: true, series: true, guide: true)
+    var r = RouteStoppedSweeps()
+    eq(r.onStart("p", activeId: "p", running: all), all, "a change on the active playlist stops its running sweeps and the guide re-sweep")
+    check(r.holdStart(activeId: "p", S(movies: true)), "a movie sweep asked for during the change waits")
+    eq(r.onLanded("p", activeId: "p", running: .none), all, "the landing starts them again, at the new address")
+    eq(r.onLanded("p", activeId: "p", running: .none), .none, "only once")
+    check(!r.holdStart(activeId: "p", S(series: true)), "after the landing nothing waits")
+
+    var o = RouteStoppedSweeps()
+    eq(o.onStart("q", activeId: "p", running: all), .none, "a change on another playlist stops nothing")
+    check(!o.holdStart(activeId: "p", S(movies: true)), "and holds nothing on the active one")
+    eq(o.onLanded("q", activeId: "p", running: .none), .none, "nor starts anything")
+
+    var t = RouteStoppedSweeps()
+    _ = t.onStart("p", activeId: "p", running: all)
+    eq(t.onLanded("p", activeId: "p", running: S(movies: true)), S(series: true, guide: true), "a sweep already running at the landing is not started twice")
+
+    var n = RouteStoppedSweeps()
+    eq(n.onStart("p", activeId: "p", running: .none), .none, "nothing running: nothing stopped")
+    check(n.holdStart(activeId: "p", S(guide: true)), "but a guide re-sweep asked for during the change still waits")
+    eq(n.onLanded("p", activeId: "p", running: .none), S(guide: true), "and starts at the landing")
+
+    var sw = RouteStoppedSweeps()
+    _ = sw.onStart("p", activeId: "p", running: S(movies: true))
+    eq(sw.onLanded("p", activeId: "q", running: .none), .none, "the active playlist changed meanwhile: nothing restarts for the old one")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
