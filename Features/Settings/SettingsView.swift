@@ -515,10 +515,6 @@ struct SettingsView: View {
                     // MARK: - Playlists Section (never for a Child)
                     if !isChild {
                     Section {
-                        if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
-                            SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
-                                .listRowBackground(Color.cardBackground)
-                        }
                         if servers.isEmpty {
                             HStack {
                                 Spacer()
@@ -609,6 +605,16 @@ struct SettingsView: View {
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
                     #endif
+                    // MARK: - Set up another device
+                    // Its own card under the Playlists card and its hint, no
+                    // header (owner 2026-11-13); the Playlists card holds only
+                    // the playlists and Add Playlist. Same gate as before.
+                    if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
+                        Section {
+                            SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
+                                .listRowBackground(Color.cardBackground)
+                        }
+                    }
                     }
 
                     // MARK: - App
@@ -1207,10 +1213,6 @@ struct SettingsView: View {
     private var padPlaylistsPane: some View {
         List {
             Section {
-                if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
-                    SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
-                        .listRowBackground(Color.cardBackground)
-                }
                 if servers.isEmpty {
                     HStack {
                         Spacer()
@@ -1273,6 +1275,14 @@ struct SettingsView: View {
                             .foregroundColor(Color.contrastText(.textTertiary))
                     }
                     .padding(.top, 4)
+                }
+            }
+            // Set up another device: its own card under the Playlists card and
+            // its hint, no header, as on the phone (owner 2026-11-13).
+            if SetupGate.canSetUpTv(servers.first(where: \.isActive)) {
+                Section {
+                    SetUpTvSettingsRow(subtitle: SetUpTvSettingsRow.listSubtitle) { showSetUpTv = true }
+                        .listRowBackground(Color.cardBackground)
                 }
             }
         }

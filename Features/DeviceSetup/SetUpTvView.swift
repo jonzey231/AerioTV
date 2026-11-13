@@ -634,13 +634,13 @@ struct SetUpTvSettingsRow: View {
 
     var body: some View {
         Button(action: action) {
+            // The standard Settings row: a filled symbol in a rounded accent tile,
+            // as the App and Device rows (owner 2026-11-13; the outline glyph
+            // read smaller than its neighbors). paperplane.fill = "send".
             HStack(spacing: 12) {
-                Image(systemName: "rectangle.portrait.and.arrow.right").foregroundColor(.accentPrimary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Set up another device").scaledFont(.bodyMedium.weight(.semibold)).foregroundColor(.textPrimary)
-                    Text(subtitle).scaledFont(.bodySmall.subtext()).foregroundColor(Color.contrastText(.textSecondary))
-                }
-                Spacer()
+                SettingsRow(icon: "paperplane.fill", iconColor: .accentPrimary,
+                            title: "Set up another device", subtitle: subtitle)
+                Spacer(minLength: 0)
                 Image(systemName: "chevron.right").foregroundColor(Color.contrastText(.textTertiary))
             }
             .contentShape(Rectangle())
