@@ -546,70 +546,43 @@ final class LaunchLockWindow {
         shielded.removeAll()
     }
 
-    #if os(tvOS)
-    /// Apple TV: the lock is presented over the app's topmost controller, the
-    /// same proven path as the rejected-key prompt and Fix Login (focus moves
-    /// to it); the watchdog presents it again whenever it is not on screen.
-    /// Over the main screen, not in place of it (LaunchLockRules
-    /// .tvPresentsOverMainScreen): a full-screen presentation took the main
-    /// screen out of the window, so it was first laid out when the PIN passed,
-    /// in front of the user (the preview banner stepped down the screen).
-    private var host: UIViewController?
-
-    private func show() {
-        if let h = host, h.viewIfLoaded?.window != nil { return }
-        let all = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows).filter { $0.windowLevel == .normal && !$0.isHidden }
-        guard let rootVC = (all.first { $0.isKeyWindow } ?? all.first)?.rootViewController else { return }
-        var top = rootVC
-        var beneath: [UIView] = [rootVC.view]
-        while let next = top.presentedViewController, next !== host {
-            top = next
-            beneath.append(next.view)
-        }
-        guard !top.isBeingDismissed, !top.isBeingPresented, !(top is UIAlertController) else { return }
-        var root: AnyView = AnyView(LaunchLockView())
-        if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
-        let h = UIHostingController(rootView: root)
-        h.modalPresentationStyle = LaunchLockRules.tvPresentsOverMainScreen ? .overFullScreen : .fullScreen
-        h.isModalInPresentation = true
-        // Opaque from its first frame, before SwiftUI draws the lock's own background.
-        h.view.backgroundColor = .black
-        host = h
-        shield(beneath)
-        top.present(h, animated: false)
-        debugLog("[PROFILE] launch lock on screen (over the main screen; \(beneath.count) screen(s) beneath take no focus)")
-    }
-
-    private func hide() {
-        guard let h = host else { unshield(); return }
-        host = nil
-        // No animation: the next screen (the Setting Up cover, What's New) can
-        // present right away without racing a transition (LaunchLockRules).
-        h.presentingViewController?.dismiss(animated: LaunchLockRules.lockDismissAnimated)
-        unshield()
-        debugLog("[PROFILE] launch lock passed; its screen is gone")
-    }
-    #else
-    /// Puts the lock on every foreground scene that lacks it.
+    /// Puts the lock on every foreground scene that lacks it, in its own window
+    /// above the app on every platform (LaunchLockRules.lockInOwnWindow). On
+    /// Apple TV it used to be presented over the app's topmost screen, and a
+    /// screen the app dismissed underneath took it along: on the Apple TV
+    /// (device log 2026-11-13 10:59:39) the loading screen's dismissal removed
+    /// the profile picker and the guide was shown and focused for 0.6 s until
+    /// the watchdog put it back. A window of its own is not part of any
+    /// presentation the app makes or dismisses, and the main screen still
+    /// lays out underneath (2ecd5a7).
     private func show() {
         let live = scenes
         let showing = live.filter { s in windows[ObjectIdentifier(s)].map { !$0.isHidden && $0.windowScene === s } ?? false }.count
-        guard LaunchLockRules.gateNeedsPresenting(locked: ProfileManager.shared.launchLocked, scenes: live.count,
-                                                 scenesShowingGate: showing) else { return }
-        for scene in live where windows[ObjectIdentifier(scene)].map({ $0.isHidden || $0.windowScene !== scene }) ?? true {
-            var root: AnyView = AnyView(LaunchLockView())
-            if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
-            let host = UIHostingController(rootView: root)
-            let w = UIWindow(windowScene: scene)
-            w.windowLevel = .alert + 1
-            w.rootViewController = host
-            w.accessibilityViewIsModal = true
-            // The app's own windows under it take no focus, touch, or VoiceOver.
-            shield(scene.windows.filter { $0 !== w && $0.windowLevel == .normal })
-            w.makeKeyAndVisible()
-            windows[ObjectIdentifier(scene)] = w
-            debugLog("[PROFILE] launch lock on screen (its own window above every alert and sheet)")
+        if LaunchLockRules.gateNeedsPresenting(locked: ProfileManager.shared.launchLocked, scenes: live.count,
+                                               scenesShowingGate: showing) {
+            for scene in live where windows[ObjectIdentifier(scene)].map({ $0.isHidden || $0.windowScene !== scene }) ?? true {
+                var root: AnyView = AnyView(LaunchLockView())
+                if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
+                let host = UIHostingController(rootView: root)
+                // Opaque from its first frame, before SwiftUI draws the lock's own background.
+                host.view.backgroundColor = .black
+                let w = UIWindow(windowScene: scene)
+                w.windowLevel = .alert + 1
+                w.rootViewController = host
+                w.accessibilityViewIsModal = true
+                windows[ObjectIdentifier(scene)] = w
+                w.makeKeyAndVisible()
+                debugLog("[PROFILE] launch lock on screen (its own window above the app)")
+            }
+        }
+        // The app's own windows under it take no focus, touch, or VoiceOver,
+        // windows made since included (the watchdog runs this every 0.5 s).
+        for scene in live {
+            let lock = windows[ObjectIdentifier(scene)]
+            shield(scene.windows.filter { $0 !== lock && $0.windowLevel == .normal })
+            // Focus and keys stay with the lock (a window the app makes key
+            // later does not take them).
+            if let lock, !lock.isHidden, !lock.isKeyWindow { lock.makeKey() }
         }
     }
 
@@ -624,7 +597,6 @@ final class LaunchLockWindow {
         windows.removeAll()
         debugLog("[PROFILE] launch lock passed; its window is gone")
     }
-    #endif
 }
 
 #if os(tvOS)

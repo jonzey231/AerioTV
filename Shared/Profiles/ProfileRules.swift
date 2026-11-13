@@ -626,13 +626,16 @@ enum LaunchLockRules {
     /// passed, while the lock's screen was still animating away).
     static let lockDismissAnimated = false
 
-    /// Apple TV presents the lock over the main screen, not in place of it.
-    /// A full-screen presentation took the main screen out of the window, so
-    /// it was first laid out when the PIN passed, in front of the user (device
+    /// The lock lives in its own window above the app, on Apple TV as on
+    /// iPhone and iPad. Over the main screen, never in place of it: a
+    /// full-screen presentation took the main screen out of the window, so it
+    /// was first laid out when the PIN passed, in front of the user (device
     /// log 2026-11-12: the preview banner's art stepped 126, 237, 394, 539,
-    /// 394 right after the PIN; tvOS simulator 2026-11-13: the main screen's
-    /// first appearance came only after the unlock).
-    static let tvPresentsOverMainScreen = true
+    /// 394 right after the PIN). And not a presentation the app owns: one
+    /// over the loading screen went away with it when the loading screen was
+    /// dismissed, and the guide was shown and focused for 0.6 s before the PIN
+    /// (device log 2026-11-13 10:59:39).
+    static let lockInOwnWindow = true
 
     /// What a screen beneath the lock may do: nothing while it is up (no focus,
     /// no touch, nothing for VoiceOver), and exactly what it did before once

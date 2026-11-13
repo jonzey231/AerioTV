@@ -795,7 +795,7 @@ do {
 // MARK: - The main screen stays laid out under the lock, unreachable (owner 2026-11-13)
 do {
     let L = LaunchLockRules.self
-    check(L.tvPresentsOverMainScreen, "Apple TV presents the lock over the main screen, so the main screen is laid out before the PIN passes")
+    check(L.lockInOwnWindow, "the lock is its own window over the main screen: laid out underneath before the PIN passes, and no screen the app dismisses can take the lock with it")
     let up = L.beneath(locked: true, wasInteractive: true, wasAccessibilityHidden: false)
     check(!up.interactive, "while locked, the screen beneath takes no focus or touch")
     check(up.accessibilityHidden, "and VoiceOver cannot reach it")
