@@ -1817,7 +1817,7 @@ enum DispatcharrCapabilityProbe {
         // saved password. The key is held instead (the sign-in form), and this
         // payload, another account's, is not applied.
         let pid = server.id.uuidString
-        guard StoredSecretRules.mayRepairIdentity(routeUnproven: ProfileManager.shared.isRouteUnproven(pid)) else {
+        guard ProfileManager.shared.mayUseStoredSecret(pid, target: server.effectiveBaseURL) else {
             ProfileManager.shared.noteStoredSecretRefused(pid, .identityRepair)
             let k = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             if !k.isEmpty { DispatcharrRequestGate.shared.markKeyRejected(playlistID: pid, key: k, playlistName: server.name) }

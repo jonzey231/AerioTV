@@ -200,6 +200,13 @@ struct EditServerPage: View {
         return "\(prefix)\(String(repeating: "•", count: 6))\(suffix)"
     }
 
+    /// The password field, noting that the user typed in it (TypedSecretFields):
+    /// a value the field opened with and left untouched is the saved password.
+    private var typedPasswordBinding: Binding<String> {
+        Binding(get: { server.password },
+                set: { server.password = $0; TypedSecretFields.shared.edited(server.id.uuidString) })
+    }
+
     @MainActor
     private func refreshDirectConnectSession() async {
         let username = server.username
@@ -211,7 +218,7 @@ struct EditServerPage: View {
         let baseURL  = server.effectiveBaseURL
         // The saved password only to a proven address (StoredSecretRules).
         let mayUseStored = ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: baseURL)
-        let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+        let password = StoredSecretRules.password(typed: TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password), stored: server.effectivePassword,
                                                   mayUseStored: mayUseStored)
         if password.isEmpty, !mayUseStored, !server.effectivePassword.isEmpty {
             ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .refreshSession)
@@ -279,6 +286,7 @@ struct EditServerPage: View {
         }
         .onAppear {
             guard server.modelContext != nil, originalCredentials == nil else { return }
+            TypedSecretFields.shared.began(server.id.uuidString)
             originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
             originalLocalURL = server.localURL
         }
@@ -304,7 +312,7 @@ struct EditServerPage: View {
                     if server.type == .xtreamCodes {
                         SettingsSection("Credentials", style: .eyebrowCard) {
                             SettingsTextField("Username", text: $server.username)
-                            SettingsTextField("Password", text: $server.password,
+                            SettingsTextField("Password", text: typedPasswordBinding,
                                               isSecure: true)
                         }
                         SettingsSection("EPG Source", style: .eyebrowCard) {
@@ -341,7 +349,7 @@ struct EditServerPage: View {
                                     // belongs to the password field alone, so
                                     // it is the field's helper now instead of a
                                     // loose caption under the section.
-                                    SettingsTextField("Password", text: $server.password,
+                                    SettingsTextField("Password", text: typedPasswordBinding,
                                                       helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
                                                       isSecure: true)
                                     if !server.baseApiKey.isEmpty {

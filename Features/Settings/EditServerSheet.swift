@@ -223,6 +223,13 @@ struct EditServerSheet: View {
     /// api_key (covers the admin-rotated-the-key case where Aerio's
     /// Keychain copy is stale and downstream long-lived consumers
     /// like mpv stream playback would 401).
+    /// The password field, noting that the user typed in it (TypedSecretFields):
+    /// a value the field opened with and left untouched is the saved password.
+    private var typedPasswordBinding: Binding<String> {
+        Binding(get: { server.password },
+                set: { server.password = $0; TypedSecretFields.shared.edited(server.id.uuidString) })
+    }
+
     @MainActor
     private func refreshDirectConnectSession() async {
         let username = server.username
@@ -237,7 +244,7 @@ struct EditServerSheet: View {
             ?? server.effectiveBaseURL
         // The saved password only to a proven address (StoredSecretRules).
         let mayUseStored = ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: baseURL)
-        let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+        let password = StoredSecretRules.password(typed: TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password), stored: server.effectivePassword,
                                                   mayUseStored: mayUseStored)
         if password.isEmpty, !mayUseStored, !server.effectivePassword.isEmpty {
             ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .refreshSession)
@@ -315,6 +322,7 @@ struct EditServerSheet: View {
         }
         .onAppear {
             guard server.modelContext != nil, originalCredentials == nil else { return }
+            TypedSecretFields.shared.began(server.id.uuidString)
             originalCredentials = DispatcharrCredentialSnapshot.capture(from: server)
             originalLocalURL = server.localURL
         }
@@ -420,7 +428,7 @@ struct EditServerSheet: View {
                 Section {
                     SettingsTextField("Username", text: $server.username)
                         .listRowBackground(Color.cardBackground)
-                    SettingsTextField("Password", text: $server.password,
+                    SettingsTextField("Password", text: typedPasswordBinding,
                                       isSecure: true)
                         .listRowBackground(Color.cardBackground)
                 } header: {
@@ -462,7 +470,7 @@ struct EditServerSheet: View {
                         // Add Server flow. Phase 3 item 2: it is the password
                         // field's helper now instead of its own Form row, so
                         // iOS, tvOS and Android read identically.
-                        SettingsTextField("Password", text: $server.password,
+                        SettingsTextField("Password", text: typedPasswordBinding,
                                           helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
                                           isSecure: true)
                             .listRowBackground(Color.cardBackground)

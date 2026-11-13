@@ -1514,7 +1514,7 @@ final class ProfileManager: ObservableObject {
     /// device does not have: never.
     func mayUseStoredSecret(_ playlistId: String, target: String) -> Bool {
         guard let s = DsyncLocal.server(playlistId), !s.isGone else { return false }
-        return StoredSecretRules.mayUseStored(routeUnproven: holds.isRouteUnproven(playlistId),
+        return StoredSecretRules.mayUseStored(provenHosts: holds.provenHosts(playlistId),
                                               target: target, base: s.baseURL, local: s.localURL)
     }
 
@@ -1527,12 +1527,14 @@ final class ProfileManager: ObservableObject {
                  + "its address is not proven the same server; nothing stored is sent")
     }
 
-    /// The user signed the playlist in at its current address with what they
-    /// typed: that address is theirs, so the route counts as proven.
-    func noteTypedSignIn(_ playlistId: String) {
-        if holds.markRouteProven(playlistId) {
-            debugLog("[PROFILE-HOST] route proven playlist=\(Self.tag(playlistId)) (signed in with typed credentials)")
-        }
+    /// The user signed the playlist in at [address] with what they typed:
+    /// that address is proven, and only that one (a Local URL pointing at
+    /// another server stays unproven).
+    func noteTypedSignIn(_ playlistId: String, at address: String) {
+        guard let s = DsyncLocal.server(playlistId), !s.isGone else { return }
+        let k = PlaylistRoute.hostKey(address)
+        guard !k.isEmpty, holds.proveHosts(playlistId, [k], currentHosts: PlaylistRoute.hosts(base: s.baseURL, local: s.localURL)) else { return }
+        debugLog("[PROFILE-HOST] address proven playlist=\(Self.tag(playlistId)) (signed in there with typed credentials)\(holds.isRouteUnproven(playlistId) ? "; another address is still unproven" : "")")
     }
 
     /// A route change of [playlistId] starts (before its own validation
@@ -1554,7 +1556,8 @@ final class ProfileManager: ObservableObject {
     private func tagSignIn(_ profileId: String, _ server: ServerConnection) async {
         let pid = server.id.uuidString
         let route = PlaylistRoute.key(base: server.baseURL, local: server.localURL)
-        let me = await fetchMe(server, server.baseApiKey)
+        // The playlist's stored key only to a proven address (StoredSecretRules).
+        let me = mayUseStoredSecret(pid, target: server.effectiveBaseURL) ? await fetchMe(server, server.baseApiKey) : nil
         guard !server.isGone, PlaylistRoute.key(base: server.baseURL, local: server.localURL) == route,
               store.byId(profileId) != nil, !holds.isHeld(profileId) else { return }
         if let me { noteDefaultUsersMe(pid, userId: me.id, username: me.username) }
@@ -1696,7 +1699,11 @@ final class ProfileManager: ObservableObject {
         switch decision {
         case .lift:
             debugLog("[PROFILE-HOST] same-server check passed playlist=\(tag)")
-            if holds.markRouteProven(playlistId) { debugLog("[PROFILE-HOST] route proven playlist=\(tag) (same server)") }
+            // Proof is per address: the addresses the check asked are proven.
+            if holds.proveHosts(playlistId, targets.map(PlaylistRoute.hostKey),
+                                currentHosts: PlaylistRoute.hosts(base: live.baseURL, local: live.localURL)) {
+                debugLog("[PROFILE-HOST] addresses proven playlist=\(tag) (same server)\(holds.isRouteUnproven(playlistId) ? "; another address is still unproven" : "")")
+            }
             // Only profiles that signed in where this account answered before the change.
             if holds.record(playlistId) != nil {
                 let r = holds.liftMatching(playlistId)
@@ -1832,7 +1839,12 @@ final class ProfileManager: ObservableObject {
         // The outgoing profile's pending sync changes go first (Android flushes the old session).
         await beforeSwitch?(playlistId)
         if target.isDefault {
-            if let me = await fetchMe(server, server.baseApiKey) {
+            // The default profile's switch reads users/me with the playlist's stored
+            // key only at a proven address (Android 6aa73a74); elsewhere the switch
+            // goes ahead without it.
+            let proven = mayUseStoredSecret(playlistId, target: server.effectiveBaseURL)
+            if !proven { noteStoredSecretRefused(playlistId, .defaultProfileSwitch) }
+            if proven, let me = await fetchMe(server, server.baseApiKey) {
                 store.update(target.id) { var c = $0; c.userId = me.id; return c }
                 followServerRole(target.id, me.effectiveUserLevel)
                 noteDefaultUsersMe(playlistId, userId: me.id, username: me.username)

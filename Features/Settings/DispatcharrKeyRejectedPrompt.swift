@@ -408,7 +408,7 @@ enum KeySignInService {
             debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): signed in, key \(key == oldKey ? "unchanged" : "replaced"); hold lifted")
             // Typed at the playlist's current address: that route is the user's (StoredSecretRules),
             // then the default profile's account is recorded (ProfileHostHold).
-            ProfileManager.shared.noteTypedSignIn(server.id.uuidString)
+            ProfileManager.shared.noteTypedSignIn(server.id.uuidString, at: base)
             ProfileManager.shared.noteDefaultUsersMe(server.id.uuidString, userId: user.id, username: user.username)
             DispatcharrKeyRecheck.shared.onRecovered?(server.id.uuidString)
             return .signedIn

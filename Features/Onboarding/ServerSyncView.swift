@@ -783,7 +783,8 @@ enum PlaylistSaveRunner {
         // A password or key typed in this save: the user chose the new address
         // with it, so the route counts as proven once the save verified it
         // (StoredSecretRules). The in-memory columns hold only what was typed.
-        let typedSecret = !server.password.isEmpty || !server.apiKey.isEmpty
+        let typedSecret = !TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password).isEmpty
+            || !server.apiKey.isEmpty
         if routeChange { ProfileManager.shared.beginRouteChange(server.id.uuidString) }
         defer { if routeChange { ProfileManager.shared.endRouteChange(server.id.uuidString) } }
         // A rename, a User-Agent edit or a Guide Days change costs no login
@@ -815,7 +816,7 @@ enum PlaylistSaveRunner {
         }
 
         commitStaged()
-        if routeChange, typedSecret, needsVerify { ProfileManager.shared.noteTypedSignIn(server.id.uuidString) }
+        if routeChange, typedSecret, needsVerify { ProfileManager.shared.noteTypedSignIn(server.id.uuidString, at: typedBaseURL) }
 
         if credentialsChanged {
             // Drops the old account's cached identity, re-mints the api_key

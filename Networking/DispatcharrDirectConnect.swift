@@ -1340,7 +1340,7 @@ enum ServerCredentialChange {
         // (StoredSecretRules): a typed address on a new host is never proven.
         let mayUseStored = server.type != .dispatcharrAPI
             || ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: url)
-        let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+        let password = StoredSecretRules.password(typed: TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password), stored: server.effectivePassword,
                                                   mayUseStored: mayUseStored)
         let apiKey   = server.apiKey.isEmpty ? server.baseApiKey : server.apiKey
         // An M3U playlist has no account model, so no login runs and no
@@ -1490,7 +1490,7 @@ enum ServerCredentialChange {
         if server.dispatcharrCredentialType == .usernamePassword {
             let username = server.username
             let mayUseStored = ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL)
-            let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+            let password = StoredSecretRules.password(typed: TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password), stored: server.effectivePassword,
                                                       mayUseStored: mayUseStored)
             if password.isEmpty, !mayUseStored {
                 ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .identityRepair)
@@ -1636,7 +1636,8 @@ enum PlaylistHostChange {
             // Only a password the user typed in this save: the new address is not
             // proven yet, so the saved one stays here (StoredSecretRules).
             let password = StoredSecretRules.password(
-                typed: server.password, stored: server.effectivePassword,
+                typed: TypedSecretFields.shared.typedPassword(server.id.uuidString, field: server.password),
+                stored: server.effectivePassword,
                 mayUseStored: ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL))
             if password.isEmpty { ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .hostChangeSignIn) }
             if !server.username.isEmpty, !password.isEmpty,

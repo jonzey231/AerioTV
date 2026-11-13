@@ -283,11 +283,12 @@ enum ProfileHostHoldRules {
 /// signed in at the new address with the saved username and password, and a
 /// silent re-login after a 401 did the same.
 ///
-/// A route change leaves the playlist's route UNPROVEN until the same-server
-/// check passes (the default account answers there with the user id and
+/// A route change leaves every new address UNPROVEN until the same-server
+/// check passes there (the default account answers with the user id and
 /// username recorded before the change), or the user signs in there with
-/// what they type. While it is unproven, nothing stored and secret goes out
-/// for the playlist: no saved password (silent re-login, launch warmup,
+/// what they type. Proof is per address (Android 6aa73a74): when only the
+/// Local URL changed, the Server URL stays proven. To an unproven address,
+/// nothing stored and secret goes out for the playlist: no saved password (silent re-login, launch warmup,
 /// identity repair, Edit Playlist's verify and the host-change sign-in,
 /// Refresh Session, a Fix Login sent from another device), no other
 /// profile's stored key or password (the profile holds), and no Dispatcharr
@@ -306,24 +307,23 @@ enum StoredSecretRules {
         case refreshSession = "Refresh Session"
         case fixLogin = "Fix Login"
         case dispatcharrSync = "Dispatcharr Sync"
+        case defaultProfileSwitch = "default profile switch"
     }
 
-    /// A stored secret may go to [target] only when the playlist's route is
-    /// proven and [target] is on one of its hosts (scheme, host, and port).
-    /// A typed address that is not saved yet is a new route, never proven.
-    static func mayUseStored(routeUnproven: Bool, target: String, base: String, local: String) -> Bool {
-        guard !routeUnproven else { return false }
+    /// A stored secret may go to [target] only when [target] is one of the
+    /// playlist's current addresses (scheme, host, and port) AND that address
+    /// is proven: proof is per address (Android 6aa73a74). [provenHosts] nil
+    /// means no change since this device last proved the route, so every
+    /// current address is proven. A typed address that is not saved yet is a
+    /// new address, never proven. Identity repair, Dispatcharr Sync, the
+    /// default profile's switch, and the launch sign-in ask about the address
+    /// they would use.
+    static func mayUseStored(provenHosts: [String]?, target: String, base: String, local: String) -> Bool {
         let k = PlaylistRoute.hostKey(target)
-        return !k.isEmpty && PlaylistRoute.hosts(base: base, local: local).contains(k)
+        guard !k.isEmpty, PlaylistRoute.hosts(base: base, local: local).contains(k) else { return false }
+        guard let provenHosts else { return true }
+        return provenHosts.contains(k)
     }
-
-    /// The identity repair (the stored key answers as another user): only
-    /// where the server is proven the same. Elsewhere the key is held and
-    /// the default profile shows the sign-in form.
-    static func mayRepairIdentity(routeUnproven: Bool) -> Bool { !routeUnproven }
-
-    /// Dispatcharr Sync starts no session for an unproven route.
-    static func maySync(routeUnproven: Bool) -> Bool { !routeUnproven }
 
     /// What a password field holds when it goes out: what the user typed,
     /// else the saved password only where it may go, else nothing.
@@ -337,6 +337,27 @@ enum StoredSecretRules {
     /// network failure or a refused key leaves it to the usual paths.
     static func holdsPlaylistKey(after decision: SameServerCheck.Decision) -> Bool {
         decision == .keep("different-user")
+    }
+}
+
+/// Whether the Edit Playlist form's password field was typed in during this
+/// visit (Android 6aa73a74 tracks the same). A field opened with a value in it
+/// (an in-memory copy the Keychain save kept) and left untouched is the SAVED
+/// password, never something the user typed, so it is held to the stored
+/// secret rules. Memory only.
+final class TypedSecretFields: @unchecked Sendable {
+    static let shared = TypedSecretFields()
+    private let lock = NSLock()
+    private var typed = Set<String>()
+
+    /// The form opened: nothing is typed yet.
+    func began(_ playlistId: String) { lock.lock(); typed.remove(playlistId); lock.unlock() }
+    /// The user changed the password field.
+    func edited(_ playlistId: String) { lock.lock(); typed.insert(playlistId); lock.unlock() }
+    /// The field's value when the user typed it in this visit, else "".
+    func typedPassword(_ playlistId: String, field: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        return typed.contains(playlistId) ? field : ""
     }
 }
 
@@ -433,8 +454,10 @@ final class ProfileHostHoldStore {
         return true
     }
 
-    /// A route change: the new route is unproven. A playlist already waiting
-    /// keeps the hosts from before its first change and follows the new route.
+    /// A route change: every address not proven before is unproven. A
+    /// playlist already waiting keeps its proven addresses and follows the
+    /// new route. An address that did not change (only the Local URL moved)
+    /// stays proven.
     func markRouteUnproven(_ playlistId: String, trustedHosts: [String], route: String) {
         var r = unproven[playlistId] ?? UnprovenRoute(route: route, trustedHosts: trustedHosts)
         r.route = route
@@ -442,13 +465,25 @@ final class ProfileHostHoldStore {
         save()
     }
 
-    /// The same-server check passed, or the user signed in at the current
-    /// route with what they typed. True when it was unproven.
+    /// The addresses where the playlist's stored secrets may go, or nil when
+    /// its whole current route is proven.
+    func provenHosts(_ playlistId: String) -> [String]? { unproven[playlistId]?.trustedHosts }
+
+    /// [hosts] are proven now (the same-server check passed there, or the
+    /// user signed in there with what they typed). Once every current
+    /// address is proven the record goes. True when anything changed.
     @discardableResult
-    func markRouteProven(_ playlistId: String) -> Bool {
-        guard unproven.removeValue(forKey: playlistId) != nil else { return false }
+    func proveHosts(_ playlistId: String, _ hosts: [String], currentHosts: [String]) -> Bool {
+        guard var r = unproven[playlistId] else { return false }
+        let added = hosts.filter { !$0.isEmpty && !r.trustedHosts.contains($0) }
+        r.trustedHosts += added
+        if currentHosts.allSatisfy(r.trustedHosts.contains) {
+            unproven[playlistId] = nil
+        } else {
+            unproven[playlistId] = r
+        }
         save()
-        return true
+        return !added.isEmpty || unproven[playlistId] == nil
     }
 
     /// A profile signed in or was verified at the playlist's current address.
