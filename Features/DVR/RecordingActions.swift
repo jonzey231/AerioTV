@@ -96,6 +96,8 @@ struct RecordingActions {
     /// in-progress recordings cannot play yet (the file is open by
     /// `LocalRecordingSession`). Scheduled rows never play.
     func canPlay(_ rec: Recording) -> Bool {
+        // An on-device recording whose file is gone shows as missing: no Play.
+        if rec.isLocalFileMissing { return false }
         if rec.isCompleted || rec.status == .stopped { return true }
         // An on-device capture cut short keeps what it captured (InterruptedCapture).
         if rec.status == .interrupted, rec.destination == .local { return true }

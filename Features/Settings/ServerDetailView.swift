@@ -23,7 +23,7 @@ enum PlaylistLockdown {
     /// Kept recordings, detached from the deleted playlist: shown under every
     /// playlist in the DVR's "Saved on this device" section, played from the
     /// file only.
-    static let savedOnDeviceServerID = "saved-on-this-device"
+    nonisolated static let savedOnDeviceServerID = "saved-on-this-device"
 
     /// The playlist's recordings with a file on this device: local captures,
     /// finished or in progress, and "Save to Device" copies of server ones.

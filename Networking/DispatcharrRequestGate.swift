@@ -1493,6 +1493,27 @@ enum RecordingPathRules {
         return candidate != stored && exists(candidate) ? candidate : nil
     }
 
+    /// Media files a recording can be (what an orphan file must be to be adopted).
+    static let mediaExtensions: Set<String> = ["ts", "mp4", "m4v", "mkv", "mov"]
+
+    /// The files in the default recordings folder that no row points at:
+    /// recordings to adopt as rows, so each can be played or deleted (owner
+    /// 2026-11-13: a recording must never sit on the device with no way to
+    /// reach or remove it). `known` holds the file names rows point at.
+    static func orphans(files: [String], known: Set<String>) -> [String] {
+        files.filter { name in
+            !name.hasPrefix(".") && !known.contains(name)
+                && mediaExtensions.contains((name as NSString).pathExtension.lowercased())
+        }.sorted()
+    }
+
+    /// A finished recording on this device whose file is not there: shown as
+    /// missing (no Play) and still deletable.
+    static func isMissing(resolvedPath: String?, exists: (String) -> Bool) -> Bool {
+        guard let p = resolvedPath, !p.isEmpty else { return true }
+        return !exists(p)
+    }
+
     /// The migration of one stored value at launch: its relative form when it
     /// is an absolute path into the default folder (this container's, or a
     /// previous one's with the file now here); nil leaves it as it is.

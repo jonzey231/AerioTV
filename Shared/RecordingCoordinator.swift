@@ -126,6 +126,51 @@ final class RecordingCoordinator: ObservableObject {
         }
     }
 
+    /// Launch, after the migration: every recording file in the default
+    /// folder that no row points at (a row lost, or a file an older build
+    /// left behind) becomes a row under "Saved on this device", so it can be
+    /// played or deleted (owner 2026-11-13). Named from the file's dates.
+    nonisolated static func adoptOrphanRecordingFiles(container: ModelContainer) {
+        guard let dir = defaultRecordingsDirectory,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let ctx = ModelContext(container)
+        let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.localFilePath != nil }))) ?? []
+        let root = dir.path
+        // The names rows point at in this folder (resolved, so an old
+        // container's path counts by its file name here).
+        let known = Set(rows.compactMap { r -> String? in
+            guard let p = r.resolvedLocalFilePath else { return nil }
+            return (p as NSString).deletingLastPathComponent == root ? (p as NSString).lastPathComponent : nil
+        })
+        let orphans = RecordingPathRules.orphans(files: names, known: known)
+        guard !orphans.isEmpty else { return }
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        var adopted = 0
+        for name in orphans {
+            let path = (root as NSString).appendingPathComponent(name)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let size = (attrs[.size] as? NSNumber)?.int64Value, size > 0 else { continue }
+            let modified = attrs[.modificationDate] as? Date ?? Date()
+            let created = min(attrs[.creationDate] as? Date ?? modified, modified)
+            let rec = Recording(channelID: "", channelName: "",
+                                programTitle: "Recording from \(df.string(from: created))",
+                                scheduledStart: created, scheduledEnd: modified,
+                                destination: .local, status: .completed,
+                                localFilePath: RecordingPathRules.stored(path, root: root),
+                                fileSizeBytes: size,
+                                serverID: PlaylistLockdown.savedOnDeviceServerID)
+            rec.capturedStart = created
+            rec.capturedSeconds = max(0, modified.timeIntervalSince(created))
+            ctx.insert(rec)
+            adopted += 1
+        }
+        guard adopted > 0 else { return }
+        try? ctx.save()
+        debugLog("[DVR-PATHS] adopted \(adopted) recording file(s) no row pointed at; they show under Saved on this device")
+    }
+
     /// Custom folder URL from a security-scoped bookmark (iOS only). If
     /// nil, `localRecordingsDirectory` is used.
     var customRecordingsDirectory: URL? {
@@ -708,5 +753,14 @@ extension Recording {
         RecordingPathRules.resolve(localFilePath,
                                    root: RecordingCoordinator.defaultRecordingsDirectory?.path,
                                    exists: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    /// A finished recording on this device whose file is not there (removed
+    /// outside the app, or purged from Apple TV's cache): shown as missing,
+    /// with no Play, and still deletable.
+    var isLocalFileMissing: Bool {
+        guard destination == .local, status == .completed || status == .stopped || status == .interrupted else { return false }
+        return RecordingPathRules.isMissing(resolvedPath: resolvedLocalFilePath,
+                                            exists: { FileManager.default.fileExists(atPath: $0) })
     }
 }

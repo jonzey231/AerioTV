@@ -1367,6 +1367,15 @@ do {
     let tvOld = "/private/var/mobile/Containers/Data/Application/T1/Library/Caches/Recordings"
     let tvNew = "/private/var/mobile/Containers/Data/Application/T2/Library/Caches/Recordings"
     eq(P.resolve(tvOld + "/B.ts", root: tvNew, exists: { $0 == tvNew + "/B.ts" }), tvNew + "/B.ts", "Apple TV's Caches folder re-roots too")
+    // Logan's condition for the merge: nothing on the device without a row, and
+    // a row without its file still shows and can be deleted.
+    let files = ["A.ts", "B.ts", "Left.ts", "clip.MP4", ".DS_Store", "notes.txt", "Old.mkv"]
+    eq(P.orphans(files: files, known: ["A.ts", "B.ts"]), ["Left.ts", "Old.mkv", "clip.MP4"],
+       "every media file no row points at is adopted; hidden and non-media files are not")
+    eq(P.orphans(files: ["A.ts"], known: ["A.ts"]), [String](), "a file a row points at is never adopted twice")
+    check(P.isMissing(resolvedPath: newRoot + "/Gone.ts", exists: exists), "a row whose file is gone is missing")
+    check(!P.isMissing(resolvedPath: newRoot + "/A.ts", exists: exists), "a row whose file is there is not")
+    check(P.isMissing(resolvedPath: nil, exists: exists), "a row with no location is missing")
 }
 
 print("\(checks) checks, \(failures) failures")
