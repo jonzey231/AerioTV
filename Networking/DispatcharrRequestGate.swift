@@ -983,6 +983,9 @@ enum DispatcharrRelogin {
         activeAtStart != activeNow
     }
 
+    /// What the one request checking a just-minted key said.
+    enum Proof: Equatable, Sendable { case accepted, refused, unknown }
+
     /// A re-login signed in and read the account's key: EXACTLY one request
     /// checks that key before anything stores or sends it. The server refusing
     /// it ends the re-login as `.keyRefused`: the identity parks for the
@@ -990,9 +993,13 @@ enum DispatcharrRelogin {
     /// server still refuses never goes out again (2026-11-12, Android parity:
     /// it was never held, and about 15 refused requests went out in a second,
     /// tripping Dispatcharr's 10 per minute IP lockout). No answer (network,
-    /// 5xx) is not a refusal: the key is used.
-    static func outcome(minted key: String, proofRefused: Bool) -> ReloginBook.Outcome {
-        proofRefused ? .keyRefused : .key(key)
+    /// 5xx) is not a refusal: the key is used, but as unproven (ReloginBook).
+    static func outcome(minted key: String, proof: Proof) -> ReloginBook.Outcome {
+        switch proof {
+        case .accepted: return .key(key)
+        case .refused: return .keyRefused
+        case .unknown: return .keyUnproven(key)
+        }
     }
 }
 
@@ -1004,9 +1011,13 @@ enum DispatcharrRelogin {
 struct ReloginBook: Sendable {
     enum Claim: Equatable, Sendable { case wait, parked(Int), shared(String?, Int), mine }
     enum Outcome: Equatable, Sendable {
-        case key(String), failed, rejected
+        /// A key that passed its one-request check.
+        case key(String)
+        case failed, rejected
         /// Signed in, but the server refused the key it issued (DispatcharrRelogin.outcome).
         case keyRefused
+        /// A key whose check got no answer (network, 5xx): used, but never proven.
+        case keyUnproven(String)
     }
 
     let window: TimeInterval
@@ -1016,21 +1027,50 @@ struct ReloginBook: Sendable {
     private var rejectedUntil: [String: TimeInterval] = [:]
     private var noKeyUntil: [String: TimeInterval] = [:]
     private var keyRefusedUntil: [String: TimeInterval] = [:]
+    /// The last key passed its check when it was issued.
+    private var lastKeyProven: [String: Bool] = [:]
 
     init(window: TimeInterval = 60) { self.window = window }
 
-    mutating func claim(_ who: DispatcharrIdentity, now: TimeInterval) -> Claim {
+    /// [refusedKey]: the key the server just refused, which sent this caller
+    /// here. A finished re-login is shared only when its key differs from it
+    /// (retry with that key); in flight, it is always shared (2026-11-12,
+    /// Android parity).
+    mutating func claim(_ who: DispatcharrIdentity, now: TimeInterval, refusedKey: String? = nil) -> Claim {
         let k = who.key
         if inFlight.contains(k) { return .wait }
         if let until = rejectedUntil[k], until > now { return .parked(Int((until - now).rounded(.up))) }
         // Its last re-login minted a key the server refused: no new attempt, and
         // nobody gets that key, for the window.
         if let until = keyRefusedUntil[k], until > now { return .parked(Int((until - now).rounded(.up))) }
-        if let last = lastAttemptAt[k], now - last < window { return .shared(lastKey[k], Int(now - last)) }
+        if let last = lastAttemptAt[k], now - last < window {
+            let shared = lastKey[k]
+            guard let refused = refusedKey, let key = shared, key == refused else {
+                return .shared(shared, Int(now - last))
+            }
+            // The key this re-login handed out is the one just refused.
+            if lastKeyProven[k] != true {
+                // Handed out unproven and refused before it ever succeeded: the
+                // end of the road for the window, as a refused check is.
+                noteKeyRefused(who, now: now)
+                return .parked(Int(window))
+            }
+            // It passed its check when issued and worked since: the server has
+            // rotated it again. A fresh re-login (its own one-request check
+            // still applies), never a hold on a stale shared result.
+        }
         lastAttemptAt[k] = now
         lastKey[k] = nil
+        lastKeyProven[k] = nil
         inFlight.insert(k)
         return .mine
+    }
+
+    /// True when [refusedKey] is the key [who]'s last re-login issued and it
+    /// passed its check: a server-side rotation, not a refused re-login.
+    func isRotation(_ who: DispatcharrIdentity, refusedKey: String?, now: TimeInterval) -> Bool {
+        guard let refusedKey, let last = lastAttemptAt[who.key], now - last < window else { return false }
+        return lastKey[who.key] == refusedKey && lastKeyProven[who.key] == true
     }
 
     /// The attempt [who] claimed finished; the key it minted, if any.
@@ -1039,10 +1079,11 @@ struct ReloginBook: Sendable {
         let k = who.key
         inFlight.remove(k)
         switch outcome {
-        case .key(let key): lastKey[k] = key; return key
+        case .key(let key): lastKey[k] = key; lastKeyProven[k] = true; return key
+        case .keyUnproven(let key): lastKey[k] = key; lastKeyProven[k] = false; return key
         case .failed: return nil
         case .rejected: rejectedUntil[k] = now + window; return nil
-        case .keyRefused: lastKey[k] = nil; keyRefusedUntil[k] = now + window; return nil
+        case .keyRefused: lastKey[k] = nil; lastKeyProven[k] = nil; keyRefusedUntil[k] = now + window; return nil
         }
     }
 
@@ -1062,11 +1103,13 @@ struct ReloginBook: Sendable {
         keyRefusedUntil[who.key] = nil
     }
 
-    /// A key [who]'s re-login issued was refused after it was handed out (a
-    /// caller got it back as the shared result and the server refused it): park
-    /// like a refused proof, and nobody gets that key again for the window.
+    /// A key [who]'s re-login handed out unproven was refused before it ever
+    /// succeeded: park like a refused check, and nobody gets it again for the
+    /// window (claim). A key that passed its check and is refused later is a
+    /// rotation, never this.
     mutating func noteKeyRefused(_ who: DispatcharrIdentity, now: TimeInterval) {
         lastKey[who.key] = nil
+        lastKeyProven[who.key] = nil
         keyRefusedUntil[who.key] = now + window
     }
     func foundRefusedKey(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (keyRefusedUntil[who.key] ?? 0) > now }

@@ -1075,33 +1075,61 @@ do {
 
 // MARK: - A re-login that mints a key the server refuses never loops (2026-11-12, Android parity)
 do {
-    // The rule: one check of the minted key; a refusal is .keyRefused.
-    eq(DispatcharrRelogin.outcome(minted: "k", proofRefused: true), .keyRefused, "a refused minted key ends the re-login as keyRefused")
-    eq(DispatcharrRelogin.outcome(minted: "k", proofRefused: false), .key("k"), "a minted key that passes is used")
+    // The rule: one check of the minted key; a refusal is .keyRefused, no answer is unproven.
+    eq(DispatcharrRelogin.outcome(minted: "k", proof: .refused), .keyRefused, "a refused minted key ends the re-login as keyRefused")
+    eq(DispatcharrRelogin.outcome(minted: "k", proof: .accepted), .key("k"), "a minted key that passes is used")
+    eq(DispatcharrRelogin.outcome(minted: "k", proof: .unknown), .keyUnproven("k"), "no answer: used, but unproven")
 
     // The book: nobody gets a refused minted key; the identity parks for the window.
     var book = ReloginBook(window: 60)
     let who = DispatcharrIdentity.playlist("P1")
-    eq(book.claim(who, now: 100), .mine, "the first 401 runs the re-login")
-    eq(book.claim(who, now: 100.1), .wait, "a concurrent 401 waits for it")
+    eq(book.claim(who, now: 100, refusedKey: "K1"), .mine, "the first 401 runs the re-login")
+    eq(book.claim(who, now: 100.1, refusedKey: "K1"), .wait, "a concurrent 401 waits for it")
     eq(book.finish(who, .keyRefused, now: 101), nil, "every waiter gets no key back")
     check(book.foundRefusedKey(who, now: 101), "the refused key is recorded (the old key is held)")
-    if case .parked = book.claim(who, now: 130) { check(true, "no second re-login inside the minute") } else { check(false, "no second re-login inside the minute") }
-    if case .parked = book.claim(who, now: 160.9) { check(true, "still parked just inside the minute") } else { check(false, "still parked just inside the minute") }
-    eq(book.claim(who, now: 161.1), .mine, "at most one re-login per slot per minute")
-    var b2 = ReloginBook(window: 60)
-    _ = b2.claim(who, now: 0); _ = b2.finish(who, .key("k1"), now: 1)
-    eq(b2.claim(who, now: 5), .shared("k1", 5), "a good key is shared inside the window")
-    b2.noteKeyRefused(who, now: 6)
-    if case .parked = b2.claim(who, now: 7) { check(true, "a shared key the server then refused is never handed out again") } else { check(false, "a shared key the server then refused is never handed out again") }
-    b2.clearRejected(who)
-    check(!b2.foundRefusedKey(who, now: 8), "the user's own sign-in clears it")
+    if case .parked = book.claim(who, now: 130, refusedKey: "K1") { check(true, "no second re-login inside the minute") } else { check(false, "no second re-login inside the minute") }
+    if case .parked = book.claim(who, now: 160.9, refusedKey: "K1") { check(true, "still parked just inside the minute") } else { check(false, "still parked just inside the minute") }
+    eq(book.claim(who, now: 161.1, refusedKey: "K1"), .mine, "at most one re-login per slot per minute after a refused check")
+    book.clearRejected(who)
+    check(!book.foundRefusedKey(who, now: 162), "the user's own sign-in clears it")
+
+    // The Streamer case (2026-11-12): K1 refused, the re-login mints K2 and it
+    // passes its check; 49 s later the server rotates again and refuses K2.
+    // That is a new rotation, not a refused re-login: a fresh re-login runs and
+    // mints K3. No hold, no prompt.
+    var rot = ReloginBook(window: 60)
+    eq(rot.claim(who, now: 0, refusedKey: "K1"), .mine, "K1 refused: re-login")
+    eq(rot.finish(who, DispatcharrRelogin.outcome(minted: "K2", proof: .accepted), now: 1), "K2", "K2 passes its check")
+    check(rot.isRotation(who, refusedKey: "K2", now: 50), "K2 refused 49 s later is a rotation")
+    eq(rot.claim(who, now: 50, refusedKey: "K2"), .mine, "a fresh re-login runs, not the stale shared K2")
+    eq(rot.finish(who, DispatcharrRelogin.outcome(minted: "K3", proof: .accepted), now: 51), "K3", "it mints K3, checked")
+    check(!rot.foundRefusedKey(who, now: 51), "nothing is parked: no hold and no prompt")
+    let rotGate = DispatcharrRequestGate()
+    check(!rotGate.isKeyRejected("K2") && !rotGate.isKeyRejected("K3"), "no key is held")
+
+    // Rotation twice within a few seconds while a re-login is in flight: one re-login, shared.
+    var twice = ReloginBook(window: 60)
+    eq(twice.claim(who, now: 0, refusedKey: "K1"), .mine, "K1 refused: re-login starts")
+    eq(twice.claim(who, now: 1, refusedKey: "K1"), .wait, "another K1 401 waits for it")
+    eq(twice.claim(who, now: 2, refusedKey: "K2"), .wait, "a second rotation while in flight shares the same re-login")
+    eq(twice.finish(who, .key("K3"), now: 3), "K3", "the one re-login mints K3")
+    eq(twice.claim(who, now: 4, refusedKey: "K1"), .shared("K3", 4), "a late K1 401 retries with K3")
+    eq(twice.claim(who, now: 5, refusedKey: "K2"), .shared("K3", 5), "a late K2 401 retries with K3")
+
+    // A key handed out unproven (its check got no answer) and refused before it
+    // ever succeeded parks for the window, as a refused check does.
+    var unp = ReloginBook(window: 60)
+    _ = unp.claim(who, now: 0, refusedKey: "K1")
+    eq(unp.finish(who, .keyUnproven("K2"), now: 1), "K2", "an unproven key is still used")
+    check(!unp.isRotation(who, refusedKey: "K2", now: 10), "an unproven key refused is not a rotation")
+    if case .parked = unp.claim(who, now: 10, refusedKey: "K2") { check(true, "an unproven key refused parks the slot") } else { check(false, "an unproven key refused parks the slot") }
+    check(unp.foundRefusedKey(who, now: 10), "and the old key is held")
 
     // End to end with the real request gate: the old key and the key the
-    // re-login issues are both refused. Fifteen 401s in a burst (what Android
-    // saw) send at most 2 refused requests in total: one probe of the old key
-    // (shared per key) and one check of the minted key. The old key is then
-    // held and nothing else is sent.
+    // re-login issues are both refused (the check refuses it). Fifteen 401s in a
+    // burst (what Android saw) send at most 2 refused requests in total: one
+    // probe of the old key (shared per key) and one check of the minted key. The
+    // old key is then held and nothing else is sent; no further re-login.
     let gate = DispatcharrRequestGate()
     var relogins = ReloginBook(window: 60)
     let old = "old-key", minted = "minted-key"
@@ -1114,11 +1142,11 @@ do {
         if gate.isKeyRejected(old) { now += 0.05; continue }
         if !oldProbed { oldProbed = true; refusedSent += 1 }        // the one probe of the old key: refused
         var got: String?
-        switch relogins.claim(who, now: now) {
+        switch relogins.claim(who, now: now, refusedKey: old) {
         case .mine:
             reloginsRun += 1
             refusedSent += 1                                        // the one check of the minted key: refused
-            got = relogins.finish(who, DispatcharrRelogin.outcome(minted: minted, proofRefused: true), now: now)
+            got = relogins.finish(who, DispatcharrRelogin.outcome(minted: minted, proof: .refused), now: now)
         case .shared(let k, _): got = k
         case .wait, .parked: got = nil
         }
@@ -1126,8 +1154,8 @@ do {
         else { gate.markKeyRejected(playlistID: "P1", key: old) }  // no key: the old key is held
         now += 0.05
     }
-    check(refusedSent <= 2, "a re-login returning a refused key sends at most 2 refused requests in total (sent \(refusedSent))")
-    eq(reloginsRun, 1, "one re-login for the whole burst")
+    eq(refusedSent, 2, "a re-login returning a refused key sends exactly 2 refused requests in total")
+    eq(reloginsRun, 1, "one re-login for the whole burst, and none after it that minute")
     check(gate.isKeyRejected(old), "the old key is held: no background load sends it")
     check(!gate.isKeyRejected(minted), "the refused minted key was never stored or handed out, so it needs no hold")
 }

@@ -2457,16 +2457,16 @@ struct DispatcharrAPI {
             if ownTarget == nil {
                 debugLog("[AUTH] 401 on an API-key call; key rejected, attempting silent re-login for \(target.id.uuidString.prefix(8))")
             }
-            let minted = await Self.silentRebootstrapApiKey(
+            // The refused key goes along: a key the last re-login issued that
+            // passed its check and is refused now is a rotation, so a fresh
+            // re-login runs (ReloginBook.claim).
+            guard let newKey = await Self.silentRebootstrapApiKey(
                 serverID: target.id,
                 baseURL: baseURL,
                 username: target.username,
-                userAgent: userAgent
-            )
-            guard let newKey = minted, newKey != key else {
-                // The re-login's own key came back and is the one the server
-                // just refused: held, never a second re-login (2026-11-12).
-                if minted == key { DispatcharrLoginGate.shared.noteKeyRefused(serverID: target.id) }
+                userAgent: userAgent,
+                refusedKey: key
+            ), newKey != key else {
                 // A password playlist whose re-login was itself refused
                 // gets the same hold, or the re-login would run again every
                 // minute (DispatcharrLoginGate).

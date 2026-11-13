@@ -906,7 +906,8 @@ extension DispatcharrAPI {
         serverID: UUID,
         baseURL: String,
         username: String,
-        userAgent: String
+        userAgent: String,
+        refusedKey: String? = nil
     ) async -> String? {
         guard !username.isEmpty else {
             debugLog("📺 silentRebootstrapApiKey: SKIP empty username (server=\(serverID.uuidString.prefix(8)))")
@@ -929,7 +930,7 @@ extension DispatcharrAPI {
         let atStart = await MainActor.run { ProfileManager.shared.activeIdentity(serverID.uuidString) }
         // One attempt per server per 60 s, shared by concurrent callers;
         // 429 and rejected logins park (DispatcharrLoginGate).
-        return await DispatcharrLoginGate.shared.silentRelogin(serverID: serverID) {
+        return await DispatcharrLoginGate.shared.silentRelogin(serverID: serverID, refusedKey: refusedKey) {
         do {
             let pair = try await DispatcharrLoginShare.shared.login(
                 serverID: serverID,
@@ -952,9 +953,10 @@ extension DispatcharrAPI {
                 return .failed
             }
             // One request checks the key before anything stores or sends it.
-            let refused = await DispatcharrKeyBroker.mintedKeyRefused(user.apiKey, serverID: serverID,
-                                                                       baseURL: baseURL, userAgent: userAgent)
-            if case .keyRefused = DispatcharrRelogin.outcome(minted: user.apiKey, proofRefused: refused) {
+            let proof = await DispatcharrKeyBroker.mintedKeyProof(user.apiKey, serverID: serverID,
+                                                                  baseURL: baseURL, userAgent: userAgent)
+            let outcome = DispatcharrRelogin.outcome(minted: user.apiKey, proof: proof)
+            if case .keyRefused = outcome {
                 debugLog("📺 silentRebootstrapApiKey: signed in, but the server refused the key it issued "
                          + "(server=\(serverID.uuidString.prefix(8))); not stored")
                 return .keyRefused
@@ -983,7 +985,7 @@ extension DispatcharrAPI {
             }
             debugLog("📺 silentRebootstrapApiKey: SUCCESS, fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
             DispatcharrLoginGate.shared.clearNoKey(serverID: serverID)
-            return .key(user.apiKey)
+            return outcome
         } catch DispatcharrDirectConnectError.noAPIKeyForAccount {
             // Signed in, but the account has no API key: hold the dead key
             // (holdIfProven) instead of probing and re-signing in forever.
@@ -1119,17 +1121,6 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// The key [who]'s re-login issued was refused by the server: hold it, and
-    /// no re-login or caller hands it out again for the window (ReloginBook).
-    func noteKeyRefused(serverID: UUID) { noteKeyRefused(identity: .playlist(serverID.uuidString)) }
-
-    func noteKeyRefused(identity who: DispatcharrIdentity) {
-        lock.lock()
-        book.noteKeyRefused(who, now: Self.now())
-        lock.unlock()
-        debugLog("[AUTH] re-login for \(who) signed in, but the server refused the key it issued; the key is held")
-    }
-
     func foundRefusedKey(serverID: UUID) -> Bool { foundRefusedKey(identity: .playlist(serverID.uuidString)) }
 
     func foundRefusedKey(identity who: DispatcharrIdentity) -> Bool {
@@ -1164,9 +1155,15 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         case mine(Task<String?, Never>)
     }
 
-    private func claim(_ who: DispatcharrIdentity, _ attempt: @escaping @Sendable () async -> Outcome) -> Claim {
+    private func claim(_ who: DispatcharrIdentity, refusedKey: String?,
+                       _ attempt: @escaping @Sendable () async -> Outcome) -> Claim {
         lock.lock(); defer { lock.unlock() }
-        switch book.claim(who, now: Self.now()) {
+        let now = Self.now()
+        if book.isRotation(who, refusedKey: refusedKey, now: now) {
+            debugLog("[AUTH] re-login for \(who): the key it issued passed its check and is refused now "
+                     + "(rotated on the server); signing in again")
+        }
+        switch book.claim(who, now: now, refusedKey: refusedKey) {
         case .wait:
             if let task = tasks[who.key] { return .wait(task) }
             return .shared(nil, 0)
@@ -1196,14 +1193,19 @@ final class DispatcharrLoginGate: @unchecked Sendable {
         return key
     }
 
-    func silentRelogin(serverID: UUID, attempt: @escaping @Sendable () async -> Outcome) async -> String? {
-        await silentRelogin(identity: .playlist(serverID.uuidString), attempt: attempt)
+    func silentRelogin(serverID: UUID, refusedKey: String? = nil,
+                       attempt: @escaping @Sendable () async -> Outcome) async -> String? {
+        await silentRelogin(identity: .playlist(serverID.uuidString), refusedKey: refusedKey, attempt: attempt)
     }
 
     /// One re-login per identity at a time and per window; the result is shared
-    /// with that identity's concurrent callers only.
-    func silentRelogin(identity who: DispatcharrIdentity, attempt: @escaping @Sendable () async -> Outcome) async -> String? {
-        switch claim(who, attempt) {
+    /// with that identity's concurrent callers only. [refusedKey] is the key the
+    /// server just refused: a finished result is shared only when its key
+    /// differs, and a key that passed its check and is refused later runs a
+    /// fresh re-login (ReloginBook.claim).
+    func silentRelogin(identity who: DispatcharrIdentity, refusedKey: String? = nil,
+                       attempt: @escaping @Sendable () async -> Outcome) async -> String? {
+        switch claim(who, refusedKey: refusedKey, attempt) {
         case .wait(let task):
             debugLog("[AUTH] re-login for \(who) in flight; waiting for its result")
             return await task.value

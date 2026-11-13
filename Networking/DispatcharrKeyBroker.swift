@@ -48,19 +48,19 @@ enum DispatcharrKeyBroker {
     /// on a 401 path only, never on a steady-state request.
     /// A key a silent re-login just read from the account: EXACTLY one request
     /// (/api/core/version/, past the rejected-key gate, in the playlist's header
-    /// shape) decides whether it may be stored and sent. False only when the
-    /// server refused it; no answer counts as usable (DispatcharrRelogin.outcome).
-    static func mintedKeyRefused(_ key: String, serverID: UUID, baseURL: String, userAgent: String) async -> Bool {
+    /// shape) decides whether it may be stored and sent. Refused: never stored or
+    /// sent; no answer: used, but unproven (DispatcharrRelogin.outcome).
+    static func mintedKeyProof(_ key: String, serverID: UUID, baseURL: String, userAgent: String) async -> DispatcharrRelogin.Proof {
         let mode = await MainActor.run { headerMode(serverID: serverID) } ?? .xapikey
         let probe = await DispatcharrAPI(baseURL: baseURL, auth: .apiKey(key), userAgent: userAgent, authMode: mode).probeApiKeyOnce()
         switch probe {
         case .rejected:
-            return true
+            return .refused
         case .accepted(let m):
             DispatcharrRequestGate.shared.noteKeyAccepted(key, mode: m.rawValue)
-            return false
+            return .accepted
         case .unknown:
-            return false
+            return .unknown
         }
     }
 
@@ -239,10 +239,9 @@ enum DispatcharrKeyBroker {
            let target = await MainActor.run(body: { reloginTarget(key: key, serverID: info.id, savedUsername: nil) }) {
             reloginTried = true
             newKey = await DispatcharrAPI.silentRebootstrapApiKey(serverID: target.id, baseURL: info.baseURL,
-                                                                  username: target.username, userAgent: info.userAgent)
+                                                                  username: target.username, userAgent: info.userAgent,
+                                                                  refusedKey: key)
             if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
-            // The re-login's own key came back and is the one just refused: hold it.
-            if newKey == key { DispatcharrLoginGate.shared.noteKeyRefused(serverID: target.id) }
         }
         let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
         if outcome == .held { _ = await holdIfProven(key: key, serverID: info.id, baseURL: info.baseURL) }
@@ -439,7 +438,8 @@ final class DispatcharrKeyRecheck {
             }
         } else if let info, info.hasPassword {
             let fresh = await DispatcharrAPI.silentRebootstrapApiKey(serverID: info.id, baseURL: info.baseURL,
-                                                                     username: info.username, userAgent: info.userAgent)
+                                                                     username: info.username, userAgent: info.userAgent,
+                                                                     refusedKey: r.key)
             if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }
             // The re-login's key was checked before it came back (one request);
             // a key the server refused comes back as none and the hold stays.
