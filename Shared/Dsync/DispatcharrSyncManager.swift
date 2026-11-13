@@ -1409,7 +1409,8 @@ final class DispatcharrSyncManager: ObservableObject {
                                            consumedBefore: localAt > 0 || state.contains(k("at", s, key)), data: env.data,
                                            localAt: localAt, localDevice: state.string(k("dev", s, key)) ?? "",
                                            remoteAt: env.updatedAt, remoteDevice: env.deviceId,
-                                           dirty: isDirty(s, key), dirtyAt: dirtyAt(s, key), forceApply: s.forceApply)
+                                           dirty: isDirty(s, key), dirtyAt: dirtyAt(s, key), forceApply: s.forceApply,
+                                           consumedData: key == .tmdbKey ? rawOf(s, key)?["data"]?.asObject : nil)
         switch action {
         case .forcedSkip:
             saveAfter(s, key, raw: raw, at: env.updatedAt, dev: env.deviceId, data: env.data)
@@ -1632,7 +1633,16 @@ final class DispatcharrSyncManager: ObservableObject {
             refreshMessage(s)
             return
         }
-        let sub = DsyncV2.encodeCategory(raw, deviceId: deviceId, updatedAt: now, data: data)
+        // The TMDB key goes up stamped with its own edit time, not the push time
+        // (owner 2026-11-13): an older edit sent late must not beat a newer one.
+        let editedAt = key == .tmdbKey ? DsyncLocal.tmdbKeyEditedAt() : 0
+        let stamp = DsyncPushRules.categoryStamp(key, pushedAt: now, tmdbKeyEditedAt: editedAt)
+        if key == .tmdbKey {
+            // Never the key, only whether it is set and which time it carries.
+            let set = !(DsyncPayloads.decodeTMDBKey(data) ?? "").isEmpty
+            debugLog("[DSYNC] tmdbKey: sending the \(set ? "key" : "clear") stamped \(editedAt > 0 ? "with its edit time" : "with the push time (edit time unknown)") at=\(stamp)")
+        }
+        let sub = DsyncV2.encodeCategory(raw, deviceId: deviceId, updatedAt: stamp, data: data)
         // No byte guard before the PUT: send the full value; trim only on a 413.
         // While the roster is paused, `profiles` goes out exactly as the server has it, or not at all.
         let previous = DsyncRosterPause.base(bucketRaw(s, b), serverHasBucket: !s.noServerBucket.contains(b), paused: rosterPaused)
@@ -1698,6 +1708,7 @@ final class DispatcharrSyncManager: ObservableObject {
         if force { return .ok }
         let at = state.long(k("at", s, key))
         let dev = state.string(k("dev", s, key)) ?? ""
+        if key == .tmdbKey { return await tmdbBeforePut(s, key, env, at: at, dev: dev) }
         if DsyncPullRules.sameAsConsumed(remoteAt: env.updatedAt, remoteDevice: env.deviceId, remoteData: env.data,
                                          localAt: at, localDevice: dev, localData: rawOf(s, key)?["data"]?.asObject) { return .ok }
         if key == .profiles {
@@ -1730,6 +1741,26 @@ final class DispatcharrSyncManager: ObservableObject {
             debugLog("[DSYNC] \(key.suffix): server copy newer than the local change; applied")
             return .remoteTook
         }
+    }
+
+    /// tmdbKey before a PUT (schema section 4.13): newest edit wins, by the
+    /// key's own edit time. A server copy this device has not consumed is
+    /// weighed against this device's edit whatever its stamp, so an older
+    /// edit is never sent over a newer one (the dirty time is when the send
+    /// was queued, not when the key was edited).
+    private func tmdbBeforePut(_ s: DsyncSession, _ key: DsyncKey, _ env: DsyncEnvelope, at: Int64, dev: String) async -> Refresh {
+        if DsyncPullRules.tmdbSameAsConsumed(remoteAt: env.updatedAt, remoteDevice: env.deviceId, remoteData: env.data,
+                                             localAt: at, localDevice: dev, localData: rawOf(s, key)?["data"]?.asObject) { return .ok }
+        // A malformed server copy is replaced by this device's.
+        guard let remote = DsyncPayloads.decodeTMDBKey(env.data) else { return .ok }
+        if DsyncPushRules.tmdbSendsLocal(local: DsyncLocal.tmdbKey(), remote: remote,
+                                         localEditedAt: DsyncLocal.tmdbKeyEditedAt(), remoteAt: env.updatedAt) { return .ok }
+        guard await apply(s, key, env) == .applied else { return .unreachable }
+        s.suppressUntil[key] = Self.nowMs() + DsyncTiming.SUPPRESS_MS
+        saveAfter(s, key, raw: env.raw, at: env.updatedAt, dev: env.deviceId, data: env.data)
+        setDirty(s, key, false)
+        debugLog("[DSYNC] tmdbKey: the server's edit is newer than this device's; applied it instead of sending")
+        return .remoteTook
     }
 
     // MARK: - Id cache readiness (DsyncReadiness)

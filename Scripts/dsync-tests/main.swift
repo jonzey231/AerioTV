@@ -1171,6 +1171,144 @@ do {
     check(DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "", localEditedAt: 0, remoteAt: 400), "unknown time: a key beats a clear")
 }
 
+// MARK: - tmdbKey carries its edit time, not the push time (owner 2026-11-13)
+
+do {
+    // Push stamp: the key's own edit time; the push time only while it is unknown; other categories unchanged.
+    eq(DsyncPushRules.categoryStamp(.tmdbKey, pushedAt: 900, tmdbKeyEditedAt: 100), 100, "tmdbKey goes up with its edit time")
+    eq(DsyncPushRules.categoryStamp(.tmdbKey, pushedAt: 900, tmdbKeyEditedAt: 0), 900, "unknown edit time: the push time")
+    eq(DsyncPushRules.categoryStamp(.favorites, pushedAt: 900, tmdbKeyEditedAt: 100), 900, "other categories keep the push time")
+    eq(DsyncPushRules.categoryStamp(.settings, pushedAt: 900, tmdbKeyEditedAt: 0), 900, "other categories keep the push time (no edit time)")
+
+    // Pull: a copy other than the one consumed is weighed by edit time, whatever its stamp.
+    let kB = obj(#"{"apiKey":"key-b"}"#), kC = obj(#"{"apiKey":"key-c"}"#)
+    func t(remoteAt: Int64, remoteDevice: String = "B", data: DsyncObject = kB, localAt: Int64 = 500, localDevice: String = "A",
+           consumed: DsyncObject? = kC, dirty: Bool = false, dirtyAt: Int64 = 0) -> DsyncPullAction {
+        DsyncPullRules.decide(.tmdbKey, forced: false, consumedBefore: localAt > 0, data: data,
+                              localAt: localAt, localDevice: localDevice, remoteAt: remoteAt, remoteDevice: remoteDevice,
+                              dirty: dirty, dirtyAt: dirtyAt, forceApply: false, consumedData: consumed)
+    }
+    eq(t(remoteAt: 300), .apply, "an older stamp than the copy last seen is still weighed (not skipped as not newer)")
+    eq(t(remoteAt: 700), .apply, "a newer stamp is weighed")
+    eq(t(remoteAt: 300, dirty: true, dirtyAt: 900), .apply, "an unsent change's queue time does not hold the copy back")
+    eq(t(remoteAt: 500, remoteDevice: "A", data: kC), .notNewer, "the very copy consumed is skipped")
+    eq(t(remoteAt: 500, remoteDevice: "A", data: kC, consumed: obj(#"{}"#)), .notNewer, "consumed copy whose key no longer restores: stamp and device decide")
+    eq(t(remoteAt: 500, remoteDevice: "A", data: kB, consumed: kC), .apply, "same stamp and device, another key: weighed")
+    eq(t(remoteAt: 300, localAt: 0, localDevice: "", consumed: nil), .apply, "first read applies")
+    eq(d500(), .notNewer, "favorites still skip a stamp that is not newer")
+    func d500() -> DsyncPullAction {
+        DsyncPullRules.decide(.favorites, forced: false, consumedBefore: true, data: obj(#"{"ids":[1]}"#),
+                              localAt: 500, localDevice: "A", remoteAt: 300, remoteDevice: "B",
+                              dirty: false, dirtyAt: 0, forceApply: false, consumedData: kC)
+    }
+    check(DsyncPullRules.tmdbSameAsConsumed(remoteAt: 5, remoteDevice: "A", remoteData: kB, localAt: 5, localDevice: "A", localData: kB), "same copy")
+    check(!DsyncPullRules.tmdbSameAsConsumed(remoteAt: 4, remoteDevice: "A", remoteData: kB, localAt: 5, localDevice: "A", localData: kB), "older stamp is another copy")
+    check(!DsyncPullRules.tmdbSameAsConsumed(remoteAt: 5, remoteDevice: "B", remoteData: kB, localAt: 5, localDevice: "A", localData: kB), "another device is another copy")
+
+    // Before a PUT: send this device's key unless the server's edit is newer.
+    check(DsyncPushRules.tmdbSendsLocal(local: "k", remote: "k", localEditedAt: 1, remoteAt: 9), "same key: send (nothing to decide)")
+    check(DsyncPushRules.tmdbSendsLocal(local: "a", remote: "b", localEditedAt: 300, remoteAt: 200), "local edit newer: send")
+    check(!DsyncPushRules.tmdbSendsLocal(local: "a", remote: "b", localEditedAt: 100, remoteAt: 200), "server edit newer: take it, never overwrite it")
+    check(!DsyncPushRules.tmdbSendsLocal(local: "a", remote: "b", localEditedAt: 0, remoteAt: 200), "unknown local time, two keys: the server's wins")
+    check(DsyncPushRules.tmdbSendsLocal(local: "a", remote: "", localEditedAt: 0, remoteAt: 200), "unknown local time: a key beats a clear")
+
+    // Two devices and the server, run through the rules above as the manager runs them:
+    // push = refreshBeforePut (same copy, or tmdbSendsLocal, else take) then the stamped PUT;
+    // pull = decide, then apply (tmdbKeepsLocal: keep and resend, or take with the server's time).
+    struct Copy: Equatable { var key: String; var at: Int64; var dev: String }
+    final class Dev {
+        let id: String; var key: String; var editedAt: Int64; var consumed: Copy?
+        init(_ id: String, _ key: String, _ at: Int64) { self.id = id; self.key = key; self.editedAt = at }
+    }
+    final class World {
+        var server: Copy?
+        let pushTimeStamp: Bool
+        init(pushTimeStamp: Bool) { self.pushTimeStamp = pushTimeStamp }
+        func data(_ k: String) -> DsyncObject { DsyncPayloads.encodeTMDBKey(nil, k) }
+        func push(_ d: Dev, now: Int64) {
+            if let s = server {
+                let same = d.consumed.map { DsyncPullRules.tmdbSameAsConsumed(remoteAt: s.at, remoteDevice: s.dev, remoteData: data(s.key),
+                                                                              localAt: $0.at, localDevice: $0.dev, localData: data($0.key)) } ?? false
+                if !same && !DsyncPushRules.tmdbSendsLocal(local: d.key, remote: s.key, localEditedAt: d.editedAt, remoteAt: s.at) {
+                    d.key = s.key; d.editedAt = s.at; d.consumed = s
+                    return
+                }
+            }
+            let at = pushTimeStamp ? now : DsyncPushRules.categoryStamp(.tmdbKey, pushedAt: now, tmdbKeyEditedAt: d.editedAt)
+            server = Copy(key: d.key, at: at, dev: d.id)
+            d.consumed = server
+        }
+        func pull(_ d: Dev, now: Int64) {
+            guard let s = server else { return }
+            let action = DsyncPullRules.decide(.tmdbKey, forced: false, consumedBefore: d.consumed != nil, data: data(s.key),
+                                               localAt: d.consumed?.at ?? 0, localDevice: d.consumed?.dev ?? "",
+                                               remoteAt: s.at, remoteDevice: s.dev, dirty: false, dirtyAt: 0, forceApply: false,
+                                               consumedData: d.consumed.map { data($0.key) })
+            guard action == .apply else { return }
+            d.consumed = s
+            if DsyncPayloads.tmdbKeepsLocal(local: d.key, remote: s.key, localEditedAt: d.editedAt, remoteAt: s.at) {
+                push(d, now: now)   // keep and resend
+            } else if d.key != s.key {
+                d.key = s.key; d.editedAt = s.at   // DsyncLocal.setTMDBKey(remote, at: server time)
+            }
+        }
+    }
+    // The race: A's edit (100) is older, B's (200) newer; A reaches the server first, at 300; B at 400.
+    func race(pushTimeStamp: Bool) -> (World, Dev, Dev) {
+        let w = World(pushTimeStamp: pushTimeStamp)
+        let a = Dev("A", "key-from-a", 100), b = Dev("B", "key-from-b", 200)
+        w.push(a, now: 300)
+        w.push(b, now: 400)
+        w.pull(a, now: 500); w.pull(b, now: 500); w.pull(a, now: 600)
+        return (w, a, b)
+    }
+    let (w1, a1, b1) = race(pushTimeStamp: false)
+    eq(w1.server?.key, "key-from-b", "race: the server ends with the newest edit")
+    eq(w1.server?.at, 200, "race: stamped with that edit's time, not a push time")
+    eq(a1.key, "key-from-b", "race: the older editor converges on the newest edit")
+    eq(b1.key, "key-from-b", "race: the newer editor keeps its edit")
+    eq(a1.editedAt, 200, "race: the applied key keeps the server's time")
+    // The same race stamped with the push time (the old behavior) lets the older edit win: the test discriminates.
+    let (_, _, b0) = race(pushTimeStamp: true)
+    eq(b0.key, "key-from-a", "push-time stamps: the older edit wins (the bug this fixes)")
+
+    // Reverse order: the newer edit reaches the server first; the older one is never sent.
+    let w2 = World(pushTimeStamp: false)
+    let a2 = Dev("A", "key-from-a", 100), b2 = Dev("B", "key-from-b", 200)
+    w2.push(b2, now: 300); w2.push(a2, now: 400)
+    eq(w2.server, Copy(key: "key-from-b", at: 200, dev: "B"), "newer edit first: the later push of an older edit takes it instead")
+    eq(a2.key, "key-from-b", "and that device converges")
+
+    // A PUT race (both checked the server before either PUT): the later PUT holds the OLDER stamp.
+    // The device whose newer edit was overwritten sees an older-stamped copy, weighs it, resends;
+    // a third device that saw the newer copy (and applied it, keeping its time) resends it with that time.
+    let w3 = World(pushTimeStamp: false)
+    let a3 = Dev("A", "key-from-a", 300), b3 = Dev("B", "key-from-b", 200), c3 = Dev("C", "", 0)
+    w3.server = Copy(key: "key-zero", at: 50, dev: "Z")
+    a3.consumed = w3.server; b3.consumed = w3.server; c3.consumed = w3.server
+    w3.push(a3, now: 400)                        // A: K_A at 300
+    w3.pull(c3, now: 410)                        // C applies K_A, keeping its time 300
+    eq(c3.key, "key-from-a", "third device applied the newer edit")
+    eq(c3.editedAt, 300, "with the server's time")
+    w3.server = Copy(key: "key-from-b", at: 200, dev: "B"); b3.consumed = w3.server   // B's PUT lands after A's
+    w3.pull(c3, now: 420)                        // C: older stamp than it saw (200 < 300), weighed, kept, resent
+    eq(w3.server, Copy(key: "key-from-a", at: 300, dev: "C"), "re-sent with the original edit time, not the push time")
+    w3.pull(b3, now: 430); w3.pull(a3, now: 430)
+    eq(b3.key, "key-from-a", "PUT race: B converges on the newest edit")
+    eq(a3.key, "key-from-a", "PUT race: A keeps the newest edit")
+
+    // A receiver applies an older-stamped key: its own edit is older than the copy, though it saw a newer stamp before.
+    let w4 = World(pushTimeStamp: false)
+    let r = Dev("R", "same-key", 100)
+    w4.server = Copy(key: "same-key", at: 500, dev: "X")
+    w4.pull(r, now: 510)                         // the same key: consumed, nothing applied, its own time stays 100
+    eq(r.consumed?.at, 500, "receiver saw a copy stamped 500")
+    w4.server = Copy(key: "key-from-y", at: 300, dev: "Y")
+    w4.pull(r, now: 520)
+    eq(r.key, "key-from-y", "a copy stamped 300 (older than 500 seen before) is applied: newer than this device's own edit (100)")
+    eq(r.editedAt, 300, "and keeps that copy's time")
+}
+
 // MARK: - Saved server copies never hold the TMDB key (hardening 2026-11-13)
 
 do {

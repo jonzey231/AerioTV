@@ -69,11 +69,22 @@ enum DsyncPullRules {
         hadFirstRead && !anyBucketListed
     }
 
+    /// [consumedData] is the data of the copy last consumed; only the tmdbKey
+    /// decision reads it.
     static func decide(_ key: DsyncKey, forced: Bool, consumedBefore: Bool, data: DsyncObject,
                        localAt: Int64, localDevice: String, remoteAt: Int64, remoteDevice: String,
-                       dirty: Bool, dirtyAt: Int64, forceApply: Bool) -> DsyncPullAction {
+                       dirty: Bool, dirtyAt: Int64, forceApply: Bool, consumedData: DsyncObject? = nil) -> DsyncPullAction {
         if forced { return .forcedSkip }
         if DsyncCoexistence.seedFromLocal(key, consumedBefore: consumedBefore, data: data) { return .seedFromLocal }
+        // tmdbKey (schema section 4.13): every copy other than the one last
+        // consumed goes to apply, which weighs its stamp (the key's edit
+        // time) against this device's own edit time (tmdbKeepsLocal). Never
+        // skipped as not newer than a stamp seen before, and never held back
+        // by an unsent change's queue time: apply keeps and resends a newer edit.
+        if key == .tmdbKey {
+            return tmdbSameAsConsumed(remoteAt: remoteAt, remoteDevice: remoteDevice, remoteData: data,
+                                      localAt: localAt, localDevice: localDevice, localData: consumedData) ? .notNewer : .apply
+        }
         let wins = DsyncEnvelopeCodec.remoteWins(localAt: localAt, localDevice: localDevice,
                                                  remoteAt: remoteAt, remoteDevice: remoteDevice)
         let decision: DsyncGate.DirtyPull = key == .profiles
@@ -101,6 +112,20 @@ enum DsyncPullRules {
                                localAt: Int64, localDevice: String, localData: DsyncObject?) -> Bool {
         remoteAt == localAt && remoteDevice == localDevice && localData == remoteData
     }
+
+    /// tmdbKey: the server copy is the very one this device last consumed
+    /// (same stamp, same device, and the same key while the saved copy still
+    /// holds it). The stamp is the key's edit time, so a copy sent later can
+    /// carry an older stamp than one consumed before; that copy is not the
+    /// consumed one and is weighed by edit time, never skipped. A saved copy
+    /// restores its key only while it matches this device's key (a local edit
+    /// or an iCloud Keychain change since), so the key is compared only then.
+    static func tmdbSameAsConsumed(remoteAt: Int64, remoteDevice: String, remoteData: DsyncObject,
+                                   localAt: Int64, localDevice: String, localData: DsyncObject?) -> Bool {
+        guard remoteAt == localAt, remoteDevice == localDevice else { return false }
+        guard let held = localData, held["apiKey"] != nil else { return true }
+        return DsyncPayloads.decodeTMDBKey(held) == DsyncPayloads.decodeTMDBKey(remoteData)
+    }
 }
 
 enum DsyncPushRules {
@@ -111,6 +136,25 @@ enum DsyncPushRules {
     static func unchanged(built: DsyncObject, serverData: DsyncObject?, lastData: DsyncObject?, present: Bool) -> Bool {
         guard present, let held = serverData ?? lastData else { return false }
         return DsyncJSONEncoder.encode(built) == DsyncJSONEncoder.encode(held)
+    }
+
+    /// A pushed category's `updatedAt` (Unix seconds). The tmdbKey category
+    /// carries the key's own edit time (schema section 4.13: when it was set
+    /// or cleared on this device, or the stamp of the server copy it was
+    /// applied from), so an older edit sent late never outranks a newer edit
+    /// made on another device. The push time stands in only while that edit
+    /// time is unknown (0). Every other category is stamped with the push time.
+    static func categoryStamp(_ key: DsyncKey, pushedAt: Int64, tmdbKeyEditedAt: Int64) -> Int64 {
+        key == .tmdbKey && tmdbKeyEditedAt > 0 ? tmdbKeyEditedAt : pushedAt
+    }
+
+    /// tmdbKey, just before a PUT, when the server copy is not the one this
+    /// device last consumed: true sends this device's key; false takes the
+    /// server's (its edit is newer). Decided by edit time like a pull
+    /// (tmdbKeepsLocal), never by the time the change was queued.
+    static func tmdbSendsLocal(local: String, remote: String, localEditedAt: Int64, remoteAt: Int64) -> Bool {
+        local == remote || DsyncPayloads.tmdbKeepsLocal(local: local, remote: remote,
+                                                         localEditedAt: localEditedAt, remoteAt: remoteAt)
     }
 
     /// The "status=unchanged" line is logged for a forced key and for a dirty shared key.
