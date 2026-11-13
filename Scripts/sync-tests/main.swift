@@ -380,5 +380,19 @@ check(adopt("cloud", 100, "dead", 900, localRejected: true), "a rejected local k
 check(!adopt("cloud", 0, "dead", 0, rejected: true, localRejected: true), "both rejected: nothing written")
 check(!adopt("", 900, "dead", 0, localRejected: true), "a rejected local key never yields to an empty one")
 
+// MARK: - One active playlist (owner 2026-11-12)
+do {
+    func e(_ id: String, _ name: String, _ t: Double, active: Bool = false) -> ActivePlaylistRule.Entry {
+        ActivePlaylistRule.Entry(id: id, name: name, createdAt: Date(timeIntervalSince1970: t), isActive: active)
+    }
+    let list = [e("C", "dispatcharr.molinete.app", 30), e("A", "Test1 Playlist", 10), e("B", "Backup 10", 20), e("D", "Backup 9", 40)]
+    eq(ActivePlaylistRule.heal(list), "D", "none active: the first in the Settings list (numbers by value: Backup 9 before Backup 10)")
+    eq(ActivePlaylistRule.heal([e("C", "dispatcharr.molinete.app", 30)]), "C", "the only remaining playlist becomes active (the iPhone 21:49 case)")
+    eq(ActivePlaylistRule.heal(list + [e("E", "Zed", 1, active: true)]), nil, "one already active: nothing changes")
+    eq(ActivePlaylistRule.heal([]), nil, "no playlists: nothing to activate")
+    eq(ActivePlaylistRule.heal([e("Y", "Home", 20), e("X", "Home", 10)]), "X", "same name: the older one")
+    eq(ActivePlaylistRule.heal([e("b", "Home", 10), e("a", "Home", 10)]), "a", "same name and age: by id")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

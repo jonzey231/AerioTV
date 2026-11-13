@@ -1505,6 +1505,10 @@ struct RootView: View {
             .modifier(DispatcharrKeyRejectedPromptHost())
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
+                // Launch with playlists but none active: the first in the list.
+                if ActivePlaylistHeal.ensure(Array(servers), modelContext: modelContext, reason: "launch") != nil {
+                    SyncManager.shared.pushServers(servers.filter { !$0.isGone })
+                }
 
                 // Kick off libmpv one-time process-wide init on a
                 // background queue. The 2 s `mpv_initialize` cost
@@ -2461,6 +2465,11 @@ struct RootView: View {
         }
         if !pendingCredentials.isEmpty {
             debugLog("🔑 All \(pendingCredentials.count) credentials saved (local + iCloud)")
+        }
+        // A merged state with playlists but none active: the first in the list.
+        if ActivePlaylistHeal.ensure((try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? [],
+                                     modelContext: modelContext, reason: "iCloud merge") != nil {
+            SyncManager.shared.pushServers(((try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []).filter { !$0.isGone })
         }
         // Launch: the iCloud credential merge ran; API calls held for it go.
         if CredentialMergeBarrier.shared.isArmed {

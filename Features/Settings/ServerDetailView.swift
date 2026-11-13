@@ -234,6 +234,9 @@ func performServerCascadeDelete(_ server: ServerConnection,
     // the id STRING, so they are purged afterwards off the main thread.
     modelContext.delete(server)
     try? modelContext.save()
+    // The active playlist was deleted and others remain: the first in the
+    // Settings list becomes active at once (pushed to iCloud just below).
+    ActivePlaylistHeal.ensure(remaining, modelContext: modelContext, reason: "delete")
     // Issue #25: wipe in-memory VOD so On Demand stops
     // showing the removed server's movies / series. Live
     // already clears (ChannelStore.refresh re-runs on the
@@ -395,6 +398,29 @@ nonisolated private func purgeOrphanRows(forDeletedServerID sid: String,
     let ms = Int(Date().timeIntervalSince(started) * 1000)
     debugLog("[PLAYLIST] delete: orphan-row purge off main finished in \(ms) ms for server \(sid) "
              + "(main=\(Thread.isMainThread))")
+}
+
+/// One active playlist (owner 2026-11-12): when playlists exist and none is
+/// active (the active one was deleted, an iCloud merge brought a state with
+/// none, or a launch found none), the first one in the Settings list becomes
+/// active (ActivePlaylistRule). Logged. Before this, Settings showed no active
+/// circle while Live TV fell back to the first row, and every feature that
+/// reads the active playlist (Set up another device among them) was off.
+@MainActor
+enum ActivePlaylistHeal {
+    @discardableResult
+    static func ensure(_ servers: [ServerConnection], modelContext: ModelContext, reason: String) -> ServerConnection? {
+        let live = servers.filter { !$0.isGone }
+        let entries = live.map {
+            ActivePlaylistRule.Entry(id: $0.id.uuidString, name: $0.name, createdAt: $0.createdAt, isActive: $0.isActive)
+        }
+        guard let pick = ActivePlaylistRule.heal(entries),
+              let server = live.first(where: { $0.id.uuidString == pick }) else { return nil }
+        server.isActive = true
+        try? modelContext.save()
+        debugLog("[PLAYLIST] self-heal (\(reason)): no playlist was active; \(server.name) is active now (first in the Settings list)")
+        return server
+    }
 }
 
 /// Activate a playlist: stop whatever the old source is still playing

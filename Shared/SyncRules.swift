@@ -750,3 +750,36 @@ enum CredentialSyncRule {
         return replace || legacyRemoteNewer
     }
 }
+
+// MARK: - One active playlist (owner 2026-11-12)
+
+/// When playlists exist but none is active (the active one was deleted, an
+/// iCloud merge brought a state with none, or a launch found none), the
+/// first one in the Settings list becomes active: name order (Finder-style,
+/// numbers by value), then the older one, then the id. Android uses its own
+/// list order the same way.
+enum ActivePlaylistRule {
+    struct Entry: Equatable, Sendable {
+        let id: String
+        let name: String
+        let createdAt: Date
+        let isActive: Bool
+    }
+
+    /// The Settings list order.
+    static func listOrder(_ a: Entry, _ b: Entry) -> Bool {
+        switch a.name.localizedStandardCompare(b.name) {
+        case .orderedAscending: return true
+        case .orderedDescending: return false
+        case .orderedSame:
+            if a.createdAt != b.createdAt { return a.createdAt < b.createdAt }
+            return a.id < b.id
+        }
+    }
+
+    /// The playlist to make active, or nil when one already is (or none exists).
+    static func heal(_ entries: [Entry]) -> String? {
+        guard !entries.isEmpty, !entries.contains(where: \.isActive) else { return nil }
+        return entries.sorted(by: listOrder).first?.id
+    }
+}
