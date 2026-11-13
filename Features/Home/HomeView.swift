@@ -7883,6 +7883,12 @@ struct MainTabView: View {
         walk(window)
         guard parked else { return }
         debugLog("[TABBAR-HEAL] bar parked off-screen at settings root; remounting TabView (token \(tvBarHealToken) -> \(tvBarHealToken + 1))")
+        // The remount rebuilds Settings: its rail selection and focus come
+        // back where the user had them, as for a tab insert. Without this the
+        // rebuilt rail started on Playlists (Apple TV log 2026-11-13
+        // 10:49:03: a rail move to Developer 2.3 s after a sub-page pop, the
+        // heal's second check, and focus jumped to Playlists).
+        if selectedTab == .settings { settingsNav.armRestore(mountOnly: true) }
         tvBarHealToken += 1
     }
     #endif

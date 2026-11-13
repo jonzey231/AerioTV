@@ -133,6 +133,7 @@ struct TVSettingsSplitView<Detail: View>: View {
             // Belt-and-braces: a focused rail row always means "not detail",
             // even if the container-level focusedPane binding lags.
             if id != nil { focusInDetail = false }
+            TVSettingsNavState.shared.railFocus = id.flatMap { id in items.first(where: { $0.id == id })?.route }
             guard let id,
                   let item = items.first(where: { $0.id == id }) else { return }
             SettingsFocusLog.rowFocused(page: "Rail", row: item.label)

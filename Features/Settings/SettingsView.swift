@@ -1282,7 +1282,10 @@ struct SettingsView: View {
 
     /// Pane selection for the rail. Defaults to Appearance until onAppear
     /// promotes the first playlist (plan: the detail pane is never empty).
-    @State private var tvSelection: SettingsRoute = .category(.playlists)
+    /// A Settings view rebuilt by a TabView remount (tab insert, parked-bar
+    /// heal) starts on the page the user had, not Playlists, so the rail
+    /// never shows Playlists for a frame before the restore lands.
+    @State private var tvSelection: SettingsRoute = TVSettingsNavState.shared.pendingRestoreSelection ?? .category(.playlists)
     /// True while focus is in the detail pane; drives the Menu semantics.
     @State private var tvFocusInDetail = false
     /// Incremented to order the split view to put focus back on the rail.
@@ -1519,6 +1522,12 @@ final class TVSettingsNavState: ObservableObject {
     /// Focus is inside the rail or the detail pane (not on the tab bar).
     /// Written by TVSettingsSplitView from its pane focus.
     var focusInPanes = false
+    /// The rail row that has focus, nil when focus is off the rail. The
+    /// selection follows it 150 ms later (TVSettingsSplitView's debounce),
+    /// so a restore armed inside that window would put back the row before
+    /// (simulator trace 2026-11-13 11:20:07: focus on Player, restore armed
+    /// Live TV). Written by TVSettingsSplitView.
+    var railFocus: SettingsRoute?
     private var pending: Restore?
 
     func update(selection: SettingsRoute, isPushed: Bool, isPresentingFlow: Bool, focusInDetail: Bool) {
@@ -1534,7 +1543,7 @@ final class TVSettingsNavState: ObservableObject {
     /// Called by the latch right before it inserts a tab while Settings is
     /// selected. Dropped if no rebuild consumes it within 2 s.
     func armRestore(mountOnly: Bool = false) {
-        let restore = Restore(selection: selection, focusInPanes: focusInPanes,
+        let restore = Restore(selection: railFocus ?? selection, focusInPanes: focusInPanes,
                               focusInDetail: focusInDetail, mountOnly: mountOnly)
         pending = restore
         SettingsFocusLog.log("restore armed: \(restore.selection) panes=\(restore.focusInPanes) detail=\(restore.focusInDetail) mountOnly=\(mountOnly)")
@@ -1547,6 +1556,9 @@ final class TVSettingsNavState: ObservableObject {
             }
         }
     }
+
+    /// The page an armed restore will put back (read when a Settings view is built).
+    var pendingRestoreSelection: SettingsRoute? { pending?.selection }
 
     func takeRestore(onMount: Bool) -> Restore? {
         guard let restore = pending, onMount || !restore.mountOnly else { return nil }
