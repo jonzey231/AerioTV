@@ -1148,10 +1148,10 @@ final class Recording {
     var videoBitrateKbps: Double? = nil
     var audioCodec: String? = nil
     var audioChannels: String? = nil
-    /// The length an interrupted on-device capture actually holds (its
-    /// file's first write to its last; InterruptedCapture). Nil: the
-    /// scheduled window is the length shown. Default nil for the
-    /// lightweight migration of existing rows.
+    /// The length an on-device capture actually holds (its file's first
+    /// write to its last; InterruptedCapture), set when it is stopped,
+    /// ends, or is interrupted. Nil: the scheduled window is the length
+    /// shown. Default nil for the lightweight migration of existing rows.
     var capturedSeconds: Double? = nil
 
     init(channelID: String,
