@@ -191,7 +191,6 @@
 		814776352C25C6D44E86A0D2 /* SettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46392B1A3F9F7A8DAB800DC8 /* SettingsControls.swift */; };
 		81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		81A5CE2643A02F7A26B2B5D0 /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
-		84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
 		84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		853136D0782A7ABB2ED6D735 /* SettingsSubgroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EA416D347F722E14878998A /* SettingsSubgroup.swift */; };
 		85F0D65172F55DFA1D3DA20B /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
@@ -238,7 +237,6 @@
 		A1E5E7C0000000000000AA03 /* AppSettleGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E5E7C0000000000000AA01 /* AppSettleGate.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
-		A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		AA10CA7A0001000000000002 /* VODCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000001 /* VODCatalogModels.swift */; };
 		AA10CA7A0001000000000003 /* VODCatalogModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA10CA7A0001000000000001 /* VODCatalogModels.swift */; };
@@ -660,7 +658,6 @@
 		CC1061A736638618318B7F01 /* ServerSyncView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSyncView.swift; sourceTree = "<group>"; };
 		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Pods-Aerio_iOS-frameworks.sh"; sourceTree = "<group>"; };
-		D60A8F073408CAFD075C499C /* MyRecordingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MyRecordingsView.swift; sourceTree = "<group>"; };
 		D6A98EC87AA5F1A5CD0E5606 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = Info.plist; path = TopShelfExtension/Info.plist; sourceTree = "<group>"; };
 		D7F92D3C38870E339A9AF7A9 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVShowsView.swift; sourceTree = "<group>"; };
@@ -1117,7 +1114,6 @@
 				9F0F11E60000000000000030 /* ProfileFlows.swift */,
 				9F0F11E60000000000000020 /* ProfileUIKit.swift */,
 				54395452D0E3EB11C09E483A /* SyncPrompts.swift */,
-				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
 				C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */,
 				A1BB2C3D4E5F60789ABCDEF1 /* LiveTVSettingsView.swift */,
 				FBD7CF084FC76AA3221F862B /* PlayerSettingsView.swift */,
@@ -1746,7 +1742,6 @@
 				9F0F11E60000000000000021 /* ProfileUIKit.swift in Sources */,
 				5F1EDF33B4DC2BB4B6F3E47C /* SyncPrompts.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006001 /* LiveTVSettingsView.swift in Sources */,
-				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
 				DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
 				F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */,
@@ -1950,7 +1945,6 @@
 				9F0F11E60000000000000022 /* ProfileUIKit.swift in Sources */,
 				408C7EF33BAC0BD8DE7DE515 /* SyncPrompts.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006002 /* LiveTVSettingsView.swift in Sources */,
-				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
 				C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
 				B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */,

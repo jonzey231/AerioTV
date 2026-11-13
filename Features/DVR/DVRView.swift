@@ -2197,3 +2197,104 @@ private struct DVRPhoneRail: View {
 }
 #endif
 
+// MARK: - Segment Pill (shared iOS + tvOS)
+
+/// Pill-style tab selector used by both the DVR tab (Scheduled /
+/// Recording / Completed) and the On Demand tab (Movies / Series) so
+/// every top-level in-tab segment selector in the app looks the same.
+///
+/// Rendering goes through a custom `ButtonStyle` that reads
+/// `@Environment(\.isFocused)` directly, this is the only way on tvOS
+/// to get the pill's custom focus treatment (accent stroke + scale)
+/// WITHOUT the default system white halo and WITHOUT triggering the
+/// `_UIReplicantView as a subview of UIHostingController.view`
+/// warning that bare `.focusable() + .onTapGesture` produces.
+///
+/// Non-private so the On Demand tab and Movies' provider row reuse it.
+/// Moved here from MyRecordingsView.swift when that unused view was
+/// removed (2026-11-13).
+struct DVRSegmentPill: View {
+    let label: String
+    /// Optional tally shown as a dim trailing number instead of the old
+    /// "(0)" suffix, which pushed the label onto a second line at
+    /// iPhone width. Callers that pass no count are unchanged.
+    var count: Int? = nil
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(label)
+                if let count {
+                    Text("\(count)")
+                        .monospacedDigit()
+                        .opacity(0.65)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .buttonStyle(DVRSegmentPillButtonStyle(isSelected: isSelected))
+    }
+}
+
+// MARK: tvOS pill style, focusable, custom stroke, scale bump
+
+#if os(tvOS)
+private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .scaledFont(.system(size: 22, weight: .medium))
+            // Phase 3: focus no longer flips the label to bright white;
+            // the accent ring is the focus visual.
+            .foregroundColor(isSelected ? .appBackground : .textSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(focused ? Color.accentPrimary : Color.clear,
+                                  lineWidth: SettingsMetrics.tvFocusRingWidth)
+            )
+            .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+#endif
+
+// MARK: iOS pill style, plain tappable capsule, no focus state
+
+#if os(iOS)
+private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // Phase 3: one step down from 15 pt so a counted pill
+            // ("Completed 12") stays on one line at iPhone width.
+            .scaledFont(.system(size: 14, weight: .medium))
+            .foregroundColor(isSelected ? .appBackground : .textSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+#endif

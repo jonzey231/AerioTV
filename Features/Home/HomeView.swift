@@ -8004,7 +8004,7 @@ struct MainTabView: View {
             // (local or server-side). Animates in/out as recordings are added/removed.
             if showRecordingsTab {
                 // Media-center DVR tab on every platform (iPhone 2026-09-05);
-                // the old My Recordings list stays reachable from Settings.
+                // the old My Recordings list is gone (removed 2026-11-13, unused since 2026-09-19).
                 DVRView(isPlaying: $isPlaying, isSelected: selectedTab == .dvr)
                     .aerioPadHidesSystemTabBar()
                     .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
