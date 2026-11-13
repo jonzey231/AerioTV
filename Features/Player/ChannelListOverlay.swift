@@ -47,11 +47,11 @@ struct ChannelPickRow: View {
 
     /// Honor the same visibility prefs the Live TV rows use so the overlay
     /// stays visually consistent with the guide/list.
-    @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
-    @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    @KeyedAppStorage("ui.showChannelLogos") private var showChannelLogos = true
+    @KeyedAppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     /// Settings > Live TV > Logo Size: scales the logo box (and with it the
     /// row) relative to today's 68 x 44.
-    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
+    @KeyedAppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
     /// Width a hidden number column frees for the logo (56 + 16 spacing).
     private static let numberColumn: CGFloat = 56 + 16
 

@@ -16,9 +16,6 @@ struct DVRSettingsView: View {
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0
     @AppStorage("dvrDefaultPostRollMins") private var defaultPostRoll = 0
 
-    // Storage
-    @AppStorage("dvrMaxLocalStorageMB") private var maxStorageMB = 10_240
-
     // Idle timer
     @AppStorage("dvrKeepAwake") private var keepAwake = true
 
@@ -174,53 +171,7 @@ struct DVRSettingsView: View {
 
             // MARK: - Local Storage
             Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Maximum")
-                        Spacer()
-                        Text(formatGB(mb: maxStorageMB))
-                            .foregroundColor(.secondary)
-                    }
-                    // 0.25 GB steps (owner 2026-11-13), snapped in the binding:
-                    // a `step:` makes iOS 26 draw a tick per step, which at
-                    // this density ran together into a grey line under the
-                    // track (Logan's iPhone screenshot, build e8d7cb2).
-                    Slider(value: Binding(
-                        get: { Double(maxStorageMB) / 1024.0 },
-                        set: { maxStorageMB = DVRStorageCapRules.snappedMB(gb: $0) }
-                    ), in: 1...200) {
-                        Text("Max storage")
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Used")
-                        Spacer()
-                        Text(formatBytes(coordinator.localUsageBytes) + " of " + formatGB(mb: maxStorageMB))
-                            .foregroundColor(.secondary)
-                    }
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.secondary.opacity(0.2))
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(usageColor)
-                                .frame(width: max(0, geo.size.width * CGFloat(coordinator.localUsageFraction)))
-                        }
-                    }
-                    .frame(height: 8)
-                }
-
-                if coordinator.isApproachingQuotaLimit {
-                    Label {
-                        Text("Storage is running low. Future recordings may not complete if the limit is reached.")
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.yellow)
-                    }
-                    .scaledFont(.footnote)
-                }
+                DVRStorageCard()
             } header: {
                 Text("Local Storage")
                     .sectionHeaderStyle()
@@ -385,59 +336,7 @@ struct DVRSettingsView: View {
     }
 
     private var tvStorageCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Maximum")
-                    .scaledFont(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                Spacer()
-                // Left and Right adjust it in 0.25 GB steps; held, they repeat
-                // and speed up (owner 2026-11-13).
-                TVStorageCapAdjuster(valueMB: $maxStorageMB)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Used")
-                        .scaledFont(.system(size: 22).subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                    Spacer()
-                    Text(formatBytes(coordinator.localUsageBytes) + " of " + formatGB(mb: maxStorageMB))
-                        .scaledFont(.system(size: 22).subtext())
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                }
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.secondary.opacity(0.2))
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(usageColor)
-                            .frame(width: max(0, geo.size.width * CGFloat(coordinator.localUsageFraction)))
-                    }
-                }
-                .frame(height: 12)
-            }
-
-            if coordinator.isApproachingQuotaLimit {
-                Label {
-                    Text("Storage is running low. Future recordings may not complete if the limit is reached.")
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.yellow)
-                }
-                .scaledFont(.system(size: 22))
-            }
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.cardBackground)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
-                )
-        )
+        DVRStorageCard()
     }
 
     #endif
@@ -547,13 +446,6 @@ struct DVRSettingsView: View {
         #endif
     }
 
-    private var usageColor: Color {
-        let f = coordinator.localUsageFraction
-        if f >= 0.95 { return .red }
-        if f >= 0.80 { return .yellow }
-        return .green
-    }
-
     private var recordingsFolderLabel: String {
         if let custom = coordinator.customRecordingsDirectory {
             return custom.lastPathComponent
@@ -649,19 +541,6 @@ struct DVRSettingsView: View {
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath().path
         let base = container.standardizedFileURL.resolvingSymlinksInPath().path
         return resolved.hasPrefix(base)
-    }
-
-    /// "10 GB", "10.25 GB": DVRStorageCapRules.label (the locale's decimal separator).
-    private func formatGB(mb: Int) -> String { DVRStorageCapRules.label(mb: mb) }
-
-    private func formatBytes(_ bytes: Int64) -> String {
-        // ByteCountFormatter spells nothing as "Zero KB", which reads like a
-        // bug next to "of 10 GB". An empty library is "0 KB" (Phase 3).
-        guard bytes > 0 else { return "0 KB" }
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        formatter.allowsNonnumericFormatting = false
-        return formatter.string(fromByteCount: bytes)
     }
 }
 
@@ -773,3 +652,237 @@ private struct TVStorageCapAdjuster: View {
     }
 }
 #endif
+
+// MARK: - Local Storage card
+
+/// Settings > DVR > Local Storage: the Maximum control and the Used bar, on
+/// every platform. Its own view, so a step re-renders only the card: the
+/// page used to re-render whole on every value change and walked the
+/// recordings folder four times per render (the Used text, the bar, its
+/// color, and the low-space warning). The value lives here while it changes
+/// and is saved 0.4 s after the last step, or when the page closes; the
+/// folder is walked once, off the main thread, when the card appears and
+/// when a recording starts or stops (Logan's iPhone hung 500 to 600 ms while
+/// the slider moved, log 2026-11-13 14:38).
+private struct DVRStorageCard: View {
+    @State private var valueMB = DVRStorageCapRules.storedMB(UserDefaults.standard.integer(forKey: DVRStorageCapRules.defaultsKey))
+    @State private var usedBytes: Int64 = 0
+    @State private var usageToken = 0
+    @State private var saveTask: Task<Void, Never>?
+
+    private var fraction: Double { min(1, Double(usedBytes) / Double(Int64(valueMB) * 1_048_576)) }
+    private var usageColor: Color { fraction >= 0.95 ? .red : (fraction >= 0.80 ? .yellow : .green) }
+    private var usedText: String { DVRStorageUsage.label(bytes: usedBytes) + " of " + DVRStorageCapRules.label(mb: valueMB) }
+
+    var body: some View {
+        content
+            .onChange(of: valueMB) { _, mb in
+                saveTask?.cancel()
+                saveTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard !Task.isCancelled else { return }
+                    Self.save(mb)
+                }
+            }
+            .onDisappear {
+                saveTask?.cancel()
+                Self.save(valueMB)
+            }
+            .onReceive(RecordingCoordinator.shared.$isRecording.removeDuplicates().dropFirst()) { _ in usageToken += 1 }
+            .task(id: usageToken) {
+                guard let dir = RecordingCoordinator.shared.localRecordingsDirectory else { return }
+                let bytes = await Task.detached(priority: .utility) { DVRStorageUsage.bytes(in: dir) }.value
+                if bytes != usedBytes { usedBytes = bytes }
+            }
+    }
+
+    private static func save(_ mb: Int) {
+        let ud = UserDefaults.standard
+        if ud.integer(forKey: DVRStorageCapRules.defaultsKey) != mb { ud.set(mb, forKey: DVRStorageCapRules.defaultsKey) }
+    }
+
+    private var warning: some View {
+        Label {
+            Text("Storage is running low. Future recordings may not complete if the limit is reached.")
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.yellow)
+        }
+    }
+
+    private func bar(height: CGFloat, radius: CGFloat) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: radius).fill(Color.secondary.opacity(0.2))
+                RoundedRectangle(cornerRadius: radius).fill(usageColor)
+                    .frame(width: max(0, geo.size.width * CGFloat(fraction)))
+            }
+        }
+        .frame(height: height)
+    }
+
+    #if os(tvOS)
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Maximum")
+                    .scaledFont(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                // Left and Right adjust it in 0.25 GB steps; held, they repeat
+                // and speed up (owner 2026-11-13).
+                TVStorageCapAdjuster(valueMB: $valueMB)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Used")
+                    Spacer()
+                    Text(usedText)
+                }
+                .scaledFont(.system(size: 22).subtext())
+                .foregroundColor(Color.contrastText(.textSecondary))
+                bar(height: 12, radius: 6)
+            }
+            if fraction >= 0.80 { warning.scaledFont(.system(size: 22)) }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
+                )
+        )
+    }
+    #else
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Maximum")
+                Spacer()
+                DVRStorageStepper(valueMB: $valueMB)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Used")
+                    Spacer()
+                    Text(usedText).foregroundColor(.secondary)
+                }
+                bar(height: 8, radius: 4)
+            }
+            if fraction >= 0.80 { warning.scaledFont(.footnote) }
+        }
+        .padding(.vertical, 4)
+    }
+    #endif
+}
+
+#if os(iOS)
+/// iPhone and iPad: a minus key, the value, and a plus key in a Liquid Glass capsule, the Apple TV
+/// control's twin (owner 2026-11-13: the slider made a specific amount hard
+/// to pick). A tap moves 0.25 GB; held, a key repeats on the TV's schedule
+/// (DVRStorageCapRules.holdStepMB: after 0.4 s, every 0.1 s, 0.25 GB for 8
+/// repeats, then 1 GB for 12, then 5 GB). VoiceOver: adjustable, 0.25 GB per
+/// increment or decrement.
+private struct DVRStorageStepper: View {
+    @Binding var valueMB: Int
+    @State private var repeatTask: Task<Void, Never>?
+
+    var body: some View {
+        HStack(spacing: 0) {
+            key(up: false)
+            Text(DVRStorageCapRules.label(mb: valueMB))
+                .scaledFont(.bodyMedium.monospacedDigit())
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+                .frame(minWidth: 86)
+            key(up: true)
+        }
+        .padding(.horizontal, 2)
+        .liquidGlass(cornerRadius: 20)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Maximum")
+        .accessibilityValue(DVRStorageCapRules.label(mb: valueMB))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: valueMB = DVRStorageCapRules.stepped(valueMB, by: DVRStorageCapRules.stepMB, up: true)
+            case .decrement: valueMB = DVRStorageCapRules.stepped(valueMB, by: DVRStorageCapRules.stepMB, up: false)
+            @unknown default: break
+            }
+        }
+        .onDisappear { end() }
+    }
+
+    private func key(up: Bool) -> some View {
+        let atLimit = up ? valueMB >= DVRStorageCapRules.maxMB : valueMB <= DVRStorageCapRules.minMB
+        return Button(action: {}) {
+            Image(systemName: up ? "plus" : "minus")
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 44, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(RepeatKeyStyle { pressed in
+            if pressed { begin(up: up) } else { end() }
+        })
+        .foregroundColor(atLimit ? Color.contrastText(.textTertiary) : Color.accentPrimary)
+        .disabled(atLimit)
+    }
+
+    private func adjust(up: Bool, _ n: Int) {
+        valueMB = DVRStorageCapRules.stepped(valueMB, by: DVRStorageCapRules.holdStepMB(n), up: up)
+    }
+
+    private func begin(up: Bool) {
+        repeatTask?.cancel()
+        adjust(up: up, 0)
+        repeatTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            var n = 1
+            // Capped (about 40 s) in case a release never arrives.
+            while !Task.isCancelled && n < 400 {
+                adjust(up: up, n)
+                n += 1
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
+    private func end() {
+        repeatTask?.cancel()
+        repeatTask = nil
+    }
+}
+
+/// A key that reports press and release (a tap is one press).
+private struct RepeatKeyStyle: ButtonStyle {
+    let onPressChange: (Bool) -> Void
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.5 : 1)
+            .onChange(of: configuration.isPressed) { _, pressed in onPressChange(pressed) }
+    }
+}
+#endif
+
+/// The recordings folder's size, walked off the main thread.
+enum DVRStorageUsage {
+    nonisolated static func bytes(in dir: URL) -> Int64 {
+        guard let e = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in e {
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize { total += Int64(size) }
+        }
+        return total
+    }
+
+    static func label(bytes: Int64) -> String {
+        // ByteCountFormatter spells nothing as "Zero KB"; an empty library is "0 KB".
+        guard bytes > 0 else { return "0 KB" }
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        f.allowsNonnumericFormatting = false
+        return f.string(fromByteCount: bytes)
+    }
+}

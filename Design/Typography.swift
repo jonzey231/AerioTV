@@ -989,3 +989,122 @@ extension EnvironmentValues {
         set { self[AerioChannelNumberCharsKey.self] = newValue }
     }
 }
+
+// MARK: - KeyedAppStorage
+
+/// `@AppStorage` for a key with a dot in it ("ui.showChannelLogos"). SwiftUI
+/// cannot observe such a key by key path, so `@AppStorage` falls back to
+/// every UserDefaults change, and each write anywhere in the app re-rendered
+/// every view holding one: the Live TV list and its rows, the guide's cells,
+/// the in-player channel list, the App itself. Measured on the iPhone
+/// simulator 2026-11-13: about 560 ChannelRow bodies a second on the hidden
+/// Live TV tab while the DVR storage slider moved, and Logan's iPhone hung
+/// 500 to 600 ms (log 14:38:16). This wrapper hears the same notification but
+/// re-renders its view only when its own key's value changed. Same
+/// initializers and projected `Binding` as `@AppStorage`; the stored keys and
+/// values are unchanged, so sync and other readers see no difference.
+@MainActor
+@propertyWrapper
+struct KeyedAppStorage<Value: Equatable>: DynamicProperty {
+    @StateObject private var box: KeyedDefaultsBox<Value>
+
+    var wrappedValue: Value {
+        get { box.value }
+        nonmutating set { box.set(newValue) }
+    }
+
+    var projectedValue: Binding<Value> {
+        let box = box
+        return Binding(get: { box.value }, set: { box.set($0) })
+    }
+
+    fileprivate init(_ key: String, _ defaultValue: Value, _ store: UserDefaults,
+                     read: @escaping (UserDefaults, String) -> Value,
+                     write: @escaping (UserDefaults, String, Value) -> Void) {
+        _box = StateObject(wrappedValue: KeyedDefaultsBox(key: key, store: store,
+                                                          read: { ud, k in ud.object(forKey: k) == nil ? defaultValue : read(ud, k) },
+                                                          write: write))
+    }
+}
+
+extension KeyedAppStorage where Value == Bool {
+    init(wrappedValue: Bool, _ key: String, store: UserDefaults = .standard) {
+        self.init(key, wrappedValue, store, read: { $0.bool(forKey: $1) }, write: { $0.set($2, forKey: $1) })
+    }
+}
+
+extension KeyedAppStorage where Value == Int {
+    init(wrappedValue: Int, _ key: String, store: UserDefaults = .standard) {
+        self.init(key, wrappedValue, store, read: { $0.integer(forKey: $1) }, write: { $0.set($2, forKey: $1) })
+    }
+}
+
+extension KeyedAppStorage where Value == Double {
+    init(wrappedValue: Double, _ key: String, store: UserDefaults = .standard) {
+        self.init(key, wrappedValue, store, read: { $0.double(forKey: $1) }, write: { $0.set($2, forKey: $1) })
+    }
+}
+
+extension KeyedAppStorage where Value == String {
+    init(wrappedValue: String, _ key: String, store: UserDefaults = .standard) {
+        self.init(key, wrappedValue, store, read: { $0.string(forKey: $1) ?? "" }, write: { $0.set($2, forKey: $1) })
+    }
+}
+
+/// One stored value; publishes only when it changes.
+@MainActor
+final class KeyedDefaultsBox<Value: Equatable>: ObservableObject, KeyedDefaultsRefreshing {
+    @Published private(set) var value: Value
+    private let key: String
+    private let store: UserDefaults
+    private let read: (UserDefaults, String) -> Value
+    private let write: (UserDefaults, String, Value) -> Void
+
+    init(key: String, store: UserDefaults,
+         read: @escaping (UserDefaults, String) -> Value,
+         write: @escaping (UserDefaults, String, Value) -> Void) {
+        self.key = key
+        self.store = store
+        self.read = read
+        self.write = write
+        value = read(store, key)
+        KeyedDefaultsHub.shared.add(self)
+    }
+
+    func set(_ newValue: Value) {
+        write(store, key, newValue)
+        if newValue != value { value = newValue }
+    }
+
+    func refresh() {
+        let v = read(store, key)
+        if v != value { value = v }
+    }
+}
+
+@MainActor
+protocol KeyedDefaultsRefreshing: AnyObject {
+    func refresh()
+}
+
+/// The one UserDefaults observer every KeyedAppStorage box shares (a guide
+/// screen holds hundreds of them).
+@MainActor
+final class KeyedDefaultsHub {
+    static let shared = KeyedDefaultsHub()
+    private let boxes = NSHashTable<AnyObject>.weakObjects()
+    private var observer: NSObjectProtocol?
+
+    func add(_ box: KeyedDefaultsRefreshing) {
+        boxes.add(box)
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification,
+                                                          object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { KeyedDefaultsHub.shared.refreshAll() }
+        }
+    }
+
+    private func refreshAll() {
+        for case let box as KeyedDefaultsRefreshing in boxes.allObjects { box.refresh() }
+    }
+}

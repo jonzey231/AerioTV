@@ -435,8 +435,8 @@ struct AerioApp: App {
     /// "Rounded corners in Guide view" (split from one toggle, Logan
     /// 2026-09-16). Injected app-wide so every logo and program-art slot
     /// re-clips live.
-    @AppStorage(LogoCorners.listKey) private var roundedLogoCorners: Bool = LogoCorners.listDefault
-    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners: Bool = LogoCorners.guideDefault
+    @KeyedAppStorage(LogoCorners.listKey) private var roundedLogoCorners: Bool = LogoCorners.listDefault
+    @KeyedAppStorage(LogoCorners.guideKey) private var roundedGuideCorners: Bool = LogoCorners.guideDefault
     @AppStorage(TextContrast.key) private var textContrast: Double = TextContrast.defaultValue
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-

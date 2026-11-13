@@ -340,7 +340,7 @@ struct ProgramInfoView: View {
 
     /// User toggle: hide the LIVE/NEW/season-episode pills. Synced per
     /// device type (tv vs mobile) via `epgBadgesVisibleKey`.
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
 
     /// Feed-driven flag badges (LIVE / NEW / PREMIERE / FINALE / REPEAT).
     private var feedFlags: [EPGFlag] {

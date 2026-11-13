@@ -144,7 +144,7 @@ struct PlayerSettingsView: View {
     @AppStorage(SkipIntervals.backKey) private var skipBackSeconds = SkipIntervals.defaultBack
     @AppStorage(SkipIntervals.forwardKey) private var skipForwardSeconds = SkipIntervals.defaultForward
     /// GH #94 (tvOS only; the phone has no hidden-controls D-pad path).
-    @AppStorage(RemoteControlStore.skipWithoutControlsKey) private var skipWithoutControls = false
+    @KeyedAppStorage(RemoteControlStore.skipWithoutControlsKey) private var skipWithoutControls = false
     @AppStorage("appBehaviorsStreamBufferSeconds")
     private var streamBufferSeconds: Double = 0
     @AppStorage("streamBufferSize") private var streamBufferSize = "default"
@@ -184,10 +184,10 @@ struct PlayerSettingsView: View {
     private var paddingEnabled: Bool = true
     @AppStorage(multiviewTileCornersRoundedKey)
     private var cornersRounded: Bool = false
-    @AppStorage(multiviewShowLogosKey) private var showTileLogos: Bool = false
-    @AppStorage(multiviewLogoPositionKey)
+    @KeyedAppStorage(multiviewShowLogosKey) private var showTileLogos: Bool = false
+    @KeyedAppStorage(multiviewLogoPositionKey)
     private var tileLogoPositionRaw: String = MultiviewLogoPosition.topLeft.rawValue
-    @AppStorage(multiviewLogoSizeKey) private var tileLogoSize: Int = multiviewLogoSizeDefault
+    @KeyedAppStorage(multiviewLogoSizeKey) private var tileLogoSize: Int = multiviewLogoSizeDefault
     /// Add to Multiview picker rows (Android parity, same keys).
     @AppStorage("multiviewPickerShowSubtitles") private var pickerShowSubtitles: Bool = false
     @AppStorage("multiviewPickerShowDescriptions") private var pickerShowDescriptions: Bool = false

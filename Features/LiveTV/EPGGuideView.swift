@@ -8845,13 +8845,13 @@ private struct GuideChannelButton: View {
     /// GH #19 (Android parity): hide the channel number in the guide rail.
     /// Same key as the List view's toggle; the guide's logo is gated by
     /// logoURL presence only, so this is the guide's first appearance flag.
-    @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    @KeyedAppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     /// GH #73 (ant462, filed on Android; applied here for parity): hide the
     /// channel NAME text in the guide rail, leaving logo and number.
-    @AppStorage("ui.showChannelNames") private var showChannelNames = true
+    @KeyedAppStorage("ui.showChannelNames") private var showChannelNames = true
     /// Settings > Live TV > Logo Size. Multiplies the logo box this row
     /// would draw today; growth is capped at the room the cell has.
-    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
+    @KeyedAppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
     private var logoFactor: CGFloat { LiveTVLogoSize.factor(logoSizePercent) }
     /// Widest channel number on screen, and the app-wide Text Size: the
     /// tvOS number column is measured from both (see `ChannelNumberColumn`).
@@ -9283,10 +9283,10 @@ private struct GuideProgramButton: View {
     @FocusState private var isFocused: Bool
     #endif
 
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// GH #87: Settings > Live TV > Rounded Program Cells, separate from the
     /// logo corner setting. Off keeps the flat Emby-style strip.
-    @AppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
+    @KeyedAppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
     /// Cell outline: square when Rounded Program Cells is off, else
     /// `LogoCorners.guideRadius`, capped at a quarter of the shorter side so
     /// a one-minute sliver never turns into a pill.
@@ -9297,7 +9297,7 @@ private struct GuideProgramButton: View {
         return RoundedRectangle(cornerRadius: max(0, r), style: .continuous)
     }
     /// Settings > Appearance > Channel List > Show Program Subtitles.
-    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    @KeyedAppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     #if !os(tvOS)
     /// Settings > Live TV > Program Info Button: "off" | "current" | "all".
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
@@ -11197,13 +11197,13 @@ struct GuideCanvasRow: View {
     @ObservedObject private var theme = ThemeManager.shared
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @AppStorage(CategoryColor.enabledKey) private var categoryColorsEnabled: Bool = true
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
-    @AppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage(LogoCorners.guideCellsKey) private var roundedGuideCorners = LogoCorners.guideCellsDefault
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButtonMode = GuideProgramInfoButton.defaultValue
     /// Settings > Live TV > Program Info Button > Guide View.
     @AppStorage(GuideProgramInfoButton.guideViewKey) private var programInfoInGuide = true
     @AppStorage("guideScale") private var guideScaleRaw: Double = 1.0
-    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+    @KeyedAppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
     @Environment(\.aerioTextScale) private var textScale
     @Environment(\.aerioSubtextScale) private var subtextScale
 

@@ -182,13 +182,13 @@ struct ChannelListView: View {
     /// to the nav-bar trailing edge and the filter/search bars become
     /// hideable via two companion toggles below. Default OFF so the
     /// main user base is unaffected.
-    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @KeyedAppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     /// Hide the group-pill row entirely. Only honored when compact chrome
     /// is ON, otherwise ignored so the classic layout stays untouched.
-    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    @KeyedAppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
     /// Collapse the always-visible nav-bar search drawer into an
     /// on-demand pull-down. Only honored when compact chrome is ON.
-    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    @KeyedAppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
     /// v1.6.13.x: Drives whether the iPad nav-bar search drawer is
     /// shown. Default `false` (hidden), a magnifier toolbar button
     /// reveals it on demand. iPhone keeps the always-visible classic
@@ -4102,16 +4102,16 @@ struct ChannelRow: View {
     /// Issue #28: when off, the channel logo is hidden so the channel name
     /// can use the full row width (the logo eats space and crops long names,
     /// especially on iPhone). Cross-platform; defaults on.
-    @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
+    @KeyedAppStorage("ui.showChannelLogos") private var showChannelLogos = true
     /// Settings > Live TV > Logo Size. Scales the logo part of the leading
     /// column and the logo's height floor, so the row grows or shrinks with it.
-    @AppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
+    @KeyedAppStorage(liveTVLogoSizeKey) private var logoSizePercent = liveTVLogoSizeDefault
     private var logoFactor: CGFloat {
         showChannelLogos ? LiveTVLogoSize.factor(logoSizePercent) : 1
     }
     /// GH #19 (Android parity): when off, the channel-number column is
     /// hidden. Cross-platform; defaults on.
-    @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    @KeyedAppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     /// Width a hidden number column frees for the logo (column + spacing).
     // The old fixed number-column widths (42 / 36 / 26 plus HStack spacing)
     // are gone: the column is measured from the monospaced digit advance so
@@ -4120,7 +4120,7 @@ struct ChannelRow: View {
     // `freedNumberColumn(_:)`.
     /// GH #73 (Android parity): when off, the channel NAME line is hidden
     /// in the list row; the program text under it is untouched.
-    @AppStorage("ui.showChannelNames") private var showChannelNames = true
+    @KeyedAppStorage("ui.showChannelNames") private var showChannelNames = true
     /// Numbers AND names both hidden: the logo slot takes the row's full
     /// height (see `CachedLogoImage.fillsHeight`) and this multiplier
     /// widens the numbers-off width proportionally, so tall/portrait art
@@ -4204,10 +4204,10 @@ struct ChannelRow: View {
         return max(width, numberColumnWidth(fontSize: numberFontSize))
     }
 
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// Settings > Appearance > Channel List > Show Program Subtitles: some EPG
     /// feeds repeat the description in the sub-title, so the row reads twice.
-    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    @KeyedAppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     /// True while the expanded schedule's rows are being built off-main.

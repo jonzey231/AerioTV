@@ -1206,7 +1206,7 @@ struct EPGFlagsRow: View {
     /// Badges (Logan, 2026-08-19). Newline-joined set; empty = show all, so
     /// future badge kinds stay visible until explicitly hidden. Same storage
     /// shape as Android's ui_hidden_epg_badges.
-    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+    @KeyedAppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
 
     var body: some View {
         let hidden = Set(hiddenEpgBadgesRaw.split(separator: "\n").map(String.init))

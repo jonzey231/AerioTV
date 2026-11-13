@@ -18,19 +18,19 @@ struct LiveTVSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
 
     // MARK: Guide presentation
-    @AppStorage("ui.showChannelLogos")     private var showChannelLogos = true
+    @KeyedAppStorage("ui.showChannelLogos")     private var showChannelLogos = true
     /// GH Android#130: Clear Recently Watched confirmation.
     @State private var showClearRecentsConfirm = false
     @ObservedObject private var recentsStore = RecentChannelsStore.shared
     /// Settings > Live TV > Logo Size (same ladder as Multiview's). Shown
     /// only while Show Channel Logos is on.
-    @AppStorage(liveTVLogoSizeKey)         private var channelLogoSize = liveTVLogoSizeDefault
-    @AppStorage("ui.showChannelNumbers")   private var showChannelNumbers = true
-    @AppStorage("ui.showChannelNames")     private var showChannelNames = true
-    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
-    @AppStorage(LogoCorners.listKey)  private var roundedLogoCorners = LogoCorners.listDefault
-    @AppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
-    @AppStorage(LogoCorners.guideCellsKey) private var roundedProgramCells = LogoCorners.guideCellsDefault
+    @KeyedAppStorage(liveTVLogoSizeKey)         private var channelLogoSize = liveTVLogoSizeDefault
+    @KeyedAppStorage("ui.showChannelNumbers")   private var showChannelNumbers = true
+    @KeyedAppStorage("ui.showChannelNames")     private var showChannelNames = true
+    @KeyedAppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    @KeyedAppStorage(LogoCorners.listKey)  private var roundedLogoCorners = LogoCorners.listDefault
+    @KeyedAppStorage(LogoCorners.guideKey) private var roundedGuideCorners = LogoCorners.guideDefault
+    @KeyedAppStorage(LogoCorners.guideCellsKey) private var roundedProgramCells = LogoCorners.guideCellsDefault
     /// Guide on-air cell "i" button: "off" (default), "current", "all".
     @AppStorage(GuideProgramInfoButton.key) private var programInfoButton = GuideProgramInfoButton.defaultValue
 
@@ -48,8 +48,8 @@ struct LiveTVSettingsView: View {
     #endif
 
     // MARK: Badges
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
-    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
 
     // MARK: Display scale
     @AppStorage("guideScale") private var guideScale: Double = 1.0

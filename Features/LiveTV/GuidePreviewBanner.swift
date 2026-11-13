@@ -143,7 +143,7 @@ struct GuidePreviewBanner: View {
     @FocusState private var descriptionFocused: Bool
     @ObservedObject private var artCache = GuidePreviewArtCache.shared
     @EnvironmentObject private var nowPlaying: NowPlayingManager
-    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    @KeyedAppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     /// Identity for GuidePreviewArtAnchor ownership.
     @State private var anchorOwner = UUID()
     /// The program focus has rested on long enough for art lookups to

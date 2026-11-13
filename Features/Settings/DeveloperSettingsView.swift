@@ -79,33 +79,33 @@ struct DeveloperSettingsView: View {
     /// Phase D, the unified view is now the canonical path. Users
     /// who hit a unified-path regression can flip this off for the
     /// legacy `PlayerView` fallback while we chase the bug.
-    @AppStorage("playback.unified") private var unifiedPlayback = true
+    @KeyedAppStorage("playback.unified") private var unifiedPlayback = true
     /// Engine auto-detection, HLS arm. **Default ON** (matches
     /// PlaybackFeatureFlags.avPlayerForHLS absent-key-means-on): genuine
     /// HLS + natively-HLS-capable Dispatcharr servers ride AVPlayer; mpv
     /// stays the automatic fallback. The off switch remains for chasing
     /// AVPlayer-path regressions.
-    @AppStorage("playback.avplayerHLS") private var avPlayerHLS = true
+    @KeyedAppStorage("playback.avplayerHLS") private var avPlayerHLS = true
     /// Engine auto-detection, remux arm: raw MPEG-TS through the on-device
     /// TS-to-HLS remuxer into AVPlayer (H.264 + AC-3/AAC only; auto
     /// fallback to mpv otherwise). Still opt-in: background-audio +
     /// transition-restart caveats keep it below the default-on bar.
-    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = true
+    @KeyedAppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = true
     /// TEST BRANCH: mpv engine kill-switch, default OFF (mpv disabled)
     /// so AVPlayer gaps fail visibly instead of being silently rescued.
     /// See PlaybackFeatureFlags.mpvEngineEnabled - must default back ON
     /// before this branch ships beyond Logan's devices.
-    @AppStorage("dev.mpvEngineEnabled") private var mpvEngineEnabled = false
+    @KeyedAppStorage("dev.mpvEngineEnabled") private var mpvEngineEnabled = false
     /// Force HLS (developer test, 2026-10-04): every Dispatcharr Direct
     /// Connect live channel requests the server's native HLS output and
     /// plays direct on AVPlayer. Read at tune time by
     /// PlaybackFeatureFlags.forceHLS, so a flip applies on the next tune.
-    @AppStorage("developer.forceHLS") private var forceHLS = false
+    @KeyedAppStorage("developer.forceHLS") private var forceHLS = false
     /// Dump Audio-Only Segments (developer diagnostic, 2026-10-15): the TS
     /// remuxer also writes every audio-only segment and playlist it serves
     /// on the loopback to Documents/AudioOnlyDump. Per device, read at tune
     /// time by AudioOnlySegmentDumper.enabled.
-    @AppStorage(AudioOnlySegmentDumper.defaultsKey) private var dumpAudioOnlySegments = false
+    @KeyedAppStorage(AudioOnlySegmentDumper.defaultsKey) private var dumpAudioOnlySegments = false
 
     /// **Experimental**, iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
@@ -116,7 +116,7 @@ struct DeveloperSettingsView: View {
     /// Reads:
     /// - `ChannelListView` for the chrome layout branch
     /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
-    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @KeyedAppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     @AppStorage("castForceHEVCTranscode") private var castForceHEVCTranscode = false
     @AppStorage("castTranscodeDownProfile") private var castTranscodeDownProfile = "720p60"
 
@@ -125,8 +125,8 @@ struct DeveloperSettingsView: View {
     /// seem to do nothing (#22 feedback: "I can't tell what iPhone
     /// Compact Chrome even does"). Exposed inline here so turning
     /// Compact Chrome ON reveals its actual controls directly beneath.
-    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
-    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    @KeyedAppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    @KeyedAppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
 
     @Query private var servers: [ServerConnection]
 
@@ -147,7 +147,7 @@ struct DeveloperSettingsView: View {
     /// stay on the GLES engine. Read by MPVPlayerViewRepresentable.
     /// Default ON since 1.8.11 (absent-key-means-on in the engine gate);
     /// this toggle is the escape hatch for metal-path regressions.
-    @AppStorage("playback.metalHDR") private var metalHDREngine = true
+    @KeyedAppStorage("playback.metalHDR") private var metalHDREngine = true
     #endif
     @State private var logSize = "Empty"
     private let logger = DebugLogger.shared

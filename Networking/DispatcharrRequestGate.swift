@@ -1534,6 +1534,10 @@ enum RecordingPathRules {
 /// saved as whole GB (a multiple of 1024) is already on a step: nothing to
 /// migrate. Range 1 to 200 GB.
 enum DVRStorageCapRules {
+    static let defaultsKey = "dvrMaxLocalStorageMB"
+    static let defaultMB = 10 * 1024
+    /// The saved value, or the 10 GB default when none was saved (0).
+    static func storedMB(_ raw: Int) -> Int { raw > 0 ? raw : defaultMB }
     static let stepMB = 256
     static let minMB = 1024
     static let maxMB = 200 * 1024

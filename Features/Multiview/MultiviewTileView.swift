@@ -2893,10 +2893,10 @@ struct MultiviewTileLogoOverlay: View {
     /// bottom-left logo lifts above it instead of covering it.
     let nameStripVisible: Bool
 
-    @AppStorage(multiviewShowLogosKey) private var showLogos: Bool = false
-    @AppStorage(multiviewLogoPositionKey)
+    @KeyedAppStorage(multiviewShowLogosKey) private var showLogos: Bool = false
+    @KeyedAppStorage(multiviewLogoPositionKey)
     private var positionRaw: String = MultiviewLogoPosition.topLeft.rawValue
-    @AppStorage(multiviewLogoSizeKey) private var sizePercent: Int = multiviewLogoSizeDefault
+    @KeyedAppStorage(multiviewLogoSizeKey) private var sizePercent: Int = multiviewLogoSizeDefault
 
     @ObservedObject private var store = MultiviewStore.shared
     @State private var image: UIImage?

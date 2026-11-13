@@ -174,9 +174,9 @@ struct ManageGroupsSheet: View {
     #endif
 
     #if os(iOS)
-    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
-    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
-    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    @KeyedAppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @KeyedAppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    @KeyedAppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
     private var showsCompactLayoutSection: Bool {
         compactChromeiPhone && UIDevice.current.userInterfaceIdiom == .phone
     }
