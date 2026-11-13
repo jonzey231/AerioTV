@@ -1671,6 +1671,8 @@ final class ChannelStore: ObservableObject {
     }
     /// ID of the server whose channels are currently loaded, detects server switches.
     private var currentChannelServerID: UUID?
+    /// The playlist whose channels are on screen (the playlist delete reads it).
+    var channelServerID: UUID? { currentChannelServerID }
 
     private var loadTask: Task<Void, Never>?
     /// In-flight `forceRefresh`, so a second pull (or a Refresh button while a
@@ -1694,7 +1696,11 @@ final class ChannelStore: ObservableObject {
             activeServer = nil
             currentChannelServerID = nil
             isEPGLoading = false
-            cancelled.append("active server reference")
+            // Nothing of it stays selectable on screen (owner 2026-11-12): its
+            // channel list and groups go now, before the next playlist loads.
+            channels = []
+            orderedGroups = []
+            cancelled.append("active server reference and its channel list")
         }
         for item in cancelled { debugLog("[PLAYLIST] delete: cancelled \(item) for \(name)") }
         if cancelled.isEmpty { debugLog("[PLAYLIST] delete: no running channel tasks for \(name)") }
@@ -2194,6 +2200,8 @@ final class ChannelStore: ObservableObject {
                 // `loadAllEPG` still overwrites with current data.
                 primeCategoriesFromCache(serverID: serverID.uuidString)
                 TopShelfDataManager.syncTopChannels(channels: items)
+                // Reminders for these channels show (and notify) on this device again.
+                ReminderManager.shared.recordPlaylistChannels(serverID.uuidString, names: Set(items.map(\.name)))
                 DebugLogger.shared.logChannelLoad(
                     serverType: type.rawValue,
                     channelCount: items.count,
@@ -7467,6 +7475,9 @@ struct MainTabView: View {
     /// state in the same way (`LocalRecordingService.activeRecording`).
     private var hasRecordings: Bool {
         if recordingCoordinator.isRecording { return true }
+        // Recordings kept from a deleted playlist show under every playlist
+        // ("Saved on this device", owner 2026-11-12).
+        if allRecordings.contains(where: { $0.serverID == PlaylistLockdown.savedOnDeviceServerID }) { return true }
         guard let active = allServers.first(where: { $0.isActive }) ?? allServers.first else {
             return false
         }

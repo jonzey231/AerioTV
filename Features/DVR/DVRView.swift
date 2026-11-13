@@ -142,6 +142,15 @@ struct DVRView: View {
         return allRecordings.filter { $0.serverID == sid || isCapturing($0) }
     }
 
+    /// Recordings kept from a deleted playlist (owner 2026-11-12): shown under
+    /// every playlist in "Saved on this device", played from their files only.
+    private var savedOnDevice: [Recording] {
+        allRecordings
+            .filter { $0.serverID == PlaylistLockdown.savedOnDeviceServerID
+                && ($0.status == .completed || $0.status == .stopped || $0.status == .interrupted) }
+            .sorted { $0.effectiveStart > $1.effectiveStart }
+    }
+
     private static let terminalStatuses: [RecordingStatus] =
         [.completed, .stopped, .interrupted, .failed, .cancelled]
 
@@ -368,7 +377,7 @@ struct DVRView: View {
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
-                if visibleRecordings.isEmpty {
+                if visibleRecordings.isEmpty && savedOnDevice.isEmpty {
                     emptyState
                 } else {
                     content
@@ -517,6 +526,12 @@ struct DVRView: View {
         var rows: [PhoneRow] = []
         if !scheduled.isEmpty {
             rows.append(PhoneRow(id: "scheduled") { AnyView(shelf(title: "Scheduled", items: scheduled)) })
+        }
+        let saved = savedOnDevice
+        if !saved.isEmpty {
+            rows.append(PhoneRow(id: "saved-on-device") {
+                AnyView(shelf(title: PlaylistDeleteCopy.savedOnDeviceSection, items: saved))
+            })
         }
         if coordinator.isApproachingQuotaLimit {
             rows.append(PhoneRow(id: "quota") { AnyView(quotaWarning) })
@@ -807,6 +822,9 @@ struct DVRView: View {
                 }
                 if !scheduled.isEmpty {
                     shelf(title: "Scheduled", items: scheduled)
+                }
+                if !savedOnDevice.isEmpty {
+                    shelf(title: PlaylistDeleteCopy.savedOnDeviceSection, items: savedOnDevice)
                 }
                 if recent.count > 1 {
                     #if os(iOS)

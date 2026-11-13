@@ -93,6 +93,14 @@ struct SettingsView: View {
     @State private var serverToDelete: ServerConnection? = nil
     @State private var serverToEdit: ServerConnection? = nil
     @State private var showDeleteAlert = false
+    /// Recordings saved on this device from the playlist being deleted (the prompt's variant).
+    @State private var deleteDeviceCount = 0
+
+    private func deleteServer(keepRecordings: Bool) {
+        guard let server = serverToDelete else { return }
+        performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext,
+                                   keepDeviceRecordings: keepRecordings)
+    }
     /// Read-only here: the Sync row's value on the Settings root. The
     /// toggle itself lives on SyncSettingsView.
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = iCloudSyncEnabledDefault
@@ -528,6 +536,7 @@ struct SettingsView: View {
                                     }
                                     Button(role: .destructive) {
                                         serverToDelete = server
+                                        deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
                                         showDeleteAlert = true
                                     } label: {
                                         Label("Delete", systemImage: "trash")
@@ -873,15 +882,20 @@ struct SettingsView: View {
                     }
             }
             #endif
-            .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
-                Button("Delete", role: .destructive) {
-                    if let server = serverToDelete {
-                        performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
-                    }
+            .alert(deleteDeviceCount > 0 ? PlaylistDeleteCopy.title(serverToDelete?.name ?? "") : "Delete Playlist?",
+                   isPresented: $showDeleteAlert) {
+                if deleteDeviceCount > 0 {
+                    // Recordings saved on this device came from it (owner 2026-11-12).
+                    Button(PlaylistDeleteCopy.keepRecordings) { deleteServer(keepRecordings: true) }
+                    Button(PlaylistDeleteCopy.deleteRecordings, role: .destructive) { deleteServer(keepRecordings: false) }
+                    Button(PlaylistDeleteCopy.cancel, role: .cancel) {}
+                } else {
+                    Button("Delete", role: .destructive) { deleteServer(keepRecordings: true) }
+                    Button("Cancel", role: .cancel) {}
                 }
-                Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
+                Text(deleteDeviceCount > 0 ? PlaylistDeleteCopy.body(recordings: deleteDeviceCount)
+                     : "This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
             }
             #if !os(tvOS)
             .sheet(item: $serverToEdit) { server in
@@ -992,15 +1006,20 @@ struct SettingsView: View {
         .sheet(item: $serverToEdit) { server in
             EditServerSheet(server: server)
         }
-        .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                if let server = serverToDelete {
-                    performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
-                }
+        .alert(deleteDeviceCount > 0 ? PlaylistDeleteCopy.title(serverToDelete?.name ?? "") : "Delete Playlist?",
+               isPresented: $showDeleteAlert) {
+            if deleteDeviceCount > 0 {
+                // Recordings saved on this device came from it (owner 2026-11-12).
+                Button(PlaylistDeleteCopy.keepRecordings) { deleteServer(keepRecordings: true) }
+                Button(PlaylistDeleteCopy.deleteRecordings, role: .destructive) { deleteServer(keepRecordings: false) }
+                Button(PlaylistDeleteCopy.cancel, role: .cancel) {}
+            } else {
+                Button("Delete", role: .destructive) { deleteServer(keepRecordings: true) }
+                Button("Cancel", role: .cancel) {}
             }
-            Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
+            Text(deleteDeviceCount > 0 ? PlaylistDeleteCopy.body(recordings: deleteDeviceCount)
+                 : "This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
         }
     }
 
@@ -1197,6 +1216,7 @@ struct SettingsView: View {
                             }
                             Button(role: .destructive) {
                                 serverToDelete = server
+                                deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
                                 showDeleteAlert = true
                             } label: {
                                 Label("Delete", systemImage: "trash")
@@ -1405,6 +1425,7 @@ struct SettingsView: View {
                             }
                             Button(role: .destructive) {
                                 serverToDelete = server
+                                deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
                                 showDeleteAlert = true
                             } label: {
                                 Label("Delete", systemImage: "trash")

@@ -9,13 +9,198 @@
 import SwiftUI
 import SwiftData
 
+// MARK: - Playlist delete: nothing of it stays reachable (owner 2026-11-12)
+
+/// "If the playlist is deleted then the app should no longer have access to
+/// anything within that playlist. Immediately." (Logan). At the moment of the
+/// delete: its network traffic is refused and what is in flight cancelled
+/// (PlaylistRevocation), its playback stops through the normal stop path,
+/// on-device recording sessions stop, its sign-ins and tokens go, and what
+/// it put on screen is cleared. Server-side Dispatcharr recordings are never
+/// touched: nothing is sent to the server for them.
+@MainActor
+enum PlaylistLockdown {
+    /// Kept recordings, detached from the deleted playlist: shown under every
+    /// playlist in the DVR's "Saved on this device" section, played from the
+    /// file only.
+    static let savedOnDeviceServerID = "saved-on-this-device"
+
+    /// The playlist's recordings with a file on this device: local captures,
+    /// finished or in progress, and "Save to Device" copies of server ones.
+    static func deviceRecordings(_ server: ServerConnection, in ctx: ModelContext) -> [Recording] {
+        let sid = server.id.uuidString
+        let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.serverID == sid }))) ?? []
+        return rows.filter { r in
+            guard let path = r.localFilePath, !path.isEmpty,
+                  r.status != .failed, r.status != .cancelled, r.status != .scheduled else { return false }
+            return FileManager.default.fileExists(atPath: path) || RecordingCoordinator.shared.activeSessions[r.id] != nil
+        }
+    }
+
+    /// What identifies the playlist's traffic, against the playlists that remain.
+    static func fingerprint(_ server: ServerConnection, remaining: [ServerConnection]) -> PlaylistFingerprint {
+        let sid = server.id.uuidString
+        var f = PlaylistFingerprint(playlistID: sid)
+        for k in [server.baseApiKey] + ProfileManager.shared.storedKeys(sid) {
+            let t = k.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { f.keys.insert(t) }
+        }
+        switch server.type {
+        case .xtreamCodes:
+            f.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: server.username, password: server.effectivePassword)
+        case .m3uPlaylist:
+            f.urlSecrets = [server.baseURL, server.epgURL, server.localURL, server.localEPGURL]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        case .dispatcharrAPI:
+            break
+        }
+        // Hosts only this playlist used: anything sent there was for it.
+        let mine = Set([server.baseURL, server.localURL].filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
+        let others = Set(remaining.flatMap { [$0.baseURL, $0.localURL, $0.epgURL, $0.localEPGURL] }
+            .filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
+        if server.type != .m3uPlaylist { f.hosts = mine.subtracting(others) }
+        return f
+    }
+
+    /// The same for a playlist in use again (added, set up, restored), to lift
+    /// what a delete revoked.
+    static func liftFingerprint(id: String?, baseURL: String, localURL: String = "", apiKey: String = "",
+                                username: String = "", password: String = "") -> PlaylistFingerprint {
+        var f = PlaylistFingerprint(playlistID: id ?? UUID().uuidString)
+        let k = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty { f.keys = [k] }
+        f.hosts = Set([baseURL, localURL].filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
+        f.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: username, password: password)
+            + [baseURL].filter { !$0.isEmpty }
+        return f
+    }
+
+    /// Stop everything playing from the playlist, through the normal stop
+    /// paths (Now Playing, the dock cards, and the remote-session card clear
+    /// with them). Playback from other playlists keeps going.
+    static func stopPlayback(deletedID: String, onScreen: Bool, name: String) {
+        var stopped: [String] = []
+        let store = MultiviewStore.shared
+        let gate = PlaylistRevocation.shared
+        let mine = store.tiles.filter { t in
+            let key = DispatcharrRequestGate.requestApiKey(
+                xApiKey: t.headers.first { $0.key.caseInsensitiveCompare("X-API-Key") == .orderedSame }?.value,
+                authorization: t.headers.first { $0.key.caseInsensitiveCompare("Authorization") == .orderedSame }?.value)
+            return PlaylistDeletePlan.stopsTile(isLive: t.kind == .live || t.kind == .catchup,
+                                                deletedIsOnScreen: onScreen, tileServerID: t.vodServerID,
+                                                deletedID: deletedID,
+                                                refusedByFingerprint: gate.isRevoked(url: t.streamURL.absoluteString, apiKey: key))
+        }
+        if !mine.isEmpty {
+            if mine.count == store.tiles.count {
+                PlayerSession.shared.stop()
+                stopped.append("player (\(mine.count) tile\(mine.count == 1 ? "" : "s"))")
+            } else {
+                for t in mine { store.remove(id: t.id) }
+                stopped.append("\(mine.count) Multiview tile(s); other playlists keep playing")
+            }
+        }
+        if onScreen, RadioModeSession.shared.isActive {
+            RadioModeSession.shared.stop(reason: "playlist deleted")
+            stopped.append("Radio Mode")
+        }
+        LivePrewarm.shared.cancel(reason: "playlist deleted")
+        #if os(iOS)
+        if onScreen, AerioCastController.shared.isCasting {
+            AerioCastController.shared.stopPlaybackKeepingSession()
+            stopped.append("Cast")
+        }
+        #endif
+        debugLog("[PLAYLIST] delete: stopped \(stopped.isEmpty ? "nothing (nothing played from it)" : stopped.joined(separator: ", ")) for \(name)")
+    }
+
+    /// On-device recordings: in-progress sessions stop and keep what they
+    /// captured; then every one is kept (detached, played from its file only)
+    /// or removed with its file, as the user chose.
+    static func settleDeviceRecordings(_ rows: [Recording], keep: Bool, deletedHosts: Set<String>,
+                                       modelContext: ModelContext, name: String) {
+        guard !rows.isEmpty else { return }
+        let coordinator = RecordingCoordinator.shared
+        let active = rows.filter { coordinator.activeSessions[$0.id] != nil }
+        if keep {
+            for r in rows { detach(r, deletedHosts: deletedHosts) }
+            try? modelContext.save()
+            debugLog("[PLAYLIST] delete: kept \(rows.count) recording(s) saved on this device from \(name) (detached)")
+        }
+        Task { @MainActor in
+            for r in active { await coordinator.stopLocalRecording(r, modelContext: modelContext) }
+            if !active.isEmpty { debugLog("[PLAYLIST] delete: stopped \(active.count) on-device recording session(s) for \(name)") }
+            guard !keep else { return }
+            for r in rows { coordinator.deleteLocalRecording(r, modelContext: modelContext) }
+            debugLog("[PLAYLIST] delete: removed \(rows.count) recording(s) saved on this device from \(name)")
+        }
+    }
+
+    /// A kept recording no longer belongs to any playlist: a local file, its
+    /// server link and the deleted server's art dropped.
+    private static func detach(_ r: Recording, deletedHosts: Set<String>) {
+        r.serverID = savedOnDeviceServerID
+        r.destinationRaw = RecordingDestination.local.rawValue
+        r.remoteRecordingID = nil
+        r.dispatcharrFileURL = nil
+        func onDeletedServer(_ url: String?) -> Bool {
+            guard let url, !url.isEmpty else { return false }
+            return deletedHosts.contains(DispatcharrRequestGate.serverKey(url))
+        }
+        if onDeletedServer(r.posterURL) { r.posterURL = nil }
+        if onDeletedServer(r.backdropURL) { r.backdropURL = nil }
+        if r.status == .scheduled || r.status == .recording { r.status = .stopped }
+    }
+}
+
 @MainActor
 func performServerCascadeDelete(_ server: ServerConnection,
                                 servers: [ServerConnection],
-                                modelContext: ModelContext) {
+                                modelContext: ModelContext,
+                                keepDeviceRecordings: Bool = true) {
     let sid = server.id.uuidString
     let deletedID = server.id
     let name = server.name
+    // First, before anything else can send for it: refuse the playlist's
+    // traffic and cancel what is in flight (PlaylistRevocation).
+    let remaining = servers.filter { !$0.isGone && $0.id != deletedID }
+    let fp = PlaylistLockdown.fingerprint(server, remaining: remaining)
+    let cancelled = PlaylistRevocation.shared.revoke(fp)
+    debugLog("[PLAYLIST] delete: \(name): no request for it from here on (cancelled \(cancelled) in flight)")
+    // Its held-key re-checks, rejected-login parks, tokens, and catch-up credentials.
+    let gate = DispatcharrRequestGate.shared
+    gate.clearPlaylist(sid)
+    for k in fp.keys { gate.clearKey(k) }
+    DispatcharrLoginGate.shared.clearRejected(serverID: deletedID)
+    DispatcharrTokenStore.shared.clear(serverID: deletedID)
+    CatchupSupport.invalidateCredentials(serverID: deletedID)
+    // Playback from it, through the normal stop path.
+    let onScreen = server.isActive || ChannelStore.shared.channelServerID == deletedID
+    PlaylistLockdown.stopPlayback(deletedID: sid, onScreen: onScreen, name: name)
+    // Recordings saved on this device: stopped, then kept (detached) or removed.
+    PlaylistLockdown.settleDeviceRecordings(PlaylistLockdown.deviceRecordings(server, in: modelContext),
+                                            keep: keepDeviceRecordings,
+                                            deletedHosts: Set([server.baseURL, server.localURL].filter { !$0.isEmpty }
+                                                .map(DispatcharrRequestGate.serverKey)),
+                                            modelContext: modelContext, name: name)
+    // Reminders stay (here, iCloud, Dispatcharr Sync); those for channels no
+    // remaining playlist has are hidden on this device and never notify.
+    let shownNames = onScreen && ChannelStore.shared.channelServerID == deletedID
+        ? Set(ChannelStore.shared.channels.map(\.name)) : []
+    ReminderManager.shared.playlistDeleted(sid, displayedNames: shownNames)
+    if onScreen {
+        // What it put on screen: open searches close, and the guide's programs go
+        // (the channel list clears with ChannelStore.cancelWork below).
+        SearchDismissCenter.dismissAll(reason: "playlist deleted")
+        if GuideStore.shared.displayedServerID == sid { GuideStore.shared.invalidateCache() }
+    }
+    #if os(tvOS)
+    // Top Shelf: its channels and its Continue Watching rows go at once.
+    if onScreen { TopShelfDataManager.syncTopChannels(channels: []) }
+    if let rows = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+        TopShelfDataManager.syncContinueWatching(rows.filter { $0.serverID != sid && !$0.isDeleted }, servers: remaining)
+    }
+    #endif
     // TestFlight 1.8.41 crash: the channel-server task was inside
     // seedEPGCache holding this model when it was deleted. Cancel every
     // long task that holds it first; they re-check `isGone` after each
@@ -272,6 +457,14 @@ struct ServerDetailView: View {
     /// button is off the D-pad path). Delete lives in Danger Zone.
     @State private var editingServer: ServerConnection? = nil
     @State private var showDeleteConfirm = false
+    /// Recordings saved on this device from this playlist (the prompt's variant).
+    @State private var deleteDeviceCount = 0
+
+    private func deleteThis(keepRecordings: Bool) {
+        performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext,
+                                   keepDeviceRecordings: keepRecordings)
+        dismiss()
+    }
     #if os(iOS)
     /// Set up a TV with this playlist (docs/DeviceSetupHandoff.md).
     @State private var showSetUpTv = false
@@ -374,14 +567,20 @@ struct ServerDetailView: View {
             await DispatcharrCapabilityProbe.refresh(server, reason: "playlist detail",
                                                      minInterval: 60)
         }
-        .alert("Delete Playlist?", isPresented: $showDeleteConfirm) {
-            Button("Delete", role: .destructive) {
-                performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
-                dismiss()
+        .alert(deleteDeviceCount > 0 ? PlaylistDeleteCopy.title(server.name) : "Delete Playlist?",
+               isPresented: $showDeleteConfirm) {
+            if deleteDeviceCount > 0 {
+                // Recordings saved on this device came from it (owner 2026-11-12).
+                Button(PlaylistDeleteCopy.keepRecordings) { deleteThis(keepRecordings: true) }
+                Button(PlaylistDeleteCopy.deleteRecordings, role: .destructive) { deleteThis(keepRecordings: false) }
+                Button(PlaylistDeleteCopy.cancel, role: .cancel) {}
+            } else {
+                Button("Delete", role: .destructive) { deleteThis(keepRecordings: true) }
+                Button("Cancel", role: .cancel) {}
             }
-            Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will remove \"\(server.name)\" from the app. Your server data will not be affected.")
+            Text(deleteDeviceCount > 0 ? PlaylistDeleteCopy.body(recordings: deleteDeviceCount)
+                 : "This will remove \"\(server.name)\" from the app. Your server data will not be affected.")
         }
         // Per-playlist EPG-purge confirmation. The action handler:
         //   1. Always calls `GuideStore.shared.purgePrograms(for:…)`
@@ -727,6 +926,7 @@ struct ServerDetailView: View {
                 // MARK: Danger Zone
                 Section {
                     Button(role: .destructive) {
+                        deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
                         showDeleteConfirm = true
                     } label: {
                         HStack(spacing: 10) {
@@ -1090,6 +1290,7 @@ struct ServerDetailView: View {
                 title: "Delete Playlist",
                 titleColor: .statusLive
             ) {
+                deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
                 showDeleteConfirm = true
             }
             tvFooter("Removes this playlist and its credentials from this device. Your server data will not be affected.")

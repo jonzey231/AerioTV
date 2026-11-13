@@ -53,6 +53,11 @@ enum HTTPRouter {
 
     static func data(from url: URL,
                      using session: URLSession = .shared) async throws -> (Data, URLResponse) {
+        try await revocable(nil, url: url) { try await unrevokedData(from: url, using: session) }
+    }
+
+    private static func unrevokedData(from url: URL,
+                                      using session: URLSession) async throws -> (Data, URLResponse) {
         // Hard route: HSTS-preloaded TLD plain HTTP, URLSession will
         // always refuse, so go straight to NWConnection.
         if shouldUseNWConnection(for: url) {
@@ -90,9 +95,29 @@ enum HTTPRouter {
         // answer pauses the server and is thrown as a typed rate limit.
         await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         let request = try DispatcharrHTTPGate.prepare(request)
-        let result = try await routedData(for: request, using: session)
+        let result = try await revocable(request, url: request.url) { try await routedData(for: request, using: session) }
         try DispatcharrHTTPGate.inspect(request, response: result.1, body: result.0)
         return result
+    }
+
+    /// A deleted playlist's traffic (PlaylistRevocation, owner 2026-11-12):
+    /// refused before it is sent, cancelled while in flight when the delete
+    /// lands, and an answer that arrives after the delete is dropped.
+    private static func revocable<T: Sendable>(_ request: URLRequest?, url: URL?,
+                                     _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        let gate = PlaylistRevocation.shared
+        let urlString = url?.absoluteString ?? ""
+        let key = request.flatMap {
+            DispatcharrRequestGate.requestApiKey(xApiKey: $0.value(forHTTPHeaderField: "X-API-Key"),
+                                                 authorization: $0.value(forHTTPHeaderField: "Authorization"))
+        }
+        try gate.check(url: urlString, apiKey: key)
+        let task = Task { try await body() }
+        let id = gate.track(url: urlString, apiKey: key) { task.cancel() }
+        defer { gate.untrack(id) }
+        let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+        try gate.check(url: urlString, apiKey: key)
+        return value
     }
 
     private static func routedData(for request: URLRequest,
@@ -126,6 +151,11 @@ enum HTTPRouter {
     /// and must delete it (decode it memory-mapped, then remove it).
     static func download(from url: URL,
                          using session: URLSession = .shared) async throws -> (URL, URLResponse) {
+        try await revocable(nil, url: url) { try await unrevokedDownload(from: url, using: session) }
+    }
+
+    private static func unrevokedDownload(from url: URL,
+                                          using session: URLSession) async throws -> (URL, URLResponse) {
         if shouldUseNWConnection(for: url) {
             let (data, response) = try await NWHTTPClient.data(from: url,
                                                                timeout: effectiveNWTimeout(using: session))
@@ -161,7 +191,7 @@ enum HTTPRouter {
                          using session: URLSession = .shared) async throws -> (URL, URLResponse) {
         await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         let request = try DispatcharrHTTPGate.prepare(request)
-        let result = try await routedDownload(for: request, using: session)
+        let result = try await revocable(request, url: request.url) { try await routedDownload(for: request, using: session) }
         if (result.1 as? HTTPURLResponse)?.statusCode == 429 {
             let head = (try? FileHandle(forReadingFrom: result.0)).flatMap { h -> Data? in
                 defer { try? h.close() }

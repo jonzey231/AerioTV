@@ -79,6 +79,8 @@ struct AuthPosterImage: View {
                 // a line per poster and flooded the log (2026-09-04).
                 debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
+            // A deleted playlist's art: no request (PlaylistRevocation).
+            if PlaylistRevocation.shared.isRevoked(url: url.absoluteString, apiKey: req.value(forHTTPHeaderField: "X-API-Key")) { return }
             let data: Data
             do {
                 let (d, resp) = try await URLSession.shared.data(for: req)

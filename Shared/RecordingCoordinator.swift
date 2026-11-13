@@ -349,6 +349,9 @@ final class RecordingCoordinator: ObservableObject {
         // A rejected key or a 429 pause fails here with nothing sent.
         await DispatcharrHTTPGate.awaitLaunchCredentialMerge(request)
         request = try DispatcharrHTTPGate.prepare(request)
+        // A deleted playlist's recording: nothing is downloaded (PlaylistRevocation).
+        try PlaylistRevocation.shared.check(url: playbackURL.absoluteString,
+                                            apiKey: request.value(forHTTPHeaderField: "X-API-Key"))
         let (tempURL, response) = try await URLSession.shared.download(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             try? FileManager.default.removeItem(at: tempURL)

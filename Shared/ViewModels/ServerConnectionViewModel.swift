@@ -286,6 +286,11 @@ final class ServerConnectionViewModel {
     func verifyConnection(onCountdown: ((_ line: String, _ secondsLeft: Int) -> Void)? = nil,
                           onRetry: (() -> Void)? = nil) async {
         guard isFormValid else { return }
+        // A playlist the user is adding: what a delete in this session revoked
+        // for these addresses and credentials is lifted (PlaylistRevocation).
+        PlaylistRevocation.shared.lift(matching: PlaylistLockdown.liftFingerprint(
+            id: nil, baseURL: serverType == .m3uPlaylist ? baseURL : normalizedURL, localURL: localURL,
+            apiKey: apiKey, username: username, password: password))
         isVerifying = true
         busyMessage = nil
         verificationError = nil

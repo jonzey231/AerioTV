@@ -1775,7 +1775,23 @@ final class ProfileManager: ObservableObject {
     /// The playlist was deleted: its hold and recorded identity go with it.
     func playlistDeleted(_ playlistId: String) {
         holds.forgetPlaylist(playlistId)
+        // Its profiles' sign-ins go with it (owner 2026-11-12): every stored key
+        // and password, so nothing of that playlist can be sent again. They are
+        // device-only Keychain items (never synced). The rows stay, signed out:
+        // a playlist added back with the same id asks each one to sign in.
+        var n = 0
+        for p in store.forPlaylist(playlistId) where store.apiKey(p.id) != nil || store.password(p.id) != nil {
+            store.setApiKey(p.id, nil)
+            store.setPassword(p.id, nil)
+            n += 1
+        }
+        if n > 0 { debugLog("[PLAYLIST] delete: removed \(n) profile sign-in(s) for playlist=\(Self.tag(playlistId))") }
         publish()
+    }
+
+    /// The API keys this playlist's profiles store (for the delete's fingerprint).
+    func storedKeys(_ playlistId: String) -> [String] {
+        store.forPlaylist(playlistId).compactMap { store.apiKey($0.id) }
     }
 
     // MARK: Switch

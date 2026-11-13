@@ -1218,6 +1218,8 @@ final class TVLANProbe: ObservableObject {
                     if (UserDefaults.standard.stringArray(forKey: Self.reachableURLsKey) ?? []).contains(key) { reachable.insert(key) }
                     continue
                 }
+                // A deleted playlist's address: no request (PlaylistRevocation).
+                if PlaylistRevocation.shared.isRevoked(url: baseURL.absoluteString, apiKey: nil) { continue }
                 // Per-candidate HEAD request with a 2s timeout. Some
                 // home routers (notably Ubiquiti) respond slowly to the
                 // first connection to a host the ARP table doesn't know
@@ -2230,6 +2232,10 @@ struct RootView: View {
                 )
                 // Preserve the original UUID so credentials match across devices
                 newServer.id = remote.id
+                // Restored here: what a delete in this session revoked for it is lifted.
+                PlaylistRevocation.shared.lift(matching: PlaylistLockdown.liftFingerprint(
+                    id: remote.id.uuidString, baseURL: remote.baseURL, localURL: remote.localURL,
+                    username: remote.username))
                 newServer.sortOrder = remote.sortOrder
                 newServer.createdAt = remote.createdAt
                 newServer.lastConnected = remote.lastConnected

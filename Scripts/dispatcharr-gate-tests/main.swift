@@ -1182,5 +1182,88 @@ do {
     check(!g.isStale(x, since: g.current(x)), "and a third instance runs")
 }
 
+// MARK: - A deleted playlist: zero requests and nothing playable (owner 2026-11-12)
+do {
+    let gate = PlaylistRevocation()
+    let x = "PLAYLIST-X", other = "PLAYLIST-O"
+    // X: a Dispatcharr playlist on its own host, with a profile's key too; an
+    // XC playlist's credentials ride in its URLs.
+    var f = PlaylistFingerprint(playlistID: x, keys: ["key-x", "key-x-kid"])
+    f.hosts = [DispatcharrRequestGate.serverKey("https://x.example.com")]
+    f.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: "alice", password: "pw1")
+    final class Counter: @unchecked Sendable { var n = 0 }
+    let cancelledInFlight = Counter()
+    let inFlight = gate.track(url: "https://x.example.com/api/epg/grid/", apiKey: "key-x") { cancelledInFlight.n += 1 }
+    let otherFlight = gate.track(url: "https://o.example.com/api/channels/", apiKey: "key-o") { cancelledInFlight.n += 100 }
+    eq(gate.revoke(f), 1, "the delete cancels the one request in flight for it")
+    eq(cancelledInFlight.n, 1, "and only that one")
+    gate.untrack(inFlight); gate.untrack(otherFlight)
+    // Every kind of request for X is refused before it is sent.
+    var refused = 0
+    let attempts: [(String, String?)] = [
+        ("https://x.example.com/api/channels/channels/", "key-x"),        // an API call
+        ("https://x.example.com/api/channels/logos/12/cache/", nil),      // a logo, no key
+        ("https://shared.example.com/api/accounts/users/me/", "key-x-kid"), // a profile's key on a shared host
+        ("http://panel.example.net/live/alice/pw1/123.ts", nil),           // an XC stream
+        ("http://panel.example.net/player_api.php?username=alice&password=pw1&action=x", nil),
+        ("https://x.example.com:443/api/accounts/token/", nil),            // a re-login
+    ]
+    for (url, key) in attempts {
+        do { try gate.check(url: url, apiKey: key) } catch { refused += 1 }
+    }
+    eq(refused, attempts.count, "a delete leaves zero requests for that playlist")
+    // Another playlist is never touched.
+    check((try? gate.check(url: "https://o.example.com/api/channels/", apiKey: "key-o")) != nil, "another playlist's request goes out")
+    check((try? gate.check(url: "http://panel.example.net/live/bob/pw2/1.ts", apiKey: nil)) != nil, "another XC user on the same panel goes out")
+    // Nothing playable for it is left.
+    struct Item { let id: String; let playlist: String? }
+    let items = [Item(id: "a", playlist: x), Item(id: "b", playlist: other), Item(id: "c", playlist: x)]
+    eq(PlaylistDeletePlan.playable(items, playlistID: { $0.playlist }, deletedID: x).map(\.id), ["b"], "zero playable items for that playlist id")
+    check(PlaylistDeletePlan.stopsTile(isLive: true, deletedIsOnScreen: true, tileServerID: nil, deletedID: x, refusedByFingerprint: false),
+          "a live tile of the playlist on screen stops")
+    check(PlaylistDeletePlan.stopsTile(isLive: false, deletedIsOnScreen: false, tileServerID: x, deletedID: x, refusedByFingerprint: false),
+          "its movie, episode, or recording tile stops")
+    check(!PlaylistDeletePlan.stopsTile(isLive: false, deletedIsOnScreen: true, tileServerID: other, deletedID: x, refusedByFingerprint: false),
+          "a Multiview tile from another playlist keeps playing")
+    check(PlaylistDeletePlan.stopsTile(isLive: true, deletedIsOnScreen: false, tileServerID: nil, deletedID: x, refusedByFingerprint: true),
+          "a tile whose stream carries its key stops")
+    // An answer after the delete is dropped (the router checks again on arrival).
+    check(gate.isRevoked(url: "https://x.example.com/api/epg/grid/", apiKey: "key-x"), "a late answer is dropped")
+    // Added back (setup, the Add Playlist form, iCloud): what it matches is lifted.
+    var back = PlaylistFingerprint(playlistID: x)
+    back.hosts = [DispatcharrRequestGate.serverKey("https://x.example.com")]
+    check(gate.lift(matching: back), "a re-added playlist lifts the revocation")
+    check((try? gate.check(url: "https://x.example.com/api/channels/channels/", apiKey: "key-x")) != nil, "and its requests go out again")
+}
+
+// MARK: - Reminders for a channel no remaining playlist has (owner 2026-11-12)
+do {
+    var idx = ReminderChannelIndex()
+    idx.recordPlaylist("X", names: ["ESPN", "CNN", "Local 4"])
+    idx.recordPlaylist("O", names: ["ESPN", "HBO"])
+    let hidden = idx.playlistDeleted("X")
+    eq(hidden, ["CNN", "Local 4"], "deleting X hides the reminders only it had")
+    check(idx.isHidden("CNN") && !idx.isHidden("ESPN") && !idx.isHidden("HBO"), "a channel another playlist has stays shown")
+    // The deleted playlist was on screen and never recorded: its displayed list counts.
+    var idx2 = ReminderChannelIndex()
+    idx2.recordPlaylist("O", names: ["HBO"])
+    eq(idx2.playlistDeleted("Y", displayedNames: ["NBC", "HBO"]), ["NBC"], "the on-screen list is used when nothing was recorded")
+    // Re-added (or a playlist with that channel comes back): it reappears.
+    eq(idx.recordPlaylist("X2", names: ["CNN"]), ["CNN"], "a playlist with the channel brings its reminder back")
+    check(!idx.isHidden("CNN") && idx.isHidden("Local 4"), "only that channel's reminders reappear")
+    check(idx.namesByPlaylist["X"] == nil, "the deleted playlist's names are forgotten")
+}
+
+// MARK: - The delete confirmation's copy (byte-identical with Android)
+do {
+    eq(PlaylistDeleteCopy.title("Home Server"), "Delete Home Server?", "title")
+    eq(PlaylistDeleteCopy.body(recordings: 3), "This removes the playlist and its sign-in from this device. 3 recordings saved on this device came from this playlist.", "plural body")
+    eq(PlaylistDeleteCopy.body(recordings: 1), "This removes the playlist and its sign-in from this device. 1 recording saved on this device came from this playlist.", "singular body")
+    eq(PlaylistDeleteCopy.keepRecordings, "Delete, Keep Recordings", "keep button")
+    eq(PlaylistDeleteCopy.deleteRecordings, "Delete Playlist and Recordings", "delete button")
+    eq(PlaylistDeleteCopy.cancel, "Cancel", "cancel button")
+    eq(PlaylistDeleteCopy.savedOnDeviceSection, "Saved on this device", "DVR section")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

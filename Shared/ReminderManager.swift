@@ -47,8 +47,91 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
     /// In-app banner to display when a reminder fires while app is in foreground.
     @Published var pendingBanner: ReminderBanner?
 
+    // MARK: - Channels no playlist on this device has (owner 2026-11-12)
+
+    /// Per-playlist channel names and the names hidden on this device
+    /// (ReminderChannelIndex). Device-only: never synced. A hidden reminder
+    /// is kept (here, iCloud, Dispatcharr Sync) but shows nothing and has no
+    /// notification until a playlist with its channel is back.
+    private var channelIndex = ReminderChannelIndex()
+    private static let hiddenKey = "aerio.reminders.hidden_channels.v1"
+    private static var indexURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("reminder-channel-index.json")
+    }
+
+    private func loadChannelIndex() {
+        channelIndex.hidden = Set(UserDefaults.standard.stringArray(forKey: Self.hiddenKey) ?? [])
+        if let url = Self.indexURL, let data = try? Data(contentsOf: url),
+           let dict = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            channelIndex.namesByPlaylist = dict.mapValues(Set.init)
+        }
+    }
+
+    private func saveChannelIndex() {
+        UserDefaults.standard.set(channelIndex.hidden.sorted(), forKey: Self.hiddenKey)
+        if let url = Self.indexURL,
+           let data = try? JSONEncoder().encode(channelIndex.namesByPlaylist.mapValues { $0.sorted() }) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// True when no playlist on this device has the reminder's channel.
+    func isHidden(_ info: ReminderInfo) -> Bool { channelIndex.isHidden(info.channelName) }
+
+    /// A playlist's channel list loaded: hidden reminders for its channels
+    /// reappear, and a future one gets its notification again.
+    func recordPlaylistChannels(_ playlistID: String, names: Set<String>) {
+        guard channelIndex.namesByPlaylist[playlistID] != names else { return }
+        let back = channelIndex.recordPlaylist(playlistID, names: names)
+        saveChannelIndex()
+        guard !back.isEmpty else { return }
+        let returning = activeReminders.values.filter { back.contains($0.channelName) }
+        debugLog("🔔 ReminderManager: \(returning.count) reminder(s) shown again (a playlist with their channel is back)")
+        objectWillChange.send()
+        scheduleNotifications(returning)
+    }
+
+    /// A playlist was deleted: reminders for channels no remaining playlist
+    /// has are hidden and their notifications cancelled. Nothing is deleted.
+    func playlistDeleted(_ playlistID: String, displayedNames: Set<String>) {
+        let gone = channelIndex.playlistDeleted(playlistID, displayedNames: displayedNames)
+        saveChannelIndex()
+        guard !gone.isEmpty else { return }
+        let hidden = activeReminders.values.filter { gone.contains($0.channelName) }
+        #if os(iOS)
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: hidden.map(\.notificationID))
+        #endif
+        if pendingBanner.map({ gone.contains($0.channel) }) == true { pendingBanner = nil }
+        debugLog("🔔 ReminderManager: \(hidden.count) reminder(s) hidden on this device (no remaining playlist has their channel); notifications cancelled, nothing deleted")
+        objectWillChange.send()
+    }
+
+    /// Future reminders' notifications, under their own ids (iOS).
+    private func scheduleNotifications(_ infos: [ReminderInfo]) {
+        #if os(iOS)
+        let future = infos.filter { $0.startTime.addingTimeInterval(-5 * 60) > Date() && !isHidden($0) }
+        guard !future.isEmpty else { return }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+            for info in future {
+                let content = UNMutableNotificationContent()
+                content.title = info.programTitle
+                content.body = "\(info.programTitle) starts in 5 minutes on \(info.channelName)"
+                content.sound = .default
+                let components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second], from: info.startTime.addingTimeInterval(-5 * 60))
+                let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                try? await center.add(UNNotificationRequest(identifier: info.notificationID, content: content, trigger: trigger))
+            }
+        }
+        #endif
+    }
+
     private override init() {
         super.init()
+        loadChannelIndex()
         loadReminders()
         #if os(iOS)
         UNUserNotificationCenter.current().delegate = self
@@ -74,7 +157,7 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
         activeReminders = [:]
         loadReminders()
         #if os(iOS)
-        let incoming = activeReminders.values.filter { $0.startTime.addingTimeInterval(-5 * 60) > Date() }
+        let incoming = activeReminders.values.filter { $0.startTime.addingTimeInterval(-5 * 60) > Date() && !isHidden($0) }
         debugLog("🔔 ReminderManager: profile switch cancelled=\(outgoing.count) rescheduled=\(incoming.count)")
         guard !incoming.isEmpty else { return }
         Task {
@@ -135,7 +218,8 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func hasReminder(forKey key: String) -> Bool {
-        activeReminders[key] != nil
+        guard let info = activeReminders[key] else { return false }
+        return !isHidden(info)
     }
 
     // MARK: - Schedule / Cancel
@@ -276,7 +360,7 @@ final class ReminderManager: NSObject, ObservableObject, @unchecked Sendable {
 
         #if os(iOS)
         let fireDate = reminder.startTime.addingTimeInterval(-5 * 60)
-        guard fireDate > Date() else { return }
+        guard fireDate > Date(), !channelIndex.isHidden(reminder.channelName) else { return }
 
         Task {
             let notifCenter = UNUserNotificationCenter.current()

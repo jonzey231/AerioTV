@@ -1143,3 +1143,214 @@ struct PlaylistGenerations: Sendable {
     /// deleted since (even if one with the same id exists again).
     func isStale(_ id: UUID, since generation: Int) -> Bool { current(id) != generation }
 }
+
+// MARK: - A deleted playlist: no request of any kind (owner 2026-11-12)
+
+/// What identifies a deleted playlist's traffic: its API keys (the playlist's
+/// own and its profiles'), the secrets an Xtream Codes or M3U playlist carries
+/// in its URLs, and the server hosts no remaining playlist uses. Never logged.
+struct PlaylistFingerprint: Sendable, Equatable {
+    var playlistID: String
+    /// Dispatcharr API keys (X-API-Key, or Authorization ApiKey / Bearer).
+    var keys: Set<String> = []
+    /// URL fragments only this playlist's requests carry: "/<user>/<pass>/",
+    /// "username=<user>&password=<pass>", the M3U and XMLTV URLs.
+    var urlSecrets: [String] = []
+    /// "host:port" keys (DispatcharrRequestGate.serverKey) that no remaining
+    /// playlist uses, so anything sent there was for this playlist.
+    var hosts: Set<String> = []
+
+    /// Xtream Codes credentials as they appear in request URLs.
+    static func xtreamSecrets(username: String, password: String) -> [String] {
+        let u = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty, !p.isEmpty else { return [] }
+        return ["/\(u)/\(p)/", "username=\(u)&password=\(p)"]
+    }
+
+    var isEmpty: Bool { keys.isEmpty && urlSecrets.isEmpty && hosts.isEmpty }
+}
+
+/// Deleted playlists, by fingerprint, in memory: a request that carries one
+/// of them (a late retry, a timer, a re-check, an image load) is refused
+/// before it is sent, and an answer that arrives after the delete is dropped.
+/// A playlist the user signs in to again (re-added, set up from another
+/// device, restored from iCloud) lifts the entries it matches.
+struct PlaylistRevocationBook: Sendable {
+    private(set) var revoked: [String: PlaylistFingerprint] = [:]
+
+    mutating func revoke(_ f: PlaylistFingerprint) {
+        guard !f.isEmpty else { return }
+        revoked[f.playlistID] = f
+    }
+
+    /// The deleted playlist whose traffic this is, or nil.
+    func refusal(url: String, apiKey: String?) -> String? {
+        guard !revoked.isEmpty else { return nil }
+        let host = url.isEmpty ? "" : DispatcharrRequestGate.serverKey(url)
+        let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        for (id, f) in revoked {
+            if !key.isEmpty, f.keys.contains(key) { return id }
+            if !host.isEmpty, f.hosts.contains(host) { return id }
+            if f.urlSecrets.contains(where: { !$0.isEmpty && url.contains($0) }) { return id }
+        }
+        return nil
+    }
+
+    /// A playlist is in use again: the same id, or any key, URL secret, or
+    /// host it shares with a revoked entry. True when anything was lifted.
+    @discardableResult
+    mutating func lift(matching live: PlaylistFingerprint) -> Bool {
+        let before = revoked.count
+        revoked = revoked.filter { id, f in
+            !(id == live.playlistID
+              || !f.keys.isDisjoint(with: live.keys)
+              || !f.hosts.isDisjoint(with: live.hosts)
+              || f.urlSecrets.contains(where: { live.urlSecrets.contains($0) }))
+        }
+        return revoked.count != before
+    }
+
+    var isEmpty: Bool { revoked.isEmpty }
+}
+
+/// What a playlist delete stops (the plan the app runs; pure so the tests
+/// can check that nothing playable or sendable is left).
+enum PlaylistDeletePlan {
+    /// A Multiview tile (or the single player's tile) belongs to the deleted
+    /// playlist when it is a live channel of the playlist on screen, a
+    /// movie, episode, or recording the playlist served, or its stream
+    /// carries the playlist's key or URL secrets.
+    static func stopsTile(isLive: Bool, deletedIsOnScreen: Bool, tileServerID: String?, deletedID: String,
+                          refusedByFingerprint: Bool) -> Bool {
+        if refusedByFingerprint { return true }
+        if let sid = tileServerID, !sid.isEmpty { return sid == deletedID }
+        return isLive && deletedIsOnScreen
+    }
+
+    /// Items left playable after the delete: nothing tagged with the deleted id.
+    static func playable<T>(_ items: [T], playlistID: (T) -> String?, deletedID: String) -> [T] {
+        items.filter { playlistID($0) != deletedID }
+    }
+}
+
+// MARK: - Reminders for channels no playlist on this device has (owner 2026-11-12)
+
+/// Reminders are kept everywhere (this device's list, iCloud, Dispatcharr
+/// Sync), but on a device where no remaining playlist has a reminder's
+/// channel, the reminder is hidden: no bell, no badge, no notification. A
+/// playlist with that channel coming back (re-added, set up, restored from
+/// iCloud) makes it reappear. Channel names are recorded per playlist when
+/// its channel list loads; a playlist this device never loaded has no names
+/// yet, so it hides nothing and keeps nothing hidden.
+struct ReminderChannelIndex: Sendable, Equatable {
+    var namesByPlaylist: [String: Set<String>] = [:]
+    /// Channel names hidden on this device.
+    var hidden: Set<String> = []
+
+    func isHidden(_ channelName: String) -> Bool { hidden.contains(channelName) }
+
+    /// A playlist's channel list loaded. Returns the names that reappear.
+    @discardableResult
+    mutating func recordPlaylist(_ playlistID: String, names: Set<String>) -> Set<String> {
+        namesByPlaylist[playlistID] = names
+        let back = hidden.intersection(names)
+        hidden.subtract(back)
+        return back
+    }
+
+    /// A playlist was deleted. [displayedNames] is its channel list when it
+    /// was the one on screen (its recorded names otherwise). Returns the
+    /// names newly hidden: its channels that no remaining playlist has.
+    @discardableResult
+    mutating func playlistDeleted(_ playlistID: String, displayedNames: Set<String> = []) -> Set<String> {
+        let mine = (namesByPlaylist.removeValue(forKey: playlistID) ?? []).union(displayedNames)
+        let others = namesByPlaylist.values.reduce(into: Set<String>()) { $0.formUnion($1) }
+        let gone = mine.subtracting(others).subtracting(hidden)
+        hidden.formUnion(gone)
+        return gone
+    }
+}
+
+/// The app's revocation gate (HTTPRouter consults it for every request):
+/// refuses a request that carries a deleted playlist's fingerprint, drops
+/// an answer that arrives after the delete, and cancels the requests in
+/// flight when a playlist is deleted.
+final class PlaylistRevocation: @unchecked Sendable {
+    static let shared = PlaylistRevocation()
+
+    struct Refused: Error, LocalizedError, Equatable {
+        let playlistID: String
+        var errorDescription: String? { "This playlist was deleted." }
+    }
+
+    private let lock = NSLock()
+    private var book = PlaylistRevocationBook()
+    private var inFlight: [UUID: (url: String, apiKey: String?, cancel: @Sendable () -> Void)] = [:]
+
+    /// Throws when [url] or [apiKey] belongs to a deleted playlist.
+    func check(url: String, apiKey: String?) throws {
+        lock.lock(); let id = book.refusal(url: url, apiKey: apiKey); lock.unlock()
+        if let id { throw Refused(playlistID: id) }
+    }
+
+    func isRevoked(url: String, apiKey: String?) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return book.refusal(url: url, apiKey: apiKey) != nil
+    }
+
+    /// A request is being sent; [cancel] stops it if its playlist is deleted meanwhile.
+    func track(url: String, apiKey: String?, cancel: @escaping @Sendable () -> Void) -> UUID {
+        let id = UUID()
+        lock.lock(); inFlight[id] = (url, apiKey, cancel); lock.unlock()
+        return id
+    }
+
+    func untrack(_ id: UUID) {
+        lock.lock(); inFlight[id] = nil; lock.unlock()
+    }
+
+    /// The playlist was deleted: refuse its traffic from now on and cancel
+    /// what is in flight. Returns how many requests were cancelled.
+    @discardableResult
+    func revoke(_ f: PlaylistFingerprint) -> Int {
+        lock.lock()
+        book.revoke(f)
+        var one = PlaylistRevocationBook()
+        one.revoke(f)
+        let hits = inFlight.filter { one.refusal(url: $0.value.url, apiKey: $0.value.apiKey) != nil }
+        for id in hits.keys { inFlight[id] = nil }
+        lock.unlock()
+        for h in hits.values { h.cancel() }
+        return hits.count
+    }
+
+    /// A playlist is in use again (added, set up, restored): lift what it matches.
+    @discardableResult
+    func lift(matching live: PlaylistFingerprint) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return book.lift(matching: live)
+    }
+
+    var inFlightCount: Int { lock.lock(); defer { lock.unlock() }; return inFlight.count }
+
+    func resetForTests() {
+        lock.lock(); book = PlaylistRevocationBook(); inFlight = [:]; lock.unlock()
+    }
+}
+
+/// The delete confirmation when the playlist has recordings saved on this
+/// device (owner 2026-11-12; byte-identical with Android). Without any, the
+/// confirmation is today's.
+enum PlaylistDeleteCopy {
+    static func title(_ playlistName: String) -> String { "Delete \(playlistName)?" }
+    static func body(recordings n: Int) -> String {
+        let saved = n == 1 ? "1 recording saved on this device came" : "\(n) recordings saved on this device came"
+        return "This removes the playlist and its sign-in from this device. \(saved) from this playlist."
+    }
+    static let keepRecordings = "Delete, Keep Recordings"
+    static let deleteRecordings = "Delete Playlist and Recordings"
+    static let cancel = "Cancel"
+    /// The DVR section for kept recordings, under every playlist.
+    static let savedOnDeviceSection = "Saved on this device"
+}
