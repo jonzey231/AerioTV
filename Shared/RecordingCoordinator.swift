@@ -315,11 +315,14 @@ final class RecordingCoordinator: ObservableObject {
         // partway into its window), not the scheduled window.
         if written > 0 {
             let attrs = recording.resolvedLocalFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
+            let created = attrs?[.creationDate] as? Date
+            let fallbackStart = max(recording.createdAt, recording.effectiveStart)
             recording.capturedSeconds = InterruptedCapture.capturedSeconds(
-                created: attrs?[.creationDate] as? Date,
+                created: created,
                 modified: attrs?[.modificationDate] as? Date,
-                fallbackStart: max(recording.createdAt, recording.effectiveStart),
+                fallbackStart: fallbackStart,
                 now: Date())
+            recording.capturedStart = InterruptedCapture.captureStart(created: created, fallbackStart: fallbackStart)
             debugLog("[DVR] on-device recording \(recording.id.uuidString.prefix(8)) stopped: \(written) bytes, \(Int(recording.capturedSeconds ?? 0)) s captured")
         }
         try? modelContext.save()
@@ -668,6 +671,7 @@ final class RecordingCoordinator: ObservableObject {
         rec.statusRaw = out.statusRaw
         rec.fileSizeBytes = out.bytes
         rec.capturedSeconds = out.capturedSeconds
+        rec.capturedStart = out.captureStart
         rec.failureReason = out.failureReason
         let what = out.capturedSeconds.map { "kept \(out.bytes) bytes, \(Int($0)) s captured" }
             ?? "nothing captured (\(out.failureReason ?? ""))"

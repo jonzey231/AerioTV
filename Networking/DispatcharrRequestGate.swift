@@ -1250,6 +1250,9 @@ enum InterruptedCapture {
         /// nothing was captured.
         let capturedSeconds: Double?
         let failureReason: String?
+        /// When the capture began (its file's first write); nil when nothing
+        /// was captured.
+        var captureStart: Date? = nil
     }
 
     static let nothingWritten = "No data was written"
@@ -1270,7 +1273,16 @@ enum InterruptedCapture {
         return Outcome(statusRaw: "interrupted", bytes: bytes,
                        capturedSeconds: capturedSeconds(created: created, modified: modified,
                                                         fallbackStart: fallbackStart, now: now),
-                       failureReason: nil)
+                       failureReason: nil,
+                       captureStart: captureStart(created: created, fallbackStart: fallbackStart))
+    }
+
+    /// When a capture began: its file's first write, else the fallback. The
+    /// time range shown for a finished on-device recording runs from here
+    /// for the captured length (as Android shows it), not the scheduled
+    /// window (owner 2026-11-13).
+    static func captureStart(created: Date?, fallbackStart: Date) -> Date {
+        created ?? fallbackStart
     }
 
     /// The length a capture's file covers, from its first write to its last.

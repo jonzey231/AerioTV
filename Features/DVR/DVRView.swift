@@ -1404,8 +1404,8 @@ struct DVRView: View {
         case .completed: status = "Completed"
         default: status = rec.statusRaw.capitalized
         }
-        return RecordingFacts(recordedOn: rec.scheduledStart,
-                              windowStart: rec.scheduledStart, windowEnd: rec.scheduledEnd,
+        return RecordingFacts(recordedOn: rec.shownStart,
+                              windowStart: rec.shownStart, windowEnd: rec.shownEnd,
                               fileSizeBytes: rec.fileSizeBytes,
                               format: ext.lowercased() == "m3u8" ? "HLS" : ext,
                               location: location, status: status,
@@ -1653,7 +1653,7 @@ struct DVRHero<Menu: View>: View {
     private var metaParts: [String] {
         var parts: [String] = []
         if !recording.channelName.isEmpty { parts.append(recording.channelName) }
-        parts.append(DVRFormat.dateRange(recording.scheduledStart, recording.scheduledEnd))
+        parts.append(DVRFormat.dateRange(recording.shownStart, recording.shownEnd))
         if recording.isInProgress {
             let sec = max(0, Date().timeIntervalSince(recording.effectiveStart))
             parts.append("\(DVRFormat.duration(seconds: sec)) recorded")
@@ -1867,7 +1867,7 @@ struct DVRPosterCard: View {
     }
 
     private var meta: String {
-        var parts = [DVRFormat.day(recording.scheduledStart)]
+        var parts = [DVRFormat.day(recording.shownStart)]
         if recording.isInProgress {
             parts.append("Recording")
         } else if recording.isUpcoming {
@@ -1974,7 +1974,7 @@ struct DVRRecordingCard: View {
         }
         if let se = recording.displaySeasonEpisode { return "S\(se.season) E\(se.episode)" }
         if recording.isUpcoming { return DVRFormat.dateRange(recording.scheduledStart, recording.scheduledEnd) }
-        return DVRFormat.day(recording.scheduledStart)
+        return DVRFormat.day(recording.shownStart)
     }
 
     private var artworkBlock: some View {

@@ -1269,6 +1269,10 @@ do {
     // 33-minute window.
     eq(C.capturedSeconds(created: t0, modified: t0.addingTimeInterval(75), fallbackStart: fallback, now: t0.addingTimeInterval(900)),
        75, "a stopped recording's length is its file's span, not the window")
+    // Its time range starts at the capture's first write (else the fallback).
+    eq(kept.captureStart, t0, "an interrupted capture's range starts at its file's first write")
+    eq(C.captureStart(created: nil, fallbackStart: fallback), fallback, "no creation date: the fallback start")
+    eq(empty.captureStart, nil, "nothing captured, no capture range")
 }
 
 // MARK: - Delete All Local Recordings clears device-copy locations it removed (owner 2026-11-13)
