@@ -139,6 +139,7 @@ struct DVRSettingsView: View {
                     .sectionHeaderStyle()
             } footer: {
                 Text("Applied to new recordings by default. Sports events often run past their scheduled time.")
+                    .settingsFooterStyle()
             }
             .listRowBackground(Color.cardBackground)
 
@@ -166,6 +167,7 @@ struct DVRSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("Server-side recordings are recommended: they continue even when AerioTV is closed.")
+                        .settingsFooterStyle()
                 }
                 .listRowBackground(Color.cardBackground)
             }
@@ -259,6 +261,7 @@ struct DVRSettingsView: View {
                     .sectionHeaderStyle()
             } footer: {
                 Text("When enabled, the screen won't turn off while a local recording is in progress. Recommended to prevent recording interruption.")
+                    .settingsFooterStyle()
             }
             .listRowBackground(Color.cardBackground)
 

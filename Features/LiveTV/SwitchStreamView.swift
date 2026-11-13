@@ -715,6 +715,7 @@ struct SwitchStreamView: View {
                 } footer: {
                     // The reorder hint lives in the subtitle now; no repeat here.
                     Text("Switches the active upstream for this channel. The picture follows in a few seconds.")
+                        .settingsFooterStyle()
                 }
             }
         }

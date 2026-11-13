@@ -300,6 +300,7 @@ struct ProfilesSettingsSection: View {
                 Text("Profiles").sectionHeaderStyle()
             } footer: {
                 Text(ProfileCopy.sectionFooter)
+                    .settingsFooterStyle()
             }
         }
     }

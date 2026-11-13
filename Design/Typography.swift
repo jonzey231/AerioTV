@@ -476,6 +476,20 @@ extension View {
     func sectionHeaderStyle() -> some View {
         ThemeReactiveSectionHeader(content: self)
     }
+
+    /// A Settings section footer, and the "Tap a playlist" hint: the dim
+    /// tertiary color at the footnote size, on every platform. Footers with
+    /// no style of their own drew in the system gray (Android parity
+    /// 2026-11-13; Android uses the same dim color for every footer).
+    func settingsFooterStyle() -> some View {
+        #if os(tvOS)
+        self.scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+            .foregroundColor(Color.contrastText(.textTertiary))
+        #else
+        self.scaledFont(.labelSmall.subtext())
+            .foregroundColor(Color.contrastText(.textTertiary))
+        #endif
+    }
 }
 
 // MARK: - Rounded Corners on Logos and Artwork (Settings > Appearance)

@@ -590,14 +590,10 @@ struct SettingsView: View {
                                 // "Long press to edit or delete") taught
                                 // two hidden gestures for something the
                                 // detail page now does in the open.
+                                // The dim footer style on every platform (Apple TV
+                                // drew it in the brighter secondary color).
                                 Label(Self.playlistFooterHint, systemImage: "list.bullet")
-                                    #if os(tvOS)
-                                    .scaledFont(.system(size: 20, weight: .regular).subtext())
-                                    .foregroundColor(Color.contrastText(.textSecondary))
-                                    #else
-                                    .scaledFont(.labelSmall.subtext())
-                                    .foregroundColor(Color.contrastText(.textTertiary))
-                                    #endif
+                                    .settingsFooterStyle()
                             }
                             .padding(.top, 4)
                         }
@@ -1482,10 +1478,11 @@ struct SettingsView: View {
                 // longer what the hint has to teach.
                 // Phase 3 item 10: plain sentence, no leading list
                 // glyph (it read as a stray icon under the list).
+                // The dim footer style and inset of every Apple TV footer.
                 Text(Self.playlistFooterHint)
-                    .scaledFont(.system(size: 24, weight: .medium))
-                    .foregroundColor(.textPrimary.opacity(0.7))
-                    .padding(.top, 12)
+                    .settingsFooterStyle()
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
             }
         }
     }
