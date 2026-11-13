@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import Combine
 
 // MARK: - EPG Cache
 // Actor-isolated in-memory cache. Keyed by a server+channel string so different
@@ -858,12 +859,10 @@ struct ChannelListView: View {
                     reconcileSelectedGroupWithPlaylist()
                     filterChannels()
                     favoritesStore.register(items: items)
-                    #if os(tvOS)
-                    // Cold-launch deep link: channels just finished loading and
-                    // we have a pending channel ID from a Top Shelf click.
-                    tryHandlePendingChannelDeepLink(from: items)
-                    #endif
                 }
+                // A channel link (README "Deep links", Top Shelf included): plays
+                // once channels are here and nothing holds it (ChannelLinkInbox).
+                .modifier(ChannelLinkReceiver(play: playPendingChannelLink))
                 // Warm-launch deep link: the app was already running, channels
                 // are already loaded, and an aerioOpenChannel notification
                 // arrived (tvOS: Top Shelf click; both platforms: the DVR
@@ -876,13 +875,10 @@ struct ChannelListView: View {
                     if let channel = channelStore.channels.first(where: { $0.id == channelID }),
                        !channel.streamURLs.isEmpty {
                         debugLog("🔗 ChannelListView: warm deep link → playing \(channel.name)")
-                        UserDefaults.standard.removeObject(forKey: "launchChannelID")
                         // Also the Kept Live card's tune and Jump to Channel:
                         // a pick, so it asks where during a remote session.
                         pickChannel(channel)
                     } else {
-                        // Channels not yet loaded, leave launchChannelID set so
-                        // the cold-path handler picks it up when they arrive.
                         debugLog("🔗 ChannelListView: warm deep link received but channel not loaded yet")
                     }
                 }
@@ -949,14 +945,8 @@ struct ChannelListView: View {
                     applyDefaultGroupIfNeeded()
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)
-                    #if os(tvOS)
-                    // If channels are already loaded when this view appears
-                    // (e.g. warm launch via Top Shelf deep link or tab switch),
-                    // handle any pending deep link now since onChange won't fire.
-                    if !channelStore.channels.isEmpty {
-                        tryHandlePendingChannelDeepLink(from: channelStore.channels)
-                    }
-                    #endif
+                    // A channel link waiting when this view mounts (tab switch).
+                    playPendingChannelLink()
                     debugLog("🔷 ChannelListView.onAppear: done")
                 }
                 .onDisappear {
@@ -3582,20 +3572,51 @@ struct ChannelListView: View {
 
     // MARK: - Deep Link Handler
 
-    #if os(tvOS)
-    /// If `launchChannelID` is set in UserDefaults (from a Top Shelf deep
-    /// link that arrived before channels were loaded), look it up in the
-    /// freshly loaded channel list and start playback. No-op if no pending
-    /// ID or the channel isn't found.
-    private func tryHandlePendingChannelDeepLink(from items: [ChannelDisplayItem]) {
-        guard let channelID = UserDefaults.standard.string(forKey: "launchChannelID"),
-              let channel = items.first(where: { $0.id == channelID }),
-              !channel.streamURLs.isEmpty else { return }
-        UserDefaults.standard.removeObject(forKey: "launchChannelID")
-        debugLog("🔗 ChannelListView: cold deep link → playing \(channel.name)")
-        startPlayback(channel)
+    /// Plays the pending channel link once nothing holds it: resolved against
+    /// the active playlist's channels in every documented form. A link that
+    /// matches nothing once channels have loaded is dropped and logged.
+    private func playPendingChannelLink() {
+        let inbox = ChannelLinkInbox.shared
+        guard let link = inbox.pending else { return }
+        if let why = inbox.holdReason {
+            inbox.noteHeld(why)
+            return
+        }
+        let items = channelStore.channels
+        let type = channelStore.activeServer?.type
+        let candidates = items.map { item in
+            ChannelLinkCandidate(
+                id: item.id,
+                crossID: ChannelLink.crossID(isDispatcharr: type == .dispatcharrAPI, isM3U: type == .m3uPlaylist,
+                                             uuid: item.uuid, tvgID: item.tvgID, streamURL: item.streamURL?.absoluteString),
+                uuid: item.uuid,
+                dispatcharrID: type == .dispatcharrAPI ? Int(item.id) : nil,
+                number: item.number)
+        }
+        if let id = ChannelLink.resolve(link, in: candidates),
+           let channel = items.first(where: { $0.id == id }), !channel.streamURLs.isEmpty {
+            inbox.consume()
+            debugLog("[DEEPLINK] channel link \(ChannelLink.logForm(link)) → playing \(channel.name)")
+            // A pick: during a remote session it asks where first. Played here,
+            // it re-tunes the open player (Android parity, and the Remote's
+            // openChannel): begin() with a session up would add a Multiview tile.
+            PlayWhereRouter.shared.request(title: channel.name, item: .live(channel)) {
+                let store = MultiviewStore.shared
+                if !store.tiles.isEmpty {
+                    if store.tiles.count == 1, nowPlaying.playingItem?.id == channel.id {
+                        if nowPlaying.isMinimized { nowPlaying.expand() }
+                        debugLog("[DEEPLINK] \(channel.name) is already playing")
+                        return
+                    }
+                    PlayerSession.shared.exit()
+                }
+                startPlayback(channel)
+            }
+        } else if !items.isEmpty && !channelStore.isLoading {
+            inbox.consume()
+            debugLog("[DEEPLINK] channel link matched no channel: \(ChannelLink.logForm(link))")
+        }
     }
-    #endif
 
     // MARK: - Upcoming EPG Closure Factory
 
@@ -7881,5 +7902,78 @@ enum LiveSearchIndexCache {
     static func invalidate() {
         index = nil
         generation &+= 1
+    }
+}
+
+// MARK: - Channel links
+
+/// Calls [play] whenever anything a pending channel link waits on changes.
+private struct ChannelLinkReceiver: ViewModifier {
+    let play: () -> Void
+    func body(content: Content) -> some View {
+        content.onReceive(ChannelLinkInbox.changes) { _ in play() }
+    }
+}
+
+/// The channel link waiting to play (README "Deep links": `aeriotv://channel/<id>`
+/// and the older `aerio://channel/<id>` the Top Shelf writes). In memory only, so
+/// a link from a cold launch never outlives that launch. ChannelListView resolves
+/// and plays it; MainTabView switches to Live TV when one arrives and reports the
+/// start screen. Android parity (a6d809bd): a link that starts the app waits for
+/// the start screen, the launch PIN, the launch profile picker, and a profile
+/// switch, and Resume Last Channel steps aside.
+@MainActor
+final class ChannelLinkInbox: ObservableObject {
+    static let shared = ChannelLinkInbox()
+
+    @Published private(set) var pending: String?
+    /// A channel link arrived this session: Resume Last Channel does not run.
+    private(set) var arrivedThisSession = false
+    /// The launch's start screen (the initial loading cover) is up.
+    @Published var startScreenUp = false
+    private var loggedHold: String?
+
+    func open(_ link: String) {
+        pending = link
+        arrivedThisSession = true
+        loggedHold = nil
+        debugLog("[DEEPLINK] channel link received: \(ChannelLink.logForm(link))")
+    }
+
+    func consume() { pending = nil }
+
+    /// What the link waits for, or nil.
+    var holdReason: String? {
+        let pm = ProfileManager.shared
+        if startScreenUp { return "the start screen" }
+        if pm.launchGate != nil { return "the launch PIN" }
+        if pm.launchPicker != nil { return "the profile picker" }
+        if pm.switching { return "a profile switch" }
+        return nil
+    }
+
+    func noteHeld(_ why: String) {
+        guard loggedHold != why else { return }
+        loggedHold = why
+        debugLog("[DEEPLINK] channel link waits for \(why)")
+    }
+
+    /// Fires after anything the pending link depends on changed. Each
+    /// @Published emits before its value is set, so the merge is delivered on
+    /// the next main queue turn, when the new values read back.
+    static var changes: AnyPublisher<Void, Never> {
+        let inbox = ChannelLinkInbox.shared
+        let pm = ProfileManager.shared
+        let store = ChannelStore.shared
+        return Publishers.MergeMany(
+            inbox.$pending.map { _ in () }.eraseToAnyPublisher(),
+            inbox.$startScreenUp.map { _ in () }.eraseToAnyPublisher(),
+            pm.$launchGate.map { _ in () }.eraseToAnyPublisher(),
+            pm.$launchPicker.map { _ in () }.eraseToAnyPublisher(),
+            pm.$switching.map { _ in () }.eraseToAnyPublisher(),
+            store.$channels.map { _ in () }.eraseToAnyPublisher(),
+            store.$isLoading.map { _ in () }.eraseToAnyPublisher())
+            .receive(on: DispatchQueue.main)
+            .eraseToAnyPublisher()
     }
 }

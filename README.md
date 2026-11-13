@@ -543,6 +543,30 @@ AerioTV always opens from the cache on your device first and refreshes in the ba
 
 Switching profiles on a Dispatcharr playlist keeps the server's guide and library on screen; only your channel visibility and personal data change. Pull down (phone) or press Refresh (TV) to force an update at any time.
 
+## Deep links
+
+A link of the form `aeriotv://channel/<id>` opens AerioTV and plays a channel. The id is matched against the channels of the active playlist:
+
+| Form | Example | Matches |
+|---|---|---|
+| `m3u:<tvg-id>` | `aeriotv://channel/m3u:101` | An M3U channel by its `tvg-id` |
+| `disp:<uuid>` | `aeriotv://channel/disp:123e4567-e89b-12d3-a456-426614174000` | A Dispatcharr channel by its UUID |
+| `<uuid>` | `aeriotv://channel/123e4567-e89b-12d3-a456-426614174000` | A Dispatcharr channel by its UUID, without the prefix |
+| `dispatcharr:<channel id>` | `aeriotv://channel/dispatcharr:42` | A Dispatcharr channel by its numeric channel ID |
+| `number:<channel number>` | `aeriotv://channel/number:5` | The channel number shown in the guide; decimals work too, as in `number:5.1` |
+
+An M3U channel without a `tvg-id` is matched by its stream URL instead, as `m3u:<url>` with the URL percent-encoded.
+
+A link whose id matches no channel in the active playlist is ignored.
+
+Older links of the form `aerio://channel/<id>`, as the Apple TV Top Shelf writes them, keep working.
+
+To try a link on a Mac with a booted simulator:
+
+```
+xcrun simctl openurl booted "aeriotv://channel/number:5"
+```
+
 ## OTA / HDHomeRun Channels (MPEG-2)
 
 Over-the-air broadcast channels (ATSC tuners such as HDHomeRun) carry

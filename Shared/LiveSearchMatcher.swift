@@ -273,3 +273,96 @@ enum GlobalSearchRanking {
         return out
     }
 }
+
+// MARK: - Channel links (README "Deep links"; Android ChannelDeepLink.kt)
+
+/// One channel as a channel link sees it.
+struct ChannelLinkCandidate: Sendable, Equatable {
+    /// Apple's own id (ChannelDisplayItem.id), which older Top Shelf links carry.
+    let id: String
+    /// The id Android uses as its own and writes into links (the Cast Connect
+    /// entity, the companion remote): `disp:<uuid>` for a Dispatcharr channel,
+    /// `m3u:<tvg-id>` (else `m3u:<stream url>`) for an M3U channel; nil otherwise.
+    let crossID: String?
+    let uuid: String?
+    /// Dispatcharr's integer channel id; nil on any other playlist type.
+    let dispatcharrID: Int?
+    /// The channel number the guide shows.
+    let number: String
+}
+
+/// `aeriotv://channel/<id>` (and the older `aerio://channel/<id>`), resolved
+/// against the ACTIVE playlist's channels, the same forms on both apps:
+/// 1. any id AerioTV itself writes, matched as is: Apple's own id, and the
+///    cross-platform `disp:<uuid>` or `m3u:<tvg-id>` / `m3u:<url>`;
+/// 2. `disp:<uuid>`: the Dispatcharr channel with that uuid, any case;
+/// 3. a bare uuid: the same;
+/// 4. `dispatcharr:<channel id>`: Dispatcharr's integer channel id;
+/// 5. `number:<channel number>`: the number the guide shows, decimals such as
+///    5.1 allowed (the exact text first, then the numeric value).
+/// Nothing matching resolves to nil; the caller drops the link once channels
+/// have loaded, and logs it.
+enum ChannelLink {
+    /// The channel id an `aeriotv://channel/<id>` or `aerio://channel/<id>`
+    /// URL carries: its first path segment, percent-decoded (as Android reads
+    /// Uri.pathSegments), so an id with a slash, such as `m3u:<url>`, arrives
+    /// percent-encoded. Nil for any other URL or an empty id.
+    static func id(from url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(), scheme == "aeriotv" || scheme == "aerio",
+              url.host?.lowercased() == "channel",
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let first = comps.percentEncodedPath.split(separator: "/").first,
+              let id = String(first).removingPercentEncoding?.trimmingCharacters(in: .whitespaces),
+              !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// The cross-platform id of a channel (ChannelLinkCandidate.crossID).
+    static func crossID(isDispatcharr: Bool, isM3U: Bool, uuid: String?, tvgID: String?, streamURL: String?) -> String? {
+        if isDispatcharr, let uuid, !uuid.isEmpty { return "disp:\(uuid)" }
+        guard isM3U else { return nil }
+        if let tvgID, !tvgID.isEmpty { return "m3u:\(tvgID)" }
+        if let streamURL, !streamURL.isEmpty { return "m3u:\(streamURL)" }
+        return nil
+    }
+
+    /// Apple's id of the first channel [link] names, or nil.
+    static func resolve(_ link: String, in channels: [ChannelLinkCandidate]) -> String? {
+        let id = link.trimmingCharacters(in: .whitespaces)
+        guard !id.isEmpty else { return nil }
+        if let c = channels.first(where: { $0.id == id || $0.crossID == id }) { return c.id }
+        let lower = id.lowercased()
+        func byUUID(_ uuid: String) -> String? {
+            let u = uuid.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !u.isEmpty else { return nil }
+            return channels.first { $0.uuid?.lowercased() == u }?.id
+        }
+        if lower.hasPrefix("disp:") { return byUUID(String(id.dropFirst(5))) }
+        if lower.hasPrefix("dispatcharr:") {
+            guard let n = Int(id.dropFirst(12).trimmingCharacters(in: .whitespaces)) else { return nil }
+            return channels.first { $0.dispatcharrID == n }?.id
+        }
+        if lower.hasPrefix("number:") {
+            let wanted = id.dropFirst(7).trimmingCharacters(in: .whitespaces)
+            guard !wanted.isEmpty else { return nil }
+            if let c = channels.first(where: { $0.number.trimmingCharacters(in: .whitespaces) == wanted }) { return c.id }
+            guard let n = Double(wanted) else { return nil }
+            return channels.first { Double($0.number.trimmingCharacters(in: .whitespaces)) == n }?.id
+        }
+        if isUUID(id) { return byUUID(id) }
+        return nil
+    }
+
+    static func isUUID(_ s: String) -> Bool {
+        let parts = s.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.map(\.count) == [8, 4, 4, 4, 12] else { return false }
+        return parts.allSatisfy { $0.allSatisfy(\.isHexDigit) }
+    }
+
+    /// The link as the log shows it: an `m3u:<url>` id can carry playlist
+    /// credentials in its URL, so only its length is logged.
+    static func logForm(_ link: String) -> String {
+        if link.lowercased().hasPrefix("m3u:"), link.contains("://") { return "m3u:<url, \(link.count - 4) characters>" }
+        return link
+    }
+}

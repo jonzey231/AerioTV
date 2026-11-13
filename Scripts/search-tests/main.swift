@@ -154,5 +154,66 @@ do {
        "filler dropped only on its own channel")
 }
 
+// MARK: - Channel links (README "Deep links"; Android ChannelDeepLink.kt)
+
+do {
+    func url(_ s: String) -> URL { URL(string: s)! }
+    // Parsing: the first path segment, percent-decoded; both schemes; channel host only.
+    check(ChannelLink.id(from: url("aeriotv://channel/number:5")) == "number:5", "aeriotv number link")
+    check(ChannelLink.id(from: url("aerio://channel/42")) == "42", "legacy aerio link (Top Shelf)")
+    check(ChannelLink.id(from: url("AERIOTV://Channel/disp:ABC")) == "disp:ABC", "scheme and host any case, id kept")
+    check(ChannelLink.id(from: url("aeriotv://channel/m3u:http%3A%2F%2Fh.example%2Fs.ts")) == "m3u:http://h.example/s.ts",
+          "a percent-encoded m3u:<url> decodes whole")
+    check(ChannelLink.id(from: url("aeriotv://channel/m3u%3Anews.1")) == "m3u:news.1", "encoded colon decodes")
+    check(ChannelLink.id(from: url("aeriotv://channel/")) == nil, "empty id")
+    check(ChannelLink.id(from: url("aeriotv://setup?v=1&code=x")) == nil, "setup link is not a channel link")
+    check(ChannelLink.id(from: url("aerio://vod/movie/12")) == nil, "VOD link is not a channel link")
+    check(ChannelLink.id(from: url("https://channel/5")) == nil, "other schemes ignored")
+
+    // Cross-platform ids, as Android names its channels.
+    check(ChannelLink.crossID(isDispatcharr: true, isM3U: false, uuid: "u-1", tvgID: "x", streamURL: "http://a") == "disp:u-1", "Dispatcharr: disp:<uuid>")
+    check(ChannelLink.crossID(isDispatcharr: false, isM3U: true, uuid: nil, tvgID: "news.1", streamURL: "http://a") == "m3u:news.1", "M3U: m3u:<tvg-id>")
+    check(ChannelLink.crossID(isDispatcharr: false, isM3U: true, uuid: nil, tvgID: "", streamURL: "http://a/b") == "m3u:http://a/b", "M3U without tvg-id: m3u:<url>")
+    check(ChannelLink.crossID(isDispatcharr: false, isM3U: false, uuid: nil, tvgID: "x", streamURL: "http://a") == nil, "Xtream: none")
+
+    let u7 = "00000000-0000-4000-8000-000000000007"
+    let disp: [ChannelLinkCandidate] = [
+        .init(id: "5", crossID: "disp:00000000-0000-4000-8000-000000000005", uuid: "00000000-0000-4000-8000-000000000005", dispatcharrID: 5, number: "5"),
+        .init(id: "7", crossID: "disp:\(u7)", uuid: u7, dispatcharrID: 7, number: "7.1"),
+        .init(id: "9", crossID: "disp:00000000-0000-4000-8000-00000000000a", uuid: "00000000-0000-4000-8000-00000000000A", dispatcharrID: 9, number: "12"),
+    ]
+    check(ChannelLink.resolve("7", in: disp) == "7", "Apple's own id")
+    check(ChannelLink.resolve("disp:\(u7)", in: disp) == "7", "disp:<uuid>")
+    check(ChannelLink.resolve("DISP:\(u7.uppercased())", in: disp) == "7", "disp: any case")
+    check(ChannelLink.resolve(u7, in: disp) == "7", "bare uuid")
+    check(ChannelLink.resolve("00000000-0000-4000-8000-00000000000a", in: disp) == "9", "bare uuid, any case")
+    check(ChannelLink.resolve("dispatcharr:9", in: disp) == "9", "dispatcharr:<channel id>")
+    check(ChannelLink.resolve("dispatcharr: 5 ", in: disp) == "5", "dispatcharr: trims")
+    check(ChannelLink.resolve("dispatcharr:x", in: disp) == nil, "dispatcharr: needs an integer")
+    check(ChannelLink.resolve("number:5", in: disp) == "5", "number:<n>")
+    check(ChannelLink.resolve("number:7.1", in: disp) == "7", "number with a decimal")
+    check(ChannelLink.resolve("number:5.0", in: disp) == "5", "number by value when the text differs")
+    check(ChannelLink.resolve("number:12", in: disp) == "9", "number is the guide's number, not the id")
+    check(ChannelLink.resolve("number:", in: disp) == nil, "empty number")
+    check(ChannelLink.resolve("number:99", in: disp) == nil, "no such number")
+    check(ChannelLink.resolve("disp:00000000-0000-4000-8000-0000000000ff", in: disp) == nil, "unknown uuid")
+    check(ChannelLink.resolve("m3u:news.1", in: disp) == nil, "m3u: does not match a Dispatcharr channel")
+    check(ChannelLink.resolve("  ", in: disp) == nil, "blank link")
+
+    let m3u: [ChannelLinkCandidate] = [
+        .init(id: "m3u_aa", crossID: "m3u:news.1", uuid: nil, dispatcharrID: nil, number: "1"),
+        .init(id: "m3u_bb", crossID: "m3u:http://h.example/s.ts", uuid: nil, dispatcharrID: nil, number: "2"),
+        .init(id: "m3u_cc", crossID: "m3u:news.1", uuid: nil, dispatcharrID: nil, number: "3"),
+    ]
+    check(ChannelLink.resolve("m3u:news.1", in: m3u) == "m3u_aa", "m3u:<tvg-id>, the first in channel order")
+    check(ChannelLink.resolve("m3u:http://h.example/s.ts", in: m3u) == "m3u_bb", "m3u:<url>")
+    check(ChannelLink.resolve("m3u_bb", in: m3u) == "m3u_bb", "Apple's own M3U id (Top Shelf)")
+    check(ChannelLink.resolve("dispatcharr:1", in: m3u) == nil, "dispatcharr: never matches an M3U channel")
+    check(ChannelLink.resolve("number:2", in: m3u) == "m3u_bb", "number on M3U")
+
+    check(ChannelLink.logForm("m3u:http://user:pw@h.example/s.ts") == "m3u:<url, 29 characters>", "a URL id is logged by length only")
+    check(ChannelLink.logForm("number:5") == "number:5", "other ids are logged as is")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

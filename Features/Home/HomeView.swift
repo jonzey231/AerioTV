@@ -5606,6 +5606,12 @@ struct MainTabView: View {
             debugLog("🎮 Auto-resume: waits for the launch PIN")
             return
         }
+        // A channel link opened the app: it plays instead (Android a6d809bd).
+        if ChannelLinkInbox.shared.arrivedThisSession {
+            didAttemptAutoResume = true
+            debugLog("🎮 Auto-resume: a channel link opened the app; Resume Last Channel steps aside")
+            return
+        }
 
         // Settings gate. Reading via UserDefaults rather than
         // @AppStorage so the property doesn't need to live on
@@ -8556,7 +8562,18 @@ struct MainTabView: View {
             // policy as playback itself - the loopback engines suspend).
             LiveChannelRetention.shared.stopAll(reason: "app backgrounded")
         }
-        // Top Shelf deep link for a channel → switch to Live TV tab.
+        // A channel link (README "Deep links", Top Shelf included) → Live TV,
+        // where ChannelListView plays it once nothing holds it. The start
+        // screen holds it, as Android's BOOTSTRAP does (a6d809bd).
+        .onReceive(ChannelLinkInbox.shared.$pending.receive(on: DispatchQueue.main)) { link in
+            guard link != nil, selectedTab != .liveTV else { return }
+            debugLog("🔗 MainTabView: channel link → switch to Live TV tab")
+            withAnimation { selectedTab = .liveTV }
+        }
+        .onChange(of: showInitialEPGLoading, initial: true) { _, up in
+            ChannelLinkInbox.shared.startScreenUp = up
+        }
+        // An in-app channel hand-off (Search, DVR, Kept Live) → Live TV tab.
         // ChannelListView itself handles starting playback once channels are loaded.
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { notif in
             debugLog("🔗 MainTabView: aerioOpenChannel → switch to Live TV tab")

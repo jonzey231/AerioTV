@@ -694,10 +694,19 @@ struct AerioApp: App {
                         debugLog("🔗 Settings deep link: \(url.absoluteString)")
                     }
                 }
+                // Channel links on every platform (README "Deep links"):
+                //   aeriotv://channel/<id>   any documented id form
+                //   aerio://channel/<id>     the older form the Top Shelf writes
+                // ChannelLinkInbox holds the link until channels are here and
+                // nothing holds it (start screen, launch PIN, profile picker,
+                // profile switch); ChannelListView resolves and plays it.
+                .onOpenURL { url in
+                    guard let link = ChannelLink.id(from: url) else { return }
+                    ChannelLinkInbox.shared.open(link)
+                }
                 #if os(tvOS)
                 .onOpenURL { url in
-                    // Handle Top Shelf deep links:
-                    //   aerio://channel/<id>            → play live channel
+                    // Top Shelf VOD links:
                     //   aerio://vod/movie/<movieID>     → navigate to movie detail
                     //   aerio://vod/series/<seriesID>   → navigate to series detail
                     //
@@ -706,18 +715,9 @@ struct AerioApp: App {
                     // a warm launch where the app is already in memory can
                     // react immediately without waiting for an onAppear that
                     // will never come).
-                    guard url.scheme == "aerio" else { return }
+                    guard url.scheme == "aerio", url.host == "vod" else { return }
                     debugLog("🔗 Deep link received: \(url.absoluteString)")
                     switch url.host {
-                    case "channel":
-                        guard let channelID = url.pathComponents.last, !channelID.isEmpty else { return }
-                        UserDefaults.standard.set(channelID, forKey: "launchChannelID")
-                        UserDefaults.standard.set(true, forKey: "launchOnLiveTV")
-                        NotificationCenter.default.post(
-                            name: .aerioOpenChannel,
-                            object: nil,
-                            userInfo: ["channelID": channelID]
-                        )
                     case "vod":
                         // pathComponents for "aerio://vod/movie/abc" is
                         // ["/", "movie", "abc"]. Strip leading "/" separators.
