@@ -289,94 +289,91 @@ struct DVRSettingsView: View {
     // highlight matches the rest of the tvOS Settings UI uniformly.
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Logan 2026-09-17: six check rows plus a Custom row,
-                // twice, was most of this page for a question that is
-                // "how many minutes". Both are one stepper now, shaped
-                // like the Appearance page's Text Size row. The TV drops
-                // the Custom escape hatch entirely: entering an
-                // arbitrary number on a remote is worse than picking a
-                // stop, and a custom value set on the phone still syncs
-                // here, still displays, and survives until stepped away.
-                // iOS keeps its picker page and its Custom row. Android
-                // gets the identical stepper.
-                // One section, as on iOS: two steppers no longer need a
-                // heading each, and a heading that just repeats the row
-                // beneath it says the same thing twice.
-                SettingsSection("Default Recording Buffers", style: .plain) {
-                    TVSettingsStepperRow(
-                        title: "Start Early (Pre-Roll)",
-                        stops: preRollStops,
-                        value: $defaultPreRoll,
-                        label: bufferStepperLabel,
-                        decreaseLabel: "Less pre-roll",
-                        increaseLabel: "More pre-roll"
-                    )
-                    TVSettingsStepperRow(
-                        title: "End Late (Post-Roll)",
-                        stops: postRollStops,
-                        value: $defaultPostRoll,
-                        label: bufferStepperLabel,
-                        decreaseLabel: "Less post-roll",
-                        increaseLabel: "More post-roll"
-                    )
-                    Text("Applied to new recordings by default. Sports events often run past their scheduled time.")
-                        .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.horizontal, 20)
-                        .padding(.top, 4)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        TVSettingsPane(spacing: 32) {
+            // Logan 2026-09-17: six check rows plus a Custom row,
+            // twice, was most of this page for a question that is
+            // "how many minutes". Both are one stepper now, shaped
+            // like the Appearance page's Text Size row. The TV drops
+            // the Custom escape hatch entirely: entering an
+            // arbitrary number on a remote is worse than picking a
+            // stop, and a custom value set on the phone still syncs
+            // here, still displays, and survives until stepped away.
+            // iOS keeps its picker page and its Custom row. Android
+            // gets the identical stepper.
+            // One section, as on iOS: two steppers no longer need a
+            // heading each, and a heading that just repeats the row
+            // beneath it says the same thing twice.
+            SettingsSection("Default Recording Buffers", style: .plain) {
+                TVSettingsStepperRow(
+                    title: "Start Early (Pre-Roll)",
+                    stops: preRollStops,
+                    value: $defaultPreRoll,
+                    label: bufferStepperLabel,
+                    decreaseLabel: "Less pre-roll",
+                    increaseLabel: "More pre-roll"
+                )
+                TVSettingsStepperRow(
+                    title: "End Late (Post-Roll)",
+                    stops: postRollStops,
+                    value: $defaultPostRoll,
+                    label: bufferStepperLabel,
+                    decreaseLabel: "Less post-roll",
+                    increaseLabel: "More post-roll"
+                )
+                Text("Applied to new recordings by default. Sports events often run past their scheduled time.")
+                    .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-                if isDispatcharr, canRecordToServer, let server = activeServer {
-                    SettingsSection("Recording Destination", style: .plain) {
-                        // Phase 3, item 3: same option list as iOS now.
-                        SettingsChoicePicker(
-                            "Default Destination",
-                            options: destinationOptions,
-                            selection: Binding(
-                                get: { server.defaultRecordingDestination },
-                                set: { server.defaultRecordingDestination = $0 }
-                            ),
-                            onChange: { _ in try? modelContext.save() }
-                        )
-                    }
-                }
-
-                SettingsSection("Local Storage", style: .plain) {
-                    tvStorageCard
-                    // tvOS treats all app storage as purgeable: under
-                    // severe storage pressure the system can evict app
-                    // data, recordings included. Disclose it rather than
-                    // let a vanished recording look like an app bug.
-                    Text("Recordings are stored on this Apple TV. If the system runs critically low on space, tvOS may remove stored app data, including recordings. For must-keep recordings, use a Dispatcharr server destination.")
-                        .scaledFont(.system(size: 22).subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.horizontal, 20)
-                        .padding(.top, 4)
-                }
-
-                SettingsSection("Behavior", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "bolt.fill",
-                        iconColor: theme.accent,
-                        title: "Keep Device Awake",
-                        subtitle: "Prevents sleep during local recording",
-                        isOn: $keepAwake
-                    ) { _ in }
-                }
-
-                SettingsSection("Danger Zone", style: .plain) {
-                    TVSettingsActionRow(
-                        icon: "trash.fill",
-                        label: "Delete All Local Recordings",
-                        isDestructive: true,
-                        action: { showClearConfirmation = true }
+            if isDispatcharr, canRecordToServer, let server = activeServer {
+                SettingsSection("Recording Destination", style: .plain) {
+                    // Phase 3, item 3: same option list as iOS now.
+                    SettingsChoicePicker(
+                        "Default Destination",
+                        options: destinationOptions,
+                        selection: Binding(
+                            get: { server.defaultRecordingDestination },
+                            set: { server.defaultRecordingDestination = $0 }
+                        ),
+                        onChange: { _ in try? modelContext.save() }
                     )
                 }
             }
-            .padding(48)
+
+            SettingsSection("Local Storage", style: .plain) {
+                tvStorageCard
+                // tvOS treats all app storage as purgeable: under
+                // severe storage pressure the system can evict app
+                // data, recordings included. Disclose it rather than
+                // let a vanished recording look like an app bug.
+                Text("Recordings are stored on this Apple TV. If the system runs critically low on space, tvOS may remove stored app data, including recordings. For must-keep recordings, use a Dispatcharr server destination.")
+                    .scaledFont(.system(size: 22).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
+            }
+
+            SettingsSection("Behavior", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "bolt.fill",
+                    iconColor: theme.accent,
+                    title: "Keep Device Awake",
+                    subtitle: "Prevents sleep during local recording",
+                    isOn: $keepAwake
+                ) { _ in }
+            }
+
+            SettingsSection("Danger Zone", style: .plain) {
+                TVSettingsActionRow(
+                    icon: "trash.fill",
+                    label: "Delete All Local Recordings",
+                    isDestructive: true,
+                    action: { showClearConfirmation = true }
+                )
+            }
         }
     }
 
@@ -384,7 +381,7 @@ struct DVRSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Maximum")
-                    .scaledFont(.system(size: 26, weight: .medium))
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
                 // Logan 2026-09-19: these two drew the default 14pt ring

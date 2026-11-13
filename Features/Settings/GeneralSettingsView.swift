@@ -143,53 +143,47 @@ struct GeneralSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                SettingsSection("Startup", style: .plain) {
-                    // Phase 3, item 3: the hand-rolled tab list is now one
-                    // SettingsChoicePicker so Startup asks its question the
-                    // same way every other page does.
-                    SettingsChoicePicker(
-                        "Default Landing Tab",
-                        options: selectableTabs.map {
-                            SettingsChoice($0.rawValue, $0.title, icon: $0.icon)
-                        },
-                        selection: $defaultTabRaw,
-                        footer: "The tab shown when the app first launches."
-                    )
+        TVSettingsPane(spacing: 32) {
+            SettingsSection("Startup", style: .plain) {
+                // Phase 3, item 3: the hand-rolled tab list is now one
+                // SettingsChoicePicker so Startup asks its question the
+                // same way every other page does.
+                SettingsChoicePicker(
+                    "Default Landing Tab",
+                    options: selectableTabs.map {
+                        SettingsChoice($0.rawValue, $0.title, icon: $0.icon)
+                    },
+                    selection: $defaultTabRaw,
+                    footer: "The tab shown when the app first launches."
+                )
 
-                    TVSettingsToggleRow(
-                        icon: "bolt.horizontal",
-                        iconColor: theme.accent,
-                        title: "Skip Loading Screen",
-                        subtitle: "Land on Live TV instantly; data hydrates in the background",
-                        isOn: $skipLoadingScreen
-                    ) { _ in }
+                TVSettingsToggleRow(
+                    icon: "bolt.horizontal",
+                    iconColor: theme.accent,
+                    title: "Skip Loading Screen",
+                    subtitle: "Land on Live TV instantly; data hydrates in the background",
+                    isOn: $skipLoadingScreen
+                ) { _ in }
 
-                    TVSettingsToggleRow(
-                        icon: "play.tv",
-                        iconColor: theme.accent,
-                        title: "Resume Last Channel",
-                        subtitle: "Auto-start the last-played channel in the corner mini-player on launch",
-                        isOn: $autoResumeLastChannel
-                    ) { _ in }
-                }
-
-                SettingsSection("Network", style: .plain) {
-                    // Phase 3, item A: the hand-rolled timeout list is now
-                    // one SettingsChoicePicker. Key networkTimeout unchanged.
-                    SettingsChoicePicker(
-                        "Request Timeout",
-                        options: Self.timeoutOptions,
-                        selection: networkTimeoutSeconds,
-                        footer: "Raise the timeout if you have a slow connection."
-                    )
-                }
+                TVSettingsToggleRow(
+                    icon: "play.tv",
+                    iconColor: theme.accent,
+                    title: "Resume Last Channel",
+                    subtitle: "Auto-start the last-played channel in the corner mini-player on launch",
+                    isOn: $autoResumeLastChannel
+                ) { _ in }
             }
-            // v1.7.5: centered 1200pt reading column (matches EditServerPage).
-            .frame(maxWidth: 1200, alignment: .leading)
-            .padding(48)
-            .frame(maxWidth: .infinity)
+
+            SettingsSection("Network", style: .plain) {
+                // Phase 3, item A: the hand-rolled timeout list is now
+                // one SettingsChoicePicker. Key networkTimeout unchanged.
+                SettingsChoicePicker(
+                    "Request Timeout",
+                    options: Self.timeoutOptions,
+                    selection: networkTimeoutSeconds,
+                    footer: "Raise the timeout if you have a slow connection."
+                )
+            }
         }
     }
     #endif

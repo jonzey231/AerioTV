@@ -654,116 +654,107 @@ struct DeveloperSettingsView: View {
     // retrieved via the companion iOS/iPad app or Files app sharing.
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                SettingsSection("Logging", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: debugLoggingEnabled ? "ladybug.fill" : "ladybug",
-                        iconColor: debugLoggingEnabled ? .accentPrimary : .textSecondary,
-                        title: "Debug Logging",
-                        subtitle: debugLoggingEnabled
-                            ? "Active: writing to aerio_debug_logs.txt"
-                            : "Off: no data is collected",
-                        isOn: Binding(
-                            get: { debugLoggingEnabled },
-                            set: { newValue in
-                                if newValue {
-                                    showEnableConfirmation = true
-                                } else {
-                                    showDisableConfirmation = true
-                                }
+        TVSettingsPane(spacing: 32) {
+            SettingsSection("Logging", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: debugLoggingEnabled ? "ladybug.fill" : "ladybug",
+                    iconColor: debugLoggingEnabled ? .accentPrimary : .textSecondary,
+                    title: "Debug Logging",
+                    subtitle: debugLoggingEnabled
+                        ? "Active: writing to aerio_debug_logs.txt"
+                        : "Off: no data is collected",
+                    isOn: Binding(
+                        get: { debugLoggingEnabled },
+                        set: { newValue in
+                            if newValue {
+                                showEnableConfirmation = true
+                            } else {
+                                showDisableConfirmation = true
                             }
-                        )
+                        }
+                    )
+                ) { _ in }
+            }
+
+            SettingsSection("Playback Engine", style: .plain) {
+                SettingsChoicePicker("Playback Engine",
+                                     options: engineOptions,
+                                     selection: engineSelection,
+                                     icon: "play.rectangle.fill")
+
+                // Only affects mpv, so it only shows when mpv can run.
+                if enginePreset != .avPlayer {
+                    TVSettingsToggleRow(
+                        icon: metalHDREngine ? "sparkles.tv.fill" : "sparkles.tv",
+                        iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
+                        title: "Metal HDR Engine",
+                        subtitle: metalHDREngine
+                            ? "On: solo live channels render HDR10 with zero-copy 4K decode (the default)"
+                            : "Off: all channels use the classic GLES engine",
+                        isOn: $metalHDREngine
                     ) { _ in }
                 }
 
-                SettingsSection("Playback Engine", style: .plain) {
-                    SettingsChoicePicker("Playback Engine",
-                                         options: engineOptions,
-                                         selection: engineSelection,
-                                         icon: "play.rectangle.fill")
+                engineAdvancedGroup
+                forceHLSToggle
 
-                    // Only affects mpv, so it only shows when mpv can run.
-                    if enginePreset != .avPlayer {
-                        TVSettingsToggleRow(
-                            icon: metalHDREngine ? "sparkles.tv.fill" : "sparkles.tv",
-                            iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
-                            title: "Metal HDR Engine",
-                            subtitle: metalHDREngine
-                                ? "On: solo live channels render HDR10 with zero-copy 4K decode (the default)"
-                                : "Off: all channels use the classic GLES engine",
-                            isOn: $metalHDREngine
-                        ) { _ in }
-                    }
+                Text(Self.playbackEngineFooter)
+                    .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-                    engineAdvancedGroup
-                    forceHLSToggle
+            if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
+                SettingsSection("Log File", style: .plain) {
+                    tvLogSizeCard
+                        .task { refreshLogSize() }
 
-                    Text(Self.playbackEngineFooter)
-                        .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
-                        .foregroundColor(Color.contrastText(.textTertiary))
-                        .padding(.horizontal, 20)
-                        .padding(.top, 4)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
-                    SettingsSection("Log File", style: .plain) {
-                        tvLogSizeCard
-                            .task { refreshLogSize() }
-
-                        // View / Share gate: surface when Debug Logging is
-                        // enabled OR the file already has bytes, mirroring
-                        // the iOSBody guard. Pre-fix this was file-existence
-                        // only, so a user who just toggled logging on saw
-                        // no rows until the first write landed.
-                        if let url = logger.logFileURL,
-                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
-                            TVSettingsActionRow(
-                                icon: "doc.text.magnifyingglass",
-                                label: "View Log File",
-                                isAccent: true,
-                                action: { showLogViewer = true }
-                            )
-                            .sheet(isPresented: $showLogViewer) {
-                                LogViewerView(url: url)
-                            }
-
-                            // v1.7.x: matching Share Log File row was missing
-                            // from this body entirely - all prior iterations
-                            // of the Share fix landed in iOSBody (line ~356)
-                            // and the tvOS view never showed a Share entry.
-                            // Wires through shareFile(url), which starts
-                            // LogShareServer and presents TvOSLogShareSheet
-                            // (URL + QR for the user's phone).
-                            TVSettingsActionRow(
-                                icon: "square.and.arrow.up",
-                                label: "Share Log File",
-                                isAccent: true,
-                                action: { shareFile(url) }
-                            )
+                    // View / Share gate: surface when Debug Logging is
+                    // enabled OR the file already has bytes, mirroring
+                    // the iOSBody guard. Pre-fix this was file-existence
+                    // only, so a user who just toggled logging on saw
+                    // no rows until the first write landed.
+                    if let url = logger.logFileURL,
+                       (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
+                        TVSettingsActionRow(
+                            icon: "doc.text.magnifyingglass",
+                            label: "View Log File",
+                            isAccent: true,
+                            action: { showLogViewer = true }
+                        )
+                        .sheet(isPresented: $showLogViewer) {
+                            LogViewerView(url: url)
                         }
 
+                        // v1.7.x: matching Share Log File row was missing
+                        // from this body entirely - all prior iterations
+                        // of the Share fix landed in iOSBody (line ~356)
+                        // and the tvOS view never showed a Share entry.
+                        // Wires through shareFile(url), which starts
+                        // LogShareServer and presents TvOSLogShareSheet
+                        // (URL + QR for the user's phone).
                         TVSettingsActionRow(
-                            icon: "trash",
-                            label: "Delete All Logs",
-                            isDestructive: true,
-                            action: { showClearConfirmation = true }
+                            icon: "square.and.arrow.up",
+                            label: "Share Log File",
+                            isAccent: true,
+                            action: { shareFile(url) }
                         )
                     }
-                }
 
-                SettingsSection("What's Captured", style: .plain) {
-                    tvLogCategoryCard
+                    TVSettingsActionRow(
+                        icon: "trash",
+                        label: "Delete All Logs",
+                        isDestructive: true,
+                        action: { showClearConfirmation = true }
+                    )
                 }
             }
-            // Phase 3 item 7: the same centered reading column every other
-            // tvOS Settings page uses. Inside the split view's pane this is
-            // already the cap; it matters when Developer is pushed as a
-            // classic child, where the content otherwise ran the full width.
-            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
-            .padding(48)
-            .frame(maxWidth: .infinity)
+
+            SettingsSection("What's Captured", style: .plain) {
+                tvLogCategoryCard
+            }
         }
     }
 
@@ -771,7 +762,7 @@ struct DeveloperSettingsView: View {
         HStack(spacing: 16) {
             DevIconTile(icon: "doc.text", isActive: false)
             Text("Log File Size")
-                .scaledFont(.system(size: 26, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
             Spacer()
             Text(logSize)

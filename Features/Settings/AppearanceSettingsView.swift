@@ -126,133 +126,130 @@ struct AppearanceSettingsView: View {
     // was almost invisible inside a section.
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Color Theme
-                tvAppearanceSection("Color Theme") {
-                    // Logan 2026-09-19: the seven inline theme rows are one
-                    // row now, opening the shared pop-up option sheet. Each
-                    // option carries the theme's accent swatch.
-                    SettingsChoicePicker(
-                        "Color Theme",
-                        options: AppTheme.allCases.map {
-                            SettingsChoice($0, $0.displayName,
-                                           subtitle: themeSubtitle($0),
-                                           swatch: $0.accentPrimary)
-                        },
-                        selection: Binding(
-                            get: { theme.selectedTheme },
-                            set: { theme.setTheme($0) }
-                        ),
-                        icon: "paintbrush.fill"
-                    )
+        TVSettingsPane(spacing: 32) {
+            // Color Theme
+            tvAppearanceSection("Color Theme") {
+                // Logan 2026-09-19: the seven inline theme rows are one
+                // row now, opening the shared pop-up option sheet. Each
+                // option carries the theme's accent swatch.
+                SettingsChoicePicker(
+                    "Color Theme",
+                    options: AppTheme.allCases.map {
+                        SettingsChoice($0, $0.displayName,
+                                       subtitle: themeSubtitle($0),
+                                       swatch: $0.accentPrimary)
+                    },
+                    selection: Binding(
+                        get: { theme.selectedTheme },
+                        set: { theme.setTheme($0) }
+                    ),
+                    icon: "paintbrush.fill"
+                )
 
-                    // Custom theme: on TV the hex field is the only input
-                    // (no system color picker on tvOS).
-                    if theme.selectedTheme == .custom {
-                        customThemeHexField
-                            .padding(.horizontal, 20)
-                    }
-
-                    // Custom accent toggle
-                    TVSettingsToggleRow(
-                        icon: "paintpalette.fill", iconColor: theme.accent,
-                        title: "Custom Accent Color",
-                        subtitle: "Override the theme accent with a custom hex color",
-                        isOn: $theme.useCustomAccent
-                    ) { _ in }
-
-                    if theme.useCustomAccent {
-                        // Phase 3: the shared Settings field replaces the
-                        // hand-styled trailing box, so the hex entry gets
-                        // the same label, helper line and focus outline
-                        // as every other field in Settings.
-                        SettingsTextField("Hex Color",
-                                          placeholder: "2DD4BF",
-                                          text: Binding(
-                                            get: { hexDraft ?? theme.customAccentHex },
-                                            set: { newValue in
-                                                let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                                                let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
-                                                hexDraft = cleaned
-                                                if cleaned.count == 6, cleaned != theme.customAccentHex {
-                                                    theme.customAccentHex = cleaned
-                                                }
-                                            }
-                                          ),
-                                          helper: "Six hex digits, for example 2DD4BF.",
-                                          autocapitalization: .characters,
-                          tvKeyboardPrompt: "Hex Color",
-                          tvCommitWhen: AppearanceSettingsView.isCompleteHex)
-                            .padding(.horizontal, 20)
-                    }
-                }
-
-                // Appearance mode (Dark / Light / System). Phase 3: it
-                // used to trail the Color Theme list with no header of
-                // its own, so once both were plain check rows there was
-                // nothing to say where one choice ended and the other
-                // began. It gets its own section. The two are
-                // orthogonal: the theme picks the hues, this picks
-                // light or dark surfaces.
-                tvAppearanceSection("Light and Dark Mode") {
-                    SettingsChoicePicker("Mode",
-                                         options: appearanceModeChoices,
-                                         selection: appearanceModeSelection,
-                                         icon: "circle.lefthalf.filled",
-                                         onChange: { _ in
-                                             SyncManager.shared.pushPreferencesImmediate()
-                                         })
-                }
-
-                // Liquid Glass
-                tvAppearanceSection("Glass Effect") {
-                    // Phase 3: shared picker, inline on tvOS.
-                    SettingsChoicePicker("Glass Effect",
-                                         options: liquidGlassChoices,
-                                         selection: liquidGlassSelection,
-                                         icon: "square.on.square")
-                }
-
-                // Preview
-                tvAppearanceSection("Preview") {
-                    swatchPreview
+                // Custom theme: on TV the hex field is the only input
+                // (no system color picker on tvOS).
+                if theme.selectedTheme == .custom {
+                    customThemeHexField
                         .padding(.horizontal, 20)
                 }
 
-                // Text Size: scales every piece of text in the app.
-                tvAppearanceSection("Text Size") {
-                    textSizeRow_tvOS
-                }
+                // Custom accent toggle
+                TVSettingsToggleRow(
+                    icon: "paintpalette.fill", iconColor: theme.accent,
+                    title: "Custom Accent Color",
+                    subtitle: "Override the theme accent with a custom hex color",
+                    isOn: $theme.useCustomAccent
+                ) { _ in }
 
-                // Subtext Size: secondary text only, on top of Text Size.
-                tvAppearanceSection("Subtext Size") {
-                    subtextSizeRow_tvOS
+                if theme.useCustomAccent {
+                    // Phase 3: the shared Settings field replaces the
+                    // hand-styled trailing box, so the hex entry gets
+                    // the same label, helper line and focus outline
+                    // as every other field in Settings.
+                    SettingsTextField("Hex Color",
+                                      placeholder: "2DD4BF",
+                                      text: Binding(
+                                        get: { hexDraft ?? theme.customAccentHex },
+                                        set: { newValue in
+                                            let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                                            let cleaned = String(newValue.filter { allowed.contains($0) }.uppercased().prefix(6))
+                                            hexDraft = cleaned
+                                            if cleaned.count == 6, cleaned != theme.customAccentHex {
+                                                theme.customAccentHex = cleaned
+                                            }
+                                        }
+                                      ),
+                                      helper: "Six hex digits, for example 2DD4BF.",
+                                      autocapitalization: .characters,
+                      tvKeyboardPrompt: "Hex Color",
+                      tvCommitWhen: AppearanceSettingsView.isCompleteHex)
+                        .padding(.horizontal, 20)
                 }
-
-                // Text Contrast: dimmed and accent text toward white/black.
-                tvAppearanceSection("Text Contrast") {
-                    textContrastRow_tvOS
-                }
-
-                // Time Format: every clock in the app (guide header, cell
-                // ranges, program info, search, recordings).
-                tvAppearanceSection("Time Format") {
-                    // Phase 3: shared picker; the push moves onto the
-                    // picker's onChange so the write and its side effect
-                    // stay in one place.
-                    SettingsChoicePicker("Time Format",
-                                         options: Self.timeFormatChoices,
-                                         selection: $timeFormat,
-                                         footer: Self.timeFormatFootnote,
-                                         icon: "clock",
-                                         onChange: { _ in
-                                             SyncManager.shared.pushPreferencesImmediate()
-                                         })
-                }
-
             }
-            .padding(48)
+
+            // Appearance mode (Dark / Light / System). Phase 3: it
+            // used to trail the Color Theme list with no header of
+            // its own, so once both were plain check rows there was
+            // nothing to say where one choice ended and the other
+            // began. It gets its own section. The two are
+            // orthogonal: the theme picks the hues, this picks
+            // light or dark surfaces.
+            tvAppearanceSection("Light and Dark Mode") {
+                SettingsChoicePicker("Mode",
+                                     options: appearanceModeChoices,
+                                     selection: appearanceModeSelection,
+                                     icon: "circle.lefthalf.filled",
+                                     onChange: { _ in
+                                         SyncManager.shared.pushPreferencesImmediate()
+                                     })
+            }
+
+            // Liquid Glass
+            tvAppearanceSection("Glass Effect") {
+                // Phase 3: shared picker, inline on tvOS.
+                SettingsChoicePicker("Glass Effect",
+                                     options: liquidGlassChoices,
+                                     selection: liquidGlassSelection,
+                                     icon: "square.on.square")
+            }
+
+            // Preview
+            tvAppearanceSection("Preview") {
+                swatchPreview
+                    .padding(.horizontal, 20)
+            }
+
+            // Text Size: scales every piece of text in the app.
+            tvAppearanceSection("Text Size") {
+                textSizeRow_tvOS
+            }
+
+            // Subtext Size: secondary text only, on top of Text Size.
+            tvAppearanceSection("Subtext Size") {
+                subtextSizeRow_tvOS
+            }
+
+            // Text Contrast: dimmed and accent text toward white/black.
+            tvAppearanceSection("Text Contrast") {
+                textContrastRow_tvOS
+            }
+
+            // Time Format: every clock in the app (guide header, cell
+            // ranges, program info, search, recordings).
+            tvAppearanceSection("Time Format") {
+                // Phase 3: shared picker; the push moves onto the
+                // picker's onChange so the write and its side effect
+                // stay in one place.
+                SettingsChoicePicker("Time Format",
+                                     options: Self.timeFormatChoices,
+                                     selection: $timeFormat,
+                                     footer: Self.timeFormatFootnote,
+                                     icon: "clock",
+                                     onChange: { _ in
+                                         SyncManager.shared.pushPreferencesImmediate()
+                                     })
+            }
+
         }
     }
 
@@ -337,7 +334,7 @@ struct AppearanceSettingsView: View {
     ) -> some View {
         HStack(spacing: 24) {
             Text(title)
-                .scaledFont(.system(size: 26, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
             Spacer()

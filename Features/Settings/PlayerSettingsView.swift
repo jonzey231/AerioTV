@@ -634,235 +634,230 @@ struct PlayerSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Phase 3, item 4: the six info-card switches now sit
-                // under a master row that summarizes them, same strings
-                // as iOS.
-                // No SettingsSection wrapper: the subgroup's master row
-                // already says "Info Card", so a section header above it
-                // labeled the same group twice. The subgroup draws the
-                // card itself.
-                // Same "On-Screen Display" eyebrow the phone uses, so the page
-                // does not open on a headerless card.
-                SettingsSection("On-Screen Display", style: .plain) {
-                    // GH Android#127 part 1.
-                    TVSettingsToggleRow(
-                        icon: "rectangle.on.rectangle",
-                        iconColor: theme.accent,
-                        title: "Pop Up Info Card on Channel Change",
-                        subtitle: "Show the channel and program card for a few seconds after a channel change. The card still appears with the player controls.",
-                        isOn: $showChannelInfoCard
-                    ) { _ in }
+        TVSettingsPane(spacing: 32) {
+            // Phase 3, item 4: the six info-card switches now sit
+            // under a master row that summarizes them, same strings
+            // as iOS.
+            // No SettingsSection wrapper: the subgroup's master row
+            // already says "Info Card", so a section header above it
+            // labeled the same group twice. The subgroup draws the
+            // card itself.
+            // Same "On-Screen Display" eyebrow the phone uses, so the page
+            // does not open on a headerless card.
+            SettingsSection("On-Screen Display", style: .plain) {
+                // GH Android#127 part 1.
+                TVSettingsToggleRow(
+                    icon: "rectangle.on.rectangle",
+                    iconColor: theme.accent,
+                    title: "Pop Up Info Card on Channel Change",
+                    subtitle: "Show the channel and program card for a few seconds after a channel change. The card still appears with the player controls.",
+                    isOn: $showChannelInfoCard
+                ) { _ in }
 
-                    SettingsSubgroup("Info Card",
-                                     summary: playerInfoCardSummary,
-                                     icon: "rectangle.on.rectangle",
-                                     iconColor: theme.accent,
-                                     footer: Self.playerInfoCardFooter,
-                                     drawsCard: false,
-                                     optionsOnly: true) {
-                            ForEach(playerInfoCardRows, id: \.key) { row in
-                                TVSettingsToggleRow(
-                                    icon: "info.circle",
-                                    iconColor: theme.accent,
-                                    title: PlayerInfoCardSettings.title(row.key),
-                                    subtitle: "",
-                                    isOn: row.binding
-                                ) { _ in }
-                        }
-                    }
-                }
-
-                SettingsSection("Radio Mode", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: RadioModeSession.menuSymbol,
-                        iconColor: theme.accent,
-                        title: "Radio Mode by Default",
-                        subtitle: "",
-                        isOn: $radioModeByDefault
-                    ) { _ in }
-                    tvFooter(RadioModeSession.byDefaultFooter)
-                }
-
-                // Phase 3, item 4: "Keep Available" and "Channel
-                // Retention" were two more cards for settings that only
-                // exist because Live Rewind is on. One card now.
-                SettingsSection("Live Rewind", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "gobackward.30",
-                        iconColor: theme.accent,
-                        title: "Pause & Rewind Live TV",
-                        subtitle: "Buffer fullscreen live playback on this Apple TV",
-                        isOn: $liveRewindEnabled
-                    ) { _ in }
-                    tvFooter("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
-
-                    if liveRewindEnabled {
-                        // No master row here: the section header and the
-                        // toggle above it already say "Live Rewind", and a
-                        // third label for the same group is noise on a TV.
-                        // iPhone still pushes a page titled "Live Rewind".
-                        SettingsSubgroup("Live Rewind",
-                                         summary: liveRewindSummary,
-                                         icon: "gobackward.30",
-                                         iconColor: theme.accent,
-                                         showsMasterRow: false) {
-                            SettingsChoicePicker(
-                                "Rewind Up To",
-                                options: rewindDepthOptions,
-                                selection: $liveRewindDepthMinutes,
-                                footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))"
-                            )
-
+                SettingsSubgroup("Info Card",
+                                 summary: playerInfoCardSummary,
+                                 icon: "rectangle.on.rectangle",
+                                 iconColor: theme.accent,
+                                 footer: Self.playerInfoCardFooter,
+                                 drawsCard: false,
+                                 optionsOnly: true) {
+                        ForEach(playerInfoCardRows, id: \.key) { row in
                             TVSettingsToggleRow(
-                                icon: "rectangle.stack.badge.play",
+                                icon: "info.circle",
                                 iconColor: theme.accent,
-                                title: "Keep Recent Channels Live",
-                                subtitle: "Buffer flipped-away channels in the background",
-                                isOn: $liveRewindRetainChannels
+                                title: PlayerInfoCardSettings.title(row.key),
+                                subtitle: "",
+                                isOn: row.binding
                             ) { _ in }
-                            if liveRewindRetainChannels {
-                                tvSteppedSegmentsRow(
-                                    title: "Channels to Keep",
-                                    values: [1, 2, 3, 4, 5],
-                                    selection: $liveRewindRetainCount,
-                                    segmentLabel: { "\($0)" }
-                                )
-                            }
-                            tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest. Kept channels keep one connection to your server open until you stop them.")
-                        }
                     }
-                }
-
-                SettingsSection("Playback", style: .plain) {
-                    tvSteppedSegmentsRow(
-                        title: "Skip Back",
-                        values: SkipIntervals.choices,
-                        selection: $skipBackSeconds,
-                        segmentLabel: { "\($0)s" }
-                    )
-                    tvSteppedSegmentsRow(
-                        title: "Skip Forward",
-                        values: SkipIntervals.choices,
-                        selection: $skipForwardSeconds,
-                        segmentLabel: { "\($0)s" }
-                    )
-                    tvFooter("How far the skip buttons and a single left or right press move in live rewind, catch-up, recordings, movies, and TV shows. Holding left or right still scrubs faster the longer you hold.")
-
-                    StreamBufferSlider(value: $streamBufferSeconds)
-                    tvFooter("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
-
-                    // Phase 3, item 3: same option list as iOS.
-                    SettingsChoicePicker(
-                        "Buffer Size",
-                        options: bufferSizeOptions,
-                        selection: $streamBufferSize,
-                        footer: "Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay."
-                    )
-
-                    TVSettingsToggleRow(
-                        icon: "arrow.clockwise.circle",
-                        iconColor: theme.accent,
-                        title: "Auto-Recover Frozen Streams",
-                        subtitle: "If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks; a brief freeze may show instead.",
-                        isOn: $autoRecoverFrozenStreams
-                    ) { _ in }
-                }
-
-                SettingsSection("Gestures", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "arrow.up.and.down",
-                        iconColor: theme.accent,
-                        title: "Up / Down Channel Change",
-                        subtitle: "Press up on the Siri Remote for the next channel, down for the previous. Live single-stream playback only.",
-                        isOn: $appleTVChannelFlip
-                    ) { _ in }
-
-                    tvFooter("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
-
-                    TVSettingsToggleRow(
-                        icon: "gobackward",
-                        iconColor: theme.accent,
-                        title: "Skip Without Controls",
-                        subtitle: "With the controls hidden, Left and Right skip right away instead of opening the timeline.",
-                        isOn: $skipWithoutControls
-                    ) { _ in }
-                }
-
-                SettingsSection("Multiview", style: .plain) {
-                    // Phase 3, item 3.
-                    SettingsChoicePicker(
-                        "Audio Focus Indicator",
-                        options: audioFocusOptions,
-                        selection: $audioFocusStyleRaw,
-                        footer: "Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once."
-                    )
-
-                    TVSettingsToggleRow(
-                        icon: "rectangle.split.2x1",
-                        iconColor: theme.accent,
-                        title: "Padding Between Tiles",
-                        subtitle: "Insert a small gap between tiles so each stream stands on its own.",
-                        isOn: $paddingEnabled,
-                        onChange: { _ in }
-                    )
-
-                    // Phase 3, item 3.
-                    SettingsChoicePicker(
-                        "Tile Corners",
-                        options: tileCornerOptions,
-                        selection: $cornersRounded,
-                        footer: "Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius."
-                    )
-
-                    TVSettingsToggleRow(
-                        icon: "photo",
-                        iconColor: theme.accent,
-                        title: "Show Channel Logos",
-                        subtitle: "Show each channel's logo on its tile so similar streams are easy to tell apart.",
-                        isOn: $showTileLogos,
-                        onChange: { _ in }
-                    )
-
-                    if showTileLogos {
-                        SettingsChoicePicker(
-                            "Logo Position",
-                            options: tileLogoPositionOptions,
-                            selection: $tileLogoPositionRaw,
-                            footer: "Which corner of each tile the channel logo sits in."
-                        )
-
-                        tvSteppedSegmentsRow(
-                            title: "Logo Size",
-                            values: multiviewLogoSizeChoices,
-                            selection: $tileLogoSize,
-                            segmentLabel: { "\($0)%" }
-                        )
-                    }
-
-                    TVSettingsToggleRow(
-                        icon: "text.below.photo",
-                        iconColor: theme.accent,
-                        title: "Show Subtitles",
-                        subtitle: "Show the program subtitle in the Add to Multiview picker",
-                        isOn: $pickerShowSubtitles,
-                        onChange: { _ in }
-                    )
-
-                    TVSettingsToggleRow(
-                        icon: "text.alignleft",
-                        iconColor: theme.accent,
-                        title: "Show Descriptions",
-                        subtitle: "Show the program description in the Add to Multiview picker",
-                        isOn: $pickerShowDescriptions,
-                        onChange: { _ in }
-                    )
                 }
             }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 60)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            SettingsSection("Radio Mode", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: RadioModeSession.menuSymbol,
+                    iconColor: theme.accent,
+                    title: "Radio Mode by Default",
+                    subtitle: "",
+                    isOn: $radioModeByDefault
+                ) { _ in }
+                tvFooter(RadioModeSession.byDefaultFooter)
+            }
+
+            // Phase 3, item 4: "Keep Available" and "Channel
+            // Retention" were two more cards for settings that only
+            // exist because Live Rewind is on. One card now.
+            SettingsSection("Live Rewind", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "gobackward.30",
+                    iconColor: theme.accent,
+                    title: "Pause & Rewind Live TV",
+                    subtitle: "Buffer fullscreen live playback on this Apple TV",
+                    isOn: $liveRewindEnabled
+                ) { _ in }
+                tvFooter("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
+
+                if liveRewindEnabled {
+                    // No master row here: the section header and the
+                    // toggle above it already say "Live Rewind", and a
+                    // third label for the same group is noise on a TV.
+                    // iPhone still pushes a page titled "Live Rewind".
+                    SettingsSubgroup("Live Rewind",
+                                     summary: liveRewindSummary,
+                                     icon: "gobackward.30",
+                                     iconColor: theme.accent,
+                                     showsMasterRow: false) {
+                        SettingsChoicePicker(
+                            "Rewind Up To",
+                            options: rewindDepthOptions,
+                            selection: $liveRewindDepthMinutes,
+                            footer: "How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))"
+                        )
+
+                        TVSettingsToggleRow(
+                            icon: "rectangle.stack.badge.play",
+                            iconColor: theme.accent,
+                            title: "Keep Recent Channels Live",
+                            subtitle: "Buffer flipped-away channels in the background",
+                            isOn: $liveRewindRetainChannels
+                        ) { _ in }
+                        if liveRewindRetainChannels {
+                            tvSteppedSegmentsRow(
+                                title: "Channels to Keep",
+                                values: [1, 2, 3, 4, 5],
+                                selection: $liveRewindRetainCount,
+                                segmentLabel: { "\($0)" }
+                            )
+                        }
+                        tvFooter("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest. Kept channels keep one connection to your server open until you stop them.")
+                    }
+                }
+            }
+
+            SettingsSection("Playback", style: .plain) {
+                tvSteppedSegmentsRow(
+                    title: "Skip Back",
+                    values: SkipIntervals.choices,
+                    selection: $skipBackSeconds,
+                    segmentLabel: { "\($0)s" }
+                )
+                tvSteppedSegmentsRow(
+                    title: "Skip Forward",
+                    values: SkipIntervals.choices,
+                    selection: $skipForwardSeconds,
+                    segmentLabel: { "\($0)s" }
+                )
+                tvFooter("How far the skip buttons and a single left or right press move in live rewind, catch-up, recordings, movies, and TV shows. Holding left or right still scrubs faster the longer you hold.")
+
+                StreamBufferSlider(value: $streamBufferSeconds)
+                tvFooter("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
+
+                // Phase 3, item 3: same option list as iOS.
+                SettingsChoicePicker(
+                    "Buffer Size",
+                    options: bufferSizeOptions,
+                    selection: $streamBufferSize,
+                    footer: "Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay."
+                )
+
+                TVSettingsToggleRow(
+                    icon: "arrow.clockwise.circle",
+                    iconColor: theme.accent,
+                    title: "Auto-Recover Frozen Streams",
+                    subtitle: "If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks; a brief freeze may show instead.",
+                    isOn: $autoRecoverFrozenStreams
+                ) { _ in }
+            }
+
+            SettingsSection("Gestures", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "arrow.up.and.down",
+                    iconColor: theme.accent,
+                    title: "Up / Down Channel Change",
+                    subtitle: "Press up on the Siri Remote for the next channel, down for the previous. Live single-stream playback only.",
+                    isOn: $appleTVChannelFlip
+                ) { _ in }
+
+                tvFooter("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
+
+                TVSettingsToggleRow(
+                    icon: "gobackward",
+                    iconColor: theme.accent,
+                    title: "Skip Without Controls",
+                    subtitle: "With the controls hidden, Left and Right skip right away instead of opening the timeline.",
+                    isOn: $skipWithoutControls
+                ) { _ in }
+            }
+
+            SettingsSection("Multiview", style: .plain) {
+                // Phase 3, item 3.
+                SettingsChoicePicker(
+                    "Audio Focus Indicator",
+                    options: audioFocusOptions,
+                    selection: $audioFocusStyleRaw,
+                    footer: "Choose how Aerio marks the tile that currently owns audio when watching multiple streams at once."
+                )
+
+                TVSettingsToggleRow(
+                    icon: "rectangle.split.2x1",
+                    iconColor: theme.accent,
+                    title: "Padding Between Tiles",
+                    subtitle: "Insert a small gap between tiles so each stream stands on its own.",
+                    isOn: $paddingEnabled,
+                    onChange: { _ in }
+                )
+
+                // Phase 3, item 3.
+                SettingsChoicePicker(
+                    "Tile Corners",
+                    options: tileCornerOptions,
+                    selection: $cornersRounded,
+                    footer: "Square keeps the cinema-grid look; rounded softens each tile with a 12pt radius."
+                )
+
+                TVSettingsToggleRow(
+                    icon: "photo",
+                    iconColor: theme.accent,
+                    title: "Show Channel Logos",
+                    subtitle: "Show each channel's logo on its tile so similar streams are easy to tell apart.",
+                    isOn: $showTileLogos,
+                    onChange: { _ in }
+                )
+
+                if showTileLogos {
+                    SettingsChoicePicker(
+                        "Logo Position",
+                        options: tileLogoPositionOptions,
+                        selection: $tileLogoPositionRaw,
+                        footer: "Which corner of each tile the channel logo sits in."
+                    )
+
+                    tvSteppedSegmentsRow(
+                        title: "Logo Size",
+                        values: multiviewLogoSizeChoices,
+                        selection: $tileLogoSize,
+                        segmentLabel: { "\($0)%" }
+                    )
+                }
+
+                TVSettingsToggleRow(
+                    icon: "text.below.photo",
+                    iconColor: theme.accent,
+                    title: "Show Subtitles",
+                    subtitle: "Show the program subtitle in the Add to Multiview picker",
+                    isOn: $pickerShowSubtitles,
+                    onChange: { _ in }
+                )
+
+                TVSettingsToggleRow(
+                    icon: "text.alignleft",
+                    iconColor: theme.accent,
+                    title: "Show Descriptions",
+                    subtitle: "Show the program description in the Add to Multiview picker",
+                    isOn: $pickerShowDescriptions,
+                    onChange: { _ in }
+                )
+            }
         }
     }
 
@@ -887,7 +882,7 @@ struct PlayerSettingsView: View {
         }) ?? selection.wrappedValue
         return HStack(spacing: 24) {
             Text(title)
-                .scaledFont(.system(size: 26, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(values, id: \.self) { value in

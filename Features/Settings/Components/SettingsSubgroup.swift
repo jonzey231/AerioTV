@@ -157,11 +157,11 @@ struct SettingsSubgroup<Content: View>: View {
 
     /// Title / summary / chevron, shared by the sheet and page variants.
     private var tvMasterRowLabel: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 14) {
             // Phase 3 item 5: tiled, matching every other Settings row.
             SettingsIconTile(icon: icon, color: iconColor)
             Text(title)
-                .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
             Spacer(minLength: 16)
             Text(summary)

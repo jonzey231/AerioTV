@@ -117,6 +117,9 @@ struct TVSettingsActionRow: View {
     @ObservedObject private var themeLive = ThemeManager.shared
     let icon: String
     let label: String
+    /// A second line (a "Last synced" stamp), as on every other row; never
+    /// inline after the title.
+    var subtitle: String? = nil
     var isAccent: Bool = false
     var isDestructive: Bool = false
     /// `nil` (the default) lays out no trailing box. Non-nil reserves a
@@ -142,25 +145,12 @@ struct TVSettingsActionRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 16) {
-                // Phase 3 item 5: tiled, so an action row matches the
-                // toggle and nav rows it sits beside.
-                SettingsIconTile(icon: icon, color: iconTint)
-                Text(label)
-                    .scaledFont(.system(size: 26, weight: .medium))
-                    .foregroundColor(tint)
-                Spacer()
-                if let isBusy {
-                    ZStack {
-                        if isBusy {
-                            ProgressView()
-                                .progressViewStyle(.circular)
-                                .tint(.accentPrimary)
-                        }
-                    }
-                    .frame(width: 44, height: 44)
-                }
-            }
+            // The standard row (owner 2026-11-13): the same tile, title and
+            // subtitle sizes, and height as the toggle and nav rows beside
+            // it. Action rows used a larger 26 pt medium title.
+            SettingsRow(icon: icon, iconColor: iconTint, title: label, subtitle: subtitle,
+                        titleColor: (isDestructive || isAccent) ? tint : nil,
+                        isBusy: isBusy)
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.vertical, 6)
@@ -270,15 +260,18 @@ struct TVSettingsSelectionRow<Leading: View>: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 16) {
+            // The standard row's title, subtitle, spacing, and padding
+            // (SettingsRow), so an option row matches the rows around it
+            // (owner 2026-11-13: Basic and Channel Preview were the outliers).
+            HStack(spacing: 14) {
                 leading()
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
-                        .scaledFont(.system(size: 26, weight: .medium))
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     if let subtitle {
                         Text(subtitle)
-                            .scaledFont(.system(size: 20).subtext())
+                            .scaledFont(.bodySmall)
                             .foregroundColor(Color.contrastText(.textSecondary))
                     }
                 }
@@ -289,6 +282,7 @@ struct TVSettingsSelectionRow<Leading: View>: View {
                         .foregroundColor(.accentPrimary)
                 }
             }
+            .padding(.vertical, 14)
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
             .padding(.horizontal, 20)
             .padding(.vertical, 6)
@@ -327,14 +321,8 @@ extension TVSettingsSelectionRow where Leading == AnyView {
         self.subtitle = subtitle
         self.isSelected = isSelected
         self.action = action
-        self.leading = {
-            AnyView(
-                Image(systemName: icon)
-                    .scaledFont(.system(size: 22))
-                    .foregroundColor(iconColor)
-                    .frame(width: 32)
-            )
-        }
+        // The tile every other row uses, never a bare glyph (SettingsIconTile).
+        self.leading = { AnyView(SettingsIconTile(icon: icon, color: iconColor)) }
     }
 }
 

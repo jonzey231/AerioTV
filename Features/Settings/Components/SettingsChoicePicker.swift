@@ -170,7 +170,7 @@ struct SettingsChoicePicker<Value: Hashable>: View {
 
     private var tvBody: some View {
         TVSettingsCardButtonRow(action: { isSheetPresented = true }, logTitle: title) {
-            HStack(spacing: 16) {
+            HStack(spacing: 14) {
                 if let icon {
                     // Phase 3 item 5: the tiled icon, never a bare glyph,
                     // so a picker row sits among toggle rows without
@@ -178,7 +178,7 @@ struct SettingsChoicePicker<Value: Hashable>: View {
                     SettingsIconTile(icon: icon, color: iconColor)
                 }
                 Text(title)
-                    .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer(minLength: 16)
                 Text(currentTitle)
