@@ -402,6 +402,11 @@ private struct TVRailReturnGuide: UIViewRepresentable {
 
         override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
             guard context.nextFocusedItem === self else { return super.shouldUpdateFocus(in: context) }
+            // Left on a value slider (Stream Buffer, DVR Maximum) changes its
+            // value; it is not a move back to the rail.
+            if let slider = context.previouslyFocusedItem as? PressCatcherView, slider.holdsHorizontalFocus {
+                return false
+            }
             if Date().timeIntervalSince(lastRedirect) > 0.25 {
                 lastRedirect = Date()
                 SettingsFocusLog.log("rail guide: Left from the detail pane cancelled, redirecting to the page's row")

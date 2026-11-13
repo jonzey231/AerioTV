@@ -1378,5 +1378,44 @@ do {
     check(P.isMissing(resolvedPath: nil, exists: exists), "a row with no location is missing")
 }
 
+// MARK: - DVR storage cap (0.25 GB steps, owner 2026-11-13)
+
+do {
+    typealias D = DVRStorageCapRules
+    let us = Locale(identifier: "en_US"), de = Locale(identifier: "de_DE")
+    // Formatter: no trailing zeros, the locale's decimal separator.
+    check(D.label(mb: 10 * 1024, locale: us) == "10 GB", "10 GB")
+    check(D.label(mb: 10 * 1024 + 256, locale: us) == "10.25 GB", "10.25 GB")
+    check(D.label(mb: 10 * 1024 + 512, locale: us) == "10.5 GB", "10.5 GB")
+    check(D.label(mb: 10 * 1024 + 768, locale: us) == "10.75 GB", "10.75 GB")
+    check(D.label(mb: 200 * 1024, locale: us) == "200 GB", "200 GB, no grouping")
+    check(D.label(mb: 10 * 1024 + 256, locale: de) == "10,25 GB", "German decimal comma")
+    check(D.label(mb: 1024, locale: de) == "1 GB", "whole GB in German")
+    // Slider snapping: the nearest 0.25 GB, in range, stored as MB.
+    check(D.snappedMB(gb: 10.1) == 10 * 1024, "10.1 snaps to 10")
+    check(D.snappedMB(gb: 10.13) == 10 * 1024 + 256, "10.13 snaps to 10.25")
+    check(D.snappedMB(gb: 0.2) == 1024, "below 1 GB clamps")
+    check(D.snappedMB(gb: 250) == 200 * 1024, "above 200 GB clamps")
+    check(D.snappedMB(gb: .nan) == 1024, "NaN is the minimum")
+    // Whole-GB values saved before stay on a step (no migration).
+    for gb in [1, 10, 37, 200] { check((gb * 1024) % D.stepMB == 0, "\(gb) GB is on a step") }
+    // Apple TV: steps, alignment, and the hold schedule.
+    check(D.stepped(10 * 1024, by: 256, up: true) == 10 * 1024 + 256, "press up: +0.25")
+    check(D.stepped(10 * 1024, by: 256, up: false) == 9 * 1024 + 768, "press down: -0.25")
+    check(D.stepped(10 * 1024 + 256, by: 1024, up: true) == 11 * 1024, "1 GB step lands on whole GB")
+    check(D.stepped(10 * 1024 + 256, by: 1024, up: false) == 10 * 1024, "1 GB step down lands on whole GB")
+    check(D.stepped(12 * 1024, by: 5 * 1024, up: true) == 15 * 1024, "5 GB step lands on a multiple of 5")
+    check(D.stepped(1024, by: 256, up: false) == 1024, "floor at 1 GB")
+    check(D.stepped(200 * 1024, by: 5 * 1024, up: true) == 200 * 1024, "ceiling at 200 GB")
+    check(D.holdStepMB(0) == 256 && D.holdStepMB(8) == 256, "press and 8 repeats: 0.25 GB")
+    check(D.holdStepMB(9) == 1024 && D.holdStepMB(20) == 1024, "next 12 repeats: 1 GB")
+    check(D.holdStepMB(21) == 5 * 1024, "then 5 GB")
+    // A held Right from 10 GB reaches 100 GB in 37 adjustments: the press, then
+    // 36 repeats (0.4 s, then one every 0.1 s), about 4 s.
+    var mb = 10 * 1024, n = 0
+    while mb < 100 * 1024 { mb = D.stepped(mb, by: D.holdStepMB(n), up: true); n += 1 }
+    check(mb == 100 * 1024 && n == 37, "10 to 100 GB in 37 adjustments (got \(n), \(mb))")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

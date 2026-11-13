@@ -179,10 +179,14 @@ struct DVRSettingsView: View {
                         Text(formatGB(mb: maxStorageMB))
                             .foregroundColor(.secondary)
                     }
+                    // 0.25 GB steps (owner 2026-11-13), snapped in the binding:
+                    // a `step:` makes iOS 26 draw a tick per step, which at
+                    // this density ran together into a grey line under the
+                    // track (Logan's iPhone screenshot, build e8d7cb2).
                     Slider(value: Binding(
                         get: { Double(maxStorageMB) / 1024.0 },
-                        set: { maxStorageMB = Int($0 * 1024.0) }
-                    ), in: 1...200, step: 1) {
+                        set: { maxStorageMB = DVRStorageCapRules.snappedMB(gb: $0) }
+                    ), in: 1...200) {
                         Text("Max storage")
                     }
                 }
@@ -384,26 +388,9 @@ struct DVRSettingsView: View {
                     .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
-                // Logan 2026-09-19: these two drew the default 14pt ring
-                // around a circular glyph, which read as the wrong focus
-                // entirely. They are now the same step keys every other
-                // Settings stepper uses (TVSettingsStepperRow).
-                HStack(spacing: 24) {
-                    TVSettingsStepKey(systemImage: "minus",
-                                      isDisabled: maxStorageMB <= 1024) {
-                        if maxStorageMB > 1024 { maxStorageMB -= 1024 }
-                    }
-                    .accessibilityLabel("Less storage")
-                    Text(formatGB(mb: maxStorageMB))
-                        .scaledFont(.system(size: 28, weight: .semibold))
-                        .foregroundColor(.textPrimary)
-                        .frame(minWidth: 110)
-                    TVSettingsStepKey(systemImage: "plus",
-                                      isDisabled: maxStorageMB >= 204_800) {
-                        if maxStorageMB < 204_800 { maxStorageMB += 1024 }
-                    }
-                    .accessibilityLabel("More storage")
-                }
+                // Left and Right adjust it in 0.25 GB steps; held, they repeat
+                // and speed up (owner 2026-11-13).
+                TVStorageCapAdjuster(valueMB: $maxStorageMB)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -661,10 +648,8 @@ struct DVRSettingsView: View {
         return resolved.hasPrefix(base)
     }
 
-    private func formatGB(mb: Int) -> String {
-        let gb = Double(mb) / 1024.0
-        return String(format: "%.0f GB", gb)
-    }
+    /// "10 GB", "10.25 GB": DVRStorageCapRules.label (the locale's decimal separator).
+    private func formatGB(mb: Int) -> String { DVRStorageCapRules.label(mb: mb) }
 
     private func formatBytes(_ bytes: Int64) -> String {
         // ByteCountFormatter spells nothing as "Zero KB", which reads like a
@@ -702,6 +687,86 @@ struct FolderPickerView: UIViewControllerRepresentable {
             guard let url = urls.first else { return }
             onPick(url)
         }
+    }
+}
+#endif
+
+#if os(tvOS)
+/// Settings > DVR > Maximum on Apple TV: the value between a left and a
+/// right chevron, adjusted with Left and Right. A press moves 0.25 GB; held,
+/// it repeats after 0.4 s every 0.1 s, at 0.25 GB for 8 repeats, then 1 GB
+/// for 12, then 5 GB (DVRStorageCapRules.holdStepMB), so 10 to 100 GB takes
+/// about 4 s. A swipe is one step. Up and Down still move focus.
+private struct TVStorageCapAdjuster: View {
+    @Binding var valueMB: Int
+    @State private var isFocused = false
+    @State private var repeatTask: Task<Void, Never>?
+
+    var body: some View {
+        HStack(spacing: 18) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 22, weight: .semibold))
+                .opacity(valueMB <= DVRStorageCapRules.minMB ? 0.25 : 0.8)
+            Text(DVRStorageCapRules.label(mb: valueMB))
+                .scaledFont(.system(size: 28, weight: .semibold).monospacedDigit())
+                .frame(minWidth: 150)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 22, weight: .semibold))
+                .opacity(valueMB >= DVRStorageCapRules.maxMB ? 0.25 : 0.8)
+        }
+        .foregroundColor(isFocused ? Color.contrastText(.accentPrimary) : .textPrimary)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            Capsule().fill(isFocused ? Color.accentPrimary.opacity(0.12) : Color.elevatedBackground)
+        )
+        .overlay(
+            Capsule().strokeBorder(Color.accentPrimary, lineWidth: isFocused ? SettingsMetrics.tvFocusRingWidth : 0)
+        )
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .settingsRowFocusLog("DVR Maximum", isFocused: isFocused)
+        .overlay(
+            TVPressOverlay(
+                isFocused: $isFocused,
+                canFocus: true,
+                interceptsDirectional: true,
+                horizontalAdjustOnly: true,
+                onTap: {},
+                onLongPress: {},
+                onMoveLeft: { begin(up: false) },
+                onMoveRight: { begin(up: true) },
+                onHorizontalRelease: { end() }
+            )
+        )
+        .onChange(of: isFocused) { _, focused in if !focused { end() } }
+        .onDisappear { end() }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Maximum")
+        .accessibilityValue(DVRStorageCapRules.label(mb: valueMB))
+    }
+
+    private func adjust(up: Bool, _ n: Int) {
+        valueMB = DVRStorageCapRules.stepped(valueMB, by: DVRStorageCapRules.holdStepMB(n), up: up)
+    }
+
+    private func begin(up: Bool) {
+        repeatTask?.cancel()
+        adjust(up: up, 0)
+        repeatTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            var n = 1
+            // Capped (about 40 s) in case a release never arrives.
+            while !Task.isCancelled && n < 400 {
+                adjust(up: up, n)
+                n += 1
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
+    private func end() {
+        repeatTask?.cancel()
+        repeatTask = nil
     }
 }
 #endif

@@ -80,6 +80,10 @@ struct TVPressOverlay: UIViewRepresentable {
     /// decrement/increment while keeping up/down for focus navigation.
     let onMoveLeft: () -> Void
     let onMoveRight: () -> Void
+    /// A held left/right click was released (or cancelled), for controls that
+    /// repeat while a direction is held (the DVR storage row). Clicks only;
+    /// a swipe has no hold.
+    let onHorizontalRelease: () -> Void
 
     init(minimumPressDuration: TimeInterval = 0.35,
          isFocused: Binding<Bool>? = nil,
@@ -92,7 +96,9 @@ struct TVPressOverlay: UIViewRepresentable {
          onMoveDown: @escaping () -> Void = {},
          onMenu: @escaping () -> Void = {},
          onMoveLeft: @escaping () -> Void = {},
-         onMoveRight: @escaping () -> Void = {}) {
+         onMoveRight: @escaping () -> Void = {},
+         onHorizontalRelease: @escaping () -> Void = {}) {
+        self.onHorizontalRelease = onHorizontalRelease
         self.minimumPressDuration = minimumPressDuration
         self.isFocused = isFocused
         self.canFocus = canFocus
@@ -147,6 +153,7 @@ struct TVPressOverlay: UIViewRepresentable {
         catcher.onMenu = onMenu
         catcher.onMoveLeft = onMoveLeft
         catcher.onMoveRight = onMoveRight
+        catcher.onHorizontalRelease = onHorizontalRelease
         catcher.minimumPressDuration = minimumPressDuration
         catcher.canFocus = canFocus
         // Set horizontalAdjustOnly BEFORE interceptsDirectional so the
@@ -175,6 +182,7 @@ final class PressCatcherView: UIView {
     var onMenu: () -> Void = {}
     var onMoveLeft: () -> Void = {}
     var onMoveRight: () -> Void = {}
+    var onHorizontalRelease: () -> Void = {}
     /// See TVPressOverlay.horizontalAdjustOnly. Set before
     /// interceptsDirectional (in apply) so its didSet enables the right
     /// swipe recognizers.
@@ -239,6 +247,21 @@ final class PressCatcherView: UIView {
 
     override var canBecomeFocused: Bool { canFocus }
 
+    /// A value slider (horizontalAdjustOnly) takes Left and Right as value
+    /// changes, but the focus engine still runs its own search for those
+    /// presses: on the DVR Maximum row, Left changed the value and also left
+    /// for the Settings rail (simulator 2026-11-13). Horizontal moves out of
+    /// it are refused; Up and Down still navigate.
+    var holdsHorizontalFocus: Bool { interceptsDirectional && horizontalAdjustOnly }
+
+    override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+        if holdsHorizontalFocus, context.previouslyFocusedItem === self,
+           context.focusHeading.contains(.left) || context.focusHeading.contains(.right) {
+            return false
+        }
+        return super.shouldUpdateFocus(in: context)
+    }
+
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                   with coordinator: UIFocusAnimationCoordinator) {
         super.didUpdateFocus(in: context, with: coordinator)
@@ -247,8 +270,10 @@ final class PressCatcherView: UIView {
 
     @objc private func handleSwipeUp() { if interceptsDirectional { onMoveUp() } }
     @objc private func handleSwipeDown() { if interceptsDirectional { onMoveDown() } }
-    @objc private func handleSwipeLeft() { if interceptsDirectional { onMoveLeft() } }
-    @objc private func handleSwipeRight() { if interceptsDirectional { onMoveRight() } }
+    // A swipe is one step: it is "released" at once, so a hold-to-repeat
+    // control never starts repeating on it.
+    @objc private func handleSwipeLeft() { if interceptsDirectional { onMoveLeft(); onHorizontalRelease() } }
+    @objc private func handleSwipeRight() { if interceptsDirectional { onMoveRight(); onHorizontalRelease() } }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         // Reorder mode: capture directional clicks + Menu, consume them so
@@ -312,6 +337,7 @@ final class PressCatcherView: UIView {
         // let only a Select press reach the tap path below.
         if interceptsDirectional,
            presses.contains(where: { $0.type == .upArrow || $0.type == .downArrow || $0.type == .leftArrow || $0.type == .rightArrow || $0.type == .menu }) {
+            if presses.contains(where: { $0.type == .leftArrow || $0.type == .rightArrow }) { onHorizontalRelease() }
             return
         }
         guard presses.contains(where: { $0.type == .select }) else {
@@ -328,6 +354,7 @@ final class PressCatcherView: UIView {
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         longPressTimer?.invalidate()
         longPressTimer = nil
+        if presses.contains(where: { $0.type == .leftArrow || $0.type == .rightArrow }) { onHorizontalRelease() }
         super.pressesCancelled(presses, with: event)
     }
 }

@@ -1525,3 +1525,50 @@ enum RecordingPathRules {
         return nil
     }
 }
+
+
+// MARK: - DVR local storage cap (Settings > DVR > Maximum)
+
+/// The cap is stored as whole MB (`dvrMaxLocalStorageMB`, device-local, never
+/// synced). Steps are 0.25 GB (owner 2026-11-13), 256 MB each, so a value
+/// saved as whole GB (a multiple of 1024) is already on a step: nothing to
+/// migrate. Range 1 to 200 GB.
+enum DVRStorageCapRules {
+    static let stepMB = 256
+    static let minMB = 1024
+    static let maxMB = 200 * 1024
+
+    static func clamped(_ mb: Int) -> Int { min(max(mb, minMB), maxMB) }
+
+    /// The slider's value in GB, snapped to the nearest 0.25 GB in range, as MB.
+    static func snappedMB(gb: Double) -> Int {
+        guard gb.isFinite else { return minMB }
+        return clamped(Int((gb * 1024 / Double(stepMB)).rounded()) * stepMB)
+    }
+
+    /// "10 GB", "10.25 GB", "10.5 GB": no trailing zeros, the locale's
+    /// decimal separator, "GB" after a space.
+    static func label(mb: Int, locale: Locale = .current) -> String {
+        let f = NumberFormatter()
+        f.locale = locale
+        f.numberStyle = .decimal
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 2
+        f.usesGroupingSeparator = false
+        let gb = Double(mb) / 1024
+        return (f.string(from: NSNumber(value: gb)) ?? String(gb)) + " GB"
+    }
+
+    /// Apple TV, a held Left or Right: the step of the n-th adjustment (0 is
+    /// the press itself): 0.25 GB for the press and the first 8 repeats, then
+    /// 1 GB for 12, then 5 GB.
+    static func holdStepMB(_ n: Int) -> Int { n <= 8 ? stepMB : (n <= 20 ? 1024 : 5 * 1024) }
+
+    /// One adjustment by [step] MB, landing on a multiple of [step] (a 1 GB
+    /// step from 10.25 GB goes to 11 GB, down to 10 GB), clamped to range.
+    static func stepped(_ mb: Int, by step: Int, up: Bool) -> Int {
+        guard step > 0 else { return clamped(mb) }
+        let next = up ? (mb / step + 1) * step : (max(mb - 1, 0) / step) * step
+        return clamped(next)
+    }
+}
