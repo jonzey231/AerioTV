@@ -713,11 +713,18 @@ struct ProfilePinEntry: View {
         #if os(tvOS)
         // The D-pad itself is the input.
         Button { submit() } label: {
-            Text("Up, Down, Left, Right. Select to confirm, Back to clear.")
+            // "the PIN", not "your PIN": the same pad sets and enters other
+            // profiles' PINs (owner 2026-11-13; Android's string is identical).
+            // The label fills the row and centers its lines: the row style
+            // anchors labels leading, so the hint sat left of the box's center
+            // and wrapped short of its edge (Apple TV device capture 2026-11-13).
+            Text("Use the directional pad to enter the PIN. Select to confirm, Back to clear.")
                 .scaledFont(ProfileUI.small)
                 .foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
-                .padding(16)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 16)
         }
         .buttonStyle(ProfileRowButtonStyle())
         .focused($padFocus, equals: "dir")
