@@ -255,17 +255,10 @@ struct TVSettingsSubgroupPage<Content: View>: View {
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
-            ScrollView {
+            // The Settings pages' container: rows stop and fade below the
+            // tab bar and the profile avatar.
+            TVSettingsPane(title: title) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(title)
-                        .scaledFont(.system(size: 38, weight: .semibold))
-                        .foregroundColor(.textPrimary)
-                        // Apple TV page titles are centered (owner 2026-11-12).
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.horizontal, 20)
-                        .padding(.bottom, 12)
-
                     content
 
                     if let footer, !footer.isEmpty {
@@ -277,9 +270,6 @@ struct TVSettingsSubgroupPage<Content: View>: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 60)
             }
         }
         .toolbar(.hidden, for: .navigationBar)

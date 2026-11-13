@@ -1043,34 +1043,21 @@ struct ServerDetailView: View {
     }
 
     private var tvScroll: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                Text(server.name)
-                    .scaledFont(.system(size: 38, weight: .semibold))
-                    .foregroundColor(.textPrimary)
-                    // Apple TV page titles are centered (owner 2026-11-12).
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 4)
-
-                Group { tvActionsSection }.disabled(profilesFlow.liftActive)
-                if server.type == .dispatcharrAPI {
-                    ProfilesTVSection(playlistId: server.id.uuidString, model: profilesFlow)
-                }
-                Group {
-                    tvConnectionDetailsSection
-                    tvPermissionsSection
-                    tvEPGCacheSection
-                    tvFullRefreshSection
-                    tvDangerZoneSection
-                }
-                .disabled(profilesFlow.liftActive)
+        // The Settings pages' container: rows stop and fade below the tab
+        // bar and the profile avatar (Apple TV device capture 2026-11-13).
+        TVSettingsPane(title: server.name) {
+            Group { tvActionsSection }.disabled(profilesFlow.liftActive)
+            if server.type == .dispatcharrAPI {
+                ProfilesTVSection(playlistId: server.id.uuidString, model: profilesFlow)
             }
-            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
-            .padding(.horizontal, 48)
-            .padding(.vertical, 60)
-            .frame(maxWidth: .infinity)
+            Group {
+                tvConnectionDetailsSection
+                tvPermissionsSection
+                tvEPGCacheSection
+                tvFullRefreshSection
+                tvDangerZoneSection
+            }
+            .disabled(profilesFlow.liftActive)
         }
     }
 

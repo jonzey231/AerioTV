@@ -295,274 +295,264 @@ struct EditServerPage: View {
     private var editContent: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 32) {
-                    // Connection
-                    SettingsSection("Connection", style: .eyebrowCard) {
-                        // Phase 3 item 2: every Settings field is now the
-                        // shared SettingsTextField, so label placement,
-                        // helper copy and focus outline match iOS and
-                        // Android exactly.
-                        SettingsTextField("Name", text: $server.name)
-                        SettingsTextField("URL", text: baseURLBinding,
+            // The Settings pages' container and a drawn title, as on every
+            // other pushed page: fields stop and fade below the tab bar and
+            // the profile avatar (Apple TV device capture 2026-11-13).
+            TVSettingsPane(title: "Edit Playlist") {
+                // Connection
+                SettingsSection("Connection", style: .eyebrowCard) {
+                    // Phase 3 item 2: every Settings field is now the
+                    // shared SettingsTextField, so label placement,
+                    // helper copy and focus outline match iOS and
+                    // Android exactly.
+                    SettingsTextField("Name", text: $server.name)
+                    SettingsTextField("URL", text: baseURLBinding,
+                                      keyboardType: .URL)
+                }
+
+                // Credentials
+                if server.type == .xtreamCodes {
+                    SettingsSection("Credentials", style: .eyebrowCard) {
+                        SettingsTextField("Username", text: $server.username)
+                        SettingsTextField("Password", text: typedPasswordBinding,
+                                          isSecure: true)
+                    }
+                    SettingsSection("EPG Source", style: .eyebrowCard) {
+                        // Phase 3 item 2: the old section footer described
+                        // this one field, so it became the field's helper.
+                        // Same string as iOS and Android.
+                        SettingsTextField("Custom XMLTV URL (Optional)",
+                                          placeholder: "https://example.com/xmltv.xml",
+                                          text: $server.xtreamXMLTVURL,
+                                          helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
                                           keyboardType: .URL)
                     }
+                } else if server.type == .dispatcharrAPI {
+                    Group {
+                        SettingsSection("Authentication", style: .eyebrowCard) {
+                            // v1.7.x: credential mode picker on
+                            // tvOS Edit Server. The Apple TV
+                            // typing-burden is the primary reason
+                            // Direct Connect exists; the edit
+                            // screen needs to support switching
+                            // modes here too so users don't have
+                            // to go to a different device.
+                            Picker("Sign-in method", selection: directConnectModeBinding) {
+                                Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
+                                Text("API Key").tag(DispatcharrCredentialType.apiKey)
+                            }
+                            .pickerStyle(.segmented)
+                            .padding(.vertical, 8)
 
-                    // Credentials
-                    if server.type == .xtreamCodes {
-                        SettingsSection("Credentials", style: .eyebrowCard) {
-                            SettingsTextField("Username", text: $server.username)
-                            SettingsTextField("Password", text: typedPasswordBinding,
-                                              isSecure: true)
+                            switch effectiveCredentialType {
+                            case .usernamePassword:
+                                SettingsTextField("Username", text: $server.username)
+                                // Phase 3 item 2: the Dashboard-vs-XC hint
+                                // belongs to the password field alone, so
+                                // it is the field's helper now instead of a
+                                // loose caption under the section.
+                                SettingsTextField("Password", text: typedPasswordBinding,
+                                                  helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
+                                                  isSecure: true)
+                                if !server.baseApiKey.isEmpty {
+                                    HStack {
+                                        Text("API Key (cached)")
+                                            .scaledFont(.system(size: 28, weight: .medium).subtext())
+                                            .foregroundColor(Color.contrastText(.textSecondary))
+                                        Spacer()
+                                        Text(maskedAPIKey(server.baseApiKey))
+                                            .scaledFont(.system(size: 22, design: .monospaced).subtext())
+                                            .foregroundColor(Color.contrastText(.textTertiary))
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                                Button {
+                                    Task { await refreshDirectConnectSession() }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        if isRefreshingSession {
+                                            ProgressView().scaleEffect(0.8)
+                                        } else {
+                                            Image(systemName: "arrow.clockwise")
+                                        }
+                                        Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
+                                    }
+                                    .scaledFont(.system(size: 26, weight: .semibold))
+                                }
+                                .disabled(server.username.isEmpty
+                                          || server.effectivePassword.isEmpty
+                                          || isRefreshingSession)
+                                .padding(.top, 6)
+                                if let msg = sessionRefreshMessage {
+                                    Text(msg)
+                                        .scaledFont(.system(size: 22))
+                                        .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
+                                        .padding(.top, 2)
+                                } else {
+                                    Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
+                                        .scaledFont(.system(size: 22).subtext())
+                                        .foregroundColor(Color.contrastText(.textTertiary))
+                                        .padding(.top, 2)
+                                }
+                            case .apiKey:
+                                SettingsTextField("Admin API Key", text: $server.apiKey,
+                                                  isSecure: true)
+                            }
                         }
                         SettingsSection("EPG Source", style: .eyebrowCard) {
-                            // Phase 3 item 2: the old section footer described
-                            // this one field, so it became the field's helper.
-                            // Same string as iOS and Android.
+                            // Phase 3 item 2: footer copy folded into the
+                            // field it describes; matches iOS and Android.
                             SettingsTextField("Custom XMLTV URL (Optional)",
                                               placeholder: "https://example.com/xmltv.xml",
-                                              text: $server.xtreamXMLTVURL,
-                                              helper: "Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.",
-                                              keyboardType: .URL)
-                        }
-                    } else if server.type == .dispatcharrAPI {
-                        Group {
-                            SettingsSection("Authentication", style: .eyebrowCard) {
-                                // v1.7.x: credential mode picker on
-                                // tvOS Edit Server. The Apple TV
-                                // typing-burden is the primary reason
-                                // Direct Connect exists; the edit
-                                // screen needs to support switching
-                                // modes here too so users don't have
-                                // to go to a different device.
-                                Picker("Sign-in method", selection: directConnectModeBinding) {
-                                    Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
-                                    Text("API Key").tag(DispatcharrCredentialType.apiKey)
-                                }
-                                .pickerStyle(.segmented)
-                                .padding(.vertical, 8)
-
-                                switch effectiveCredentialType {
-                                case .usernamePassword:
-                                    SettingsTextField("Username", text: $server.username)
-                                    // Phase 3 item 2: the Dashboard-vs-XC hint
-                                    // belongs to the password field alone, so
-                                    // it is the field's helper now instead of a
-                                    // loose caption under the section.
-                                    SettingsTextField("Password", text: typedPasswordBinding,
-                                                      helper: "Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.\nYour Dispatcharr account must already have an API key. In Dispatcharr, open System, then Users, edit the user, and generate an API key before signing in here.",
-                                                      isSecure: true)
-                                    if !server.baseApiKey.isEmpty {
-                                        HStack {
-                                            Text("API Key (cached)")
-                                                .scaledFont(.system(size: 28, weight: .medium).subtext())
-                                                .foregroundColor(Color.contrastText(.textSecondary))
-                                            Spacer()
-                                            Text(maskedAPIKey(server.baseApiKey))
-                                                .scaledFont(.system(size: 22, design: .monospaced).subtext())
-                                                .foregroundColor(Color.contrastText(.textTertiary))
-                                        }
-                                        .padding(.vertical, 4)
-                                    }
-                                    Button {
-                                        Task { await refreshDirectConnectSession() }
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            if isRefreshingSession {
-                                                ProgressView().scaleEffect(0.8)
-                                            } else {
-                                                Image(systemName: "arrow.clockwise")
-                                            }
-                                            Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
-                                        }
-                                        .scaledFont(.system(size: 26, weight: .semibold))
-                                    }
-                                    .disabled(server.username.isEmpty
-                                              || server.effectivePassword.isEmpty
-                                              || isRefreshingSession)
-                                    .padding(.top, 6)
-                                    if let msg = sessionRefreshMessage {
-                                        Text(msg)
-                                            .scaledFont(.system(size: 22))
-                                            .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
-                                            .padding(.top, 2)
-                                    } else {
-                                        Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                            .scaledFont(.system(size: 22).subtext())
-                                            .foregroundColor(Color.contrastText(.textTertiary))
-                                            .padding(.top, 2)
-                                    }
-                                case .apiKey:
-                                    SettingsTextField("Admin API Key", text: $server.apiKey,
-                                                      isSecure: true)
-                                }
-                            }
-                            SettingsSection("EPG Source", style: .eyebrowCard) {
-                                // Phase 3 item 2: footer copy folded into the
-                                // field it describes; matches iOS and Android.
-                                SettingsTextField("Custom XMLTV URL (Optional)",
-                                                  placeholder: "https://example.com/xmltv.xml",
-                                                  text: $server.dispatcharrXMLTVURL,
-                                                  helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
-                                                  keyboardType: .URL)
-                            }
-                        }
-                    } else if server.type == .m3uPlaylist {
-                        SettingsSection("EPG Guide", style: .eyebrowCard) {
-                            SettingsTextField("EPG URL (Optional)", text: $server.epgURL,
+                                              text: $server.dispatcharrXMLTVURL,
+                                              helper: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.",
                                               keyboardType: .URL)
                         }
                     }
-
-                    // Local Network
-                    if server.type != .m3uPlaylist {
-                        SettingsSection("Local Network", style: .eyebrowCard) {
-                            // Phase 3 item 2: tvOS used to say "when the Apple
-                            // TV detects"; the helper is now the one shared
-                            // device-neutral string used on iOS and Android.
-                            SettingsTextField("Local URL", text: localURLBinding,
-                                              helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
-                                              keyboardType: .URL)
-                        }
+                } else if server.type == .m3uPlaylist {
+                    SettingsSection("EPG Guide", style: .eyebrowCard) {
+                        SettingsTextField("EPG URL (Optional)", text: $server.epgURL,
+                                          keyboardType: .URL)
                     }
-
-                    // User-Agent (Dispatcharr only) -- parity with the
-                    // iOS edit sheet.
-                    if server.type == .dispatcharrAPI {
-                        SettingsSection("User-Agent", style: .eyebrowCard) {
-                            SettingsTextField("User-Agent",
-                                              placeholder: DeviceInfo.defaultUserAgent,
-                                              text: $server.customUserAgent,
-                                              helper: "Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
-                        }
-                    }
-
-                    // On Demand (per-server VOD toggle). Previously this
-                    // and Guide History only existed on the iOS edit
-                    // sheet; Apple TV users had no way to change them.
-                    if server.supportsVOD {
-                        SettingsSection("On Demand", style: .eyebrowCard) {
-                            Toggle("Fetch On Demand from This Playlist", isOn: $server.vodEnabled)
-                                .scaledFont(.system(size: 28, weight: .medium))
-                                .foregroundColor(.textPrimary)
-                                .padding(.vertical, 4)
-                            Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
-                        }
-                    }
-
-                    // Guide Days (window back AND ahead; Logan 2026-09-11)
-                    // A choice row like Default Destination, not a segmented
-                    // control (Logan 2026-10-02: the pills felt out of place);
-                    // same labels as Android.
-                    SettingsSection("Guide Days", style: .eyebrowCard) {
-                        SettingsChoicePicker("Guide Days",
-                                             options: GuideDayChoices.all,
-                                             selection: $server.epgRetentionDays,
-                                             footer: "How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
-                    }
-
-                    // GH Android#129: catch-up request time offset
-                    // (Dispatcharr and Xtream Codes build catch-up times).
-                    if server.type == .dispatcharrAPI || server.type == .xtreamCodes {
-                        SettingsSection("Catch-Up", style: .eyebrowCard) {
-                            CatchupTimeOffsetPicker(serverID: server.id)
-                        }
-                    }
-
-                    // Task #189 (Android parity): user-chosen Channel
-                    // Profile. Radio-style rows (like Android's picker);
-                    // a segmented control can't hold N variable-length
-                    // profile names on tvOS.
-                    if server.type == .dispatcharrAPI {
-                        SettingsSection("Channel Profile", style: .eyebrowCard) {
-                            channelProfileRow(name: "All Channels", count: nil, id: nil)
-                            ForEach(channelProfiles) { profile in
-                                channelProfileRow(name: profile.name,
-                                                  count: profile.channels.count,
-                                                  id: profile.id)
-                            }
-                            Text(channelProfilesLoadFailed
-                                 ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
-                                 : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
-                        }
-                        .task { await loadChannelProfiles() }
-                    }
-
-                    // Info
-                    SettingsSection("Info", style: .eyebrowCard) {
-                        HStack {
-                            Text("Type")
-                                .scaledFont(.system(size: 28, weight: .medium).subtext())
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                            Spacer()
-                            Text(server.type.displayName)
-                                .scaledFont(.system(size: 28).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                        }
-                        .padding(.vertical, 8)
-                    }
-
-                    // Save Failed: the server rejected the new credentials
-                    // (or the verification fetch failed). Same section
-                    // chrome as the rest of the page.
-                    if let saveErrorMessage {
-                        SettingsSection("Save Failed", style: .eyebrowCard) {
-                            HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .foregroundColor(.statusLive)
-                                Text(saveErrorMessage)
-                                    .scaledFont(.system(size: 24))
-                                    .foregroundColor(.statusLive)
-                            }
-                            .padding(.vertical, 4)
-                            Text("Your entries are still here. Fix them and select Save Changes again.")
-                                .scaledFont(.system(size: 22).subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.top, 4)
-                        }
-                    }
-
-                    // Save
-                    HStack {
-                        Spacer()
-                        Button {
-                            Task { await saveEdits() }
-                        } label: {
-                            Text(isSaving ? "Saving…" : "Save Changes")
-                                .scaledFont(.system(size: 28, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 48)
-                                .padding(.vertical, 14)
-                                .background(LinearGradient.accentGradient)
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle(settingsStyle: true))
-                        .tvFocusRingShape(.capsule)
-                        .disabled(isSaving ||
-                                  server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                                  (pendingBaseURL ?? server.baseURL)
-                                      .trimmingCharacters(in: .whitespaces).isEmpty)
-                        Spacer()
-                    }
-                    .padding(.top, 16)
                 }
-                // v1.7.5: cap the content to a centered reading column
-                // instead of letting every row span the full 1920pt TV
-                // width (Archie field report: tvOS settings "look like
-                // stretched out iPhone/iPad screens"). 1200pt keeps the
-                // 28pt form text comfortably readable at couch distance
-                // with generous side margins, the conventional tvOS form
-                // proportion. The inner cap is left-aligned; the outer
-                // infinity-width frame centers that capped column.
-                .frame(maxWidth: 1200, alignment: .leading)
-                .padding(48)
-                .frame(maxWidth: .infinity)
+
+                // Local Network
+                if server.type != .m3uPlaylist {
+                    SettingsSection("Local Network", style: .eyebrowCard) {
+                        // Phase 3 item 2: tvOS used to say "when the Apple
+                        // TV detects"; the helper is now the one shared
+                        // device-neutral string used on iOS and Android.
+                        SettingsTextField("Local URL", text: localURLBinding,
+                                          helper: "Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.",
+                                          keyboardType: .URL)
+                    }
+                }
+
+                // User-Agent (Dispatcharr only) -- parity with the
+                // iOS edit sheet.
+                if server.type == .dispatcharrAPI {
+                    SettingsSection("User-Agent", style: .eyebrowCard) {
+                        SettingsTextField("User-Agent",
+                                          placeholder: DeviceInfo.defaultUserAgent,
+                                          text: $server.customUserAgent,
+                                          helper: "Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
+                    }
+                }
+
+                // On Demand (per-server VOD toggle). Previously this
+                // and Guide History only existed on the iOS edit
+                // sheet; Apple TV users had no way to change them.
+                if server.supportsVOD {
+                    SettingsSection("On Demand", style: .eyebrowCard) {
+                        Toggle("Fetch On Demand from This Playlist", isOn: $server.vodEnabled)
+                            .scaledFont(.system(size: 28, weight: .medium))
+                            .foregroundColor(.textPrimary)
+                            .padding(.vertical, 4)
+                        Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
+                            .scaledFont(.system(size: 22).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .padding(.top, 4)
+                    }
+                }
+
+                // Guide Days (window back AND ahead; Logan 2026-09-11)
+                // A choice row like Default Destination, not a segmented
+                // control (Logan 2026-10-02: the pills felt out of place);
+                // same labels as Android.
+                SettingsSection("Guide Days", style: .eyebrowCard) {
+                    SettingsChoicePicker("Guide Days",
+                                         options: GuideDayChoices.all,
+                                         selection: $server.epgRetentionDays,
+                                         footer: "How many days of guide data to load, back and ahead. Dispatcharr only; other sources show what their guide carries.")
+                }
+
+                // GH Android#129: catch-up request time offset
+                // (Dispatcharr and Xtream Codes build catch-up times).
+                if server.type == .dispatcharrAPI || server.type == .xtreamCodes {
+                    SettingsSection("Catch-Up", style: .eyebrowCard) {
+                        CatchupTimeOffsetPicker(serverID: server.id)
+                    }
+                }
+
+                // Task #189 (Android parity): user-chosen Channel
+                // Profile. Radio-style rows (like Android's picker);
+                // a segmented control can't hold N variable-length
+                // profile names on tvOS.
+                if server.type == .dispatcharrAPI {
+                    SettingsSection("Channel Profile", style: .eyebrowCard) {
+                        channelProfileRow(name: "All Channels", count: nil, id: nil)
+                        ForEach(channelProfiles) { profile in
+                            channelProfileRow(name: profile.name,
+                                              count: profile.channels.count,
+                                              id: profile.id)
+                        }
+                        Text(channelProfilesLoadFailed
+                             ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
+                             : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
+                            .scaledFont(.system(size: 22).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .padding(.top, 4)
+                    }
+                    .task { await loadChannelProfiles() }
+                }
+
+                // Info
+                SettingsSection("Info", style: .eyebrowCard) {
+                    HStack {
+                        Text("Type")
+                            .scaledFont(.system(size: 28, weight: .medium).subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                        Spacer()
+                        Text(server.type.displayName)
+                            .scaledFont(.system(size: 28).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                    }
+                    .padding(.vertical, 8)
+                }
+
+                // Save Failed: the server rejected the new credentials
+                // (or the verification fetch failed). Same section
+                // chrome as the rest of the page.
+                if let saveErrorMessage {
+                    SettingsSection("Save Failed", style: .eyebrowCard) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundColor(.statusLive)
+                            Text(saveErrorMessage)
+                                .scaledFont(.system(size: 24))
+                                .foregroundColor(.statusLive)
+                        }
+                        .padding(.vertical, 4)
+                        Text("Your entries are still here. Fix them and select Save Changes again.")
+                            .scaledFont(.system(size: 22).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .padding(.top, 4)
+                    }
+                }
+
+                // Save
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { await saveEdits() }
+                    } label: {
+                        Text(isSaving ? "Saving…" : "Save Changes")
+                            .scaledFont(.system(size: 28, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 48)
+                            .padding(.vertical, 14)
+                            .background(LinearGradient.accentGradient)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(TVNoHighlightButtonStyle(settingsStyle: true))
+                    .tvFocusRingShape(.capsule)
+                    .disabled(isSaving ||
+                              server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                              (pendingBaseURL ?? server.baseURL)
+                                  .trimmingCharacters(in: .whitespaces).isEmpty)
+                    Spacer()
+                }
+                .padding(.top, 16)
             }
         }
         .navigationTitle("Edit Playlist")

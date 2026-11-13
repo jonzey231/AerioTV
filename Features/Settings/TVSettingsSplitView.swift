@@ -462,12 +462,18 @@ enum TVSettingsPaneMetrics {
 /// Every Settings rail page's scroll container: one x, width, top, and
 /// eyebrow position (TVSettingsPaneMetrics). Content scrolls up to the
 /// rail's top line and fades out there; at rest nothing is faded.
+/// Pushed pages (Sync Categories, a playlist's detail and Edit Playlist,
+/// subgroup pages) use it too, with their title as the first element:
+/// their rows stop and fade at the same line, below the tab bar and the
+/// profile avatar (Apple TV device capture 2026-11-13, atv5).
 struct TVSettingsPane<Content: View>: View {
+    var title: String? = nil
     let spacing: CGFloat
     let content: Content
     @State private var scrolled = false
 
-    init(spacing: CGFloat = 32, @ViewBuilder content: () -> Content) {
+    init(title: String? = nil, spacing: CGFloat = 32, @ViewBuilder content: () -> Content) {
+        self.title = title
         self.spacing = spacing
         self.content = content()
     }
@@ -475,6 +481,15 @@ struct TVSettingsPane<Content: View>: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: spacing) {
+                if let title {
+                    Text(title)
+                        .scaledFont(.system(size: 38, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                        // Apple TV page titles are centered (owner 2026-11-12).
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 20)
+                }
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)

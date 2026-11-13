@@ -261,73 +261,61 @@ struct SyncCategoriesSettingsView: View {
     // MARK: - tvOS Body
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Own heading, now that the system bar is hidden above.
-                Text("Sync Categories")
-                    .scaledFont(.system(size: 38, weight: .semibold))
-                    .foregroundColor(.textPrimary)
-                    // Apple TV page titles are centered (owner 2026-11-12).
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.horizontal, 24)
-
-                ForEach(settingsGroups) { group in
-                    SettingsSection(group.title, style: .compactCard) {
-                        SettingsChoicePicker("All \(group.title) Settings",
+        // The rail pages' container and small-caps eyebrows (Apple TV device
+        // capture 2026-11-13, atv5: large title-case headers, and scrolled
+        // rows ran under the profile avatar). Own heading, since the system
+        // bar is hidden above.
+        TVSettingsPane(title: "Sync Categories") {
+            ForEach(settingsGroups) { group in
+                SettingsSection(group.title, style: .plain) {
+                    SettingsChoicePicker("All \(group.title) Settings",
+                                         options: Self.scopeOptions,
+                                         selection: groupScopeBinding(group),
+                                         footer: scopeFooter,
+                                         unmatchedTitle: "Mixed")
+                    ForEach(group.items.filter { !$0.isData }) { item in
+                        SettingsChoicePicker(item.label,
                                              options: Self.scopeOptions,
-                                             selection: groupScopeBinding(group),
-                                             footer: scopeFooter,
-                                             unmatchedTitle: "Mixed")
-                        ForEach(group.items.filter { !$0.isData }) { item in
-                            SettingsChoicePicker(item.label,
-                                                 options: Self.scopeOptions,
-                                                 selection: itemScopeBinding(item),
-                                                 footer: scopeFooter)
-                        }
-                    }
-                    .disabled(!anyProviderOn)
-                    .opacity(anyProviderOn ? 1.0 : 0.5)
-                }
-
-                SettingsSection("Your Data", style: .compactCard) {
-                    ForEach(dataItems) { item in
-                        TVSettingsToggleRow(
-                            icon: "icloud",
-                            iconColor: theme.accent,
-                            title: item.label,
-                            subtitle: "",
-                            isOn: itemToggleBinding(item)
-                        ) { _ in }
+                                             selection: itemScopeBinding(item),
+                                             footer: scopeFooter)
                     }
                 }
                 .disabled(!anyProviderOn)
                 .opacity(anyProviderOn ? 1.0 : 0.5)
+            }
 
-                if !dsyncOnly {
-                    SettingsSection("Delete from iCloud", style: .compactCard) {
-                        ForEach(SyncCategory.allCases) { category in
-                            TVSettingsActionRow(
-                                icon: "icloud.slash",
-                                label: "Delete \(category.displayName)",
-                                isDestructive: true,
-                                action: { pendingDeleteCategory = category }
-                            )
-                        }
+            SettingsSection("Your Data", style: .plain) {
+                ForEach(dataItems) { item in
+                    TVSettingsToggleRow(
+                        icon: "icloud",
+                        iconColor: theme.accent,
+                        title: item.label,
+                        subtitle: "",
+                        isOn: itemToggleBinding(item)
+                    ) { _ in }
+                }
+            }
+            .disabled(!anyProviderOn)
+            .opacity(anyProviderOn ? 1.0 : 0.5)
+
+            if !dsyncOnly {
+                SettingsSection("Delete from iCloud", style: .plain) {
+                    ForEach(SyncCategory.allCases) { category in
+                        TVSettingsActionRow(
+                            icon: "icloud.slash",
+                            label: "Delete \(category.displayName)",
+                            isDestructive: true,
+                            action: { pendingDeleteCategory = category }
+                        )
                     }
                 }
-
-                Text(footerText)
-                    .scaledFont(.footnote.subtext())
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 32)
             }
-            // Same reading column every other tvOS Settings pane uses, so
-            // a pushed page does not stretch edge to edge on a 4K set.
-            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.top, 32)
+
+            Text(footerText)
+                .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                .foregroundColor(Color.contrastText(.textTertiary))
+                .padding(.horizontal, 20)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
     #endif

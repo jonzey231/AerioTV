@@ -40,8 +40,8 @@ struct SettingsSection<Content: View>: View {
         case card
         /// Compact header with zero-spacing content clipped into a card.
         case compactCard
-        /// Uppercased eyebrow header (no leading pad) with the content in a
-        /// 24pt-padded rounded-16 card. The Edit Playlist page's look.
+        /// Uppercased eyebrow header (inset like .plain's) with the content
+        /// in a 24pt-padded rounded-16 card. The Edit Playlist page's look.
         case eyebrowCard
     }
 
@@ -99,6 +99,9 @@ struct SettingsSection<Content: View>: View {
                     .scaledFont(.system(size: 22, weight: .bold))
                     .foregroundColor(Color.contrastText(.textTertiary))
                     .tracking(1)
+                    // The .plain eyebrow's inset, so Edit Playlist's
+                    // eyebrows share every other page's x.
+                    .padding(.leading, 20)
                 VStack(spacing: 16) {
                     content
                 }

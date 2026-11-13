@@ -345,7 +345,11 @@ struct TVSettingsToggleRow: View {
             onChange(isOn)
         } label: {
             HStack(spacing: 0) {
-                SettingsRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle)
+                // An empty subtitle laid out a blank second line, so the
+                // title sat above the row's center (Info Card, Badge Types,
+                // Sync Categories' Your Data rows).
+                SettingsRow(icon: icon, iconColor: iconColor, title: title,
+                            subtitle: subtitle.isEmpty ? nil : subtitle)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 // On/Off indicator, mirrors TVGroupToggleRow style
                 HStack(spacing: 8) {
