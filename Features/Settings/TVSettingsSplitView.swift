@@ -469,28 +469,45 @@ enum TVSettingsPaneMetrics {
 struct TVSettingsPane<Content: View>: View {
     var title: String? = nil
     let spacing: CGFloat
+    /// A LazyVStack column, for long text (a license's paragraphs).
+    var lazy = false
     let content: Content
-    @State private var scrolled = false
 
-    init(title: String? = nil, spacing: CGFloat = 32, @ViewBuilder content: () -> Content) {
+    init(title: String? = nil, spacing: CGFloat = 32, lazy: Bool = false,
+         @ViewBuilder content: () -> Content) {
         self.title = title
         self.spacing = spacing
+        self.lazy = lazy
         self.content = content()
+    }
+
+    @ViewBuilder
+    private var titleText: some View {
+        if let title {
+            Text(title)
+                .scaledFont(.system(size: 38, weight: .semibold))
+                .foregroundColor(.textPrimary)
+                // Apple TV page titles are centered (owner 2026-11-12).
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 20)
+        }
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: spacing) {
-                if let title {
-                    Text(title)
-                        .scaledFont(.system(size: 38, weight: .semibold))
-                        .foregroundColor(.textPrimary)
-                        // Apple TV page titles are centered (owner 2026-11-12).
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.horizontal, 20)
+            Group {
+                if lazy {
+                    LazyVStack(alignment: .leading, spacing: spacing) {
+                        titleText
+                        content
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: spacing) {
+                        titleText
+                        content
+                    }
                 }
-                content
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, TVSettingsPaneMetrics.horizontal)
@@ -501,26 +518,48 @@ struct TVSettingsPane<Content: View>: View {
             .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
             .frame(maxWidth: .infinity)
         }
-        .onScrollGeometryChange(for: Bool.self) { g in
-            WhatsNewRules.fadeActive(scrolledBy: Double(g.contentOffset.y + g.contentInsets.top))
-        } action: { _, isScrolled in
-            scrolled = isScrolled
-        }
         // A tvOS ScrollView does not clip: without the mask, scrolled rows
         // drew up behind the tab bar and the profile avatar (device p12).
-        .mask {
-            VStack(spacing: 0) {
-                LinearGradient(colors: [scrolled ? .clear : .black, .black],
-                               startPoint: .top, endPoint: .bottom)
-                    .frame(height: TVSettingsPaneMetrics.fadeHeight)
-                Color.black
-            }
-            // Only the top is cut: below, rows still run past the safe area
-            // to the screen's edge as before, a cue that the page scrolls.
-            .padding(.bottom, -TVSettingsPaneMetrics.bottomOverhang)
-            .animation(.easeInOut(duration: 0.2), value: scrolled)
-        }
+        // Only the top is cut: below, rows still run past the safe area to
+        // the screen's edge as before, a cue that the page scrolls.
+        .tvSettingsTopFade(bottomOverhang: TVSettingsPaneMetrics.bottomOverhang)
         .padding(.top, TVSettingsPaneMetrics.topLine)
+    }
+}
+
+/// The Settings scroll fade: once a scroll view is scrolled, its content
+/// fades out over TVSettingsPaneMetrics.fadeHeight at the view's top edge
+/// (as What's New's list does under its header); at rest nothing is
+/// faded. Content is cut at the top edge and, past `bottomOverhang`, at
+/// the bottom. Used by TVSettingsPane and the option sheet card.
+private struct TVSettingsTopFade: ViewModifier {
+    let bottomOverhang: CGFloat
+    @State private var scrolled = false
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: Bool.self) { g in
+                WhatsNewRules.fadeActive(scrolledBy: Double(g.contentOffset.y + g.contentInsets.top))
+            } action: { _, isScrolled in
+                scrolled = isScrolled
+            }
+            .mask {
+                VStack(spacing: 0) {
+                    LinearGradient(colors: [scrolled ? .clear : .black, .black],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: TVSettingsPaneMetrics.fadeHeight)
+                    Color.black
+                }
+                .padding(.bottom, -bottomOverhang)
+                .animation(.easeInOut(duration: 0.2), value: scrolled)
+            }
+    }
+}
+
+extension View {
+    /// See TVSettingsTopFade. Apply to a ScrollView.
+    func tvSettingsTopFade(bottomOverhang: CGFloat = 0) -> some View {
+        modifier(TVSettingsTopFade(bottomOverhang: bottomOverhang))
     }
 }
 

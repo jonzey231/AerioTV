@@ -358,6 +358,9 @@ struct TVSettingsSheetCard<Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(32)
                 }
+                // Scrolled options fade out at the card's top edge, as rows
+                // do at the Settings pages' top line, instead of a hard cut.
+                .tvSettingsTopFade()
                 .frame(maxWidth: cardWidth)
                 // Taller lists scroll INSIDE the card.
                 .frame(maxHeight: geo.size.height * 0.7)

@@ -3458,6 +3458,9 @@ struct OpenSourceLicensesView: View {
 
     #if os(tvOS)
     @State private var selected: OSSComponent?
+    /// The license last closed: focus goes back to its row.
+    @State private var lastOpened: String?
+    @FocusState private var focusedComponent: String?
 
     private var tvBody: some View {
         ZStack {
@@ -3467,48 +3470,75 @@ struct OpenSourceLicensesView: View {
                     // Back closes the license text, not the sheet.
                     .onExitCommand {
                         SettingsFocusLog.log("menu handled by OpenSourceLicensesView (close license text)")
+                        lastOpened = c.id
                         selected = nil
                     }
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        Text("Open Source Licenses")
-                            .scaledFont(.system(size: 40, weight: .bold))
-                            .foregroundColor(.textPrimary)
-                            // Apple TV page titles are centered (owner 2026-11-12).
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        Text(OSSCatalog.appSummary)
-                            .scaledFont(.system(size: 24).subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        Text("Patents")
-                            .scaledFont(.system(size: 28, weight: .semibold))
-                            .foregroundColor(.textPrimary)
-                        Text(OSSCatalog.patentNotice)
-                            .scaledFont(.system(size: 24).subtext())
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                        TMDBAttributionView(style: .long)
-                        VStack(spacing: 12) {
-                            ForEach(OSSCatalog.components) { c in
-                                Button {
-                                    selected = c
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(c.name).scaledFont(.system(size: 28, weight: .medium))
-                                            Text(c.licenseName).scaledFont(.system(size: 20)).opacity(0.6)
-                                        }
-                                        Spacer()
-                                        Image(systemName: "chevron.right").opacity(0.4)
+                // The Settings pages' container, eyebrow, and standard rows
+                // (owner 2026-11-13: rows and widths match the standard row
+                // style and the page's container). Before, the list ran
+                // 1640 pt wide with system buttons.
+                // The notice is focusable paragraph by paragraph, as a
+                // license's own text is: tvOS scrolls by moving focus, and in
+                // the reading column the rows start below the screen, so a
+                // plain text block left the cover with nothing to focus
+                // (simulator 2026-11-13). Focus now starts at the first line.
+                TVSettingsPane(title: "Open Source Licenses") {
+                    tvParagraphs(OSSCatalog.appSummary)
+                    SettingsSection("Patents", style: .plain) {
+                        tvParagraphs(OSSCatalog.patentNotice)
+                    }
+                    TMDBAttributionView(style: .long)
+                        .padding(.horizontal, 20)
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(OSSCatalog.components) { c in
+                            TVSettingsCardButtonRow(action: { selected = c }, logTitle: c.name) {
+                                HStack(spacing: 14) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(c.name)
+                                            .scaledFont(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        Text(c.licenseName)
+                                            .scaledFont(.bodySmall)
+                                            .foregroundColor(Color.contrastText(.textSecondary))
                                     }
-                                    .padding(.vertical, 6)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "chevron.right")
+                                        .scaledFont(.system(size: 22, weight: .semibold))
+                                        .foregroundColor(Color.contrastText(.textTertiary))
                                 }
                             }
+                            .focused($focusedComponent, equals: c.id)
                         }
                     }
-                    .padding(60)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .onAppear(perform: refocusLastOpened)
+            }
+        }
+    }
+
+    /// Back from a license's text: focus returns to that license's row,
+    /// retrying while the list realizes (a lone FocusState write is dropped
+    /// during layout).
+    private func refocusLastOpened() {
+        guard let id = lastOpened else { return }
+        Task { @MainActor in
+            for _ in 0..<10 {
+                focusedComponent = id
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if focusedComponent == id { break }
+            }
+            lastOpened = nil
+        }
+    }
+
+    private func tvParagraphs(_ text: String) -> some View {
+        let blocks = text.components(separatedBy: "\n\n").filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                FocusableParagraph(text: block)
             }
         }
     }
@@ -3560,20 +3590,11 @@ private struct OSSTVDetailView: View {
         return blocks
     }
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 18) {
-                Text(component.name)
-                    .scaledFont(.system(size: 36, weight: .bold))
-                    .foregroundColor(.textPrimary)
-                    // Apple TV page titles are centered (owner 2026-11-12).
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, block in
-                    FocusableParagraph(text: block)
-                }
+        // The Settings pages' container, lazy for the long texts.
+        TVSettingsPane(title: component.name, spacing: 18, lazy: true) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, block in
+                FocusableParagraph(text: block)
             }
-            .padding(60)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -3587,8 +3608,12 @@ private struct FocusableParagraph: View {
         Text(text)
             .scaledFont(.system(size: 22))
             .foregroundColor(focused ? .textPrimary : Color.contrastText(.textSecondary))
-            .padding(8)
-            .background(RoundedRectangle(cornerRadius: 8)
+            // The rows' 20 pt inset and full column width, so text lines up
+            // with the eyebrows and rows (Settings pages' container).
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(focused ? Color.cardBackground : Color.clear))
             .focusable(true)
             .focused($focused)
