@@ -48,6 +48,22 @@ struct SettingsIconTile: View {
     }
 }
 
+extension View {
+    /// A Settings row button's label that answers a tap anywhere on its row,
+    /// not only on its icon and text (owner 2026-11-13). A Button with a
+    /// custom or plain style in a List row is hit only where its label draws:
+    /// the empty width beside the text and the row's top and bottom padding
+    /// did nothing. The label now fills the row's width, and its hit shape
+    /// reaches [margin] past it to the row's edges. A list row only receives
+    /// touches inside its own bounds, so the margin never takes a tap from
+    /// the next row. Not for buttons stacked outside a List, where the
+    /// margin would overlap a neighbor.
+    func settingsRowHitTarget(margin: CGFloat = 24) -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle().inset(by: -margin))
+    }
+}
+
 struct SettingsRow: View {
     let icon: String
     let iconColor: Color

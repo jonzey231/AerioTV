@@ -415,6 +415,7 @@ struct SyncSettingsView: View {
                                         ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
                                         : "Send this device's playlists, preferences and progress up",
                                     isBusy: sync.activity == .pushing)
+                            .settingsRowHitTarget()
                     }
                     .buttonStyle(PressableButtonStyle())
                     // Both directions are locked out while either one runs so
@@ -431,6 +432,7 @@ struct SyncSettingsView: View {
                                     title: "Pull from iCloud",
                                     subtitle: "Replace this device's data with the iCloud copy",
                                     isBusy: sync.activity == .pulling)
+                            .settingsRowHitTarget()
                     }
                     .buttonStyle(PressableButtonStyle())
                     .disabled(sync.activity != .idle)
@@ -448,6 +450,7 @@ struct SyncSettingsView: View {
                                 iconColor: .statusLive,
                                 title: "Clear iCloud Data",
                                 subtitle: "Wipe synced playlists, preferences, watch progress, and credentials from iCloud")
+                        .settingsRowHitTarget()
                 }
                 .buttonStyle(PressableButtonStyle())
             } header: {
@@ -478,6 +481,7 @@ struct SyncSettingsView: View {
                             SettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .accentPrimary,
                                         title: "Sync Now", subtitle: syncNowSubtitle,
                                         isBusy: dsyncManager.ui.running)
+                                .settingsRowHitTarget()
                         }
                         .buttonStyle(PressableButtonStyle())
                     }
@@ -492,6 +496,7 @@ struct SyncSettingsView: View {
                                                 ? "Send this device's data up  ·  Last synced \(dsyncLastString)"
                                                 : "Send this device's data up",
                                             isBusy: dsyncPushStatus.isRunning)
+                                    .settingsRowHitTarget()
                             }
                             .buttonStyle(PressableButtonStyle())
                             SyncActionStatusLine(status: dsyncPushStatus)
@@ -504,6 +509,7 @@ struct SyncSettingsView: View {
                                             title: "Pull from Dispatcharr",
                                             subtitle: "Replace this device's data with the Dispatcharr copy",
                                             isBusy: dsyncPullStatus.isRunning)
+                                    .settingsRowHitTarget()
                             }
                             .buttonStyle(PressableButtonStyle())
                             SyncActionStatusLine(status: dsyncPullStatus)
@@ -518,6 +524,7 @@ struct SyncSettingsView: View {
                                             title: "Push to both",
                                             subtitle: "Send this device's data to Dispatcharr and iCloud",
                                             isBusy: bothPushStatus.isRunning)
+                                    .settingsRowHitTarget()
                             }
                             .buttonStyle(PressableButtonStyle())
                             SyncActionStatusLine(status: bothPushStatus)

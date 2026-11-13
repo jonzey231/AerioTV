@@ -520,6 +520,8 @@ struct EditServerSheet: View {
                             }
                             .scaledFont(.labelMedium.weight(.semibold))
                             .foregroundColor(.accentPrimary)
+                            // The whole row, not just the icon and text (owner 2026-11-13).
+                            .settingsRowHitTarget()
                         }
                         .buttonStyle(.plain)
                         .disabled(server.username.isEmpty
@@ -570,10 +572,14 @@ struct EditServerSheet: View {
                     // Test button + status. Mirrors AddServerView's validation
                     // affordance so editing a server feels consistent with
                     // adding one.
-                    HStack(spacing: 10) {
-                        Button {
-                            Task { await testEditXMLTVURL() }
-                        } label: {
+                    // The status pill sits inside the button's label so the
+                    // whole row takes the tap, not just the icon and text
+                    // (owner 2026-11-13). The pill is empty whenever the
+                    // button is disabled (idle or testing).
+                    Button {
+                        Task { await testEditXMLTVURL() }
+                    } label: {
+                        HStack(spacing: 10) {
                             HStack(spacing: 6) {
                                 if case .testing = xmltvTestState {
                                     ProgressView().tint(.accentPrimary).scaleEffect(0.8)
@@ -584,15 +590,16 @@ struct EditServerSheet: View {
                             }
                             .scaledFont(.labelMedium.weight(.semibold))
                             .foregroundColor(.accentPrimary)
+
+                            xmltvEditStatusPill
+
+                            Spacer(minLength: 0)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(editXMLTVTrimmed.isEmpty ||
-                                  { if case .testing = xmltvTestState { return true } else { return false } }())
-
-                        xmltvEditStatusPill
-
-                        Spacer(minLength: 0)
+                        .settingsRowHitTarget()
                     }
+                    .buttonStyle(.plain)
+                    .disabled(editXMLTVTrimmed.isEmpty ||
+                              { if case .testing = xmltvTestState { return true } else { return false } }())
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("EPG Source").sectionHeaderStyle()

@@ -570,6 +570,8 @@ struct SettingsView: View {
                                     .scaledFont(.bodyMedium)
                                     .foregroundColor(Color.contrastText(.accentPrimary))
                             }
+                            // The whole row, not just the icon and text (owner 2026-11-13).
+                            .settingsRowHitTarget()
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
@@ -1082,6 +1084,10 @@ struct SettingsView: View {
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(selected ? theme.accent.opacity(Self.padSidebarSelectionOpacity)
                                    : Color.clear))
+                // An unselected row's clear fill is not hit-tested: without
+                // this only its icon and text took a tap (owner 2026-11-13).
+                // No margin: these rows are stacked in a scroll view.
+                .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1258,6 +1264,8 @@ struct SettingsView: View {
                             .scaledFont(.bodyMedium)
                             .foregroundColor(Color.contrastText(.accentPrimary))
                     }
+                    // The whole row, not just the icon and text (owner 2026-11-13).
+                    .settingsRowHitTarget()
                 }
                 .buttonStyle(PressableButtonStyle())
                 .listRowBackground(Color.cardBackground)

@@ -111,6 +111,8 @@ struct AboutSettingsView: View {
                             .foregroundColor(copiedAbout ? Color.contrastText(.accentPrimary) : Color.contrastText(.textSecondary))
                         Spacer()
                     }
+                    // The Spacer's width took no tap (owner 2026-11-13).
+                    .settingsRowHitTarget()
                 }
                 .buttonStyle(PressableButtonStyle())
                 .listRowBackground(Color.cardBackground)
