@@ -295,6 +295,13 @@ final class RecordingCoordinator: ObservableObject {
             // needed to halt it. This distinguishes "session not found" from
             // "stop ran but didn't cancel the task" in logs.
             debugLog("🔴 stopLocalRecording: NO active session for id=\(recording.id) (already stopped or orphaned) - active keys=\(activeSessions.keys.map { $0.uuidString.prefix(8) })")
+            // Still marked recording with nothing capturing (a relaunch or a
+            // trip to the background ended it): Stop finishes it now.
+            if finishInterrupted(recording, trigger: "stop") {
+                try? modelContext.save()
+                updateRecordingState()
+                refreshGuideRecordingMarkers(modelContext: modelContext)
+            }
             return
         }
         debugLog("🔴 stopLocalRecording: stopping active session id=\(recording.id)")
@@ -599,16 +606,62 @@ final class RecordingCoordinator: ObservableObject {
 
     // MARK: - Background handling
 
-    /// Lightweight variant called from AerioApp's scenePhase handler
-    /// (which has no modelContext). Stops all active sessions immediately.
-    /// The Recording model objects will be updated the next time the user
-    /// opens My Recordings or when the coordinator syncs state.
-    func stopAllSessionsOnBackground() {
-        for (_, session) in activeSessions {
-            Task { await session.stop() }
-        }
+    /// Called from AerioApp's scenePhase handler on background. Stops all
+    /// active sessions immediately; with a model context, their
+    /// rows are then finished as interrupted (finishInterruptedRecordings).
+    /// Without one, the next launch or Stop finishes them.
+    func stopAllSessionsOnBackground(modelContext: ModelContext? = nil) {
+        let stopping = Array(activeSessions.values)
         activeSessions.removeAll()
         updateRecordingState()
+        guard !stopping.isEmpty else { return }
+        Task {
+            for session in stopping { await session.stop() }
+            // Their rows are finished now (interrupted), not left "Recording
+            // now" with nothing capturing.
+            if let modelContext { finishInterruptedRecordings(in: modelContext, trigger: "background") }
+        }
+    }
+
+    // MARK: - On-device recordings with no capture behind them (owner 2026-11-13)
+
+    /// Every on-device row still marked recording with no capture running
+    /// for it becomes finished (InterruptedCapture). At launch that is every
+    /// one: no capture survives a relaunch.
+    func finishInterruptedRecordings(in modelContext: ModelContext, trigger: String) {
+        let rows = (try? modelContext.fetch(FetchDescriptor<Recording>(
+            predicate: #Predicate<Recording> { $0.destinationRaw == "local" && $0.statusRaw == "recording" }
+        ))) ?? []
+        var finished = 0
+        for r in rows where activeSessions[r.id] == nil {
+            if finishInterrupted(r, trigger: trigger) { finished += 1 }
+        }
+        guard finished > 0 else { return }
+        try? modelContext.save()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
+    }
+
+    /// One row: interrupted with what its file captured, or failed when
+    /// nothing was. False when the row is not an on-device recording in
+    /// progress (nothing to do).
+    @discardableResult
+    private func finishInterrupted(_ rec: Recording, trigger: String) -> Bool {
+        guard rec.destination == .local, rec.status == .recording else { return false }
+        let attrs = rec.resolvedLocalFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
+        let out = InterruptedCapture.outcome(
+            fileBytes: attrs.flatMap { ($0[.size] as? NSNumber)?.int64Value },
+            created: attrs?[.creationDate] as? Date,
+            modified: attrs?[.modificationDate] as? Date,
+            fallbackStart: max(rec.createdAt, rec.effectiveStart),
+            now: Date())
+        rec.statusRaw = out.statusRaw
+        rec.fileSizeBytes = out.bytes
+        rec.capturedSeconds = out.capturedSeconds
+        rec.failureReason = out.failureReason
+        let what = out.capturedSeconds.map { "kept \(out.bytes) bytes, \(Int($0)) s captured" }
+            ?? "nothing captured (\(out.failureReason ?? ""))"
+        debugLog("[DVR] on-device recording \(rec.id.uuidString.prefix(8)) had no capture running (\(trigger)): now \(out.statusRaw), \(what)")
+        return true
     }
 
     /// Full variant with model updates, call this from views that have

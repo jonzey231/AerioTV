@@ -1234,6 +1234,61 @@ enum PlaylistDeletePlan {
     }
 }
 
+// MARK: - On-device recordings with no capture behind them (owner 2026-11-13)
+
+/// A recording on this device still marked recording when no capture is
+/// running for it: the app was relaunched, or sent to the background, mid
+/// capture. It used to stay "Recording now" for good, and Stop did nothing.
+/// It becomes finished: interrupted, keeping what the file captured, with
+/// the length the file covers; failed when nothing was captured.
+enum InterruptedCapture {
+    struct Outcome: Equatable {
+        /// RecordingStatus raw value: "interrupted" or "failed".
+        let statusRaw: String
+        let bytes: Int64
+        /// What the file covers, from its first write to its last; nil when
+        /// nothing was captured.
+        let capturedSeconds: Double?
+        let failureReason: String?
+    }
+
+    static let nothingWritten = "No data was written"
+    static let fileNotFound = "The recording file was not found"
+
+    /// [fileBytes] nil: no file at the recording's location. [created] and
+    /// [modified] are the file's dates; [fallbackStart] stands in for a
+    /// missing creation date (the later of the row's creation and its
+    /// window's start).
+    static func outcome(fileBytes: Int64?, created: Date?, modified: Date?,
+                        fallbackStart: Date, now: Date) -> Outcome {
+        guard let bytes = fileBytes else {
+            return Outcome(statusRaw: "failed", bytes: 0, capturedSeconds: nil, failureReason: fileNotFound)
+        }
+        guard bytes > 0 else {
+            return Outcome(statusRaw: "failed", bytes: 0, capturedSeconds: nil, failureReason: nothingWritten)
+        }
+        let start = created ?? fallbackStart
+        let end = modified ?? now
+        return Outcome(statusRaw: "interrupted", bytes: bytes,
+                       capturedSeconds: max(0, end.timeIntervalSince(start)), failureReason: nil)
+    }
+}
+
+// MARK: - Delete All Local Recordings and Save to Device copies (owner 2026-11-13)
+
+/// "Delete All Local Recordings" removes every file in the recordings
+/// folder no kept row points at, which includes Save to Device copies of
+/// server recordings. Those rows stay (the server's recording is untouched)
+/// but lose their device-copy location in the same operation, so nothing
+/// points at a deleted file (owner 2026-11-13).
+enum DeviceCopySweep {
+    /// The rows (by id) whose device copy was among [removedPaths]. Paths
+    /// compare after the caller has resolved symlinks on both sides.
+    static func clearedCopies<ID: Hashable>(_ copies: [(id: ID, path: String)], removedPaths: Set<String>) -> [ID] {
+        copies.filter { removedPaths.contains($0.path) }.map(\.id)
+    }
+}
+
 // MARK: - Reminders for channels no playlist on this device has (owner 2026-11-12)
 
 /// Reminders are kept everywhere (this device's list, iCloud, Dispatcharr

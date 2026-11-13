@@ -1150,6 +1150,11 @@ final class Recording {
     var videoBitrateKbps: Double? = nil
     var audioCodec: String? = nil
     var audioChannels: String? = nil
+    /// The length an interrupted on-device capture actually holds (its
+    /// file's first write to its last; InterruptedCapture). Nil: the
+    /// scheduled window is the length shown. Default nil for the
+    /// lightweight migration of existing rows.
+    var capturedSeconds: Double? = nil
 
     init(channelID: String,
          channelName: String,
@@ -1205,6 +1210,12 @@ final class Recording {
     /// Effective recording end after applying post-roll buffer.
     var effectiveEnd: Date {
         scheduledEnd.addingTimeInterval(Double(postRollMinutes) * 60)
+    }
+
+    /// The length shown for a finished recording: what was captured when
+    /// known, else the scheduled window.
+    var shownDurationSeconds: TimeInterval {
+        capturedSeconds ?? effectiveEnd.timeIntervalSince(effectiveStart)
     }
 
     var isInProgress: Bool { status == .recording }

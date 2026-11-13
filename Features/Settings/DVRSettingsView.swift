@@ -594,6 +594,12 @@ struct DVRSettingsView: View {
     /// at are removed, as the old wipe-the-folder version did.
     private func clearLocalRecordings(includingInProgress: Bool) async {
         let rows = localRecordingRows()
+        // Save to Device copies of server recordings, with their locations
+        // resolved now, while the files still exist (the same resolution the
+        // sweep below uses on the folder's files).
+        let copies = deviceCopyRows().compactMap { r in
+            r.resolvedLocalFilePath.map { (row: r, path: URL(fileURLWithPath: $0).resolvingSymlinksInPath().path) }
+        }
         var keepPaths = Set<String>()
         for r in rows {
             if r.isUpcoming {
@@ -609,12 +615,34 @@ struct DVRSettingsView: View {
             }
             coordinator.deleteLocalRecording(r, modelContext: modelContext)
         }
+        var removed = Set<String>()
         if let dir = coordinator.localRecordingsDirectory, isInsideAppSandbox(dir),
            let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            for f in files where !keepPaths.contains(f.resolvingSymlinksInPath().path) {
-                try? FileManager.default.removeItem(at: f)
+            for f in files {
+                let p = f.resolvingSymlinksInPath().path
+                guard !keepPaths.contains(p) else { continue }
+                if (try? FileManager.default.removeItem(at: f)) != nil { removed.insert(p) }
             }
         }
+        // The sweep removed those copies' files: the rows stay (the server's
+        // recording is untouched) without a device copy, so nothing points
+        // at a deleted file (DeviceCopySweep).
+        let cleared = Set(DeviceCopySweep.clearedCopies(copies.map { (id: $0.row.id, path: $0.path) },
+                                                        removedPaths: removed))
+        for c in copies where cleared.contains(c.row.id) {
+            c.row.localFilePath = nil
+            c.row.fileSizeBytes = 0
+        }
+        if !cleared.isEmpty { try? modelContext.save() }
+        debugLog("[DVR] Delete All Local Recordings: removed \(removed.count) file(s); cleared the device copy on \(cleared.count) of \(copies.count) server recording(s) saved to this device")
+    }
+
+    /// Server recordings with a copy saved on this device.
+    private func deviceCopyRows() -> [Recording] {
+        let descriptor = FetchDescriptor<Recording>(
+            predicate: #Predicate<Recording> { $0.destinationRaw != "local" && $0.localFilePath != nil }
+        )
+        return (try? modelContext.fetch(descriptor)) ?? []
     }
 
     /// Defensive guard: only allow bulk-delete when the resolved directory is
