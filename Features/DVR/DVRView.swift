@@ -991,7 +991,7 @@ struct DVRView: View {
     private func heroSecondary(_ rec: Recording) {
         if rec.isInProgress {
             if rec.destination == .dispatcharrServer { actions.playServer(rec, liveEdge: true) }
-        } else if rec.destination == .local, let path = rec.localFilePath {
+        } else if rec.destination == .local, let path = rec.resolvedLocalFilePath {
             // Play from Beginning: local files ignore the saved position.
             if let id = rec.watchProgressID {
                 WatchProgressManager.delete(vodID: id, serverID: rec.serverID)
@@ -1386,9 +1386,9 @@ struct DVRView: View {
     }
 
     private func recordingFacts(_ rec: Recording) -> RecordingFacts {
-        let path = rec.dispatcharrFileURL ?? rec.localFilePath ?? ""
+        let path = rec.dispatcharrFileURL ?? rec.resolvedLocalFilePath ?? ""
         var ext = URL(string: path).map { $0.pathExtension } ?? (path as NSString).pathExtension
-        if ext.isEmpty, let name = rec.remoteFileName ?? rec.localFilePath {
+        if ext.isEmpty, let name = rec.remoteFileName ?? rec.resolvedLocalFilePath {
             ext = (name as NSString).pathExtension
         }
         let location: String
@@ -1431,9 +1431,12 @@ struct DVRView: View {
         if rec.isCompleted || rec.status == .stopped || rec.status == .interrupted {
             // Same wording as the hero card's primary button: "Resume" when
             // the recording has saved progress (GH #93 follow-up, Logan
-            // 2026-10-12: the long-press menu had no Resume).
-            Button { actions.play(rec) } label: {
-                Label(progressFraction(rec) > 0 ? "Resume" : "Play", systemImage: "play.fill")
+            // 2026-10-12: the long-press menu had no Resume). Not for a file
+            // that is gone (shown as missing; Delete from Device stays).
+            if !rec.isLocalFileMissing {
+                Button { actions.play(rec) } label: {
+                    Label(progressFraction(rec) > 0 ? "Resume" : "Play", systemImage: "play.fill")
+                }
             }
             if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
                 Button { actions.playServer(rec, fromStart: true) } label: {
@@ -1663,6 +1666,8 @@ struct DVRHero<Menu: View>: View {
             parts.append(DVRFormat.duration(seconds: recording.shownDurationSeconds))
         }
         if let r = recording.contentRating, !r.isEmpty { parts.append(r) }
+        // On this device, but its file is gone: say so (Delete from Device stays).
+        if recording.isLocalFileMissing { parts.append("File missing") }
         return parts
     }
 
@@ -1754,7 +1759,8 @@ struct DVRHero<Menu: View>: View {
                     focusable(MoviesHeroButton(title: "Stop Recording", systemImage: "stop.fill",
                                                isPrimary: !canPlay, action: onStop), role: canPlay ? "stop" : "primary")
                 }
-            } else {
+            } else if canPlay {
+                // Not for a file that is gone (shown as missing in the meta line).
                 focusable(MoviesHeroButton(title: progress > 0 ? "Resume" : "Play", systemImage: "play.fill",
                                            isPrimary: true, action: onPrimary), role: "primary")
                 if progress > 0 {
@@ -2102,6 +2108,13 @@ struct DVRRecordingCard: View {
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color.black.opacity(0.6)))
             .padding(10)
+        } else if recording.isLocalFileMissing {
+            Text("Missing")
+                .scaledFont(.system(size: badgeSize, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(Color.gray.opacity(0.85)))
+                .padding(10)
         } else if recording.status == .interrupted {
             Text("Partial")
                 .scaledFont(.system(size: badgeSize, weight: .bold))

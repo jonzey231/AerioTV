@@ -587,10 +587,17 @@ struct AerioApp: App {
         }
         #endif
 
+        // Recording locations survive a container move (RecordingPathRules),
+        // before any view reads a recording's file.
+        RecordingCoordinator.migrateStoredRecordingPaths(container: self.sharedModelContainer)
+
         // No capture survives a relaunch: an on-device recording still marked
         // recording is finished now (interrupted), before any view shows it.
         RecordingCoordinator.shared.finishInterruptedRecordings(
             in: ModelContext(self.sharedModelContainer), trigger: "launch")
+        // Then every recording file with no row gets one, so none is left
+        // on the device with no way to play or delete it.
+        RecordingCoordinator.adoptOrphanRecordingFiles(container: self.sharedModelContainer)
 
         // Fire a throwaway fetch off main to force SQLite open +
         // schema validation off the critical path. Uses a fresh

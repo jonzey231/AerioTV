@@ -595,17 +595,17 @@ struct DVRSettingsView: View {
         // resolved now, while the files still exist (the same resolution the
         // sweep below uses on the folder's files).
         let copies = deviceCopyRows().compactMap { r in
-            r.localFilePath.map { (row: r, path: URL(fileURLWithPath: $0).resolvingSymlinksInPath().path) }
+            r.resolvedLocalFilePath.map { (row: r, path: URL(fileURLWithPath: $0).resolvingSymlinksInPath().path) }
         }
         var keepPaths = Set<String>()
         for r in rows {
             if r.isUpcoming {
-                if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                if let p = r.resolvedLocalFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
                 continue
             }
             if r.isInProgress {
                 guard includingInProgress else {
-                    if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                    if let p = r.resolvedLocalFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
                     continue
                 }
                 await coordinator.stopLocalRecording(r, modelContext: modelContext)

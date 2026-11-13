@@ -1445,3 +1445,83 @@ enum PlaylistDeleteCopy {
     /// The DVR section for kept recordings, under every playlist.
     static let savedOnDeviceSection = "Saved on this device"
 }
+
+// MARK: - On-device recording locations (owner 2026-11-13)
+
+/// Where an on-device recording's file is. The app's data container can move
+/// between installs and updates (seen on the simulator 2026-11-12: after a
+/// reinstall a 40 MB recording's stored absolute path pointed into the old
+/// container and the file "was gone"). A recording in the default recordings
+/// folder (Documents/Recordings, Caches/Recordings on Apple TV) is stored
+/// relative to it, as "recordings:<file name>", and resolved at runtime. A
+/// recording in a custom folder (a security-scoped bookmark outside the
+/// container) keeps its absolute path. An old absolute path into a previous
+/// container's default folder is re-rooted when the file is under the current
+/// one.
+enum RecordingPathRules {
+    static let prefix = "recordings:"
+    /// The default folder's own name (the last component of the root).
+    static let folderName = "Recordings"
+
+    /// The value to store for [path]: relative when it sits directly in [root].
+    static func stored(_ path: String, root: String?) -> String {
+        guard let root, !root.isEmpty else { return path }
+        let r = root.hasSuffix("/") ? String(root.dropLast()) : root
+        let parent = (path as NSString).deletingLastPathComponent
+        guard parent == r else { return path }
+        return prefix + (path as NSString).lastPathComponent
+    }
+
+    /// The file's current location for a stored value, or nil when it has none.
+    static func resolve(_ stored: String?, root: String?, exists: (String) -> Bool) -> String? {
+        guard let stored, !stored.isEmpty else { return nil }
+        if stored.hasPrefix(prefix) {
+            guard let root, !root.isEmpty else { return nil }
+            return (root as NSString).appendingPathComponent(String(stored.dropFirst(prefix.count)))
+        }
+        if exists(stored) { return stored }
+        return reRooted(stored, root: root, exists: exists) ?? stored
+    }
+
+    /// An absolute path into a previous container's default folder whose file
+    /// is now under [root]: its current path there, else nil.
+    static func reRooted(_ stored: String, root: String?, exists: (String) -> Bool) -> String? {
+        guard let root, !root.isEmpty, stored.hasPrefix("/") else { return nil }
+        let parent = (stored as NSString).deletingLastPathComponent
+        guard (parent as NSString).lastPathComponent == folderName else { return nil }
+        let candidate = (root as NSString).appendingPathComponent((stored as NSString).lastPathComponent)
+        return candidate != stored && exists(candidate) ? candidate : nil
+    }
+
+    /// Media files a recording can be (what an orphan file must be to be adopted).
+    static let mediaExtensions: Set<String> = ["ts", "mp4", "m4v", "mkv", "mov"]
+
+    /// The files in the default recordings folder that no row points at:
+    /// recordings to adopt as rows, so each can be played or deleted (owner
+    /// 2026-11-13: a recording must never sit on the device with no way to
+    /// reach or remove it). `known` holds the file names rows point at.
+    static func orphans(files: [String], known: Set<String>) -> [String] {
+        files.filter { name in
+            !name.hasPrefix(".") && !known.contains(name)
+                && mediaExtensions.contains((name as NSString).pathExtension.lowercased())
+        }.sorted()
+    }
+
+    /// A finished recording on this device whose file is not there: shown as
+    /// missing (no Play) and still deletable.
+    static func isMissing(resolvedPath: String?, exists: (String) -> Bool) -> Bool {
+        guard let p = resolvedPath, !p.isEmpty else { return true }
+        return !exists(p)
+    }
+
+    /// The migration of one stored value at launch: its relative form when it
+    /// is an absolute path into the default folder (this container's, or a
+    /// previous one's with the file now here); nil leaves it as it is.
+    static func migrated(_ stored: String, root: String?, exists: (String) -> Bool) -> String? {
+        guard !stored.hasPrefix(prefix), let root, !root.isEmpty else { return nil }
+        let rel = Self.stored(stored, root: root)
+        if rel != stored { return rel }
+        if let moved = reRooted(stored, root: root, exists: exists) { return Self.stored(moved, root: root) }
+        return nil
+    }
+}

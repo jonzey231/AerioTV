@@ -82,14 +82,93 @@ final class RecordingCoordinator: ObservableObject {
     /// OS may purge it under pressure, which the DVR settings copy
     /// disclosed already - tvOS treats all app storage as purgeable.
     var localRecordingsDirectory: URL? {
+        guard let dir = Self.defaultRecordingsDirectory else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// The default recordings folder in THIS install's container, without
+    /// creating it. Stored recording locations are relative to it
+    /// (RecordingPathRules), because the container's path can change
+    /// between installs and updates.
+    nonisolated static var defaultRecordingsDirectory: URL? {
         #if os(tvOS)
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         #else
         guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
         #endif
-        let dir = base.appendingPathComponent("Recordings", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return base.appendingPathComponent(RecordingPathRules.folderName, isDirectory: true)
+    }
+
+    /// Launch, once per run: stored absolute paths into the default folder
+    /// (this container's, or a previous one's with the file now here) become
+    /// relative. Custom-folder paths are left as they are.
+    nonisolated static func migrateStoredRecordingPaths(container: ModelContainer) {
+        guard let root = defaultRecordingsDirectory?.path else { return }
+        let ctx = ModelContext(container)
+        let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.localFilePath != nil }))) ?? []
+        var relative = 0, migrated = 0, reRooted = 0, kept = 0
+        let exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        for r in rows {
+            guard let p = r.localFilePath, !p.isEmpty else { continue }
+            if p.hasPrefix(RecordingPathRules.prefix) { relative += 1; continue }
+            if let rel = RecordingPathRules.migrated(p, root: root, exists: exists) {
+                if (p as NSString).deletingLastPathComponent != root { reRooted += 1 }
+                r.localFilePath = rel
+                migrated += 1
+            } else {
+                kept += 1
+            }
+        }
+        if migrated > 0 { try? ctx.save() }
+        if migrated > 0 || kept > 0 {
+            debugLog("[DVR-PATHS] recording locations: \(migrated) made relative (\(reRooted) from a previous container), \(relative) already relative, \(kept) kept as stored (custom folder or file not here)")
+        }
+    }
+
+    /// Launch, after the migration: every recording file in the default
+    /// folder that no row points at (a row lost, or a file an older build
+    /// left behind) becomes a row under "Saved on this device", so it can be
+    /// played or deleted (owner 2026-11-13). Named from the file's dates.
+    nonisolated static func adoptOrphanRecordingFiles(container: ModelContainer) {
+        guard let dir = defaultRecordingsDirectory,
+              let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let ctx = ModelContext(container)
+        let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.localFilePath != nil }))) ?? []
+        let root = dir.path
+        // The names rows point at in this folder (resolved, so an old
+        // container's path counts by its file name here).
+        let known = Set(rows.compactMap { r -> String? in
+            guard let p = r.resolvedLocalFilePath else { return nil }
+            return (p as NSString).deletingLastPathComponent == root ? (p as NSString).lastPathComponent : nil
+        })
+        let orphans = RecordingPathRules.orphans(files: names, known: known)
+        guard !orphans.isEmpty else { return }
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        df.timeStyle = .short
+        var adopted = 0
+        for name in orphans {
+            let path = (root as NSString).appendingPathComponent(name)
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                  let size = (attrs[.size] as? NSNumber)?.int64Value, size > 0 else { continue }
+            let modified = attrs[.modificationDate] as? Date ?? Date()
+            let created = min(attrs[.creationDate] as? Date ?? modified, modified)
+            let rec = Recording(channelID: "", channelName: "",
+                                programTitle: "Recording from \(df.string(from: created))",
+                                scheduledStart: created, scheduledEnd: modified,
+                                destination: .local, status: .completed,
+                                localFilePath: RecordingPathRules.stored(path, root: root),
+                                fileSizeBytes: size,
+                                serverID: PlaylistLockdown.savedOnDeviceServerID)
+            rec.capturedStart = created
+            rec.capturedSeconds = max(0, modified.timeIntervalSince(created))
+            ctx.insert(rec)
+            adopted += 1
+        }
+        guard adopted > 0 else { return }
+        try? ctx.save()
+        debugLog("[DVR-PATHS] adopted \(adopted) recording file(s) no row pointed at; they show under Saved on this device")
     }
 
     /// Custom folder URL from a security-scoped bookmark (iOS only). If
@@ -213,7 +292,8 @@ final class RecordingCoordinator: ObservableObject {
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
 
         let path = dir.appendingPathComponent("\(recording.id.uuidString).ts").path
-        recording.localFilePath = path
+        // Relative in the default folder, absolute in a custom one.
+        recording.localFilePath = RecordingPathRules.stored(path, root: Self.defaultRecordingsDirectory?.path)
         recording.status = .recording
         try? modelContext.save()
 
@@ -279,7 +359,7 @@ final class RecordingCoordinator: ObservableObject {
         // The length shown is what the file holds (stopped early, or started
         // partway into its window), not the scheduled window.
         if written > 0 {
-            let attrs = recording.localFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
+            let attrs = recording.resolvedLocalFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
             let created = attrs?[.creationDate] as? Date
             let fallbackStart = max(recording.createdAt, recording.effectiveStart)
             recording.capturedSeconds = InterruptedCapture.capturedSeconds(
@@ -386,7 +466,7 @@ final class RecordingCoordinator: ObservableObject {
         try FileManager.default.moveItem(at: tempURL, to: destPath)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: destPath.path)
-        recording.localFilePath = destPath.path
+        recording.localFilePath = RecordingPathRules.stored(destPath.path, root: Self.defaultRecordingsDirectory?.path)
         recording.fileSizeBytes = (attrs[.size] as? Int64) ?? 0
         try? modelContext.save()
 
@@ -565,7 +645,7 @@ final class RecordingCoordinator: ObservableObject {
     /// Deletes a local recording's file from disk and removes the
     /// SwiftData row.
     func deleteLocalRecording(_ recording: Recording, modelContext: ModelContext) {
-        if let path = recording.localFilePath {
+        if let path = recording.resolvedLocalFilePath {
             try? FileManager.default.removeItem(atPath: path)
         }
         modelContext.delete(recording)
@@ -626,7 +706,7 @@ final class RecordingCoordinator: ObservableObject {
     @discardableResult
     private func finishInterrupted(_ rec: Recording, trigger: String) -> Bool {
         guard rec.destination == .local, rec.status == .recording else { return false }
-        let attrs = rec.localFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
+        let attrs = rec.resolvedLocalFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
         let out = InterruptedCapture.outcome(
             fileBytes: attrs.flatMap { ($0[.size] as? NSNumber)?.int64Value },
             created: attrs?[.creationDate] as? Date,
@@ -662,5 +742,25 @@ final class RecordingCoordinator: ObservableObject {
         activeSessions.removeAll()
         updateRecordingState()
         try? modelContext.save()
+    }
+}
+
+extension Recording {
+    /// Where this recording's file is on this device now: the stored value
+    /// resolved against the current container (RecordingPathRules). Every
+    /// file access goes through this, never the raw `localFilePath`.
+    var resolvedLocalFilePath: String? {
+        RecordingPathRules.resolve(localFilePath,
+                                   root: RecordingCoordinator.defaultRecordingsDirectory?.path,
+                                   exists: { FileManager.default.fileExists(atPath: $0) })
+    }
+
+    /// A finished recording on this device whose file is not there (removed
+    /// outside the app, or purged from Apple TV's cache): shown as missing,
+    /// with no Play, and still deletable.
+    var isLocalFileMissing: Bool {
+        guard destination == .local, status == .completed || status == .stopped || status == .interrupted else { return false }
+        return RecordingPathRules.isMissing(resolvedPath: resolvedLocalFilePath,
+                                            exists: { FileManager.default.fileExists(atPath: $0) })
     }
 }

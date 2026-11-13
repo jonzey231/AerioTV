@@ -96,6 +96,8 @@ struct RecordingActions {
     /// in-progress recordings cannot play yet (the file is open by
     /// `LocalRecordingSession`). Scheduled rows never play.
     func canPlay(_ rec: Recording) -> Bool {
+        // An on-device recording whose file is gone shows as missing: no Play.
+        if rec.isLocalFileMissing { return false }
         if rec.isCompleted || rec.status == .stopped { return true }
         // An on-device capture cut short keeps what it captured (InterruptedCapture).
         if rec.status == .interrupted, rec.destination == .local { return true }
@@ -108,7 +110,7 @@ struct RecordingActions {
     /// Tap / click: resume saved progress, else from the beginning.
     func play(_ rec: Recording) {
         guard canPlay(rec) else { return }
-        if rec.destination == .local, let path = rec.localFilePath {
+        if rec.destination == .local, let path = rec.resolvedLocalFilePath {
             playLocal(rec, path: path)
         } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
             playServer(rec)
@@ -290,7 +292,7 @@ struct RecordingActions {
     /// recording, or a server recording that was saved to the device with
     /// "Save to Device" (which stamps `localFilePath` on the server row).
     func hasDeviceCopy(_ rec: Recording) -> Bool {
-        guard let path = rec.localFilePath, !path.isEmpty else { return false }
+        guard let path = rec.resolvedLocalFilePath, !path.isEmpty else { return false }
         return FileManager.default.fileExists(atPath: path)
     }
 
@@ -298,7 +300,7 @@ struct RecordingActions {
     /// server's recording (and this row) alone. Never touches the network,
     /// so it is available to every user whatever their DVR access.
     func deleteDeviceCopy(_ rec: Recording) {
-        guard let path = rec.localFilePath else { return }
+        guard let path = rec.resolvedLocalFilePath else { return }
         try? FileManager.default.removeItem(atPath: path)
         rec.localFilePath = nil
         rec.fileSizeBytes = 0

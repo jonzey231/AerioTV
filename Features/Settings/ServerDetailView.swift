@@ -23,7 +23,7 @@ enum PlaylistLockdown {
     /// Kept recordings, detached from the deleted playlist: shown under every
     /// playlist in the DVR's "Saved on this device" section, played from the
     /// file only.
-    static let savedOnDeviceServerID = "saved-on-this-device"
+    nonisolated static let savedOnDeviceServerID = "saved-on-this-device"
 
     /// The playlist's recordings with a file on this device: local captures,
     /// finished or in progress, and "Save to Device" copies of server ones.
@@ -31,7 +31,7 @@ enum PlaylistLockdown {
         let sid = server.id.uuidString
         let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.serverID == sid }))) ?? []
         return rows.filter { r in
-            guard let path = r.localFilePath, !path.isEmpty,
+            guard let path = r.resolvedLocalFilePath, !path.isEmpty,
                   r.status != .failed, r.status != .cancelled, r.status != .scheduled else { return false }
             return FileManager.default.fileExists(atPath: path) || RecordingCoordinator.shared.activeSessions[r.id] != nil
         }

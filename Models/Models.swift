@@ -1094,8 +1094,10 @@ final class Recording {
     /// migrations cleanly.
     var destinationRaw: String
     var statusRaw: String
-    /// Absolute path inside the app's Documents (or security-scoped bookmark
-    /// resolved path) for local recordings. Nil for Dispatcharr recordings.
+    /// Where the file is on this device: "recordings:<file name>" in the
+    /// default recordings folder (relative, so a container move keeps it),
+    /// or an absolute path in a custom folder. Read it through
+    /// `resolvedLocalFilePath`. Nil when this device has no file.
     var localFilePath: String?
     /// Dispatcharr-assigned integer recording ID. Nil for local recordings.
     var remoteRecordingID: Int?

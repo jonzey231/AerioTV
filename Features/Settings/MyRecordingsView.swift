@@ -376,7 +376,7 @@ struct MyRecordingsView: View {
     @ViewBuilder
     private func contextMenuItems(for rec: Recording) -> some View {
         if rec.isCompleted || rec.status == .stopped {
-            if rec.destination == .local, let path = rec.localFilePath {
+            if rec.destination == .local, let path = rec.resolvedLocalFilePath {
                 Button {
                     playRecording(rec, path: path)
                 } label: {
