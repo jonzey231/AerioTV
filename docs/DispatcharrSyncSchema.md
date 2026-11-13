@@ -678,12 +678,9 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
   applied there, and a profile whose user has no `tmdbKey` yet is seeded from it.
 - Logs never carry the key: `[DSYNC] tmdbKey: set from the server`, `cleared from the server`, or
   `kept this device's key (newer than the server's clear); sending it`.
-- The saved server copies on the device (section 6.2) never hold the key: `apiKey` is stored as
-  `apiKeySha256`, its lowercase hex SHA-256, in the member's place, and copies saved before this
-  rule are rewritten at startup. A read puts the device's own key back when the digest matches;
-  otherwise the copy reads without `apiKey`, and a bucket copy without the `tmdbKey` category, so a
-  digest is never written to the server. A write re-emits the other categories from the bucket as
-  this session last read or wrote it, held in memory, so another device's newer key round-trips.
+- Devices never keep the key in plain text in their saved server copies (section 6.2); change
+  detection uses a SHA-256 digest. A write sends only the key itself or `""`, never a digest or an
+  encrypted form.
 
 ## 5. Profiles flow
 
