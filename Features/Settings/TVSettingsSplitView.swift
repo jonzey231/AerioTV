@@ -261,6 +261,13 @@ struct TVSettingsSplitView<Detail: View>: View {
             .padding(.leading, 60)   // overscan-safe start padding
             .padding(.trailing, 16)
         }
+        // A tvOS ScrollView does not clip: with focus on Developer or About the
+        // scrolled rows drew above the rail, up into the tab bar's band
+        // (Playlists level with the Live TV pill, device report 2026-11-12).
+        // The rail's top edge is the tab bar's safe area, so the rows now clip
+        // there. Drawing only: focus, the rows (no focus scale), and the detail
+        // pane are unchanged.
+        .clipped()
         .background(Color.appBackground)
         .focusScope(railFocusNS)
         // Known-issue fix: on first entry the focus engine preferred the
