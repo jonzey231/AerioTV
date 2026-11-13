@@ -2468,7 +2468,10 @@ struct RootView: View {
             if cred.key.hasPrefix("apiKey_") {
                 let old = ServerConnection.resolveCredential(key: cred.key, fallback: "")
                 if !old.isEmpty, old != cred.value {
-                    DispatcharrRequestGate.shared.noteKeyReplaced(old: old, new: cred.value)
+                    // To the playlist's addresses as merged (never an address it left).
+                    let pid = UUID(uuidString: String(cred.key.dropFirst("apiKey_".count)))
+                    DispatcharrRequestGate.shared.noteKeyReplaced(old: old, new: cred.value,
+                                                                  routes: DispatcharrKeyBroker.routes(serverID: pid))
                     if DispatcharrRequestGate.shared.isKeyRejected(old) {
                         DispatcharrRequestGate.shared.clearPlaylist(String(cred.key.dropFirst("apiKey_".count)))
                     }

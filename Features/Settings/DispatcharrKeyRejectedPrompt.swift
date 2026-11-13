@@ -402,7 +402,8 @@ enum KeySignInService {
             server.password = password
             DispatcharrLoginGate.shared.clearRejected(serverID: server.id)
             DispatcharrRequestGate.shared.liftFixedLogin(playlistID: server.id.uuidString,
-                                                         oldKey: oldKey.isEmpty ? nil : oldKey, newKey: key)
+                                                         oldKey: oldKey.isEmpty ? nil : oldKey, newKey: key,
+                                                         routes: DispatcharrKeyBroker.routes(serverID: server.id))
             SyncManager.shared.saveCredentialsSynced(for: server)
             try? ctx.save()
             debugLog("[AUTH] sign-in from the prompt for \(playlistID.prefix(8)): signed in, key \(key == oldKey ? "unchanged" : "replaced"); hold lifted")

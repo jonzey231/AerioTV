@@ -610,7 +610,7 @@ final class CastHLSProxySession: @unchecked Sendable {
         // Headers re-read on every open and reconnect (2026-11-10): a replaced
         // key goes out as its successor; a key held as rejected never opens.
         let openHeaders: [String: String]
-        switch StreamKeyGate.headersForOpen(headers) {
+        switch StreamKeyGate.headersForOpen(headers, url: url.absoluteString) {
         case .send(let h): openHeaders = h
         case .held:
             log("[AUTH] ingest open skipped: this API key is held as rejected")
@@ -831,7 +831,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                     let sent = headers
                     let waitEpoch = self.ingestEpoch
                     Task {
-                        let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+                        let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent, url: url.absoluteString)
                         self.queue.async {
                             guard self.ingestEpoch == waitEpoch, self.activeURL == url, self.terminalError == nil else { return }
                             switch outcome {

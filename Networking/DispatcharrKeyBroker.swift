@@ -89,6 +89,32 @@ enum DispatcharrKeyBroker {
                             userAgent: s.effectiveUserAgent)
     }
 
+    /// The playlist's addresses now (its address, its local address, and the
+    /// one in use): where its keys may go. Empty when the playlist is unknown.
+    @MainActor static func routes(serverID: UUID?) -> [String] {
+        guard let container, let sid = serverID else { return [] }
+        let all = (try? container.mainContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        guard let s = all.first(where: { $0.id == sid }), !s.isGone else { return [] }
+        var out = [s.normalizedBaseURL, s.effectiveBaseURL]
+        if !s.localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { out.append(s.normalizedLocalURL) }
+        return out
+    }
+
+    /// A response from an address the playlist no longer uses: a request built
+    /// before an address change that finished after it. Nothing is probed,
+    /// re-signed in, refreshed, or held from it, so the old address never gets
+    /// a new key and the playlist never takes a key or token the old server
+    /// issued (owner 2026-11-13, Android parity). The playlist is the request's
+    /// own (`serverID`), else the saved playlist that uses `key`.
+    @MainActor static func isStaleRoute(url: String?, serverID: UUID?, key: String?) -> Bool {
+        guard let url, !url.isEmpty else { return false }
+        var sid = serverID
+        if sid == nil, let key, let info = playlist(forKey: key, serverID: nil) { sid = info.id }
+        let r = routes(serverID: sid)
+        guard !r.isEmpty else { return false }
+        return !DispatcharrRequestGate.routeServers(r).contains(DispatcharrRequestGate.serverKey(url))
+    }
+
     /// A username and a password saved for the playlist (Keychain): what
     /// silentRebootstrapApiKey needs. 2026-11-10: this required the
     /// usernamePassword credential type, so a playlist added before v1.7
@@ -199,10 +225,16 @@ enum DispatcharrKeyBroker {
     /// and the stream opens once more with the new key; otherwise the key is
     /// held, the playlist prompts, and no stream opens with it again
     /// (StreamKeyGate.headersForOpen). Never a retry loop on a dead key.
-    static func after401(streamHeaders headers: [String: String], serverID: UUID? = nil) async -> StreamKeyGate.After401 {
+    static func after401(streamHeaders headers: [String: String], url: String?, serverID: UUID? = nil) async -> StreamKeyGate.After401 {
         guard let key = StreamKeyGate.apiKey(in: headers) else { return .unchanged }
         let gate = DispatcharrRequestGate.shared
-        if let newer = gate.replacementKey(for: key) { return .retry(newKey: newer) }
+        // A stream still bound for an address the playlist left: no probe, no
+        // re-login, no hold, and never a retry with a newer key there.
+        if await MainActor.run(body: { isStaleRoute(url: url, serverID: serverID, key: key) }) {
+            debugLog("[ROUTE] stream 401 from \(url.flatMap { URL(string: $0)?.host } ?? "?"), an address the playlist no longer uses: no recovery there")
+            return .unchanged
+        }
+        if let newer = gate.replacementKey(for: key, url: url) { return .retry(newKey: newer) }
         if gate.isKeyRejected(key) { return .held }
         guard let info = await MainActor.run(body: { playlist(forKey: key, serverID: serverID) }) else {
             debugLog("[AUTH] stream 401 with a key no saved playlist uses; no probe")
@@ -223,7 +255,9 @@ enum DispatcharrKeyBroker {
             if probe == .rejected {
                 reloginTried = await MainActor.run { ProfileManager.shared.hasOwnPassword(who.profileID ?? "") }
                 newKey = await ProfileManager.shared.reloginProfile(who, rejectedKey: key)
-                if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
+                if let n = newKey, !n.isEmpty, n != key {
+                    gate.noteKeyReplaced(old: key, new: n, routes: await MainActor.run { routes(serverID: info.id) })
+                }
             }
             let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
             if outcome == .held { _ = await MainActor.run { holdProfileKey(key: key, identity: who) } }
@@ -241,7 +275,9 @@ enum DispatcharrKeyBroker {
             newKey = await DispatcharrAPI.silentRebootstrapApiKey(serverID: target.id, baseURL: info.baseURL,
                                                                   username: target.username, userAgent: info.userAgent,
                                                                   refusedKey: key)
-            if let n = newKey, !n.isEmpty, n != key { gate.noteKeyReplaced(old: key, new: n) }
+            if let n = newKey, !n.isEmpty, n != key {
+                gate.noteKeyReplaced(old: key, new: n, routes: await MainActor.run { routes(serverID: info.id) })
+            }
         }
         let outcome = StreamKeyGate.after401(probe: probe, reloginTried: reloginTried, newKey: newKey, oldKey: key)
         if outcome == .held { _ = await holdIfProven(key: key, serverID: info.id, baseURL: info.baseURL) }
@@ -424,7 +460,10 @@ final class DispatcharrKeyRecheck {
             }
             if ProfileManager.shared.hasOwnPassword(pid) {
                 let fresh = await ProfileManager.shared.reloginProfile(r.identity, rejectedKey: r.key)
-                if let fresh { gate.noteKeyReplaced(old: r.key, new: fresh) }
+                if let fresh {
+                    gate.noteKeyReplaced(old: r.key, new: fresh,
+                                         routes: DispatcharrKeyBroker.routes(serverID: UUID(uuidString: r.identity.playlistID)))
+                }
                 accepted = fresh != nil
                 outcome = accepted ? "accepted (its own re-login issued a key)"
                     : DispatcharrLoginGate.shared.isRejected(identity: r.identity) ? "rejected (its login refused)" : "unknown"
@@ -440,7 +479,10 @@ final class DispatcharrKeyRecheck {
             let fresh = await DispatcharrAPI.silentRebootstrapApiKey(serverID: info.id, baseURL: info.baseURL,
                                                                      username: info.username, userAgent: info.userAgent,
                                                                      refusedKey: r.key)
-            if let fresh, fresh != r.key { DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh) }
+            if let fresh, fresh != r.key {
+                DispatcharrRequestGate.shared.noteKeyReplaced(old: r.key, new: fresh,
+                                                              routes: DispatcharrKeyBroker.routes(serverID: info.id))
+            }
             // The re-login's key was checked before it came back (one request);
             // a key the server refused comes back as none and the hold stays.
             accepted = fresh != nil && fresh != r.key

@@ -386,7 +386,8 @@ extension SetupApplyModel {
         let newKey = next.apiKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         // Lift the hold first so the credential save below treats the new key as good.
         DispatcharrRequestGate.shared.liftFixedLogin(playlistID: server.id.uuidString,
-                                                     oldKey: oldKey.isEmpty ? nil : oldKey, newKey: newKey)
+                                                     oldKey: oldKey.isEmpty ? nil : oldKey, newKey: newKey,
+                                                     routes: DispatcharrKeyBroker.routes(serverID: server.id))
         SyncManager.shared.saveCredentialsSynced(for: server)
         try? ctx.save()
         debugLog("[SETUP] fix login applied to \(server.id.uuidString.prefix(8)): key \(newKey != nil && newKey != oldKey ? "replaced" : "unchanged")"

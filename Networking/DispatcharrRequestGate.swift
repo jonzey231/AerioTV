@@ -112,8 +112,9 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     private var rejected: [String: Set<String>] = [:]
     private var rechecks: [String: Recheck] = [:]
     private var acceptedAt: [String: (at: TimeInterval, mode: String)] = [:]
-    /// Key hash -> the key a silent re-login minted in its place, and when.
-    private var replacedBy: [String: (key: String, at: TimeInterval)] = [:]
+    /// Key hash -> the key a silent re-login minted in its place, when, and
+    /// the addresses (serverKey) that key is for.
+    private var replacedBy: [String: (key: String, at: TimeInterval, servers: Set<String>)] = [:]
     private var pendingPrompt: Prompt?
 
     init() {}
@@ -441,43 +442,58 @@ final class DispatcharrRequestGate: @unchecked Sendable {
 
     /// The silent re-login (stored username and password) minted `new` after
     /// the server refused `old`: requests still carrying `old` go out with
-    /// `new` (no failed attempt, no probe, no hold), as on Android.
-    func noteKeyReplaced(old: String, new: String) {
+    /// `new` (no failed attempt, no probe, no hold), as on Android, but only
+    /// to `routes`, the playlist's addresses the new key is for. A request
+    /// built before an address change, still bound for the old address,
+    /// keeps the key it was built with: an address and a key always come
+    /// from one snapshot (owner 2026-11-13, Android parity: an in-flight
+    /// sweep sent the new key to the old address). No routes, no rewrite.
+    func noteKeyReplaced(old: String, new: String, routes: [String]) {
         let o = old.trimmingCharacters(in: .whitespacesAndNewlines)
         let n = new.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !o.isEmpty, !n.isEmpty, o != n else { return }
+        let servers = Self.routeServers(routes)
+        guard !o.isEmpty, !n.isEmpty, o != n, !servers.isEmpty else { return }
         let hash = Self.keyHash(o)
         lock.lock()
-        replacedBy[hash] = (n, clock())
+        replacedBy[hash] = (n, clock(), servers)
         lock.unlock()
+    }
+
+    /// The server keys (host:port) of a playlist's addresses; blanks ignored.
+    static func routeServers(_ routes: [String]) -> Set<String> {
+        Set(routes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.map(serverKey))
     }
 
     /// Fix Login wrote a new sign-in for `playlistID` (docs/DeviceSetupHandoff.md):
     /// its hold and prompt are lifted, `newKey` counts as good, and requests or
-    /// streams still built with `oldKey` go out with `newKey`.
-    func liftFixedLogin(playlistID: String, oldKey: String?, newKey: String?) {
+    /// streams still built with `oldKey` for `routes` go out with `newKey`.
+    func liftFixedLogin(playlistID: String, oldKey: String?, newKey: String?, routes: [String]) {
         clearPlaylist(playlistID)
         if let n = newKey?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty {
             clearKey(n)
-            if let o = oldKey { noteKeyReplaced(old: o, new: n) }
+            if let o = oldKey { noteKeyReplaced(old: o, new: n, routes: routes) }
         }
     }
 
-    /// The key that replaced `key` within the memo window, or nil.
-    func replacementKey(for key: String) -> String? {
+    /// The key that replaced `key` within the memo window for a request to
+    /// `url`, or nil (nothing replaced, the window passed, or `url` is not an
+    /// address the new key is for, nil included).
+    func replacementKey(for key: String, url: String?) -> String? {
+        guard let url, !url.isEmpty else { return nil }
         let hash = Self.keyHash(key)
         lock.lock(); defer { lock.unlock() }
         guard let r = replacedBy[hash] else { return nil }
         if clock() - r.at > Self.replacementMemo { replacedBy[hash] = nil; return nil }
-        return r.key
+        return r.servers.contains(Self.serverKey(url)) ? r.key : nil
     }
 
     /// The request's auth headers with a replaced key swapped for its
     /// successor, or nil when nothing changes. Keeps the header shape:
-    /// X-API-Key, `ApiKey <k>`, or `Bearer <k>`.
-    func rewritingReplacedKey(xApiKey: String?, authorization: String?) -> (xApiKey: String?, authorization: String?)? {
+    /// X-API-Key, `ApiKey <k>`, or `Bearer <k>`. Only for a request to an
+    /// address the successor is for (`replacementKey(for:url:)`).
+    func rewritingReplacedKey(xApiKey: String?, authorization: String?, url: String?) -> (xApiKey: String?, authorization: String?)? {
         guard let old = Self.requestApiKey(xApiKey: xApiKey, authorization: authorization),
-              let new = replacementKey(for: old) else { return nil }
+              let new = replacementKey(for: old, url: url) else { return nil }
         var x = xApiKey
         if let v = x, v.trimmingCharacters(in: .whitespacesAndNewlines) == old { x = new }
         var auth = authorization
@@ -798,11 +814,11 @@ enum StreamKeyGate {
     }
 
     /// Re-read before every open, retry, and reconnect: a key the silent
-    /// re-login replaced goes out as its successor; a key held as rejected
-    /// never goes out again.
-    static func headersForOpen(_ headers: [String: String], gate: DispatcharrRequestGate = .shared) -> Open {
+    /// re-login replaced goes out as its successor when `url` is an address
+    /// that successor is for; a key held as rejected never goes out again.
+    static func headersForOpen(_ headers: [String: String], url: String?, gate: DispatcharrRequestGate = .shared) -> Open {
         var h = headers
-        if let swapped = gate.rewritingReplacedKey(xApiKey: header(h, "X-API-Key"), authorization: header(h, "Authorization")) {
+        if let swapped = gate.rewritingReplacedKey(xApiKey: header(h, "X-API-Key"), authorization: header(h, "Authorization"), url: url) {
             set(&h, "X-API-Key", swapped.xApiKey)
             set(&h, "Authorization", swapped.authorization)
         }

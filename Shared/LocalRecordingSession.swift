@@ -1011,7 +1011,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         // out as its successor; a key held as rejected is never sent.
         let headers: [String: String]
         let live = withStateLock { liveHeaders }
-        switch StreamKeyGate.headersForOpen(live) {
+        switch StreamKeyGate.headersForOpen(live, url: url.absoluteString) {
         case .send(let h): headers = h
         case .held:
             stopForNotice(.heldOpen(live), reason: "HTTP 401 | held")
@@ -1155,7 +1155,8 @@ extension LiveRewindEngine: URLSessionDataDelegate {
            }) {
             completionHandler(.cancel)
             Task {
-                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent,
+                                                                  url: dataTask.originalRequest?.url?.absoluteString)
                 debugLog("[AUTH] rewind stream 401: \(outcome)")
                 switch outcome {
                 case .held:

@@ -861,7 +861,13 @@ final class PlayerSession: ObservableObject {
         if let ua = server?.effectiveUserAgent, !ua.isEmpty {
             headers["User-Agent"] = ua
         }
-        if let server, server.type == .dispatcharrAPI {
+        // The key goes only to this playlist's own addresses: a channel URL
+        // still on an address the playlist left (its list not reloaded yet
+        // after an address change) opens without it, never with the key the
+        // playlist has now (owner 2026-11-13: one snapshot per request).
+        if let server, server.type == .dispatcharrAPI, !server.isOwnAddress(url.absoluteString) {
+            debugLog("[ROUTE] stream on \(url.host ?? "?"), an address this playlist no longer uses: opened without its key")
+        } else if let server, server.type == .dispatcharrAPI {
             let key = server.effectiveApiKey
             // A key the server already rejected stays here on purpose: every
             // open passes StreamKeyGate.headersForOpen, which stops an open

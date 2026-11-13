@@ -792,6 +792,14 @@ final class ServerConnection {
     /// comparison strips auth headers / rejects the server's own LAN-IP
     /// covers whenever fetch-time and check-time routing diverge (the
     /// v1.7.9 blank-VOD-covers regression, Discord 2026-07-23).
+    /// `url` is on one of this playlist's addresses now (its address, its
+    /// local address, or the one in use): where its key may go.
+    func isOwnAddress(_ url: String) -> Bool {
+        guard let host = URL(string: url)?.host?.lowercased() else { return false }
+        if ownHosts.contains(host) { return true }
+        return URL(string: effectiveBaseURL)?.host?.lowercased() == host
+    }
+
     var ownHosts: Set<String> {
         var hosts = Set<String>()
         if let h = URL(string: normalizedBaseURL)?.host?.lowercased() { hosts.insert(h) }
