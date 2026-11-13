@@ -252,22 +252,29 @@ struct TVSettingsSplitView<Detail: View>: View {
 
     private var railColumn: some View {
         ScrollView(showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 6) {
+            LazyVStack(alignment: .leading, spacing: RailMetrics.rowGap) {
                 ForEach(items) { item in
                     railRow(item)
                 }
             }
-            .padding(.vertical, 40)
+            // Room for the focus ring (a 2 pt stroke centered on the row's
+            // edge) inside the clip below.
+            .padding(.vertical, RailMetrics.ringRoom)
             .padding(.leading, 60)   // overscan-safe start padding
             .padding(.trailing, 16)
         }
-        // A tvOS ScrollView does not clip: with focus on Developer or About the
-        // scrolled rows drew above the rail, up into the tab bar's band
-        // (Playlists level with the Live TV pill, device report 2026-11-12).
-        // The rail's top edge is the tab bar's safe area, so the rows now clip
-        // there. Drawing only: focus, the rows (no focus scale), and the detail
-        // pane are unchanged.
+        // The whole rail fits without scrolling, so it never moves: the row
+        // pitch (RailMetrics) fits 12 rows, Android TV's count with its
+        // Updates row, between the resting top and the bottom safe area at
+        // the default text size; Apple uses the same pitch for its 11.
+        // Larger text sizes can still overflow, and then the rail scrolls.
+        // A tvOS ScrollView does not clip, so scrolled rows drew above the
+        // rail into the tab bar's band (device report 2026-11-12); they now
+        // clip at the rail's resting top, level with the detail card's top,
+        // because the clip sits inside the top padding. Drawing only: focus
+        // and the detail pane are unchanged.
         .clipped()
+        .padding(.top, RailMetrics.restingTop - RailMetrics.ringRoom)
         .background(Color.appBackground)
         .focusScope(railFocusNS)
         // Known-issue fix: on first entry the focus engine preferred the
@@ -408,8 +415,21 @@ private struct TVRailReturnGuide: UIViewRepresentable {
     }
 }
 
-/// Rail row chrome per plan A3: minHeight 80, focus scale 1.02, accent 0.18
-/// wash on focus, with a persistent tint for the selected row so the rail
+/// Rail geometry, in points. 12 rows x 64 + 11 gaps x 4 = 812, which fits
+/// the 823 between the resting top (40 below the rail's top edge) and the
+/// bottom safe area. The 26/18 pt label and subtitle measure 55 pt at the
+/// default text size, inside the 64 pt row.
+private enum RailMetrics {
+    static let rowHeight: CGFloat = 64
+    static let rowGap: CGFloat = 4
+    /// The first row's top, below the rail's top edge (unchanged from the
+    /// scrolling rail's 40 pt top padding).
+    static let restingTop: CGFloat = 40
+    static let ringRoom: CGFloat = 2
+}
+
+/// Rail row chrome per plan A3 (row height now RailMetrics.rowHeight), accent
+/// 0.18 wash on focus, with a persistent tint for the selected row so the rail
 /// shows which pane is displayed even while focus is in the detail.
 private struct TVRailRowStyle: ButtonStyle {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
@@ -420,7 +440,7 @@ private struct TVRailRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .padding(.horizontal, 18)
-            .frame(minHeight: 80)
+            .frame(minHeight: RailMetrics.rowHeight)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(isFocused
