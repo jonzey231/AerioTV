@@ -137,6 +137,11 @@ struct TVSettingsSplitView<Detail: View>: View {
             guard let id,
                   let item = items.first(where: { $0.id == id }) else { return }
             SettingsFocusLog.rowFocused(page: "Rail", row: item.label)
+            if TVSettingsNavState.shared.holdsSelection, item.route != selection {
+                SettingsFocusLog.log("rail selection held for a restore: \(item.route) not taken")
+                if TVSettingsNavState.shared.holdReturnsToRail { assertRailFocus() }
+                return
+            }
             scheduleSelection(item.route)
         }
         .onChange(of: railReturnToken) { _, _ in

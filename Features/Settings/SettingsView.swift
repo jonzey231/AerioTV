@@ -418,10 +418,21 @@ struct SettingsView: View {
     private func applyPendingTVRestore(_ reason: String, onMount: Bool) {
         guard let restore = TVSettingsNavState.shared.takeRestore(onMount: onMount) else { return }
         SettingsFocusLog.log("restore (\(reason)): \(restore.selection) panes=\(restore.focusInPanes) detail=\(restore.focusInDetail)")
-        tvSelection = allowed(restore.selection) ? restore.selection : Self.childRoot
+        let target = allowed(restore.selection) ? restore.selection : Self.childRoot
+        tvSelection = target
         guard restore.focusInPanes else { return }
+        // Until the assert below, a rail row the focus engine picks on its
+        // own does not become the selection: after a real parked-bar heal
+        // the engine put focus on the Playlists row 20 ms after the mount,
+        // the selection followed, and the assert then landed on Playlists
+        // (simulator log 2026-11-13 11:35:44, a pop from a scrolled Sync
+        // Categories page).
+        TVSettingsNavState.shared.holdsSelection = true
+        TVSettingsNavState.shared.holdReturnsToRail = !restore.focusInDetail
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(250))
+            TVSettingsNavState.shared.holdsSelection = false
+            tvSelection = target
             if restore.focusInDetail { tvDetailFocusToken += 1 } else { railReturnToken += 1 }
         }
     }
@@ -1528,6 +1539,12 @@ final class TVSettingsNavState: ObservableObject {
     /// (simulator trace 2026-11-13 11:20:07: focus on Player, restore armed
     /// Live TV). Written by TVSettingsSplitView.
     var railFocus: SettingsRoute?
+    /// True while an applied restore waits to place focus: rail focus moves
+    /// in that window do not change the selection.
+    var holdsSelection = false
+    /// The held restore returns focus to the rail, so a rail row the engine
+    /// picks is moved to the selection's row at once.
+    var holdReturnsToRail = false
     private var pending: Restore?
 
     func update(selection: SettingsRoute, isPushed: Bool, isPresentingFlow: Bool, focusInDetail: Bool) {
