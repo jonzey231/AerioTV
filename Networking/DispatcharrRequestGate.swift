@@ -1267,10 +1267,18 @@ enum InterruptedCapture {
         guard bytes > 0 else {
             return Outcome(statusRaw: "failed", bytes: 0, capturedSeconds: nil, failureReason: nothingWritten)
         }
-        let start = created ?? fallbackStart
-        let end = modified ?? now
         return Outcome(statusRaw: "interrupted", bytes: bytes,
-                       capturedSeconds: max(0, end.timeIntervalSince(start)), failureReason: nil)
+                       capturedSeconds: capturedSeconds(created: created, modified: modified,
+                                                        fallbackStart: fallbackStart, now: now),
+                       failureReason: nil)
+    }
+
+    /// The length a capture's file covers, from its first write to its last.
+    /// Also what a recording stopped with Stop (or at its end) shows as its
+    /// duration and progress total, not the scheduled window (owner
+    /// 2026-11-13).
+    static func capturedSeconds(created: Date?, modified: Date?, fallbackStart: Date, now: Date) -> Double {
+        max(0, (modified ?? now).timeIntervalSince(created ?? fallbackStart))
     }
 }
 

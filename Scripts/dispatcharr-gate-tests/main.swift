@@ -1265,6 +1265,10 @@ do {
     eq(missing.failureReason, "The recording file was not found", "and says so")
     check(kept.statusRaw != "recording" && empty.statusRaw != "recording" && missing.statusRaw != "recording",
           "every outcome clears the recording state")
+    // A recording stopped early with Stop shows what it captured: 75 s of a
+    // 33-minute window.
+    eq(C.capturedSeconds(created: t0, modified: t0.addingTimeInterval(75), fallbackStart: fallback, now: t0.addingTimeInterval(900)),
+       75, "a stopped recording's length is its file's span, not the window")
 }
 
 // MARK: - Delete All Local Recordings clears device-copy locations it removed (owner 2026-11-13)

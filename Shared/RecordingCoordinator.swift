@@ -311,6 +311,17 @@ final class RecordingCoordinator: ObservableObject {
         recording.fileSizeBytes = written
         recording.status = written > 0 ? .completed : .failed
         if written == 0 { recording.failureReason = "No data was written" }
+        // The length shown is what the file holds (stopped early, or started
+        // partway into its window), not the scheduled window.
+        if written > 0 {
+            let attrs = recording.resolvedLocalFilePath.flatMap { try? FileManager.default.attributesOfItem(atPath: $0) }
+            recording.capturedSeconds = InterruptedCapture.capturedSeconds(
+                created: attrs?[.creationDate] as? Date,
+                modified: attrs?[.modificationDate] as? Date,
+                fallbackStart: max(recording.createdAt, recording.effectiveStart),
+                now: Date())
+            debugLog("[DVR] on-device recording \(recording.id.uuidString.prefix(8)) stopped: \(written) bytes, \(Int(recording.capturedSeconds ?? 0)) s captured")
+        }
         try? modelContext.save()
         updateRecordingState()
         refreshGuideRecordingMarkers(modelContext: modelContext)
