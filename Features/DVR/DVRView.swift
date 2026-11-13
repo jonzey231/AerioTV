@@ -236,8 +236,9 @@ struct DVRView: View {
             guard let id = rec.watchProgressID ?? (rec.destination == .local ? "local-\(rec.id.uuidString)" : nil),
                   let ms = WatchProgressManager.getResumePosition(vodID: id, serverID: rec.serverID), ms > 0 else { continue }
             // A capture still running has only recorded up to now.
-            let end = rec.status == .recording ? min(Date(), rec.effectiveEnd) : rec.effectiveEnd
-            let total = end.timeIntervalSince(rec.effectiveStart) * 1000
+            let total = (rec.status == .recording
+                ? min(Date(), rec.effectiveEnd).timeIntervalSince(rec.effectiveStart)
+                : rec.shownDurationSeconds) * 1000
             guard total > 0 else { continue }
             out[rec.id] = min(1, Double(ms) / total)
         }
@@ -1659,7 +1660,7 @@ struct DVRHero<Menu: View>: View {
         } else if let se = recording.displaySeasonEpisode {
             parts.append("S\(se.season) E\(se.episode)")
         } else {
-            parts.append(DVRFormat.duration(seconds: recording.effectiveEnd.timeIntervalSince(recording.effectiveStart)))
+            parts.append(DVRFormat.duration(seconds: recording.shownDurationSeconds))
         }
         if let r = recording.contentRating, !r.isEmpty { parts.append(r) }
         return parts
@@ -1872,7 +1873,7 @@ struct DVRPosterCard: View {
         } else if recording.isUpcoming {
             parts.append(DVRFormat.time(recording.scheduledStart))
         } else {
-            parts.append(DVRFormat.duration(seconds: recording.effectiveEnd.timeIntervalSince(recording.effectiveStart)))
+            parts.append(DVRFormat.duration(seconds: recording.shownDurationSeconds))
         }
         if let se = recording.displaySeasonEpisode { parts.append("S\(se.season) E\(se.episode)") }
         return parts.joined(separator: " · ")
@@ -2076,7 +2077,7 @@ struct DVRRecordingCard: View {
             return DVRFormat.duration(seconds: max(0, Date().timeIntervalSince(recording.effectiveStart)))
         }
         if recording.isUpcoming { return DVRFormat.time(recording.scheduledStart) }
-        return DVRFormat.duration(seconds: recording.effectiveEnd.timeIntervalSince(recording.effectiveStart))
+        return DVRFormat.duration(seconds: recording.shownDurationSeconds)
     }
 
     @ViewBuilder

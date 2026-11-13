@@ -587,6 +587,11 @@ struct AerioApp: App {
         }
         #endif
 
+        // No capture survives a relaunch: an on-device recording still marked
+        // recording is finished now (interrupted), before any view shows it.
+        RecordingCoordinator.shared.finishInterruptedRecordings(
+            in: ModelContext(self.sharedModelContainer), trigger: "launch")
+
         // Fire a throwaway fetch off main to force SQLite open +
         // schema validation off the critical path. Uses a fresh
         // background `ModelContext`, never touches MainActor.
@@ -844,7 +849,8 @@ struct AerioApp: App {
                 // would fail silently. Better to stop cleanly. The model
                 // context update happens inside RootView's own onChange.
                 Task { @MainActor in
-                    RecordingCoordinator.shared.stopAllSessionsOnBackground()
+                    RecordingCoordinator.shared.stopAllSessionsOnBackground(
+                        modelContext: sharedModelContainer.mainContext)
                 }
             @unknown default:  break
             }

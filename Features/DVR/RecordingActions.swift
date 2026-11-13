@@ -97,6 +97,8 @@ struct RecordingActions {
     /// `LocalRecordingSession`). Scheduled rows never play.
     func canPlay(_ rec: Recording) -> Bool {
         if rec.isCompleted || rec.status == .stopped { return true }
+        // An on-device capture cut short keeps what it captured (InterruptedCapture).
+        if rec.status == .interrupted, rec.destination == .local { return true }
         if rec.status == .recording, rec.destination == .dispatcharrServer, rec.dispatcharrFileURL != nil {
             return true
         }

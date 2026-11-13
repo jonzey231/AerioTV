@@ -1236,6 +1236,37 @@ do {
     check((try? gate.check(url: "https://x.example.com/api/channels/channels/", apiKey: "key-x")) != nil, "and its requests go out again")
 }
 
+// MARK: - On-device recordings with no capture behind them (owner 2026-11-13)
+do {
+    typealias C = InterruptedCapture
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    let fallback = t0.addingTimeInterval(-600)
+    // A capture cut off after 62 s keeps its file, size, and real length.
+    let kept = C.outcome(fileBytes: 55_348_704, created: t0, modified: t0.addingTimeInterval(62),
+                         fallbackStart: fallback, now: t0.addingTimeInterval(3600))
+    eq(kept.statusRaw, "interrupted", "a capture with data becomes interrupted")
+    eq(kept.bytes, 55_348_704, "with the file's size")
+    eq(kept.capturedSeconds, 62, "and the length the file covers, not the scheduled window")
+    eq(kept.failureReason, nil, "and no failure reason")
+    // No creation date: the fallback start; no modification date: now.
+    eq(C.outcome(fileBytes: 10, created: nil, modified: t0, fallbackStart: fallback, now: t0).capturedSeconds,
+       600, "a missing creation date uses the fallback start")
+    eq(C.outcome(fileBytes: 10, created: t0, modified: nil, fallbackStart: fallback, now: t0.addingTimeInterval(5)).capturedSeconds,
+       5, "a missing modification date uses now")
+    eq(C.outcome(fileBytes: 10, created: t0, modified: t0.addingTimeInterval(-3), fallbackStart: fallback, now: t0).capturedSeconds,
+       0, "dates out of order never give a negative length")
+    // Nothing captured: failed, never left recording.
+    let empty = C.outcome(fileBytes: 0, created: t0, modified: t0, fallbackStart: fallback, now: t0)
+    eq(empty.statusRaw, "failed", "an empty file is a failed recording")
+    eq(empty.failureReason, "No data was written", "with the same reason a normal stop gives")
+    eq(empty.capturedSeconds, nil, "and no length")
+    let missing = C.outcome(fileBytes: nil, created: nil, modified: nil, fallbackStart: fallback, now: t0)
+    eq(missing.statusRaw, "failed", "no file at all is a failed recording")
+    eq(missing.failureReason, "The recording file was not found", "and says so")
+    check(kept.statusRaw != "recording" && empty.statusRaw != "recording" && missing.statusRaw != "recording",
+          "every outcome clears the recording state")
+}
+
 // MARK: - Reminders for a channel no remaining playlist has (owner 2026-11-12)
 do {
     var idx = ReminderChannelIndex()
