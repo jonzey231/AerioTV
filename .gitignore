@@ -38,3 +38,6 @@ Thumbs.db
 
 # Local-only UITest harness (see file header: heat/regression, not committed)
 AerioUITests/
+
+# Release notes are drafted locally and go only on GitHub releases
+CHANGELOG.md
