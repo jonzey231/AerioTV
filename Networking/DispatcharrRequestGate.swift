@@ -1274,6 +1274,21 @@ enum InterruptedCapture {
     }
 }
 
+// MARK: - Delete All Local Recordings and Save to Device copies (owner 2026-11-13)
+
+/// "Delete All Local Recordings" removes every file in the recordings
+/// folder no kept row points at, which includes Save to Device copies of
+/// server recordings. Those rows stay (the server's recording is untouched)
+/// but lose their device-copy location in the same operation, so nothing
+/// points at a deleted file (owner 2026-11-13).
+enum DeviceCopySweep {
+    /// The rows (by id) whose device copy was among [removedPaths]. Paths
+    /// compare after the caller has resolved symlinks on both sides.
+    static func clearedCopies<ID: Hashable>(_ copies: [(id: ID, path: String)], removedPaths: Set<String>) -> [ID] {
+        copies.filter { removedPaths.contains($0.path) }.map(\.id)
+    }
+}
+
 // MARK: - Reminders for channels no playlist on this device has (owner 2026-11-12)
 
 /// Reminders are kept everywhere (this device's list, iCloud, Dispatcharr

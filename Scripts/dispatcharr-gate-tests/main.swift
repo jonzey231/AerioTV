@@ -1267,6 +1267,21 @@ do {
           "every outcome clears the recording state")
 }
 
+// MARK: - Delete All Local Recordings clears device-copy locations it removed (owner 2026-11-13)
+do {
+    let removed: Set<String> = ["/c/Documents/Recordings/A.ts", "/c/Documents/Recordings/B.ts"]
+    let copies: [(id: Int, path: String)] = [
+        (1, "/c/Documents/Recordings/A.ts"),     // its file was removed
+        (2, "/custom/folder/C.ts"),              // a custom-folder copy, not swept
+        (3, "/c/Documents/Recordings/B.ts"),     // removed
+        (4, "/c/Documents/Recordings/Kept.ts"),  // still on disk
+    ]
+    eq(DeviceCopySweep.clearedCopies(copies, removedPaths: removed), [1, 3],
+       "only copies whose file the sweep removed lose their location")
+    eq(DeviceCopySweep.clearedCopies(copies, removedPaths: []), [Int](),
+       "nothing removed, nothing cleared")
+}
+
 // MARK: - Reminders for a channel no remaining playlist has (owner 2026-11-12)
 do {
     var idx = ReminderChannelIndex()
