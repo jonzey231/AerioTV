@@ -274,6 +274,87 @@ enum ProfileHostHoldRules {
     static func isRosterAddAfterPause(adoptedRow: Bool) -> Bool { adoptedRow }
 }
 
+// MARK: - Stored secrets and the playlist's own route
+
+/// The playlist's OWN stored secrets after a route change (security fix,
+/// 2026-11-12, Android found it first). The default profile's saved password
+/// went to a new address with nothing proving it was the same server: the
+/// identity repair, seeing the stored key answer as another user there,
+/// signed in at the new address with the saved username and password, and a
+/// silent re-login after a 401 did the same.
+///
+/// A route change leaves the playlist's route UNPROVEN until the same-server
+/// check passes (the default account answers there with the user id and
+/// username recorded before the change), or the user signs in there with
+/// what they type. While it is unproven, nothing stored and secret goes out
+/// for the playlist: no saved password (silent re-login, launch warmup,
+/// identity repair, Edit Playlist's verify and the host-change sign-in,
+/// Refresh Session, a Fix Login sent from another device), no other
+/// profile's stored key or password (the profile holds), and no Dispatcharr
+/// Sync session. The new address gets only what the user types, and the
+/// playlist's own API key from the Edit Playlist save the user made (the
+/// same-server check sends it). A check that finds another account holds
+/// that key, so the default profile shows the sign-in form.
+enum StoredSecretRules {
+    /// Every path that can send a stored secret, for the log and the tests.
+    enum Path: String, CaseIterable, Sendable {
+        case identityRepair = "identity repair"
+        case silentRelogin = "silent re-login"
+        case launchWarmup = "launch sign-in"
+        case editPlaylistVerify = "Edit Playlist verify"
+        case hostChangeSignIn = "host change sign-in"
+        case refreshSession = "Refresh Session"
+        case fixLogin = "Fix Login"
+        case dispatcharrSync = "Dispatcharr Sync"
+    }
+
+    /// A stored secret may go to [target] only when the playlist's route is
+    /// proven and [target] is on one of its hosts (scheme, host, and port).
+    /// A typed address that is not saved yet is a new route, never proven.
+    static func mayUseStored(routeUnproven: Bool, target: String, base: String, local: String) -> Bool {
+        guard !routeUnproven else { return false }
+        let k = PlaylistRoute.hostKey(target)
+        return !k.isEmpty && PlaylistRoute.hosts(base: base, local: local).contains(k)
+    }
+
+    /// The identity repair (the stored key answers as another user): only
+    /// where the server is proven the same. Elsewhere the key is held and
+    /// the default profile shows the sign-in form.
+    static func mayRepairIdentity(routeUnproven: Bool) -> Bool { !routeUnproven }
+
+    /// Dispatcharr Sync starts no session for an unproven route.
+    static func maySync(routeUnproven: Bool) -> Bool { !routeUnproven }
+
+    /// What a password field holds when it goes out: what the user typed,
+    /// else the saved password only where it may go, else nothing.
+    static func password(typed: String, stored: String, mayUseStored: Bool) -> String {
+        if !typed.isEmpty { return typed }
+        return mayUseStored ? stored : ""
+    }
+
+    /// A same-server check verdict for the playlist's own key: another
+    /// account at the new address holds the key (the sign-in form); a
+    /// network failure or a refused key leaves it to the usual paths.
+    static func holdsPlaylistKey(after decision: SameServerCheck.Decision) -> Bool {
+        decision == .keep("different-user")
+    }
+}
+
+/// What the user sees when a stored secret is kept from an unproven address.
+enum StoredSecretCopy {
+    /// Edit Playlist's save and Refresh Session, Username & Password, a new address, no typed password.
+    static let typePasswordAtNewAddress = "Enter the password to sign in at the new server address."
+    /// Fix Login on the receiving device while its playlist's new address is unproven.
+    static let fixLoginNewAddress = "This playlist's server address changed. Sign in on this device to use the new address."
+}
+
+/// A route change waiting for proof: the route it is for and the hosts the
+/// playlist was used with before the first change.
+struct UnprovenRoute: Equatable, Sendable {
+    var route: String
+    var trustedHosts: [String]
+}
+
 /// The holds, the default profile's recorded identity, and each profile's
 /// sign-in tag, in UserDefaults (no secrets: profile ids, user ids,
 /// usernames, hosts).
@@ -282,6 +363,7 @@ final class ProfileHostHoldStore {
     static let KEY_IDENTITY = "aerio.profiles.default_identity.v1"
     static let KEY_TAGS = "aerio.profiles.signin_tag.v1"
     static let KEY_PAUSE_ADDS = "aerio.profiles.added_during_pause.v1"
+    static let KEY_UNPROVEN = "aerio.profiles.route_unproven.v1"
 
     private let defaults: UserDefaults
     private var holds: [String: HostHoldRecord] = [:]
@@ -291,6 +373,8 @@ final class ProfileHostHoldStore {
     private var pauseAdds = Set<String>()
     /// Playlists in the middle of a route change (memory only).
     private var changing = Set<String>()
+    /// Playlists whose route changed and is not proven yet (StoredSecretRules).
+    private var unproven: [String: UnprovenRoute] = [:]
 
     init(defaults: UserDefaults) {
         self.defaults = defaults
@@ -318,7 +402,16 @@ final class ProfileHostHoldStore {
     /// such as the save's validation, the host-change re-verify, or a setup
     /// payload's verify, would record the new server and then match itself),
     /// and never while any profile of the playlist is held (FREEZE).
-    func mayRecord(_ playlistId: String) -> Bool { holds[playlistId] == nil && !changing.contains(playlistId) }
+    /// Nor while its route is unproven: the new server's answer would become
+    /// the record and the check would then match itself.
+    func mayRecord(_ playlistId: String) -> Bool {
+        holds[playlistId] == nil && !changing.contains(playlistId) && unproven[playlistId] == nil
+    }
+
+    /// The playlist's route changed and is not proven yet (StoredSecretRules).
+    func isRouteUnproven(_ playlistId: String) -> Bool { unproven[playlistId] != nil }
+    func unprovenRoute(_ playlistId: String) -> UnprovenRoute? { unproven[playlistId] }
+    var unprovenPlaylistIds: Set<String> { Set(unproven.keys) }
 
     // MARK: Writes
 
@@ -336,6 +429,24 @@ final class ProfileHostHoldStore {
         guard mayRecord(playlistId) else { return false }
         guard identities[playlistId] != id else { return true }
         identities[playlistId] = id
+        save()
+        return true
+    }
+
+    /// A route change: the new route is unproven. A playlist already waiting
+    /// keeps the hosts from before its first change and follows the new route.
+    func markRouteUnproven(_ playlistId: String, trustedHosts: [String], route: String) {
+        var r = unproven[playlistId] ?? UnprovenRoute(route: route, trustedHosts: trustedHosts)
+        r.route = route
+        unproven[playlistId] = r
+        save()
+    }
+
+    /// The same-server check passed, or the user signed in at the current
+    /// route with what they typed. True when it was unproven.
+    @discardableResult
+    func markRouteProven(_ playlistId: String) -> Bool {
+        guard unproven.removeValue(forKey: playlistId) != nil else { return false }
         save()
         return true
     }
@@ -387,7 +498,7 @@ final class ProfileHostHoldStore {
         let lifted = ProfileHostHoldRules.liftable(held: r.profileIds, tags: { self.tags[$0] }, snapshot: r.expected)
         r.profileIds.removeAll { lifted.contains($0) }
         holds[playlistId] = r.profileIds.isEmpty ? nil : r
-        if !lifted.isEmpty { save() }
+        if !lifted.isEmpty || r.profileIds.isEmpty { save() }
         return (lifted, r.profileIds)
     }
 
@@ -424,6 +535,8 @@ final class ProfileHostHoldStore {
 
     /// A playlist merged into another: its holds go with its profiles.
     func move(from loser: String, to winner: String) {
+        // The winner's own route state stands; the loser's goes with it.
+        if loser != winner, unproven.removeValue(forKey: loser) != nil { save() }
         guard loser != winner, let r = holds.removeValue(forKey: loser) else { return }
         if var w = holds[winner] {
             w.profileIds = Array(Set(w.profileIds).union(r.profileIds)).sorted()
@@ -445,8 +558,9 @@ final class ProfileHostHoldStore {
     func forgetPlaylist(_ playlistId: String) {
         let hadHold = holds.removeValue(forKey: playlistId) != nil
         let hadIdentity = identities.removeValue(forKey: playlistId) != nil
+        let hadRoute = unproven.removeValue(forKey: playlistId) != nil
         changing.remove(playlistId)
-        if hadHold || hadIdentity { save() }
+        if hadHold || hadIdentity || hadRoute { save() }
     }
 
     // MARK: Persistence
@@ -475,6 +589,9 @@ final class ProfileHostHoldStore {
             if let id = Self.identity(from: v) { tags[profileId] = .identity(id) } else { tags[profileId] = .unknown }
         }
         pauseAdds = Set(defaults.stringArray(forKey: Self.KEY_PAUSE_ADDS) ?? [])
+        for (pid, v) in object(Self.KEY_UNPROVEN) {
+            unproven[pid] = UnprovenRoute(route: v["route"] as? String ?? "", trustedHosts: (v["trusted"] as? [String]) ?? [])
+        }
     }
 
     private func write(_ o: [String: Any], _ key: String) {
@@ -501,6 +618,9 @@ final class ProfileHostHoldStore {
         }
         write(t, Self.KEY_TAGS)
         defaults.set(pauseAdds.sorted(), forKey: Self.KEY_PAUSE_ADDS)
+        var u: [String: Any] = [:]
+        for (pid, r) in unproven { u[pid] = ["route": r.route, "trusted": r.trustedHosts] }
+        write(u, Self.KEY_UNPROVEN)
     }
 }
 

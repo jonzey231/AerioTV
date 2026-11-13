@@ -309,8 +309,10 @@ final class ProfileManager: ObservableObject {
             for pid in Set(store.profiles.map(\.playlistId)) { await leaveHeldProfile(pid) }
             await activePlaylistMaybeChanged()
             // Every start runs the same-server check for a playlist on hold (a held Child
-            // makes no default users/me of its own to trigger it).
-            for pid in holds.heldPlaylistIds.sorted() { await recheckHostHold(pid) }
+            // makes no default users/me of its own to trigger it), and for one whose route
+            // is still unproven.
+            let waiting = holds.heldPlaylistIds.union(holds.unprovenPlaylistIds)
+            for pid in waiting.sorted() { await recheckHostHold(pid) }
             launchChecked = true
             promptActiveSignInIfNeeded("launch")
             let ids = store.profiles.filter { !$0.isDefault }.map(\.id)
@@ -1500,8 +1502,37 @@ final class ProfileManager: ObservableObject {
             // Profiles from before this release are tagged the first time there is a record.
             holds.backfillTags(playlistId, profileIds: store.forPlaylist(playlistId).filter { !$0.isDefault }.map(\.id))
         }
-        guard holds.record(playlistId) != nil else { return }
+        guard holds.record(playlistId) != nil || holds.isRouteUnproven(playlistId) else { return }
         Task { await self.recheckHostHold(playlistId) }
+    }
+
+    // MARK: Stored secrets (StoredSecretRules)
+
+    /// Whether the playlist's stored secrets (its saved password, a stored
+    /// key) may go to [target]: only to a host of its current route, and
+    /// only once that route is proven the same server. A playlist this
+    /// device does not have: never.
+    func mayUseStoredSecret(_ playlistId: String, target: String) -> Bool {
+        guard let s = DsyncLocal.server(playlistId), !s.isGone else { return false }
+        return StoredSecretRules.mayUseStored(routeUnproven: holds.isRouteUnproven(playlistId),
+                                              target: target, base: s.baseURL, local: s.localURL)
+    }
+
+    /// The playlist's route changed and is not proven yet.
+    func isRouteUnproven(_ playlistId: String) -> Bool { holds.isRouteUnproven(playlistId) }
+
+    /// One line per refusal, never a secret or an address.
+    func noteStoredSecretRefused(_ playlistId: String, _ path: StoredSecretRules.Path) {
+        debugLog("[PROFILE-HOST] \(path.rawValue) refused for playlist=\(Self.tag(playlistId)): "
+                 + "its address is not proven the same server; nothing stored is sent")
+    }
+
+    /// The user signed the playlist in at its current address with what they
+    /// typed: that address is theirs, so the route counts as proven.
+    func noteTypedSignIn(_ playlistId: String) {
+        if holds.markRouteProven(playlistId) {
+            debugLog("[PROFILE-HOST] route proven playlist=\(Self.tag(playlistId)) (signed in with typed credentials)")
+        }
     }
 
     /// A route change of [playlistId] starts (before its own validation
@@ -1555,7 +1586,7 @@ final class ProfileManager: ObservableObject {
         guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return }
         onRouteWillChange?(playlistId)
         let leave = holdForRouteChange(playlistId, oldBase: oldBase, oldLocal: oldLocal, newBase: newBase, newLocal: newLocal)
-        guard holds.record(playlistId) != nil else { return }
+        guard holds.record(playlistId) != nil || holds.isRouteUnproven(playlistId) else { return }
         Task {
             if leave { await self.leaveHeldProfile(playlistId) }
             await self.recheckHostHold(playlistId)
@@ -1565,6 +1596,10 @@ final class ProfileManager: ObservableObject {
     /// Places the hold. True when the active profile is now held.
     private func holdForRouteChange(_ playlistId: String, oldBase: String, oldLocal: String, newBase: String, newLocal: String) -> Bool {
         guard PlaylistRoute.changed(oldBase: oldBase, newBase: newBase, oldLocal: oldLocal, newLocal: newLocal) else { return false }
+        // The playlist's own stored secrets wait for proof too, profiles or not (StoredSecretRules).
+        holds.markRouteUnproven(playlistId, trustedHosts: PlaylistRoute.hosts(base: oldBase, local: oldLocal),
+                                route: PlaylistRoute.key(base: newBase, local: newLocal))
+        debugLog("[PROFILE-HOST] route unproven playlist=\(Self.tag(playlistId)): no saved password or stored key goes there until it is proven")
         let ids = ProfileHostHoldRules.toHold(store.forPlaylist(playlistId))
         guard let rec = holds.hold(playlistId, profileIds: ids,
                                    trustedHosts: PlaylistRoute.hosts(base: oldBase, local: oldLocal),
@@ -1600,7 +1635,7 @@ final class ProfileManager: ObservableObject {
     /// profile of the playlist; anything else keeps it until the next
     /// successful default users/me. One check per playlist at a time.
     func recheckHostHold(_ playlistId: String) async {
-        guard holds.record(playlistId) != nil else { return }
+        guard holds.record(playlistId) != nil || holds.isRouteUnproven(playlistId) else { return }
         // The address may have just been written: block the new one too.
         refreshHeldServers()
         guard checking.insert(playlistId).inserted else {
@@ -1611,11 +1646,16 @@ final class ProfileManager: ObservableObject {
         repeat {
             checkAgain.remove(playlistId)
             await sameServerCheck(playlistId)
-        } while checkAgain.contains(playlistId) && holds.record(playlistId) != nil
+        } while checkAgain.contains(playlistId) && (holds.record(playlistId) != nil || holds.isRouteUnproven(playlistId))
     }
 
     private func sameServerCheck(_ playlistId: String) async {
-        guard let rec = holds.record(playlistId) else { return }
+        // The hold's record, or (no profile held) the unproven route's.
+        let held = holds.record(playlistId)
+        let waiting = holds.unprovenRoute(playlistId)
+        guard held != nil || waiting != nil else { return }
+        let rec = held ?? HostHoldRecord(profileIds: [], expected: holds.identity(playlistId),
+                                         trustedHosts: waiting?.trustedHosts ?? [], route: waiting?.route ?? "")
         let tag = Self.tag(playlistId)
         func failed(_ why: String) { debugLog("[PROFILE-HOST] same-server check failed playlist=\(tag) reason=\(why)") }
         guard let server = DsyncLocal.server(playlistId), !server.isGone, server.type == .dispatcharrAPI else {
@@ -1645,23 +1685,37 @@ final class ProfileManager: ObservableObject {
             }
         }
         // The address or the hold may have moved while users/me was out.
-        guard let now = holds.record(playlistId), now.route == rec.route,
+        let nowRoute = holds.record(playlistId)?.route ?? holds.unprovenRoute(playlistId)?.route
+        guard let nowRoute, nowRoute == rec.route,
               let live = DsyncLocal.server(playlistId), !live.isGone,
               PlaylistRoute.key(base: live.baseURL, local: live.localURL) == route else {
             failed("address-changed")
             return
         }
-        switch SameServerCheck.decide(expected: now.expected, answers: answers) {
+        let decision = SameServerCheck.decide(expected: holds.record(playlistId)?.expected ?? rec.expected, answers: answers)
+        switch decision {
         case .lift:
             debugLog("[PROFILE-HOST] same-server check passed playlist=\(tag)")
+            if holds.markRouteProven(playlistId) { debugLog("[PROFILE-HOST] route proven playlist=\(tag) (same server)") }
             // Only profiles that signed in where this account answered before the change.
-            let r = holds.liftMatching(playlistId)
-            debugLog("[PROFILE-HOST] lifted playlist=\(tag) profiles=\(r.lifted.count) kept=\(r.kept.count) (same server)")
-            publish()
-            // A held profile kept active (a Child) carries on: load again with its own key.
-            if let a = store.activeProfileId(playlistId), r.lifted.contains(a) { await reloadIfOnScreen(live) }
+            if holds.record(playlistId) != nil {
+                let r = holds.liftMatching(playlistId)
+                debugLog("[PROFILE-HOST] lifted playlist=\(tag) profiles=\(r.lifted.count) kept=\(r.kept.count) (same server)")
+                publish()
+                // A held profile kept active (a Child) carries on: load again with its own key.
+                if let a = store.activeProfileId(playlistId), r.lifted.contains(a) { await reloadIfOnScreen(live) }
+            }
         case .keep(let why):
             failed(why)
+            // Another account at the new address: the playlist's own key is held too,
+            // so nothing more goes there with it and the default profile shows the
+            // sign-in form. No re-check: it would only send the key there again.
+            if StoredSecretRules.holdsPlaylistKey(after: decision), holds.isRouteUnproven(playlistId) {
+                let k = live.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !k.isEmpty, DispatcharrRequestGate.shared.markKeyRejected(playlistID: playlistId, key: k, playlistName: live.name) {
+                    debugLog("[PROFILE-HOST] playlist=\(tag): another account answers at the new address; its key is held (sign-in form)")
+                }
+            }
         }
     }
 

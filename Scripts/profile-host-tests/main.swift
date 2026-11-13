@@ -878,5 +878,108 @@ do {
     }
 }
 
+// MARK: - Stored secrets at a new, unproven address (security fix 2026-11-12)
+// The playlist moved to a DIFFERENT server; the same-server check found another
+// user there. Nothing stored and secret may go: per path below. The new address
+// gets only what the user types, and the playlist's own key from the save.
+do {
+    let (ud, suite) = freshDefaults("secrets"); defer { ud.removePersistentDomain(forName: suite) }
+    let pl = "P-secrets"
+    let oldBase = "https://tv.example.com", newBase = "https://other.example.net"
+    let holds = ProfileHostHoldStore(defaults: ud)
+    check(holds.recordIdentity(pl, DefaultIdentity(userId: 7, username: "logan")!), "the account is recorded before the change")
+    check(!holds.isRouteUnproven(pl), "no address change yet: the route is the proven one")
+    // Proven route: stored secrets go to its own hosts only.
+    check(StoredSecretRules.mayUseStored(routeUnproven: false, target: oldBase + "/api/accounts/token/", base: oldBase, local: ""),
+          "the saved password may go to the proven address")
+    check(!StoredSecretRules.mayUseStored(routeUnproven: false, target: newBase, base: oldBase, local: ""),
+          "a typed address on a new host (Edit Playlist verify, Refresh Session before Save) is never proven")
+
+    // The change: no profiles held, the route still waits for proof.
+    holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: oldBase, local: ""), route: R.key(base: newBase, local: ""))
+    check(holds.record(pl) == nil, "no profile is held (the playlist has none)")
+    check(holds.isRouteUnproven(pl), "the route is unproven without any profile")
+    eq(holds.unprovenPlaylistIds, [pl], "the launch check finds it without any profile")
+    check(!holds.mayRecord(pl), "nothing the new server answers is recorded while it is unproven")
+    let u = holds.isRouteUnproven(pl)
+
+    // 1. Identity repair (the stored key answers as another user there).
+    check(!StoredSecretRules.mayRepairIdentity(routeUnproven: u), "identity repair: never at an unproven address")
+    check(StoredSecretRules.mayRepairIdentity(routeUnproven: false), "identity repair: still runs where the server is proven the same")
+    // 2. Silent re-login on a 401: the saved password to the new address.
+    check(!StoredSecretRules.mayUseStored(routeUnproven: u, target: newBase, base: newBase, local: ""), "silent re-login: refused")
+    // 3. Launch sign-in (Username & Password warmup).
+    check(!StoredSecretRules.mayUseStored(routeUnproven: u, target: newBase, base: newBase, local: ""), "launch sign-in: refused")
+    // 4. Edit Playlist verify and the host-change sign-in: only what was typed.
+    eq(StoredSecretRules.password(typed: "", stored: "saved", mayUseStored: false), "", "a save with no typed password sends no password")
+    eq(StoredSecretRules.password(typed: "typed", stored: "saved", mayUseStored: false), "typed", "a typed password goes")
+    eq(StoredSecretRules.password(typed: "", stored: "saved", mayUseStored: true), "saved", "the saved password at a proven address")
+    // 5. Refresh Session with the address the form shows.
+    check(!StoredSecretRules.mayUseStored(routeUnproven: u, target: newBase, base: oldBase, local: ""), "Refresh Session: refused")
+    // 6. Fix Login: a sign-in sent from another device is a stored secret.
+    check(!StoredSecretRules.mayUseStored(routeUnproven: u, target: newBase, base: newBase, local: ""), "Fix Login: refused")
+    // 7. Dispatcharr Sync: no session at all.
+    check(!StoredSecretRules.maySync(routeUnproven: u), "Dispatcharr Sync: no session for an unproven route")
+    check(StoredSecretRules.maySync(routeUnproven: false), "Dispatcharr Sync: a proven route syncs")
+    // 8. Other profiles' stored keys and passwords: held (ProfileSignIns), as before.
+    let store = ProfileStore(defaults: ud, secrets: MemorySecretBox())
+    store.upsert(profile("kid", pl, "kid"))
+    store.setApiKey("kid", "kid-key")
+    store.setPassword("kid", "kid-pass")
+    holds.hold(pl, profileIds: ProfileHostHoldRules.toHold(store.forPlaylist(pl)), trustedHosts: R.hosts(base: oldBase, local: ""),
+               route: R.key(base: newBase, local: ""))
+    let signIns = ProfileSignIns(store: store, holds: holds)
+    for use in ProfileSignIns.Use.allCases {
+        check(signIns.apiKey("kid", for: use) == nil && signIns.password("kid", for: use) == nil,
+              "another profile's stored sign-in never goes there (\(use.rawValue))")
+    }
+    // 9. Capability, level, and permissions probes send the playlist's own key (the save's
+    //    exception); artwork carries it only to the playlist's own hosts. A check that finds
+    //    another account holds that key, so neither sends it again.
+    check(StoredSecretRules.holdsPlaylistKey(after: SameServerCheck.decide(expected: DefaultIdentity(userId: 7, username: "logan"),
+                                                                          answers: [.user(DefaultIdentity(userId: 3, username: "someone")!)])),
+          "another account at the new address holds the playlist's key (the sign-in form)")
+    check(!StoredSecretRules.holdsPlaylistKey(after: .keep("network")), "an unreachable address holds nothing")
+    check(!StoredSecretRules.holdsPlaylistKey(after: .keep("rejected")), "a refused key goes the usual 401 way")
+    check(!StoredSecretRules.holdsPlaylistKey(after: .lift), "the same server holds nothing")
+
+    // Survives a relaunch.
+    check(ProfileHostHoldStore(defaults: ud).isRouteUnproven(pl), "the unproven route survives a relaunch")
+    eq(ProfileHostHoldStore(defaults: ud).unprovenRoute(pl)?.trustedHosts ?? [], R.hosts(base: oldBase, local: ""),
+       "with the hosts from before the change")
+    // A second change keeps the hosts from before the first.
+    holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: newBase, local: ""), route: R.key(base: "https://third.example.org", local: ""))
+    eq(holds.unprovenRoute(pl)?.trustedHosts ?? [], R.hosts(base: oldBase, local: ""), "a second change keeps the first change's hosts")
+
+    // Proof: the user signs in there with what they type (or the check passes).
+    check(holds.markRouteProven(pl), "a typed sign-in proves the route")
+    check(!holds.isRouteUnproven(pl), "proven")
+    check(!ProfileHostHoldStore(defaults: ud).isRouteUnproven(pl), "and stays proven after a relaunch")
+    check(!holds.markRouteProven(pl), "proving twice changes nothing")
+    // Deleting the playlist forgets it.
+    holds.markRouteUnproven(pl, trustedHosts: [], route: "r")
+    holds.forgetPlaylist(pl)
+    check(!holds.isRouteUnproven(pl), "a deleted playlist's route state goes with it")
+}
+
+// MARK: - The same server at the new address proves the route (no profiles needed)
+do {
+    let (ud, suite) = freshDefaults("secrets-same"); defer { ud.removePersistentDomain(forName: suite) }
+    let pl = "P-same"
+    let holds = ProfileHostHoldStore(defaults: ud)
+    let me = DefaultIdentity(userId: 7, username: "logan")!
+    holds.recordIdentity(pl, me)
+    holds.markRouteUnproven(pl, trustedHosts: ["http://192.168.1.20:9191"], route: R.key(base: "https://tv.example.com", local: ""))
+    // The app's check: the record is the identity from before the change.
+    let d = SameServerCheck.decide(expected: holds.identity(pl), answers: [.user(me)])
+    eq(d, .lift, "the same account answers")
+    if d == .lift { holds.markRouteProven(pl) }
+    check(!holds.isRouteUnproven(pl), "the same server proves the route")
+    check(holds.mayRecord(pl), "and recording resumes")
+    check(StoredSecretRules.mayUseStored(routeUnproven: holds.isRouteUnproven(pl), target: "https://tv.example.com",
+                                         base: "https://tv.example.com", local: ""),
+          "the saved password works there again (silent re-login after a later 401)")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

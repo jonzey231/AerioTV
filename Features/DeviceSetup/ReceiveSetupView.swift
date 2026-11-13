@@ -348,6 +348,13 @@ extension SetupApplyModel {
             setPhase(.failed(FixLogin.notHere))
             return
         }
+        // A sign-in sent from another device is a stored secret: it goes only to a
+        // proven address (StoredSecretRules), never to one whose change is unproven.
+        guard ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL) else {
+            ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .fixLogin)
+            setPhase(.failed(StoredSecretCopy.fixLoginNewAddress))
+            return
+        }
         let oldKey = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let next = FixLogin.signInToWrite(oldKey: oldKey, oldUser: server.username,
                                                 oldPass: server.effectivePassword, sent: p.playlist.credential) else {

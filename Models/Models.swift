@@ -1812,6 +1812,18 @@ enum DispatcharrCapabilityProbe {
         let actual = norm(serverUsername)
         guard !typed.isEmpty, !actual.isEmpty, typed != actual else { return false }
 
+        // Only where the server is proven the same (StoredSecretRules): at an
+        // unproven or different address the repair would sign in there with the
+        // saved password. The key is held instead (the sign-in form), and this
+        // payload, another account's, is not applied.
+        let pid = server.id.uuidString
+        guard StoredSecretRules.mayRepairIdentity(routeUnproven: ProfileManager.shared.isRouteUnproven(pid)) else {
+            ProfileManager.shared.noteStoredSecretRefused(pid, .identityRepair)
+            let k = server.baseApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !k.isEmpty { DispatcharrRequestGate.shared.markKeyRejected(playlistID: pid, key: k, playlistName: server.name) }
+            return true
+        }
+
         guard !identityRepaired.contains(server.id) else {
             logProbe("[PERMS] stored key STILL authenticates as '\(serverUsername)' but the "
                      + "playlist is '\(server.username)' after a repair this run; leaving it "

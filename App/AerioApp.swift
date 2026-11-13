@@ -918,6 +918,11 @@ struct AerioApp: App {
         }
         let targets: [WarmupTarget] = servers.compactMap { server in
             guard server.dispatcharrCredentialType == .usernamePassword else { return nil }
+            // The saved password only to a proven address (StoredSecretRules).
+            guard ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL) else {
+                ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .launchWarmup)
+                return nil
+            }
             return WarmupTarget(
                 id: server.id,
                 baseURL: server.effectiveBaseURL,

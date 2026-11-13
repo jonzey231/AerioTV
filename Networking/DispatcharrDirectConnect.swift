@@ -925,6 +925,14 @@ extension DispatcharrAPI {
             debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))), server is in API Key mode without saved credentials")
             return nil
         }
+        // The saved password goes only to a proven address (StoredSecretRules):
+        // never to a new server address the same-server check has not passed.
+        let pid = serverID.uuidString
+        let mayUse = await MainActor.run { ProfileManager.shared.mayUseStoredSecret(pid, target: baseURL) }
+        guard mayUse else {
+            await MainActor.run { ProfileManager.shared.noteStoredSecretRefused(pid, .silentRelogin) }
+            return nil
+        }
         // The playlist's own identity (the default profile's sign-in): a re-login
         // that waits through a profile switch writes nothing (Android fc04722f).
         let atStart = await MainActor.run { ProfileManager.shared.activeIdentity(serverID.uuidString) }
@@ -1328,7 +1336,12 @@ enum ServerCredentialChange {
         // In-memory column wins: it is what the user just typed. Empty
         // means "unchanged", so fall back to the stored credential.
         let username = server.username
-        let password = server.password.isEmpty ? server.effectivePassword : server.password
+        // What the user typed, else the saved password only where it may go
+        // (StoredSecretRules): a typed address on a new host is never proven.
+        let mayUseStored = server.type != .dispatcharrAPI
+            || ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: url)
+        let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+                                                  mayUseStored: mayUseStored)
         let apiKey   = server.apiKey.isEmpty ? server.baseApiKey : server.apiKey
         // An M3U playlist has no account model, so no login runs and no
         // "Verifying credentials" row is published for it.
@@ -1339,6 +1352,20 @@ enum ServerCredentialChange {
             case .dispatcharrAPI:
                 switch credentialType {
                 case .usernamePassword:
+                    if password.isEmpty, !mayUseStored, !server.effectivePassword.isEmpty {
+                        // A new address and no typed password: the playlist's own key
+                        // may go there (the user chose the address); the saved password
+                        // may not. The key must answer as this playlist's user.
+                        ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .editPlaylistVerify)
+                        guard !apiKey.isEmpty else { return StoredSecretCopy.typePasswordAtNewAddress }
+                        step = "user profile"
+                        let me = try await DispatcharrAPI(baseURL: url, auth: .apiKey(apiKey), userAgent: userAgent,
+                                                          authMode: server.dispatcharrHeaderMode).fetchCurrentUser()
+                        guard username.isEmpty || me.username.caseInsensitiveCompare(username) == .orderedSame else {
+                            return StoredSecretCopy.typePasswordAtNewAddress
+                        }
+                        return nil
+                    }
                     guard !username.isEmpty, !password.isEmpty else {
                         return "Enter the username and password for this server."
                     }
@@ -1462,7 +1489,13 @@ enum ServerCredentialChange {
 
         if server.dispatcharrCredentialType == .usernamePassword {
             let username = server.username
-            let password = server.password.isEmpty ? server.effectivePassword : server.password
+            let mayUseStored = ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL)
+            let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+                                                      mayUseStored: mayUseStored)
+            if password.isEmpty, !mayUseStored {
+                ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .identityRepair)
+                return StoredSecretCopy.typePasswordAtNewAddress
+            }
             guard !username.isEmpty, !password.isEmpty else {
                 debugLog("📺 [CRED] re-auth SKIP: Username & Password mode with an empty field")
                 return "Enter the username and password for this server."
@@ -1600,7 +1633,12 @@ enum PlaylistHostChange {
 
         // Re-authenticate against the new host before anything else loads.
         if server.dispatcharrCredentialType == .usernamePassword {
-            let password = server.password.isEmpty ? server.effectivePassword : server.password
+            // Only a password the user typed in this save: the new address is not
+            // proven yet, so the saved one stays here (StoredSecretRules).
+            let password = StoredSecretRules.password(
+                typed: server.password, stored: server.effectivePassword,
+                mayUseStored: ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: server.effectiveBaseURL))
+            if password.isEmpty { ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .hostChangeSignIn) }
             if !server.username.isEmpty, !password.isEmpty,
                let pair = try? await DispatcharrAPI.login(baseURL: server.effectiveBaseURL,
                                                          username: server.username,

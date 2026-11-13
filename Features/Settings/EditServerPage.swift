@@ -208,8 +208,17 @@ struct EditServerPage: View {
         // would test the OLD password on a sheet where the user is
         // replacing it -- reporting success for credentials that are on
         // their way out, or failure for correct new ones.
-        let password = server.password.isEmpty ? server.effectivePassword : server.password
         let baseURL  = server.effectiveBaseURL
+        // The saved password only to a proven address (StoredSecretRules).
+        let mayUseStored = ProfileManager.shared.mayUseStoredSecret(server.id.uuidString, target: baseURL)
+        let password = StoredSecretRules.password(typed: server.password, stored: server.effectivePassword,
+                                                  mayUseStored: mayUseStored)
+        if password.isEmpty, !mayUseStored, !server.effectivePassword.isEmpty {
+            ProfileManager.shared.noteStoredSecretRefused(server.id.uuidString, .refreshSession)
+            sessionRefreshMessage = StoredSecretCopy.typePasswordAtNewAddress
+            sessionRefreshSucceeded = false
+            return
+        }
         let userAgent = server.effectiveUserAgent
         let serverID = server.id
         guard !username.isEmpty, !password.isEmpty else {

@@ -307,6 +307,8 @@ final class DispatcharrSyncManager: ObservableObject {
         let pid = s.id.uuidString
         // No session while the playlist's address is being changed (it would bind to the old one).
         if ProfileManager.shared.routeChanging(pid) { return nil }
+        // Nor while its new address is not proven the same server (StoredSecretRules).
+        guard StoredSecretRules.maySync(routeUnproven: ProfileManager.shared.isRouteUnproven(pid)) else { return nil }
         return Target(playlistId: pid, token: currentToken(pid))
     }
 
