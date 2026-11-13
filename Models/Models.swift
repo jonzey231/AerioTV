@@ -1153,6 +1153,11 @@ final class Recording {
     /// ends, or is interrupted. Nil: the scheduled window is the length
     /// shown. Default nil for the lightweight migration of existing rows.
     var capturedSeconds: Double? = nil
+    /// When that capture began (its file's first write). With
+    /// `capturedSeconds`, the time range shown for a finished on-device
+    /// recording, as Android shows it. Default nil for the lightweight
+    /// migration of existing rows.
+    var capturedStart: Date? = nil
 
     init(channelID: String,
          channelName: String,
@@ -1214,6 +1219,14 @@ final class Recording {
     /// known, else the scheduled window.
     var shownDurationSeconds: TimeInterval {
         capturedSeconds ?? effectiveEnd.timeIntervalSince(effectiveStart)
+    }
+
+    /// The time range shown for a recording: an on-device capture's own
+    /// start and end when known, else the scheduled program window.
+    var shownStart: Date { capturedStart ?? scheduledStart }
+    var shownEnd: Date {
+        guard let start = capturedStart, let seconds = capturedSeconds else { return scheduledEnd }
+        return start.addingTimeInterval(seconds)
     }
 
     var isInProgress: Bool { status == .recording }
