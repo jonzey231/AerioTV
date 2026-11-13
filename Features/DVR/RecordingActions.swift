@@ -99,8 +99,12 @@ struct RecordingActions {
         // An on-device recording whose file is gone shows as missing: no Play.
         if rec.isLocalFileMissing { return false }
         if rec.isCompleted || rec.status == .stopped { return true }
-        // An on-device capture cut short keeps what it captured (InterruptedCapture).
-        if rec.status == .interrupted, rec.destination == .local { return true }
+        // Cut short, it keeps what it captured: on this device (InterruptedCapture),
+        // and on Dispatcharr, whose /file/ serves the partial recording (or its
+        // HLS while that remains) as its web UI and Android play it (Logan
+        // 2026-11-13: "Allow play"). Nothing captured there: the server's 404
+        // shows as the normal player error.
+        if rec.status == .interrupted { return true }
         if rec.status == .recording, rec.destination == .dispatcharrServer, rec.dispatcharrFileURL != nil {
             return true
         }
