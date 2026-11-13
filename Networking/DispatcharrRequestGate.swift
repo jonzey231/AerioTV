@@ -1118,3 +1118,28 @@ struct ReloginBook: Sendable {
     func foundNoKey(_ who: DispatcharrIdentity, now: TimeInterval) -> Bool { (noKeyUntil[who.key] ?? 0) > now }
     mutating func clearNoKey(_ who: DispatcharrIdentity) { noKeyUntil[who.key] = nil }
 }
+
+// MARK: - Deleted playlists, per instance
+
+/// Work for a playlist that was deleted, by instance. A delete bumps the
+/// playlist id's generation; work notes the generation when it starts and
+/// stops at its next resume once it changed. A playlist id can come back:
+/// Set up another device creates the playlist with the sender's id, and
+/// iCloud sync restores a playlist under its own id. The re-created
+/// playlist's work starts at the new generation and runs, while
+/// late work from the deleted instance stays stopped. (A set of deleted ids
+/// stopped the re-created playlist's work too, until the app restarted;
+/// Android hit that on 2026-11-12.)
+struct PlaylistGenerations: Sendable {
+    private var bumps: [UUID: Int] = [:]
+
+    /// The generation work for [id] started now belongs to.
+    func current(_ id: UUID) -> Int { bumps[id] ?? 0 }
+
+    /// The playlist [id] was deleted: work started before now stops.
+    mutating func deleted(_ id: UUID) { bumps[id, default: 0] += 1 }
+
+    /// True when work started at [generation] must stop: its playlist was
+    /// deleted since (even if one with the same id exists again).
+    func isStale(_ id: UUID, since generation: Int) -> Bool { current(id) != generation }
+}

@@ -5176,11 +5176,16 @@ struct MainTabView: View {
         // model from the server list at each resume, bailing when the
         // playlist was deleted. The Task is registered with the probe so
         // the playlist delete cancels it outright.
+        // Each target's generation now: a playlist deleted later (even one
+        // re-created with the same id) is skipped by this pass.
         let targets = activeDispatcharrServers.map { (id: $0.id, name: $0.name) }
         guard !targets.isEmpty else { return }
+        let started = Dictionary(targets.map { ($0.id, DispatcharrCapabilityProbe.generation($0.id)) },
+                                 uniquingKeysWith: { a, _ in a })
         let ctx = modelContext
         let resolve: @MainActor (UUID) -> ServerConnection? = { id in
-            guard !Task.isCancelled, !DispatcharrCapabilityProbe.isCancelled(id) else { return nil }
+            guard !Task.isCancelled,
+                  !DispatcharrCapabilityProbe.isCancelled(id, since: started[id] ?? DispatcharrCapabilityProbe.generation(id)) else { return nil }
             let descriptor = FetchDescriptor<ServerConnection>(predicate: #Predicate { $0.id == id })
             guard let live = (try? ctx.fetch(descriptor))?.first, !live.isGone else { return nil }
             return live

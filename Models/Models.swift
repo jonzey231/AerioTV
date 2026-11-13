@@ -1551,14 +1551,16 @@ enum DispatcharrCapabilityProbe {
 
     private static var inFlight: Set<UUID> = []
 
-    /// Playlists deleted in this process (2026-10-14 crash: the launch
-    /// permissions pass slept between retries, the playlist was deleted,
-    /// and the next `refresh` read `server.type` on the deleted model).
-    /// Every resume point in `refresh` checks this plus `isGone`, so a
-    /// probe that is mid-request when the delete lands never touches the
-    /// model again. UUIDs are never reused, so the set only grows by one
-    /// per delete.
-    private static var deletedIDs: Set<UUID> = []
+    /// Playlists deleted in this process, per instance (2026-10-14 crash:
+    /// the launch permissions pass slept between retries, the playlist was
+    /// deleted, and the next `refresh` read `server.type` on the deleted
+    /// model). Every resume point in `refresh` checks the generation it
+    /// started at plus `isGone`, so a probe that is mid-request when the
+    /// delete lands never touches the model again. A playlist re-created
+    /// with the same id (Set up another device keeps the sender's id; iCloud
+    /// sync restores its own) starts at the new generation and is probed. A
+    /// set of deleted ids blocked it until the app restarted.
+    private static var generations = PlaylistGenerations()
 
     /// Callers that run their own multi-attempt loop around `refresh`
     /// (the MainTabView permissions pass) register the Task here so the
@@ -1569,18 +1571,29 @@ enum DispatcharrCapabilityProbe {
         for id in ids { passTasks[id] = task }
     }
 
-    static func isCancelled(_ id: UUID) -> Bool { deletedIDs.contains(id) }
+    /// The generation work for this playlist started now belongs to.
+    static func generation(_ id: UUID) -> Int { generations.current(id) }
+
+    /// True when work that started at `generation` must stop: the playlist
+    /// it was for was deleted since, even if one with its id exists again.
+    static func isCancelled(_ id: UUID, since generation: Int) -> Bool {
+        generations.isStale(id, since: generation)
+    }
 
     /// True when `server` must not be read any more: deleted from SwiftData,
-    /// detached from its context, or marked deleted by the playlist delete.
-    static func isUnusable(_ server: ServerConnection, id: UUID) -> Bool {
-        server.isGone || deletedIDs.contains(id)
+    /// detached from its context, or deleted since `generation`.
+    static func isUnusable(_ server: ServerConnection, id: UUID, generation: Int) -> Bool {
+        server.isGone || generations.isStale(id, since: generation)
     }
 
     /// Playlist delete: stop every permissions probe for this server before
     /// the model is removed. Plain values only.
     static func cancelWork(forDeletedServerID id: UUID, name: String) {
-        deletedIDs.insert(id)
+        generations.deleted(id)
+        // A playlist re-created with this id is probed like a new one.
+        launchProbed.remove(id)
+        lastProbeAt[id] = nil
+        if lastActiveProbed == id { lastActiveProbed = nil }
         var cancelled = false
         if let task = passTasks.removeValue(forKey: id) {
             task.cancel()
@@ -1642,9 +1655,10 @@ enum DispatcharrCapabilityProbe {
         guard !server.isGone else { return false }
         let id = server.id
         let name = server.name
-        guard !deletedIDs.contains(id), server.type == .dispatcharrAPI else { return false }
+        let started = generation(id)
+        guard server.type == .dispatcharrAPI else { return false }
         func gone(_ step: String) -> Bool {
-            guard isUnusable(server, id: id) else { return false }
+            guard isUnusable(server, id: id, generation: started) else { return false }
             debugLog("[PERMS] probe abandoned server=\(name) reason=\(reason) step=\(step): playlist deleted")
             return true
         }
@@ -1860,7 +1874,7 @@ enum DispatcharrCapabilityProbe {
     /// probes when the snapshot is missing, schema-outdated, or older than
     /// `DispatcharrCapabilitySet.staleAfter` (about 6 hours).
     static func refreshIfStale(_ server: ServerConnection, reason: String) async {
-        guard !isUnusable(server, id: server.id), server.type == .dispatcharrAPI,
+        guard !server.isGone, server.type == .dispatcharrAPI,
               server.dispatcharrCapabilities.isStale else { return }
         await refresh(server, reason: reason)
     }
@@ -1879,9 +1893,10 @@ enum DispatcharrCapabilityProbe {
                                 serverReason: String?) async -> String {
         guard !server.isGone else { return capability.deniedMessage }
         let id = server.id
+        let started = generation(id)
         await refresh(server, reason: "403 on \(capability.rawValue)")
         // Deleted while the re-probe ran: nothing left to explain.
-        guard !isUnusable(server, id: id) else { return capability.deniedMessage }
+        guard !isUnusable(server, id: id, generation: started) else { return capability.deniedMessage }
         let caps = server.dispatcharrCapabilities
         let message: String
         if caps.state(of: capability) == .denied {
@@ -1902,7 +1917,7 @@ enum DispatcharrCapabilityProbe {
     /// affordance instead of staying wrongly hidden.
     static func promoteIfUnexpectedlyAllowed(_ server: ServerConnection,
                                              capability: DispatcharrCapability) async {
-        guard !isUnusable(server, id: server.id), server.type == .dispatcharrAPI,
+        guard !server.isGone, server.type == .dispatcharrAPI,
               server.dispatcharrCapabilities.state(of: capability) == .denied else { return }
         await refresh(server, reason: "200 on supposedly denied \(capability.rawValue)")
     }

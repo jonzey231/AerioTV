@@ -1160,5 +1160,27 @@ do {
     check(!gate.isKeyRejected(minted), "the refused minted key was never stored or handed out, so it needs no hold")
 }
 
+// MARK: - A playlist deleted and re-created with the same id (2026-11-12, Android parity)
+// Delete X, re-add X (Set up another device keeps the sender's id): the new
+// playlist's work runs, and a late resume from work started before the
+// delete is still stopped. The app's permissions probe and its launch pass
+// check exactly this at every resume (DispatcharrCapabilityProbe).
+do {
+    var g = PlaylistGenerations()
+    let x = UUID(), other = UUID()
+    let oldTask = g.current(x)                       // a probe for X starts, then waits on users/me
+    check(!g.isStale(x, since: oldTask), "work for a live playlist runs")
+    g.deleted(x)                                     // X is deleted while it waits
+    check(g.isStale(x, since: oldTask), "the deleted playlist's late resume is dropped")
+    // X is re-created with the same id.
+    let newTask = g.current(x)
+    check(!g.isStale(x, since: newTask), "the re-created playlist's new work runs")
+    check(g.isStale(x, since: oldTask), "the old instance's late resume is still dropped after the re-add")
+    check(!g.isStale(other, since: g.current(other)), "another playlist is never touched")
+    g.deleted(x)                                     // deleted again
+    check(g.isStale(x, since: newTask), "a second delete stops the second instance's work")
+    check(!g.isStale(x, since: g.current(x)), "and a third instance runs")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
