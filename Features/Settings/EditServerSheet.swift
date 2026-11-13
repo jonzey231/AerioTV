@@ -845,9 +845,10 @@ enum GuideDayChoices {
     static var all: [SettingsChoice<Int>] { [
         SettingsChoice(1, "1 Day"),
         SettingsChoice(3, "3 Days"),
-        SettingsChoice(7, "7 Days (Default)"),
+        SettingsChoice(7, "7 Days"),
         SettingsChoice(14, "14 Days"),
-        SettingsChoice(0, "All"),
+        // New playlists start on All (fe7ad4c), so All carries the label.
+        SettingsChoice(0, "All (Default)"),
     ] }
 }
 
