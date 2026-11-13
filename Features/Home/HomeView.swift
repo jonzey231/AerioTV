@@ -8855,6 +8855,8 @@ struct MainTabView: View {
                 // playback holds as the fresh path.
                 if let activeServer, !activeServer.isGone, activeServer.type == .dispatcharrAPI {
                     debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming on Dispatcharr (after loadAllEPG, fills channels the bulk grid omitted)")
+                    let firedAt = Date()
+                    let firedFor = activeServer.id.uuidString
                     Task { @MainActor [allServers] in
                         var heldSec = 0
                         while !MultiviewStore.shared.tiles.isEmpty, heldSec < 60 {
@@ -8862,6 +8864,12 @@ struct MainTabView: View {
                             heldSec += 5
                         }
                         await AppSettleGate.shared.awaitSettled(reason: "EPG post-bulk window walk")
+                        // The guide's own fetch may have run while this one was held
+                        // (it starts the same window walk): one full fetch per load.
+                        if let done = guideStore.lastCompletedFetch, done.serverID == firedFor, done.at >= firedAt {
+                            debugLog("🟢 [Orchestrator] background fetchUpcoming skipped: a guide fetch completed \(Int(Date().timeIntervalSince(done.at)))s ago (held \(heldSec)s)")
+                            return
+                        }
                         let fetchStart = Date()
                         let didRefresh = await guideStore.fetchUpcoming(
                             channels: channelStore.channels,

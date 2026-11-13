@@ -418,6 +418,16 @@ final class GuideStore: ObservableObject {
     /// SwiftData read on the next caller.
     private var lastLoadFromCacheResult: (serverID: String, isFresh: Bool)? = nil
 
+    /// The last network guide fetch that completed for the playlist on
+    /// screen. A re-added playlist (its cache purged by the delete) or a
+    /// fresh install reads an EMPTY cache at launch, so the cache read's
+    /// answer stays "not fresh" for the whole run; every channel-set change
+    /// in the guide (a group pick, a search) then replayed that answer and
+    /// fetched the whole guide again (atv log 2026-11-12 22:13:38 to
+    /// 22:13:57, three full fetches in 19 s). A completed fetch now counts
+    /// as fresh, and the orchestrator's held fetch skips itself after one.
+    private(set) var lastCompletedFetch: (serverID: String, at: Date)? = nil
+
     /// Coalesces concurrent `loadFromCache` calls. The old sync
     /// version of `loadFromCache` couldn't race because MainActor
     /// serialization ran the first call to completion (including the
@@ -1162,6 +1172,9 @@ final class GuideStore: ObservableObject {
         return h.finalize()
     }
 
+    /// Rows per SwiftData context in `saveToCache`.
+    nonisolated static let saveBatchRows = 10_000
+
     func saveToCache(modelContext: ModelContext, serverID: String) {
         let container = modelContext.container
         let snapshot = programs
@@ -1255,9 +1268,19 @@ final class GuideStore: ObservableObject {
                     removed += o.removed; unchanged += o.unchanged
                 }
             }
+            // About 10k rows per batch, each its own context (EPGSweepStore.applyDay).
+            // Batches of 500 CHANNELS held one context of ~127k inserted rows
+            // when the guide was All Available (61 days ahead) and the cache was
+            // empty (a re-added playlist): RSS 412 MB to 1676 MB and a memory
+            // warning on the Apple TV (atv log 2026-11-12 22:13:41 to 22:14:44).
+            var batchRows = 0
             for channelID in snapshot.keys {
                 batch.append(channelID)
-                if batch.count >= 500 { flush() }
+                batchRows += snapshot[channelID]?.count ?? 0
+                if batchRows >= GuideStore.saveBatchRows || batch.count >= 500 {
+                    flush()
+                    batchRows = 0
+                }
             }
             flush()
             debugLog("📺 GuideStore.saveToCache: delta added=\(added) changed=\(changed) removed=\(removed) unchanged=\(unchanged) belowHistoryFloor=\(skippedOld) writes=\(count)\(failed ? " (stopped: a batch write failed)" : "")")
@@ -2022,7 +2045,15 @@ final class GuideStore: ObservableObject {
         // because the user switched playlists mid-flight reports true (to
         // suppress the backstop) but refreshed nothing the user can see, and
         // must not mark the NEW playlist's guide as fresh.
-        if didRefresh, displayedServerID == fetchServerID { newestFetchedAt = now }
+        if didRefresh, displayedServerID == fetchServerID {
+            newestFetchedAt = now
+            lastCompletedFetch = (serverID: fetchServerID, at: Date())
+            // Later replays of the launch's cache read answer "fresh", so a
+            // channel-set change with future programs on screen fetches nothing.
+            if lastLoadFromCacheResult?.serverID == fetchServerID {
+                lastLoadFromCacheResult = (serverID: fetchServerID, isFresh: true)
+            }
+        }
         return didRefresh
     }
 
@@ -5874,6 +5905,18 @@ struct EPGGuideView: View {
                 }
                 guard !cacheIsFresh || !hasFuturePrograms else {
                     debugLog("📺 EPG cache is fresh with future programs; skipping network fetch")
+                    return
+                }
+                // A channel-set change (group pick, search) while a fetch for this
+                // playlist is running or already completed: the channels on screen
+                // have future programs, so nothing is fetched again.
+                if hasFuturePrograms,
+                   guideStore.isLoading || guideStore.lastCompletedFetch?.serverID == activeServerID {
+                    debugLog("📺 EPG: channel set changed (\(channels.count) rows) with future programs and a guide fetch \(guideStore.isLoading ? "running" : "completed"); skipping network fetch")
+                    // What the completed fetch and its window walk loaded is still
+                    // persisted here, as the refetch used to do (a no-op when the
+                    // guide is unchanged since the last save).
+                    if !guideStore.isLoading { guideStore.saveToCache(modelContext: modelContext, serverID: activeServerID) }
                     return
                 }
                 channelStore.isEPGLoading = true
