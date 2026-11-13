@@ -235,58 +235,50 @@ struct AboutSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(spacing: 0) {
-                    tvAboutRow("Device",          value: aboutDevice)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("System",          value: aboutSystem)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAppVersionRow
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("First Installed", value: aboutInstallDate)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("Last Updated",    value: aboutUpdateDate)
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
-                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    Button {
-                        showOSSLicenses = true
-                    } label: {
-                        HStack {
-                            Text("Open Source Licenses")
-                                .scaledFont(.system(size: 26, weight: .medium))
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .scaledFont(.system(size: 20))
-                                .opacity(0.5)
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 18)
+        TVSettingsPane(spacing: 0) {
+            VStack(spacing: 0) {
+                tvAboutRow("Device",          value: aboutDevice)
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAboutRow("System",          value: aboutSystem)
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAppVersionRow
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAboutRow("First Installed", value: aboutInstallDate)
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAboutRow("Last Updated",    value: aboutUpdateDate)
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
+                Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                Button {
+                    showOSSLicenses = true
+                } label: {
+                    HStack {
+                        Text("Open Source Licenses")
+                            .scaledFont(.system(size: 26, weight: .medium))
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .scaledFont(.system(size: 20))
+                            .opacity(0.5)
                     }
-                    // .plain let tvOS drop its big bright white platter behind
-                    // the row (Logan 2026-09-15). Shared inline-card treatment.
-                    .buttonStyle(TVInlineCardRowButtonStyle())
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 18)
                 }
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.cardBackground))
-                .padding(.bottom, 8)
-
-                Text("In loving memory of Jesse Mann aka EPG Guru")
-                    .scaledFont(.system(size: 22).subtext())
-                    .italic()
-                    .foregroundColor(Color.contrastText(.textTertiary))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 12)
+                // .plain let tvOS drop its big bright white platter behind
+                // the row (Logan 2026-09-15). Shared inline-card treatment.
+                .buttonStyle(TVInlineCardRowButtonStyle())
             }
-            // Phase 3 item 7: centered reading column, same as every other
-            // tvOS Settings page.
-            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth, alignment: .leading)
-            .padding(.horizontal, 40)
-            .padding(.vertical, 40)
-            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground))
+            .padding(.bottom, 8)
+
+            Text("In loving memory of Jesse Mann aka EPG Guru")
+                .scaledFont(.system(size: 22).subtext())
+                .italic()
+                .foregroundColor(Color.contrastText(.textTertiary))
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 12)
         }
         .sheet(item: $tvQRLink) { link in
             TVQRLinkSheet(link: link)

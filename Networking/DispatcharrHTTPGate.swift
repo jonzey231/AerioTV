@@ -58,9 +58,12 @@ enum DispatcharrHTTPGate {
         guard let url = req.url else { return req }
         let method = req.httpMethod ?? "GET"
         let gate = DispatcharrRequestGate.shared
-        // A key the silent re-login already replaced goes out as its successor.
+        // A key the silent re-login already replaced goes out as its successor,
+        // to the addresses that successor is for only (never an address the
+        // playlist left).
         if let swapped = gate.rewritingReplacedKey(xApiKey: req.value(forHTTPHeaderField: "X-API-Key"),
-                                                   authorization: req.value(forHTTPHeaderField: "Authorization")) {
+                                                   authorization: req.value(forHTTPHeaderField: "Authorization"),
+                                                   url: url.absoluteString) {
             req.setValue(swapped.xApiKey, forHTTPHeaderField: "X-API-Key")
             req.setValue(swapped.authorization, forHTTPHeaderField: "Authorization")
         }

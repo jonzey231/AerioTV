@@ -1692,7 +1692,8 @@ final class SyncManager: ObservableObject {
         KeychainHelper.save(cloud, for: slot, synchronizable: true)
         let t = d["_apiKeyChangedAt"] as? Double ?? 0
         if t > 0 { Self.setCredentialChangedAt(.apiKey, playlistID, t) }
-        DispatcharrRequestGate.shared.noteKeyReplaced(old: rejectedKey, new: cloud)
+        DispatcharrRequestGate.shared.noteKeyReplaced(old: rejectedKey, new: cloud,
+                                                      routes: DispatcharrKeyBroker.routes(serverID: playlistID))
         debugLog("[SYNC] adopting iCloud's apiKey for \(playlistID.uuidString.prefix(8)): the server rejected this device's key")
         return cloud
     }

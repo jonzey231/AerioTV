@@ -86,7 +86,7 @@ final class MKVRangeFetcher: @unchecked Sendable {
         }
         // Headers re-read per request (2026-11-10): a replaced key goes out as
         // its successor; a key held as rejected is never sent (no request).
-        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+        guard let sendHeaders = StreamFetchAuth.headers(headers, url: url) else {
             throw MKVRemuxError(reason: "range fetch HTTP 401 | held")
         }
         var request = URLRequest(url: url)
@@ -329,7 +329,7 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             cond.broadcast()
             return
         }
-        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+        guard let sendHeaders = StreamFetchAuth.headers(headers, url: url) else {
             failed = "HTTP 401 on media range | held"
             debugLog("[AUTH] VOD stream open skipped: this API key is held as rejected")
             cond.broadcast()

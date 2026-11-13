@@ -355,7 +355,7 @@ final class HeadlessPlaybackController: ObservableObject {
             }
             // Every open re-reads the key (StreamKeyGate): a key held as
             // rejected is never sent.
-            guard case .send(let openHeaders) = StreamKeyGate.headersForOpen(resolved.headers) else {
+            guard case .send(let openHeaders) = StreamKeyGate.headersForOpen(resolved.headers, url: resolved.routeURL.absoluteString) else {
                 debugLog("[CARPLAY] error: \(item.name) API key held as rejected; not opening")
                 return
             }
@@ -715,7 +715,7 @@ final class HeadlessAVPlayerEngine {
         // Every open re-reads the key (StreamKeyGate): a replaced key goes
         // out as its successor; a key held as rejected is never sent.
         var headers = headers
-        switch StreamKeyGate.headersForOpen(headers) {
+        switch StreamKeyGate.headersForOpen(headers, url: url.absoluteString) {
         case .send(let h): headers = h
         case .held:
             fail(.playback(DispatcharrRateLimitCopy.heldStreamMessage(headers)))

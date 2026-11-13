@@ -423,9 +423,84 @@ private enum RailMetrics {
     static let rowHeight: CGFloat = 64
     static let rowGap: CGFloat = 4
     /// The first row's top, below the rail's top edge (unchanged from the
-    /// scrolling rail's 40 pt top padding).
-    static let restingTop: CGFloat = 40
+    /// scrolling rail's 40 pt top padding). The pane shares this line.
+    static let restingTop: CGFloat = TVSettingsPaneMetrics.topLine
     static let ringRoom: CGFloat = 2
+}
+
+/// The one container geometry for every Settings rail page (owner
+/// 2026-11-13, Apple TV device check), taken from the Live TV page. Before,
+/// pages used three: Playlists and Sync padded 40 (cards 8 pt wider each
+/// side, the first card level with the rail's first row), Player, Movies &
+/// TV Shows, and Remote Control padded 80 by 60 (32 pt narrower each side,
+/// the first eyebrow 12 pt lower), and the rest padded 48.
+enum TVSettingsPaneMetrics {
+    /// The rail's resting top, below the panes' top edge: the pane's scroll
+    /// area starts here, so content scrolls up to this line and fades out
+    /// at it, never under the tab bar.
+    static let topLine: CGFloat = 40
+    /// The first element's top at rest, below the pane's top edge (the Live
+    /// TV page's eyebrow: just below the rail's first row top).
+    static let firstElementTop: CGFloat = 48
+    /// Leading and trailing inset inside the centered reading column.
+    static let horizontal: CGFloat = 48
+    static let bottom: CGFloat = 48
+    /// Scrolled content fades out over this band at the top line (as What's
+    /// New's list does under its header).
+    static let fadeHeight: CGFloat = 30
+    /// How far content may still draw below the pane (into the bottom
+    /// overscan band, to the screen's edge).
+    static let bottomOverhang: CGFloat = 80
+}
+
+/// Every Settings rail page's scroll container: one x, width, top, and
+/// eyebrow position (TVSettingsPaneMetrics). Content scrolls up to the
+/// rail's top line and fades out there; at rest nothing is faded.
+struct TVSettingsPane<Content: View>: View {
+    let spacing: CGFloat
+    let content: Content
+    @State private var scrolled = false
+
+    init(spacing: CGFloat = 32, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: spacing) {
+                content
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, TVSettingsPaneMetrics.horizontal)
+            .padding(.top, TVSettingsPaneMetrics.firstElementTop - TVSettingsPaneMetrics.topLine)
+            .padding(.bottom, TVSettingsPaneMetrics.bottom)
+            // The reading column: already the cap inside the split view's
+            // pane; it matters when a page is pushed full width.
+            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
+            .frame(maxWidth: .infinity)
+        }
+        .onScrollGeometryChange(for: Bool.self) { g in
+            WhatsNewRules.fadeActive(scrolledBy: Double(g.contentOffset.y + g.contentInsets.top))
+        } action: { _, isScrolled in
+            scrolled = isScrolled
+        }
+        // A tvOS ScrollView does not clip: without the mask, scrolled rows
+        // drew up behind the tab bar and the profile avatar (device p12).
+        .mask {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [scrolled ? .clear : .black, .black],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: TVSettingsPaneMetrics.fadeHeight)
+                Color.black
+            }
+            // Only the top is cut: below, rows still run past the safe area
+            // to the screen's edge as before, a cue that the page scrolls.
+            .padding(.bottom, -TVSettingsPaneMetrics.bottomOverhang)
+            .animation(.easeInOut(duration: 0.2), value: scrolled)
+        }
+        .padding(.top, TVSettingsPaneMetrics.topLine)
+    }
 }
 
 /// Rail row chrome per plan A3 (row height now RailMetrics.rowHeight), accent

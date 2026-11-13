@@ -1753,7 +1753,9 @@ final class ProfileManager: ObservableObject {
         let gate = DispatcharrRequestGate.shared
         gate.clearIdentity(who)
         gate.clearKey(apiKey)
-        if let oldKey { gate.noteKeyReplaced(old: oldKey, new: apiKey) }
+        if let oldKey {
+            gate.noteKeyReplaced(old: oldKey, new: apiKey, routes: DispatcharrKeyBroker.routes(serverID: UUID(uuidString: p.playlistId)))
+        }
         DispatcharrLoginGate.shared.clearRejected(identity: who)
         if holds.lift(profileId: profileId) {
             debugLog("[PROFILE-HOST] lifted playlist=\(Self.tag(p.playlistId)) profile=\(Self.tag(profileId)) (signed in)")

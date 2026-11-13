@@ -2339,6 +2339,17 @@ struct DispatcharrAPI {
             return (data, response)
         }
 
+        // A 401 from an address the playlist has left (built before an address
+        // change, finished after it): no refresh, probe, re-login, or hold from
+        // it, so no token or key the old server issues reaches the playlist and
+        // no new one goes to the old address.
+        let staleKey: String? = { if case .apiKey(let k) = auth { return k }; return nil }()
+        let requestURL = request.url?.absoluteString
+        if await DispatcharrKeyBroker.isStaleRoute(url: requestURL, serverID: serverID, key: staleKey) {
+            debugLog("[ROUTE] 401 from \(request.url?.host ?? "?"), an address the playlist no longer uses: no recovery there")
+            return (data, response)
+        }
+
         switch auth {
         case .jwtSession(let serverID):
             // Need a refresh token to even attempt recovery.
@@ -2378,7 +2389,7 @@ struct DispatcharrAPI {
             guard recoverApiKey else { return (data, response) }
             // DispatcharrHTTPGate sends a key the silent re-login replaced as
             // its successor, so the 401 is about the key that went out.
-            let key = DispatcharrRequestGate.shared.replacementKey(for: builtKey) ?? builtKey
+            let key = DispatcharrRequestGate.shared.replacementKey(for: builtKey, url: requestURL) ?? builtKey
             // 2026-11-09 (Android fd145f3d parity): is the KEY bad, or did
             // only this endpoint refuse it? One /api/core/version/ probe,
             // stopping at Dispatcharr's "Invalid API key" answer, so a bad
@@ -2402,7 +2413,8 @@ struct DispatcharrAPI {
             if let who = await MainActor.run(body: { DispatcharrKeyBroker.profileIdentity(forKey: key, serverID: serverID) }) {
                 guard case .rejected = probe else { return (data, response) }
                 if let newKey = await ProfileManager.shared.reloginProfile(who, rejectedKey: key) {
-                    DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey)
+                    DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey,
+                                                                  routes: await DispatcharrKeyBroker.routes(serverID: UUID(uuidString: who.playlistID)))
                     debugLog("[AUTH] 401 on a profile's key; its own re-login OK for \(who); retrying with the new key")
                     return try await HTTPRouter.data(for: withApiKey(newKey, request), using: session)
                 }
@@ -2477,8 +2489,10 @@ struct DispatcharrAPI {
                 return (data, response)
             }
             // Requests still carrying the old key go out with the new one
-            // (DispatcharrHTTPGate), so nothing else spends a failed attempt.
-            DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey)
+            // (DispatcharrHTTPGate), so nothing else spends a failed attempt;
+            // to this playlist's addresses only.
+            DispatcharrRequestGate.shared.noteKeyReplaced(old: key, new: newKey,
+                                                          routes: await DispatcharrKeyBroker.routes(serverID: target.id))
             if ownTarget == nil {
                 debugLog("[AUTH] silent re-login OK for \(target.id.uuidString.prefix(8)); retrying with the new key")
             }
@@ -7119,7 +7133,11 @@ enum CatchupSupport {
             // legacy for the process and we fall through to the XC
             // /timeshift/ path below - which also remains THE protocol
             // for genuine Xtream Codes servers (next case), forever.
-            let nativeBase = dispatcharrBase(fromStreamURL: channel.streamURL) ?? server.effectiveBaseURL
+            // The playlist's own address only: a channel URL still on an address
+            // the playlist left (list not reloaded yet) mints at the current one,
+            // so the key and the address come from one snapshot.
+            let streamBase = dispatcharrBase(fromStreamURL: channel.streamURL)
+            let nativeBase = streamBase.flatMap { server.isOwnAddress($0) ? $0 : nil } ?? server.effectiveBaseURL
             if let channelUUID = dispatcharrChannelUUID(fromStreamURL: channel.streamURL),
                nativeSupportCache[nativeBase] != false {
                 let key = server.effectiveApiKey

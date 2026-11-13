@@ -202,7 +202,7 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
 
     private static func fetch(_ url: URL, headers: [String: String],
                               from start: Int64, to end: Int64) async -> (Data, Int64?)? {
-        guard let sendHeaders = StreamFetchAuth.headers(headers) else { return nil }
+        guard let sendHeaders = StreamFetchAuth.headers(headers, url: url) else { return nil }
         var req = URLRequest(url: url)
         for (k, v) in sendHeaders { req.setValue(v, forHTTPHeaderField: k) }
         req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
@@ -212,7 +212,7 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
         guard let (stream, resp) = try? await URLSession.shared.bytes(for: req) else { return nil }
         guard let http = resp as? HTTPURLResponse, http.statusCode == 206 else {
             stream.task.cancel()
-            if (resp as? HTTPURLResponse)?.statusCode == 401 { StreamFetchAuth.note401(sendHeaders) }
+            if (resp as? HTTPURLResponse)?.statusCode == 401 { StreamFetchAuth.note401(sendHeaders, url: url) }
             return nil
         }
         var data = Data()
@@ -376,7 +376,7 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
             ? probeResult.contentLength - 1
             : min(dr.requestedOffset + Int64(dr.requestedLength), probeResult.contentLength) - 1
         guard end >= start else { loadingRequest.finishLoading(); return true }
-        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+        guard let sendHeaders = StreamFetchAuth.headers(headers, url: realURL) else {
             loadingRequest.finishLoading(with: StreamFetchAuth.heldError)
             return true
         }
@@ -422,7 +422,7 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
     fileprivate func completed(task: URLSessionTask, error: Error?) {
         guard let (request, _) = active.removeValue(forKey: task.taskIdentifier) else { return }
         if (task.response as? HTTPURLResponse)?.statusCode == 401 {
-            StreamFetchAuth.note401(task.originalRequest?.allHTTPHeaderFields ?? [:])
+            StreamFetchAuth.note401(task.originalRequest?.allHTTPHeaderFields ?? [:], url: task.originalRequest?.url)
             request.finishLoading(with: StreamFetchAuth.heldError)
             return
         }
@@ -557,7 +557,7 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
     func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
                         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
         guard let url = loadingRequest.request.url, let real = Self.realURL(for: url) else { return false }
-        guard let sendHeaders = StreamFetchAuth.headers(headers) else {
+        guard let sendHeaders = StreamFetchAuth.headers(headers, url: real) else {
             loadingRequest.finishLoading(with: StreamFetchAuth.heldError)
             return true
         }
@@ -571,7 +571,7 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
                 return
             }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if status == 401 { StreamFetchAuth.note401(sendHeaders) }
+            if status == 401 { StreamFetchAuth.note401(sendHeaders, url: real) }
             guard status == 200, let data, let text = String(data: data, encoding: .utf8),
                   text.hasPrefix("#EXTM3U") else {
                 // Not a playlist (finalized recording answering with the
@@ -1650,7 +1650,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // a key the silent re-login replaced goes out as its successor, and
         // a key held as rejected never goes out (no request at all).
         let openHeaders: [String: String]
-        switch StreamKeyGate.headersForOpen(headers) {
+        switch StreamKeyGate.headersForOpen(headers, url: sourceURL.absoluteString) {
         case .send(let h): openHeaders = h
         case .held:
             debugLog("[AUTH] stream open skipped: this API key is held as rejected; waiting for Edit Playlist")
@@ -7245,7 +7245,7 @@ struct AVPlayerMultiviewTile: View {
         statusText = "Connecting..."
         let token = teardownToken
         Task { @MainActor in
-            let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent)
+            let outcome = await DispatcharrKeyBroker.after401(streamHeaders: sent, url: (catchupURL ?? liveSourceURL).absoluteString)
             guard token == teardownToken else { return }
             switch outcome {
             case .retry:
@@ -9170,7 +9170,7 @@ struct AVPlayerMultiviewTile: View {
         // swapped for its successor, a held one is never sent.
         var requestHeaders = requestHeaders
         if adoptedPlayer == nil, !requestHeaders.isEmpty {
-            switch StreamKeyGate.headersForOpen(requestHeaders) {
+            switch StreamKeyGate.headersForOpen(requestHeaders, url: url.absoluteString) {
             case .send(let h): requestHeaders = h
             case .held:
                 stopForHeldKey("direct HTTP 401 | held")
@@ -10865,16 +10865,16 @@ enum Stream429Marker {
 enum StreamFetchAuth {
     /// The headers to send now (a replaced key swapped for its successor),
     /// or nil when the key is held as rejected (no request at all).
-    static func headers(_ h: [String: String]) -> [String: String]? {
-        if case .send(let s) = StreamKeyGate.headersForOpen(h) { return s }
+    static func headers(_ h: [String: String], url: URL?) -> [String: String]? {
+        if case .send(let s) = StreamKeyGate.headersForOpen(h, url: url?.absoluteString) { return s }
         return nil
     }
 
     /// A 401 on a stream fetch: the broker decides once (probe, silent
     /// re-login, or the hold); later fetches re-read and never resend a dead key.
-    static func note401(_ h: [String: String]) {
+    static func note401(_ h: [String: String], url: URL?) {
         guard StreamKeyGate.apiKey(in: h) != nil else { return }
-        Task { _ = await DispatcharrKeyBroker.after401(streamHeaders: h) }
+        Task { _ = await DispatcharrKeyBroker.after401(streamHeaders: h, url: url?.absoluteString) }
     }
 
     static let heldError = NSError(domain: NSURLErrorDomain, code: NSURLErrorUserAuthenticationRequired,

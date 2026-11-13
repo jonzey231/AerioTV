@@ -1383,77 +1383,73 @@ struct SettingsView: View {
     /// pane. Rows push ServerDetailView (classic push); the long-press
     /// context menu keeps switch/reorder/edit/delete.
     private var tvPlaylistsPane: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                if servers.isEmpty {
-                    HStack {
-                        Spacer()
-                        VStack(spacing: 12) {
-                            Image(systemName: "list.and.film")
-                                .scaledFont(.system(size: 36))
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                            Text("No playlists added")
-                                .scaledFont(.bodyMedium.subtext())
-                                .foregroundColor(Color.contrastText(.textSecondary))
-                        }
-                        Spacer()
+        TVSettingsPane(spacing: 8) {
+            if servers.isEmpty {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        Image(systemName: "list.and.film")
+                            .scaledFont(.system(size: 36))
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                        Text("No playlists added")
+                            .scaledFont(.bodyMedium.subtext())
+                            .foregroundColor(Color.contrastText(.textSecondary))
                     }
-                    .padding(.vertical, 28)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.cardBackground))
-                } else {
-                    ForEach(sortedServers) { server in
-                        TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild("Playlist Detail \(server.name)"),
-                                         logTitle: server.name) {
-                            ServerListRow(server: server)
-                        }
-                        .contextMenu {
-                            if servers.count > 1 {
-                                Button {
-                                    setActiveServer(server)
-                                } label: {
-                                    if server.isActive {
-                                        Label("Active Playlist", systemImage: "checkmark.circle.fill")
-                                    } else {
-                                        Label("Use This Playlist", systemImage: "checkmark.circle")
-                                    }
-                                }
-                                .disabled(server.isActive)
-                            }
-                            Button { navPath.append(SettingsRoute.editServer(server.id)) } label: {
-                                Label("Edit", systemImage: "pencil")
-                            }
-                            Button(role: .destructive) {
-                                serverToDelete = server
-                                deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
-                                showDeleteAlert = true
+                    Spacer()
+                }
+                .padding(.vertical, 28)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.cardBackground))
+            } else {
+                ForEach(sortedServers) { server in
+                    TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild("Playlist Detail \(server.name)"),
+                                     logTitle: server.name) {
+                        ServerListRow(server: server)
+                    }
+                    .contextMenu {
+                        if servers.count > 1 {
+                            Button {
+                                setActiveServer(server)
                             } label: {
-                                Label("Delete", systemImage: "trash")
+                                if server.isActive {
+                                    Label("Active Playlist", systemImage: "checkmark.circle.fill")
+                                } else {
+                                    Label("Use This Playlist", systemImage: "checkmark.circle")
+                                }
                             }
+                            .disabled(server.isActive)
+                        }
+                        Button { navPath.append(SettingsRoute.editServer(server.id)) } label: {
+                            Label("Edit", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            serverToDelete = server
+                            deleteDeviceCount = PlaylistLockdown.deviceRecordings(server, in: modelContext).count
+                            showDeleteAlert = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
                         }
                     }
-                }
-                TVSettingsActionRow(icon: "plus.circle.fill",
-                                    label: "Add Playlist",
-                                    isAccent: true) {
-                    showAddServer = true
-                }
-                if !servers.isEmpty {
-                    // Phase 3 item 5: the TV gets the same sentence as the
-                    // phone and the iPad. Long press still opens the
-                    // reorder / edit / delete menu; it is no longer the
-                    // only way to switch the active playlist, so it is no
-                    // longer what the hint has to teach.
-                    // Phase 3 item 10: plain sentence, no leading list
-                    // glyph (it read as a stray icon under the list).
-                    Text(Self.playlistFooterHint)
-                        .scaledFont(.system(size: 24, weight: .medium))
-                        .foregroundColor(.textPrimary.opacity(0.7))
-                        .padding(.top, 12)
                 }
             }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 40)
+            TVSettingsActionRow(icon: "plus.circle.fill",
+                                label: "Add Playlist",
+                                isAccent: true) {
+                showAddServer = true
+            }
+            if !servers.isEmpty {
+                // Phase 3 item 5: the TV gets the same sentence as the
+                // phone and the iPad. Long press still opens the
+                // reorder / edit / delete menu; it is no longer the
+                // only way to switch the active playlist, so it is no
+                // longer what the hint has to teach.
+                // Phase 3 item 10: plain sentence, no leading list
+                // glyph (it read as a stray icon under the list).
+                Text(Self.playlistFooterHint)
+                    .scaledFont(.system(size: 24, weight: .medium))
+                    .foregroundColor(.textPrimary.opacity(0.7))
+                    .padding(.top, 12)
+            }
         }
     }
 

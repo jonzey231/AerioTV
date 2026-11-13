@@ -249,95 +249,90 @@ struct MoviesTVSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Phase 3 item 6 (Logan 2026-09-19): this page was the only
-                // tvOS Settings page using `.card` sections, so its headers
-                // rendered as large white Title text and its rows sat
-                // inside an outer card while each row already draws its own
-                // card (card in card). `.plain` is what Live TV, Appearance,
-                // DVR and Developer use: small uppercase eyebrow header,
-                // bare content column.
-                SettingsSection("Refresh Library", style: .plain) {
-                    // Phase 3: same options and copy as iOS, still inline
-                    // here because a push costs an extra Back press.
-                    SettingsChoicePicker("Refresh Library",
-                                         options: Self.vodRefreshOptions,
-                                         selection: $vodRefreshHours,
-                                         footer: Self.vodRefreshFootnote,
-                                         icon: "arrow.clockwise")
-                }
+        TVSettingsPane(spacing: 32) {
+            // Phase 3 item 6 (Logan 2026-09-19): this page was the only
+            // tvOS Settings page using `.card` sections, so its headers
+            // rendered as large white Title text and its rows sat
+            // inside an outer card while each row already draws its own
+            // card (card in card). `.plain` is what Live TV, Appearance,
+            // DVR and Developer use: small uppercase eyebrow header,
+            // bare content column.
+            SettingsSection("Refresh Library", style: .plain) {
+                // Phase 3: same options and copy as iOS, still inline
+                // here because a push costs an extra Back press.
+                SettingsChoicePicker("Refresh Library",
+                                     options: Self.vodRefreshOptions,
+                                     selection: $vodRefreshHours,
+                                     footer: Self.vodRefreshFootnote,
+                                     icon: "arrow.clockwise")
+            }
 
-                SettingsSection("The Movie Database", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "photo.on.rectangle.angled",
-                        iconColor: theme.accent,
-                        title: "Use TMDB for Movies and TV Shows",
-                        subtitle: "Posters, backdrops, descriptions, cast and crew, episode details, and recommendations from The Movie Database, plus program artwork your provider does not supply.",
-                        isOn: $tmdbPostersEnabled
-                    ) { _ in }
+            SettingsSection("The Movie Database", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "photo.on.rectangle.angled",
+                    iconColor: theme.accent,
+                    title: "Use TMDB for Movies and TV Shows",
+                    subtitle: "Posters, backdrops, descriptions, cast and crew, episode details, and recommendations from The Movie Database, plus program artwork your provider does not supply.",
+                    isOn: $tmdbPostersEnabled
+                ) { _ in }
 
-                    if tmdbPostersEnabled {
-                        // Phase 3: the same shared field the iOS page
-                        // uses. It stays MASKED unless the user toggles the
-                        // eye, focused or not (security fix 2026-09-19).
-                        SettingsTextField("TMDB API Key",
-                                          placeholder: "API Key or Read Access Token",
-                                          text: $tmdbKeyDraft,
-                                          isSecure: true)
-                            .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
-                            .padding(.horizontal, 20)
-
-                        // Phase 3 item 7: Save is the accent-filled primary
-                        // and Test the ghost, same pair the iPhone shows.
-                        HStack(spacing: 24) {
-                            // Not gated on an empty key: on tvOS the field only
-                            // commits its text when focus LEAVES it, and the
-                            // focus engine can't move onto a disabled button.
-                            TVCompactButton(
-                                title: tmdbTestState == .testing ? "Testing…" : "Test",
-                                role: .ghost,
-                                disabled: tmdbTestState == .testing
-                            ) { Task { await testTMDBKey() } }
-
-                            TVCompactButton(
-                                title: "Save",
-                                role: .primary,
-                                disabled: tmdbTestState == .testing
-                            ) { saveTMDBKey() }
-
-                            tmdbStatusView
-                            Spacer()
-                        }
+                if tmdbPostersEnabled {
+                    // Phase 3: the same shared field the iOS page
+                    // uses. It stays MASKED unless the user toggles the
+                    // eye, focused or not (security fix 2026-09-19).
+                    SettingsTextField("TMDB API Key",
+                                      placeholder: "API Key or Read Access Token",
+                                      text: $tmdbKeyDraft,
+                                      isSecure: true)
+                        .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
                         .padding(.horizontal, 20)
 
-                        Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
-                            .scaledFont(.system(size: 22).subtext())
-                            .foregroundColor(Color.contrastText(.textTertiary))
-                            .padding(.horizontal, 20)
-                            .padding(.top, 4)
+                    // Phase 3 item 7: Save is the accent-filled primary
+                    // and Test the ghost, same pair the iPhone shows.
+                    HStack(spacing: 24) {
+                        // Not gated on an empty key: on tvOS the field only
+                        // commits its text when focus LEAVES it, and the
+                        // focus engine can't move onto a disabled button.
+                        TVCompactButton(
+                            title: tmdbTestState == .testing ? "Testing…" : "Test",
+                            role: .ghost,
+                            disabled: tmdbTestState == .testing
+                        ) { Task { await testTMDBKey() } }
+
+                        TVCompactButton(
+                            title: "Save",
+                            role: .primary,
+                            disabled: tmdbTestState == .testing
+                        ) { saveTMDBKey() }
+
+                        tmdbStatusView
+                        Spacer()
                     }
+                    .padding(.horizontal, 20)
 
-                    TMDBAttributionView(style: .long)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 12)
-                }
-
-                // Display Scale (Android parity, Logan 2026-09-27): the TV
-                // Movies / TV Shows pages now scale their text by `uiScale`
-                // through VODDisplayScale.
-                SettingsSection("Display Scale", style: .plain) {
-                    scaleSliderRow_tvOS(title: "Movies & TV Shows", binding: $vodScale)
-                    Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
+                    Text("If iCloud Sync is enabled, your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org; paste either the API Key or the Read Access Token. With a key, artwork and details for Movies and TV Shows come from TMDB first and your provider fills any gaps.")
                         .scaledFont(.system(size: 22).subtext())
                         .foregroundColor(Color.contrastText(.textTertiary))
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
                 }
+
+                TMDBAttributionView(style: .long)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
             }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 60)
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Display Scale (Android parity, Logan 2026-09-27): the TV
+            // Movies / TV Shows pages now scale their text by `uiScale`
+            // through VODDisplayScale.
+            SettingsSection("Display Scale", style: .plain) {
+                scaleSliderRow_tvOS(title: "Movies & TV Shows", binding: $vodScale)
+                Text("Independent scale for Movies & Series. 100% matches the default; 85-150% lets you trade density for readability. Changes apply live, no restart needed.")
+                    .scaledFont(.system(size: 22).subtext())
+                    .foregroundColor(Color.contrastText(.textTertiary))
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
+            }
         }
     }
 
@@ -346,7 +341,7 @@ struct MoviesTVSettingsView: View {
         let current = steps.min(by: { abs($0 - binding.wrappedValue) < abs($1 - binding.wrappedValue) }) ?? 1.0
         return HStack(spacing: 24) {
             Text(title)
-                .scaledFont(.system(size: 26, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(steps, id: \.self) { step in

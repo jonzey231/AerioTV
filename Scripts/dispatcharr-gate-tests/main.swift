@@ -348,27 +348,41 @@ check(!DispatcharrRequestGate.isDispatcharrInvalidKeyBody("{\"detail\":\"User no
 eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: true, loginRefused: false), .relogin, "password: re-login first")
 eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: true, loginRefused: true), .hold, "refused login: hold")
 eq(DispatcharrRequestGate.afterRejectedKey(hasStoredPassword: false, loginRefused: false), .hold, "no password: hold")
-// The key the re-login minted replaces the old one in requests still carrying it.
+// The key the re-login minted replaces the old one in requests still carrying it,
+// at the playlist's addresses only (owner 2026-11-13: an address and a key come
+// from one snapshot).
 do {
     let g = freshGate()
-    eq(g.replacementKey(for: "old-key"), nil, "nothing replaced yet")
-    check(g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil) == nil, "no rewrite before a re-login")
-    g.noteKeyReplaced(old: "old-key", new: "new-key")
-    eq(g.replacementKey(for: "old-key"), "new-key", "old key maps to the new one")
-    eq(g.replacementKey(for: " old-key "), "new-key", "whitespace ignored")
-    eq(g.replacementKey(for: "other"), nil, "other keys untouched")
-    let x = g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil)
+    let home = "https://home.example:9191/api/channels/"
+    let lan = "http://192.168.1.10:9191/proxy/ts/stream/x"
+    let old = "https://old.example:9191/api/epg/grid/"
+    let routes = ["https://home.example:9191", "http://192.168.1.10:9191"]
+    eq(g.replacementKey(for: "old-key", url: home), nil, "nothing replaced yet")
+    check(g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil, url: home) == nil, "no rewrite before a re-login")
+    g.noteKeyReplaced(old: "old-key", new: "new-key", routes: routes)
+    eq(g.replacementKey(for: "old-key", url: home), "new-key", "old key maps to the new one at the playlist's address")
+    eq(g.replacementKey(for: "old-key", url: lan), "new-key", "and at its local address")
+    eq(g.replacementKey(for: " old-key ", url: home), "new-key", "whitespace ignored")
+    eq(g.replacementKey(for: "other", url: home), nil, "other keys untouched")
+    // An in-flight request built for an address the playlist left keeps its own key.
+    eq(g.replacementKey(for: "old-key", url: old), nil, "the old address never gets the new key")
+    check(g.rewritingReplacedKey(xApiKey: "old-key", authorization: "ApiKey old-key", url: old) == nil,
+          "a request to the old address goes out exactly as it was built")
+    eq(g.replacementKey(for: "old-key", url: nil), nil, "no address known: no rewrite")
+    let x = g.rewritingReplacedKey(xApiKey: "old-key", authorization: nil, url: home)
     eq(x?.xApiKey, "new-key", "X-API-Key swapped")
     eq(x?.authorization, nil, "no Authorization added")
-    let both = g.rewritingReplacedKey(xApiKey: "old-key", authorization: "ApiKey old-key")
+    let both = g.rewritingReplacedKey(xApiKey: "old-key", authorization: "ApiKey old-key", url: home)
     eq(both?.xApiKey, "new-key", "dual shape: X-API-Key swapped")
     eq(both?.authorization, "ApiKey new-key", "dual shape: ApiKey swapped")
-    eq(g.rewritingReplacedKey(xApiKey: nil, authorization: "Bearer old-key")?.authorization, "Bearer new-key", "bearer shape swapped")
-    check(g.rewritingReplacedKey(xApiKey: "new-key", authorization: nil) == nil, "the new key is left alone")
-    g.noteKeyReplaced(old: "same", new: "same")
-    eq(g.replacementKey(for: "same"), nil, "a re-login that returns the same key replaces nothing")
+    eq(g.rewritingReplacedKey(xApiKey: nil, authorization: "Bearer old-key", url: home)?.authorization, "Bearer new-key", "bearer shape swapped")
+    check(g.rewritingReplacedKey(xApiKey: "new-key", authorization: nil, url: home) == nil, "the new key is left alone")
+    g.noteKeyReplaced(old: "same", new: "same", routes: routes)
+    eq(g.replacementKey(for: "same", url: home), nil, "a re-login that returns the same key replaces nothing")
+    g.noteKeyReplaced(old: "k1", new: "k2", routes: [" ", ""])
+    eq(g.replacementKey(for: "k1", url: home), nil, "no addresses given: nothing is rewritten anywhere")
     now += DispatcharrRequestGate.replacementMemo + 1
-    eq(g.replacementKey(for: "old-key"), nil, "the swap expires after the memo window")
+    eq(g.replacementKey(for: "old-key", url: home), nil, "the swap expires after the memo window")
 }
 
 // 429 reasons (stream-429-spec.md UPDATE): every body shape.
@@ -490,14 +504,17 @@ do {
     g.consumePrompt()
     g.markKeyRejected(playlistID: "P1", key: "DEAD2", playlistName: "Home")
     check(g.prompt?.playlistID == "P1", "prompt up for P1")
-    g.liftFixedLogin(playlistID: "P1", oldKey: "DEAD", newKey: "GOOD")
+    g.liftFixedLogin(playlistID: "P1", oldKey: "DEAD", newKey: "GOOD", routes: ["https://home.example"])
     check(!g.isPlaylistRejected("P1"), "P1 hold lifted")
     check(g.prompt == nil, "P1 prompt cleared")
     check(g.isPlaylistRejected("P2") && g.isKeyRejected("OTHER"), "another playlist's hold stays")
     check(!g.isKeyRejected("GOOD"), "new key good")
-    eq(g.replacementKey(for: "DEAD"), "GOOD", "old key goes out as the new one")
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], gate: g), .send(["X-API-Key": "GOOD"]), "a stream built with the old key opens with the new one")
-    g.liftFixedLogin(playlistID: "P2", oldKey: "OTHER", newKey: nil)
+    eq(g.replacementKey(for: "DEAD", url: "https://home.example/api/x"), "GOOD", "old key goes out as the new one")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], url: "https://home.example/proxy/ts/stream/u", gate: g), .send(["X-API-Key": "GOOD"]),
+       "a stream built with the old key opens with the new one")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], url: "https://old.example/proxy/ts/stream/u", gate: g), .send(["X-API-Key": "DEAD"]),
+       "a stream still bound for an address the playlist left goes out as built, never with the new key")
+    g.liftFixedLogin(playlistID: "P2", oldKey: "OTHER", newKey: nil, routes: ["https://home.example"])
     check(!g.isPlaylistRejected("P2"), "password-only fix still lifts the hold")
 }
 
@@ -522,7 +539,7 @@ do {
     check(g.markKeyRejected(playlistID: "P1", key: "DEAD", playlistName: "Home", noKey: true), "no-key hold is a fresh rejection")
     check(g.isKeyRejected("DEAD"), "the dead key is held: no further requests with it")
     eq(g.prompt?.noKey, true, "prompt carries no-key")
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], gate: g), .held, "a stream with the dead key never opens")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "DEAD"], url: nil, gate: g), .held, "a stream with the dead key never opens")
     eq(DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: "Home", passwordToo: false, noKey: true),
        "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it.", "no-key prompt body")
     eq(DispatcharrRateLimitCopy.keyRejectedPromptBody(playlistName: "Home", passwordToo: true, noKey: false),
@@ -639,7 +656,7 @@ do {
     check(StreamKeyGate.isProfileHeld(["Authorization": "ApiKey \(ph)"]), "placeholder in Authorization")
     check(!StreamKeyGate.isProfileHeld(["X-API-Key": "real-key"]) && !StreamKeyGate.isProfileHeld([:]), "a real or missing key is not held")
     let g = DispatcharrRequestGate.shared
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": ph], gate: g), .held, "a held profile's stream never opens")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": ph], url: nil, gate: g), .held, "a held profile's stream never opens")
     eq(DispatcharrRateLimitCopy.heldStreamMessage(["X-API-Key": ph]), line, "stream stop text in the held case")
     eq(DispatcharrRateLimitCopy.heldStreamMessage(["X-API-Key": "DEAD"]), DispatcharrRateLimitCopy.keyRejectedErrorMessage,
        "a rejected key keeps the rejected-key text")
@@ -710,7 +727,7 @@ do {
           "the profile's key is held as its own")
     eq(g.prompt?.profileID, "KID", "its prompt names the profile")
     eq(g.prompt?.identity, kid, "prompt identity")
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KID-K"], gate: g), .held, "its streams stop")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KID-K"], url: nil, gate: g), .held, "its streams stop")
     check(g.isKeyRejected("KID-K"), "its requests stop")
     check(g.isIdentityRejected(kid) && g.isPlaylistRejected("P"), "both identities held")
     g.clearPlaylist("P")
@@ -718,7 +735,7 @@ do {
     check(g.isKeyRejected("KID-K") && g.isIdentityRejected(kid), "and never releases the profile's held key")
     eq(g.prompt?.profileID, "KID", "the profile's prompt stays")
     g.markKeyRejected(playlistID: "P", key: "DEF-K2", playlistName: "Home", baseURL: "http://h:9191")
-    g.liftFixedLogin(playlistID: "P", oldKey: "DEF-K2", newKey: "DEF-K3")
+    g.liftFixedLogin(playlistID: "P", oldKey: "DEF-K2", newKey: "DEF-K3", routes: ["http://h:9191"])
     check(!g.isKeyRejected("DEF-K2") && g.isKeyRejected("KID-K"), "Fix Login lifts the playlist's hold only")
     if let r = g.allRechecks().first(where: { $0.identity == .playlist("P") }) {
         g.finishProbe(r, accepted: true)
@@ -1001,10 +1018,13 @@ do {
     let g = DispatcharrRequestGate()
     let h = ["X-API-Key": "dead", "Authorization": "ApiKey dead", "User-Agent": "UA"]
     eq(StreamKeyGate.apiKey(in: h), "dead", "stream open carries its key")
-    eq(StreamKeyGate.headersForOpen(h, gate: g), .send(h), "a good key opens as it is")
+    let su = "http://tv.example:9191/proxy/ts/stream/u"
+    eq(StreamKeyGate.headersForOpen(h, url: su, gate: g), .send(h), "a good key opens as it is")
     // A key the silent re-login replaced goes out as its successor, in both header shapes.
-    g.noteKeyReplaced(old: "dead", new: "fresh")
-    if case .send(let s) = StreamKeyGate.headersForOpen(h, gate: g) {
+    g.noteKeyReplaced(old: "dead", new: "fresh", routes: ["http://tv.example:9191"])
+    eq(StreamKeyGate.headersForOpen(h, url: "http://moved.example:9191/proxy/ts/stream/u", gate: g), .send(h),
+       "a stream to another address opens with the key it was built with")
+    if case .send(let s) = StreamKeyGate.headersForOpen(h, url: su, gate: g) {
         eq(s["X-API-Key"], "fresh", "replaced key swapped in X-API-Key")
         eq(s["Authorization"], "ApiKey fresh", "replaced key swapped in Authorization")
         eq(s["User-Agent"], "UA", "other headers kept")
@@ -1012,9 +1032,9 @@ do {
     // A key held as rejected never opens (no request at all).
     let g2 = DispatcharrRequestGate()
     _ = g2.markKeyRejected(playlistID: "P", key: "dead")
-    eq(StreamKeyGate.headersForOpen(h, gate: g2), .held, "held key: no open")
-    eq(StreamKeyGate.headersForOpen(["Authorization": "Bearer dead"], gate: g2), .held, "held key in Bearer shape: no open")
-    eq(StreamKeyGate.headersForOpen(["User-Agent": "UA"], gate: g2), .send(["User-Agent": "UA"]), "no key: opens (M3U)")
+    eq(StreamKeyGate.headersForOpen(h, url: nil, gate: g2), .held, "held key: no open")
+    eq(StreamKeyGate.headersForOpen(["Authorization": "Bearer dead"], url: nil, gate: g2), .held, "held key in Bearer shape: no open")
+    eq(StreamKeyGate.headersForOpen(["User-Agent": "UA"], url: nil, gate: g2), .send(["User-Agent": "UA"]), "no key: opens (M3U)")
     // What a 401 leads to.
     eq(StreamKeyGate.after401(probe: .rejected, reloginTried: true, newKey: "fresh", oldKey: "dead"), .retry(newKey: "fresh"),
        "rejected key with a stored password: re-login, one retry with the new key")

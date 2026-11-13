@@ -113,18 +113,13 @@ struct RemoteControlSettingsView: View {
     // MARK: - Body
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                hintsSection
-                playChannelsInSection
-                whileWatchingSection
-                inTheGuideSection
-                additionalButtonsSection
-                resetSection
-            }
-            .padding(.horizontal, 80)
-            .padding(.vertical, 60)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        TVSettingsPane(spacing: 32) {
+            hintsSection
+            playChannelsInSection
+            whileWatchingSection
+            inTheGuideSection
+            additionalButtonsSection
+            resetSection
         }
         .background(Color.appBackground.ignoresSafeArea())
         .navigationTitle("Remote Control")
@@ -380,12 +375,12 @@ private struct TVSlotChoiceRow<Action: Hashable>: View {
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                        .scaledFont(.bodyMedium)
                         .foregroundColor(.textPrimary)
                     if let subtitle {
                         Text(subtitle)
-                            .scaledFont(.system(size: 22).subtext())
-                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .scaledFont(.bodySmall)
+                            .foregroundColor(Color.contrastText(.textSecondary))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

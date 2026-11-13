@@ -559,7 +559,7 @@ do {
     // Its requests go nowhere: the placeholder laid over them stops at the gate, and is never the default's key.
     let gate = DispatcharrRequestGate()
     check(gate.isKeyRejected(DispatcharrRequestGate.HELD_PROFILE_KEY), "every request with the placeholder stops locally")
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": DispatcharrRequestGate.HELD_PROFILE_KEY], gate: gate), .held, "no stream opens")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": DispatcharrRequestGate.HELD_PROFILE_KEY], url: nil, gate: gate), .held, "no stream opens")
     check(gate.prompt == nil && !gate.isPlaylistRejected("P"), "and no rejected-key prompt for it")
     // Nor as the default profile: every request to the playlist's addresses stops at the gate
     // (only the same-server check and the held sign-in form, marked HELD_CHECK_HEADER, go through).
@@ -652,7 +652,7 @@ do {
     check(sent != defaultKey, "nothing is sent with the default's key")
     let g = DispatcharrRequestGate()
     check(g.isKeyRejected(sent), "the placeholder stops every request at the gate")
-    eq(StreamKeyGate.headersForOpen(["X-API-Key": sent], gate: g), .held, "and every stream open")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": sent], url: nil, gate: g), .held, "and every stream open")
     check(StreamKeyGate.isProfileHeld(["X-API-Key": sent]), "with the held line (Could not reach your Dispatcharr server)")
     // The other combinations.
     eq(R.activeSignIn(isDefault: false, isHeld: false, storedKey: "  "), .refused, "a blank key is no key")
@@ -721,7 +721,7 @@ do {
     store.setPassword("kid", "kid-pass")
     g.clearIdentity(kid)
     g.clearKey("KID-NEW")
-    g.noteKeyReplaced(old: "KID-OLD", new: "KID-NEW")
+    g.noteKeyReplaced(old: "KID-OLD", new: "KID-NEW", routes: ["https://home.example"])
     check(!g.isIdentityRejected(kid) && !g.isKeyRejected("KID-NEW"), "its own hold clears; the switch goes on")
     eq(store.apiKey("kid"), "KID-NEW", "its key replaced")
     eq(store.password("kid"), "kid-pass", "its password replaced")
@@ -790,6 +790,22 @@ do {
     check(L.gateNeedsPresenting(locked: true, scenes: 2, scenesShowingGate: 1), "every scene gets the gate")
     check(!L.gateNeedsPresenting(locked: true, scenes: 1, scenesShowingGate: 1), "on screen: nothing to do")
     check(!L.gateNeedsPresenting(locked: false, scenes: 1, scenesShowingGate: 0), "unlocked: no gate")
+}
+
+// MARK: - The main screen stays laid out under the lock, unreachable (owner 2026-11-13)
+do {
+    let L = LaunchLockRules.self
+    check(L.tvPresentsOverMainScreen, "Apple TV presents the lock over the main screen, so the main screen is laid out before the PIN passes")
+    let up = L.beneath(locked: true, wasInteractive: true, wasAccessibilityHidden: false)
+    check(!up.interactive, "while locked, the screen beneath takes no focus or touch")
+    check(up.accessibilityHidden, "and VoiceOver cannot reach it")
+    let after = L.beneath(locked: false, wasInteractive: true, wasAccessibilityHidden: false)
+    check(after.interactive && !after.accessibilityHidden, "once the PIN passes it is exactly as it was")
+    let wasOff = L.beneath(locked: false, wasInteractive: false, wasAccessibilityHidden: true)
+    check(!wasOff.interactive && wasOff.accessibilityHidden, "a screen that was already off stays off")
+    // The gates that keep the main screen quiet do not depend on it being off screen.
+    check(!L.promptMayShow(gateArmed: true, pickerUp: false), "no prompt while the main screen is laid out under the PIN")
+    check(!L.promptMayShow(gateArmed: false, pickerUp: true), "nor under the Apple TV launch picker")
 }
 
 // MARK: - A stray Setting Up cover is always closed (device report 2026-11-12)

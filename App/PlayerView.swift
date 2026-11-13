@@ -8587,7 +8587,7 @@ struct NativeHLSPlayerScreen: View {
         // Every open re-reads the key (StreamKeyGate): a replaced key goes
         // out as its successor; a key held as rejected is never sent.
         var headers = headers
-        switch StreamKeyGate.headersForOpen(headers) {
+        switch StreamKeyGate.headersForOpen(headers, url: url.absoluteString) {
         case .send(let h): headers = h
         case .held:
             stopForLiveNotice(.heldOpen(headers), reason: "HTTP 401 | held")

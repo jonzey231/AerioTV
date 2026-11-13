@@ -166,7 +166,7 @@ struct TVSettingsStepperRow: View {
     var body: some View {
         HStack(spacing: 24) {
             Text(title)
-                .scaledFont(.system(size: SettingsMetrics.tvRowTitleSize, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
                 .lineLimit(1)
             Spacer(minLength: 12)
@@ -189,8 +189,11 @@ struct TVSettingsStepperRow: View {
             }
             .accessibilityLabel(increaseLabel)
         }
+        // The standard row height (80 plus 6 above and below), as every
+        // other row; the stepper rows were 20 pt shorter.
+        .frame(minHeight: 80)
         .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.cardBackground)

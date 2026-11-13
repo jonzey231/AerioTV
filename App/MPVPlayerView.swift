@@ -2286,7 +2286,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// successor (StreamKeyGate). nil while the key is held as
         /// rejected: play() stops before any load, and probes skip.
         private var openHeaders: [String: String]? {
-            if case .send(let h) = StreamKeyGate.headersForOpen(headers) { return h }
+            let url = (urls[safe: currentIndex] ?? urls.first)?.absoluteString
+            if case .send(let h) = StreamKeyGate.headersForOpen(headers, url: url) { return h }
             return nil
         }
 
@@ -6505,7 +6506,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // replaced key goes out as its successor, and a key held as
             // rejected is never sent again (the playlist prompts).
             if StreamKeyGate.apiKey(in: headers) != nil {
-                switch StreamKeyGate.headersForOpen(headers) {
+                switch StreamKeyGate.headersForOpen(headers, url: url.absoluteString) {
                 case .held:
                     stopForLiveNotice(.heldOpen(headers), reason: "HTTP 401 | held")
                     return
@@ -7460,6 +7461,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let gate = DispatchSemaphore(value: 0)
                     limitProbeGate = gate
                     let tag = streamTag
+                    let probeURL = urls[currentIndex].absoluteString
                     DispatcharrLimitProbe.run(url: urls[currentIndex], headers: probeHeaders,
                                               owner: "mpv-limit-probe") { [weak self] notice, summary in
                         debugLog("[LIMIT] mpv load-failure probe \(tag): \(summary)\(notice.map { " -> \($0.kind.rawValue)" } ?? "")")
@@ -7473,7 +7475,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                            StreamKeyGate.apiKey(in: probeHeaders) != nil {
                             let coordinator = self
                             Task {
-                                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: probeHeaders)
+                                let outcome = await DispatcharrKeyBroker.after401(streamHeaders: probeHeaders, url: probeURL)
                                 debugLog("[AUTH] mpv stream 401 \(tag): \(outcome)")
                                 if outcome == .held {
                                     coordinator?.stopForLiveNotice(.keyRejected, reason: "HTTP 401 | held")

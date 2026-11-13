@@ -605,215 +605,212 @@ struct LiveTVSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // MARK: Guide Presentation
-                SettingsSection("Guide Presentation", style: .plain) {
+        TVSettingsPane(spacing: 32) {
+            // MARK: Guide Presentation
+            SettingsSection("Guide Presentation", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "tv.fill",
+                    iconColor: .accentPrimary,
+                    title: "Show Channel Logos",
+                    subtitle: TVListView.enabled
+                        ? "Turn off to hide channel logos so longer channel names get the full row width."
+                        : "Display each channel's logo in the Guide's channel column.",
+                    isOn: $showChannelLogos,
+                    onChange: { _ in }
+                )
+                if showChannelLogos {
+                    tvLogoSizeRow
+                }
+                TVSettingsToggleRow(
+                    icon: "number",
+                    iconColor: .accentPrimary,
+                    title: "Show Channel Numbers",
+                    subtitle: TVListView.enabled
+                        ? "Turn off to hide channel numbers in the Live TV list and Guide."
+                        : "Display each channel's number in the Guide's channel column.",
+                    isOn: $showChannelNumbers,
+                    onChange: { _ in }
+                )
+                TVSettingsToggleRow(
+                    icon: "textformat",
+                    iconColor: .accentPrimary,
+                    title: "Show Channel Names",
+                    subtitle: TVListView.enabled
+                        ? "Turn off to hide channel names in the Live TV list and the Guide's channel column."
+                        : "Turn off to hide channel names in the Guide's channel column.",
+                    isOn: $showChannelNames,
+                    onChange: { _ in }
+                )
+                TVSettingsToggleRow(
+                    icon: "text.alignleft",
+                    iconColor: .accentPrimary,
+                    title: "Show Program Subtitles",
+                    subtitle: TVListView.enabled
+                        ? "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there."
+                        : "Turn off to hide the episode or match name under each program title in the Guide, for EPGs that repeat the description there.",
+                    isOn: $showProgramSubtitles,
+                    onChange: { _ in }
+                )
+                TVSettingsToggleRow(
+                    icon: "square.grid.3x3",
+                    iconColor: .accentPrimary,
+                    title: "Rounded Guide Logos",
+                    subtitle: "Round the channel logos in the guide.",
+                    isOn: $roundedGuideCorners,
+                    onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
+                )
+                TVSettingsToggleRow(
+                    icon: "square.grid.3x3",
+                    iconColor: .accentPrimary,
+                    title: "Rounded Program Cells",
+                    subtitle: "Round the program cells in the guide to match the logos.",
+                    isOn: $roundedProgramCells,
+                    onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
+                )
+                tvFooter("Turn logos or numbers off to give long channel names more room in the Guide's channel column.")
+            }
+
+            // MARK: List view
+            // Hidden on Apple TV while the List view is removed from the
+            // tvOS UI (Logan 2026-09-16). The code and the persisted keys
+            // are untouched, so flipping TVListView.enabled brings the
+            // section and the user's stored choice straight back.
+            if TVListView.enabled {
+                SettingsSection("List view", style: .plain) {
                     TVSettingsToggleRow(
-                        icon: "tv.fill",
+                        icon: "square.on.square",
                         iconColor: .accentPrimary,
-                        title: "Show Channel Logos",
-                        subtitle: TVListView.enabled
-                            ? "Turn off to hide channel logos so longer channel names get the full row width."
-                            : "Display each channel's logo in the Guide's channel column.",
-                        isOn: $showChannelLogos,
-                        onChange: { _ in }
-                    )
-                    if showChannelLogos {
-                        tvLogoSizeRow
-                    }
-                    TVSettingsToggleRow(
-                        icon: "number",
-                        iconColor: .accentPrimary,
-                        title: "Show Channel Numbers",
-                        subtitle: TVListView.enabled
-                            ? "Turn off to hide channel numbers in the Live TV list and Guide."
-                            : "Display each channel's number in the Guide's channel column.",
-                        isOn: $showChannelNumbers,
-                        onChange: { _ in }
-                    )
-                    TVSettingsToggleRow(
-                        icon: "textformat",
-                        iconColor: .accentPrimary,
-                        title: "Show Channel Names",
-                        subtitle: TVListView.enabled
-                            ? "Turn off to hide channel names in the Live TV list and the Guide's channel column."
-                            : "Turn off to hide channel names in the Guide's channel column.",
-                        isOn: $showChannelNames,
-                        onChange: { _ in }
-                    )
-                    TVSettingsToggleRow(
-                        icon: "text.alignleft",
-                        iconColor: .accentPrimary,
-                        title: "Show Program Subtitles",
-                        subtitle: TVListView.enabled
-                            ? "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there."
-                            : "Turn off to hide the episode or match name under each program title in the Guide, for EPGs that repeat the description there.",
-                        isOn: $showProgramSubtitles,
-                        onChange: { _ in }
-                    )
-                    TVSettingsToggleRow(
-                        icon: "square.grid.3x3",
-                        iconColor: .accentPrimary,
-                        title: "Rounded Guide Logos",
-                        subtitle: "Round the channel logos in the guide.",
-                        isOn: $roundedGuideCorners,
+                        title: "Rounded List Logos and Artwork",
+                        subtitle: "Round the channel logos and program artwork in the channel list and on the app's cards.",
+                        isOn: $roundedLogoCorners,
                         onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
                     )
-                    TVSettingsToggleRow(
-                        icon: "square.grid.3x3",
-                        iconColor: .accentPrimary,
-                        title: "Rounded Program Cells",
-                        subtitle: "Round the program cells in the guide to match the logos.",
-                        isOn: $roundedProgramCells,
-                        onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
-                    )
-                    tvFooter("Turn logos or numbers off to give long channel names more room in the Guide's channel column.")
-                }
-
-                // MARK: List view
-                // Hidden on Apple TV while the List view is removed from the
-                // tvOS UI (Logan 2026-09-16). The code and the persisted keys
-                // are untouched, so flipping TVListView.enabled brings the
-                // section and the user's stored choice straight back.
-                if TVListView.enabled {
-                    SettingsSection("List view", style: .plain) {
-                        TVSettingsToggleRow(
-                            icon: "square.on.square",
-                            iconColor: .accentPrimary,
-                            title: "Rounded List Logos and Artwork",
-                            subtitle: "Round the channel logos and program artwork in the channel list and on the app's cards.",
-                            isOn: $roundedLogoCorners,
-                            onChange: { _ in SyncManager.shared.pushPreferencesImmediate() }
-                        )
-                        // Phase 3 item 3: same inline rows, now built by the
-                        // shared picker so tvOS and iOS offer one control.
-                        SettingsChoicePicker(
-                            "Default Live TV View",
-                            options: Self.liveTVViewOptions.map {
-                                SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
-                            },
-                            selection: $defaultLiveTVView
-                        )
-                    }
-                }
-
-                // MARK: Guide Layout
-                SettingsSection("Guide Layout", style: .plain) {
-                    TVSettingsSelectionRow(
-                        icon: "rectangle.grid.1x2",
-                        iconColor: theme.accent,
-                        label: "Basic",
-                        subtitle: "Full program details in every guide cell",
-                        isSelected: liveTVLayout != "preview",
-                        action: { liveTVLayout = "basic" }
-                    )
-                    TVSettingsSelectionRow(
-                        icon: "rectangle.topthird.inset.filled",
-                        iconColor: theme.accent,
-                        label: "Channel Preview",
-                        subtitle: "A banner shows the highlighted program; cells keep the title and tags",
-                        isSelected: liveTVLayout == "preview",
-                        action: { liveTVLayout = "preview" }
-                    )
-                }
-
-                // MARK: Group Selection
-                // Logan 2026-09-17: Default Group removed here too; it is
-                // set in Manage Groups. Group Selection is the only row
-                // left, so the section takes its name.
-                SettingsSection("Group Selection", style: .plain) {
-                    // Phase 3 item 3. The tvOS binding stays the remote
-                    // store's Bool; only the rows are shared now.
+                    // Phase 3 item 3: same inline rows, now built by the
+                    // shared picker so tvOS and iOS offer one control.
                     SettingsChoicePicker(
-                        "Group Selection",
-                        options: [
-                            SettingsChoice(false, "Top Group Pills"),
-                            SettingsChoice(true, "Sidebar Menu")
-                        ],
-                        selection: $remote.useGroupSidebar,
-                        footer: "How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time.",
-                        icon: "sidebar.left"
+                        "Default Live TV View",
+                        options: Self.liveTVViewOptions.map {
+                            SettingsChoice($0, liveTVViewLabel($0), icon: liveTVViewIcon($0))
+                        },
+                        selection: $defaultLiveTVView
                     )
-                }
-
-                // MARK: Badges
-                SettingsSection("Badges", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "tag",
-                        iconColor: theme.accent,
-                        title: "Show Program Badges",
-                        subtitle: "LIVE, NEW, and season/episode pills on the guide",
-                        isOn: $showEpgBadges
-                    ) { _ in }
-
-                    if showEpgBadges {
-                        // Phase 3 item 4: same five toggles, now under a
-                        // master row carrying the same summary string the
-                        // phone shows.
-                        // Multi-select pop-up on tvOS: the checkmarks are
-                        // these toggles, the sheet stays open while they
-                        // are flipped, Menu closes it.
-                        SettingsSubgroup("Badge Types",
-                                         summary: badgesSummary,
-                                         icon: "tag",
-                                         iconColor: theme.accent,
-                                         footer: "Which badges appear. Turning one off hides it everywhere badges are shown.",
-                                         optionsOnly: true) {
-                            ForEach(Self.badgeKinds, id: \.self) { kind in
-                                TVSettingsToggleRow(
-                                    icon: "tag",
-                                    iconColor: theme.accent,
-                                    title: Self.badgeTitle(kind),
-                                    subtitle: "",
-                                    isOn: badgeShownBinding(kind)
-                                ) { _ in }
-                            }
-                        }
-                    }
-
-                    tvFooter("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
-                }
-
-                // MARK: Recently Watched (GH Android#130)
-                // Never disabled on TV (a disabled row drops focus); an
-                // empty list just confirms and clears nothing.
-                SettingsSection("Recently Watched", style: .plain) {
-                    TVSettingsActionRow(
-                        icon: "clock.badge.xmark",
-                        label: "Clear Recently Watched",
-                        isDestructive: true
-                    ) { showClearRecentsConfirm = true }
-                }
-
-                // MARK: Display Scale
-                SettingsSection("Display Scale", style: .plain) {
-                    scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
-                }
-
-                // MARK: Colors
-                SettingsSection("Colors", style: .plain) {
-                    TVSettingsToggleRow(
-                        icon: "paintpalette.fill",
-                        iconColor: .accentPrimary,
-                        title: "Color Programs by Category",
-                        subtitle: "Tint guide cells by program type. Customize the palette on iPhone or iPad in Settings > Live TV.",
-                        isOn: $enableCategoryColors,
-                        onChange: { _ in }
-                    )
-                    TVSettingsToggleRow(
-                        icon: "tv.fill",
-                        iconColor: .accentPrimary,
-                        title: "Tint Channel Cards",
-                        subtitle: "Adds a colored gradient to Live TV channel cards based on what's airing now.",
-                        isOn: $tintChannelCards,
-                        onChange: { _ in }
-                    )
-                    .disabled(!enableCategoryColors)
-                    .opacity(enableCategoryColors ? 1.0 : 0.4)
                 }
             }
-            .padding(48)
+
+            // MARK: Guide Layout
+            SettingsSection("Guide Layout", style: .plain) {
+                TVSettingsSelectionRow(
+                    icon: "rectangle.grid.1x2",
+                    iconColor: theme.accent,
+                    label: "Basic",
+                    subtitle: "Full program details in every guide cell",
+                    isSelected: liveTVLayout != "preview",
+                    action: { liveTVLayout = "basic" }
+                )
+                TVSettingsSelectionRow(
+                    icon: "rectangle.topthird.inset.filled",
+                    iconColor: theme.accent,
+                    label: "Channel Preview",
+                    subtitle: "A banner shows the highlighted program; cells keep the title and tags",
+                    isSelected: liveTVLayout == "preview",
+                    action: { liveTVLayout = "preview" }
+                )
+            }
+
+            // MARK: Group Selection
+            // Logan 2026-09-17: Default Group removed here too; it is
+            // set in Manage Groups. Group Selection is the only row
+            // left, so the section takes its name.
+            SettingsSection("Group Selection", style: .plain) {
+                // Phase 3 item 3. The tvOS binding stays the remote
+                // store's Bool; only the rows are shared now.
+                SettingsChoicePicker(
+                    "Group Selection",
+                    options: [
+                        SettingsChoice(false, "Top Group Pills"),
+                        SettingsChoice(true, "Sidebar Menu")
+                    ],
+                    selection: $remote.useGroupSidebar,
+                    footer: "How channel groups are picked in the guide. Top Group Pills keep the group row above the grid; Sidebar Menu hides that row and opens when you hold Left in the guide (or from whichever button you set to Open sidebar in Remote Control). Only one is active at a time.",
+                    icon: "sidebar.left"
+                )
+            }
+
+            // MARK: Badges
+            SettingsSection("Badges", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "tag",
+                    iconColor: theme.accent,
+                    title: "Show Program Badges",
+                    subtitle: "LIVE, NEW, and season/episode pills on the guide",
+                    isOn: $showEpgBadges
+                ) { _ in }
+
+                if showEpgBadges {
+                    // Phase 3 item 4: same five toggles, now under a
+                    // master row carrying the same summary string the
+                    // phone shows.
+                    // Multi-select pop-up on tvOS: the checkmarks are
+                    // these toggles, the sheet stays open while they
+                    // are flipped, Menu closes it.
+                    SettingsSubgroup("Badge Types",
+                                     summary: badgesSummary,
+                                     icon: "tag",
+                                     iconColor: theme.accent,
+                                     footer: "Which badges appear. Turning one off hides it everywhere badges are shown.",
+                                     optionsOnly: true) {
+                        ForEach(Self.badgeKinds, id: \.self) { kind in
+                            TVSettingsToggleRow(
+                                icon: "tag",
+                                iconColor: theme.accent,
+                                title: Self.badgeTitle(kind),
+                                subtitle: "",
+                                isOn: badgeShownBinding(kind)
+                            ) { _ in }
+                        }
+                    }
+                }
+
+                tvFooter("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
+            }
+
+            // MARK: Recently Watched (GH Android#130)
+            // Never disabled on TV (a disabled row drops focus); an
+            // empty list just confirms and clears nothing.
+            SettingsSection("Recently Watched", style: .plain) {
+                TVSettingsActionRow(
+                    icon: "clock.badge.xmark",
+                    label: "Clear Recently Watched",
+                    isDestructive: true
+                ) { showClearRecentsConfirm = true }
+            }
+
+            // MARK: Display Scale
+            SettingsSection("Display Scale", style: .plain) {
+                scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
+            }
+
+            // MARK: Colors
+            SettingsSection("Colors", style: .plain) {
+                TVSettingsToggleRow(
+                    icon: "paintpalette.fill",
+                    iconColor: .accentPrimary,
+                    title: "Color Programs by Category",
+                    subtitle: "Tint guide cells by program type. Customize the palette on iPhone or iPad in Settings > Live TV.",
+                    isOn: $enableCategoryColors,
+                    onChange: { _ in }
+                )
+                TVSettingsToggleRow(
+                    icon: "tv.fill",
+                    iconColor: .accentPrimary,
+                    title: "Tint Channel Cards",
+                    subtitle: "Adds a colored gradient to Live TV channel cards based on what's airing now.",
+                    isOn: $tintChannelCards,
+                    onChange: { _ in }
+                )
+                .disabled(!enableCategoryColors)
+                .opacity(enableCategoryColors ? 1.0 : 0.4)
+            }
         }
     }
 
@@ -826,7 +823,7 @@ struct LiveTVSettingsView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 24) {
                 Text("Logo Size")
-                    .scaledFont(.system(size: 26, weight: .medium))
+                    .scaledFont(.bodyMedium)
                     .foregroundColor(.textPrimary)
                 Spacer()
                 ForEach(liveTVLogoSizeChoices, id: \.self) { value in
@@ -859,7 +856,7 @@ struct LiveTVSettingsView: View {
         let current = steps.min(by: { abs($0 - binding.wrappedValue) < abs($1 - binding.wrappedValue) }) ?? 1.0
         return HStack(spacing: 24) {
             Text(title)
-                .scaledFont(.system(size: 26, weight: .medium))
+                .scaledFont(.bodyMedium)
                 .foregroundColor(.textPrimary)
             Spacer()
             ForEach(steps, id: \.self) { step in

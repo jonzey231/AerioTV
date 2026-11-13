@@ -561,127 +561,127 @@ struct SyncSettingsView: View {
 
     #if os(tvOS)
     private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                SettingsSection("iCloud", style: .compactCard) {
-                    accountRow
-                        .padding(.horizontal, 20)
-                        .frame(minHeight: 80)
-                    TVSettingsToggleRow(
-                        icon: "icloud.fill",
-                        iconColor: .accentPrimary,
-                        title: "iCloud Sync",
-                        subtitle: "Sync playlists, preferences, and watch progress",
-                        isOn: cloudBinding
-                    ) { _ in }
+        // Laid out like every other page (owner 2026-11-13): small-caps
+        // eyebrows, standard rows with icon tiles, stamps as subtitles, the
+        // shared pane container.
+        TVSettingsPane(spacing: 32) {
+            SettingsSection("iCloud", style: .plain) {
+                // Who iCloud syncs as: a standard row, left-aligned, not a
+                // focus stop (Select would do nothing).
+                accountRow
+                    .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 6)
+                    .background(tvSettingsCardBG(false))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                TVSettingsToggleRow(
+                    icon: "icloud.fill",
+                    iconColor: .accentPrimary,
+                    title: "iCloud Sync",
+                    subtitle: "Sync playlists, preferences, and watch progress",
+                    isOn: cloudBinding
+                ) { _ in }
 
-                    if iCloudSyncEnabled && cloudSignedIn {
-                        // tvOS: single-line rows, the stamp rides the title.
-                        TVSettingsActionRow(
-                            icon: "arrow.triangle.2.circlepath.icloud",
-                            label: syncLastDate > 0
-                                ? "Push to iCloud  ·  Last synced \(lastSyncedString)"
-                                : "Push to iCloud",
-                            isBusy: sync.activity == .pushing
-                        ) {
-                            // tvOS rows are never `.disabled` (that would drop them
-                            // out of the focus engine), so a run in flight swallows the press.
-                            guard sync.activity == .idle else { return }
-                            showPushConfirm = true
-                        }
-                        TVSettingsActionRow(
-                            icon: "icloud.and.arrow.down",
-                            label: "Pull from iCloud",
-                            isBusy: sync.activity == .pulling
-                        ) {
-                            guard sync.activity == .idle else { return }
-                            showPullConfirm = true
-                        }
-                        SyncActivityRow()
+                if iCloudSyncEnabled && cloudSignedIn {
+                    TVSettingsActionRow(
+                        icon: "arrow.triangle.2.circlepath.icloud",
+                        label: "Push to iCloud",
+                        subtitle: syncLastDate > 0 ? "Last synced \(lastSyncedString)" : nil,
+                        isBusy: sync.activity == .pushing
+                    ) {
+                        // tvOS rows are never `.disabled` (that would drop them
+                        // out of the focus engine), so a run in flight swallows the press.
+                        guard sync.activity == .idle else { return }
+                        showPushConfirm = true
                     }
                     TVSettingsActionRow(
-                        icon: "trash.circle.fill",
-                        label: "Clear iCloud Data",
-                        isDestructive: true
+                        icon: "icloud.and.arrow.down",
+                        label: "Pull from iCloud",
+                        isBusy: sync.activity == .pulling
                     ) {
-                        showClearICloudConfirm = true
+                        guard sync.activity == .idle else { return }
+                        showPullConfirm = true
                     }
+                    SyncActivityRow()
                 }
+                TVSettingsActionRow(
+                    icon: "trash.circle.fill",
+                    label: "Clear iCloud Data",
+                    isDestructive: true
+                ) {
+                    showClearICloudConfirm = true
+                }
+            }
 
-                if dsyncAvailable || dsyncOn {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SettingsSection("Dispatcharr Sync", style: .compactCard) {
-                            TVSettingsToggleRow(
-                                icon: "arrow.triangle.2.circlepath",
-                                iconColor: .accentPrimary,
-                                title: "Dispatcharr Sync",
-                                subtitle: dsyncAvailable ? "Store sync data on your Dispatcharr server under each profile"
-                                    : "Needs a Dispatcharr playlist",
-                                isOn: dsyncBinding
-                            ) { _ in }
-                            if dsyncOn {
-                                TVSettingsActionRow(
-                                    icon: "arrow.triangle.2.circlepath",
-                                    label: "Sync Now  ·  \(syncNowSubtitle)",
-                                    isBusy: dsyncManager.ui.running
-                                ) {
-                                    if dsyncAvailable && !dsyncManager.ui.running { DispatcharrSyncManager.shared.syncNow() }
-                                }
-                            }
-                            if manualRows.pushPullDispatcharr {
-                                TVSettingsActionRow(
-                                    icon: "arrow.triangle.2.circlepath",
-                                    label: dsyncLast > 0
-                                        ? "Push to Dispatcharr  ·  Last synced \(dsyncLastString)"
-                                        : "Push to Dispatcharr",
-                                    isBusy: dsyncPushStatus.isRunning
-                                ) {
-                                    if !manualRunning { dsyncPushConfirm = true }
-                                }
-                                SyncActionStatusLine(status: dsyncPushStatus)
-                                TVSettingsActionRow(
-                                    icon: "arrow.down.circle",
-                                    label: "Pull from Dispatcharr",
-                                    isBusy: dsyncPullStatus.isRunning
-                                ) {
-                                    if !manualRunning { dsyncPullConfirm = true }
-                                }
-                                SyncActionStatusLine(status: dsyncPullStatus)
-                            }
-                            if manualRows.pushToBoth {
-                                TVSettingsActionRow(
-                                    icon: "arrow.triangle.2.circlepath",
-                                    label: "Push to both",
-                                    isBusy: bothPushStatus.isRunning
-                                ) {
-                                    if !manualRunning && sync.activity == .idle { bothPushConfirm = true }
-                                }
-                                SyncActionStatusLine(status: bothPushStatus)
-                            }
-                        }
-                        if let f = dsyncFooter {
-                            Text(f)
-                                .scaledFont(.footnote.subtext())
-                                .foregroundColor(Color.contrastText(.textTertiary))
-                                .padding(.horizontal, 24)
+            if dsyncAvailable || dsyncOn {
+                SettingsSection("Dispatcharr Sync", style: .plain) {
+                    TVSettingsToggleRow(
+                        icon: "arrow.triangle.2.circlepath",
+                        iconColor: .accentPrimary,
+                        title: "Dispatcharr Sync",
+                        subtitle: dsyncAvailable ? "Store sync data on your Dispatcharr server under each profile"
+                            : "Needs a Dispatcharr playlist",
+                        isOn: dsyncBinding
+                    ) { _ in }
+                    if dsyncOn {
+                        TVSettingsActionRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            label: "Sync Now",
+                            subtitle: syncNowSubtitle,
+                            isBusy: dsyncManager.ui.running
+                        ) {
+                            if dsyncAvailable && !dsyncManager.ui.running { DispatcharrSyncManager.shared.syncNow() }
                         }
                     }
-                }
-
-                SettingsSection("Sync Categories", style: .compactCard) {
-                    TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild("Sync Categories"),
-                                     logTitle: "Sync Categories") {
-                        SettingsRow(icon: "slider.horizontal.3",
-                                    iconColor: .accentPrimary,
-                                    title: "Sync Categories",
-                                    subtitle: "Choose what syncs across your devices")
+                    if manualRows.pushPullDispatcharr {
+                        TVSettingsActionRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            label: "Push to Dispatcharr",
+                            subtitle: dsyncLast > 0 ? "Last synced \(dsyncLastString)" : nil,
+                            isBusy: dsyncPushStatus.isRunning
+                        ) {
+                            if !manualRunning { dsyncPushConfirm = true }
+                        }
+                        SyncActionStatusLine(status: dsyncPushStatus)
+                        TVSettingsActionRow(
+                            icon: "arrow.down.circle",
+                            label: "Pull from Dispatcharr",
+                            isBusy: dsyncPullStatus.isRunning
+                        ) {
+                            if !manualRunning { dsyncPullConfirm = true }
+                        }
+                        SyncActionStatusLine(status: dsyncPullStatus)
+                    }
+                    if manualRows.pushToBoth {
+                        TVSettingsActionRow(
+                            icon: "arrow.triangle.2.circlepath",
+                            label: "Push to both",
+                            isBusy: bothPushStatus.isRunning
+                        ) {
+                            if !manualRunning && sync.activity == .idle { bothPushConfirm = true }
+                        }
+                        SyncActionStatusLine(status: bothPushStatus)
+                    }
+                    if let f = dsyncFooter {
+                        // The footnote style every other page uses.
+                        Text(f)
+                            .scaledFont(.system(size: SettingsMetrics.tvFootnoteSize).subtext())
+                            .foregroundColor(Color.contrastText(.textTertiary))
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
                     }
                 }
             }
-            .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.horizontal, 40)
-            .padding(.vertical, 40)
+
+            SettingsSection("Sync Categories", style: .plain) {
+                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild("Sync Categories"),
+                                 logTitle: "Sync Categories") {
+                    SettingsRow(icon: "slider.horizontal.3",
+                                iconColor: .accentPrimary,
+                                title: "Sync Categories",
+                                subtitle: "Choose what syncs across your devices")
+                }
+            }
         }
     }
     #endif
