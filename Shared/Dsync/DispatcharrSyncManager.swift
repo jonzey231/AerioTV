@@ -42,6 +42,11 @@ final class DsyncSession {
     let token: String
     let mutex = DsyncMutex()
     var client: DispatcharrAppDataClient?
+    /// The bucket as last read or written in this session, in memory: a write
+    /// re-emits every other category from it, and the copy on disk carries the
+    /// TMDB key only as a digest (DsyncSecretCache), which can stand in for it
+    /// only when it is this device's key.
+    var liveBucket: [DsyncBucket: DsyncObject] = [:]
     /// Buckets the last read before a PUT found absent or unreadable on the server.
     var noServerBucket = Set<DsyncBucket>()
     /// Ended by a route change: nothing it still reads from the old address is saved.
@@ -182,6 +187,9 @@ final class DispatcharrSyncManager: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // Saved copies from before the TMDB key was kept out of them.
+        let scrubbed = state.redactStoredSecrets()
+        if scrubbed > 0 { debugLog("[DSYNC] saved copies: \(scrubbed) rewritten without the TMDB key") }
         let nc = NotificationCenter.default
         // These notifications arrive on whatever thread posted them (the
         // guide cache saves from a background task); the sink closures run
@@ -361,6 +369,7 @@ final class DispatcharrSyncManager: ObservableObject {
     private func discardServerCopies(_ playlistId: String) {
         if let s = session, s.playlistId == playlistId {
             s.discarded = true
+            s.liveBucket.removeAll()
             endSession(s)
             session = nil
         }
@@ -900,9 +909,12 @@ final class DispatcharrSyncManager: ObservableObject {
     /// The server key for [b] in this session; empty before /me/ answered (every caller checks userKey first).
     private func wire(_ s: DsyncSession, _ b: DsyncBucket) -> String { b.wire(s.userKey ?? "") }
 
-    private func bucketRaw(_ s: DsyncSession, _ b: DsyncBucket) -> DsyncObject? { state.object(k("braw", s) + "|" + b.rawValue) }
+    private func bucketRaw(_ s: DsyncSession, _ b: DsyncBucket) -> DsyncObject? {
+        s.liveBucket[b] ?? state.object(k("braw", s) + "|" + b.rawValue)
+    }
     private func saveBucketRaw(_ s: DsyncSession, _ b: DsyncBucket, _ raw: DsyncObject) {
         guard !s.discarded else { return }
+        s.liveBucket[b] = raw
         state.setObject(k("braw", s) + "|" + b.rawValue, raw)
         foldProviders(s, raw)
     }

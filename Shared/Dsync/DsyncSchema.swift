@@ -1058,3 +1058,72 @@ enum DsyncManual {
         }
     }
 }
+
+/// The TMDB key never rests in the saved server copies on disk (section
+/// 4.13; hardening 2026-11-13, Android parity): a copy's `apiKey` is stored
+/// as `apiKeySha256`, its SHA-256 digest, in the member's place. A read puts
+/// this device's key back when the digests match. Otherwise the key is not
+/// known here: a category or data copy comes back without `apiKey` (its other
+/// members kept), and a bucket copy without its tmdbKey category, so no
+/// digest ever reaches a write. A clear ("") is no secret and stays as is.
+enum DsyncSecretCache {
+    static let DIGEST = "apiKeySha256"
+    private static let KEY = "apiKey"
+
+    static func digest(_ key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// [name] is the store key: one ending "|tmdbKey" holds a tmdbKey category
+    /// copy (`raw`, with `data`) or data copy (`data`); any other may hold a bucket.
+    static func redact(_ o: DsyncObject, name: String) -> DsyncObject {
+        if isTMDBCopy(name) {
+            if let d = o["data"]?.asObject { return o.replacing("data", .object(redactData(d))) }
+            return redactData(o)
+        }
+        guard let cats = o[DsyncV2.CATEGORIES]?.asObject, let cat = cats[DsyncKey.tmdbKey.suffix]?.asObject,
+              let d = cat["data"]?.asObject else { return o }
+        let c2 = cat.replacing("data", .object(redactData(d)))
+        return o.replacing(DsyncV2.CATEGORIES, .object(cats.replacing(DsyncKey.tmdbKey.suffix, .object(c2))))
+    }
+
+    /// The reverse of [redact] for this device's key ([localKey] is read only
+    /// when a digest is present).
+    static func restore(_ o: DsyncObject, name: String, localKey: () -> String) -> DsyncObject {
+        if isTMDBCopy(name) {
+            if let d = o["data"]?.asObject { return o.replacing("data", .object(restoreData(d, localKey) ?? without(d, DIGEST))) }
+            return restoreData(o, localKey) ?? without(o, DIGEST)
+        }
+        guard let cats = o[DsyncV2.CATEGORIES]?.asObject, let cat = cats[DsyncKey.tmdbKey.suffix]?.asObject,
+              let d = cat["data"]?.asObject, d[DIGEST] != nil else { return o }
+        guard let back = restoreData(d, localKey) else {
+            return o.replacing(DsyncV2.CATEGORIES, .object(without(cats, DsyncKey.tmdbKey.suffix)))
+        }
+        let c2 = cat.replacing("data", .object(back))
+        return o.replacing(DsyncV2.CATEGORIES, .object(cats.replacing(DsyncKey.tmdbKey.suffix, .object(c2))))
+    }
+
+    private static func isTMDBCopy(_ name: String) -> Bool { name.hasSuffix("|" + DsyncKey.tmdbKey.suffix) }
+
+    private static func redactData(_ d: DsyncObject) -> DsyncObject {
+        guard let k = d[KEY]?.asStr, !k.isEmpty else { return d }
+        return DsyncObject(d.entries.map { $0.0 == KEY ? (DIGEST, .string(digest(k))) : $0 })
+    }
+
+    /// Nil: a digest that is not this device's key.
+    private static func restoreData(_ d: DsyncObject, _ localKey: () -> String) -> DsyncObject? {
+        guard let dg = d[DIGEST]?.asStr else { return d }
+        let k = localKey()
+        guard !k.isEmpty, digest(k) == dg else { return nil }
+        return DsyncObject(d.entries.map { $0.0 == DIGEST ? (KEY, .string(k)) : $0 })
+    }
+
+    private static func without(_ o: DsyncObject, _ member: String) -> DsyncObject { o.filterKeys { $0 != member } }
+}
+
+private extension DsyncObject {
+    /// A copy with [key]'s value replaced in place (member order kept).
+    func replacing(_ key: String, _ value: DsyncJSON) -> DsyncObject {
+        DsyncObject(entries.map { $0.0 == key ? (key, value) : $0 })
+    }
+}

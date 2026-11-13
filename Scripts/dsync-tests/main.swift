@@ -1171,4 +1171,53 @@ do {
     check(DsyncPayloads.tmdbKeepsLocal(local: "k2", remote: "", localEditedAt: 0, remoteAt: 400), "unknown time: a key beats a clear")
 }
 
+// MARK: - Saved server copies never hold the TMDB key (hardening 2026-11-13)
+
+do {
+    let key = "tmdb-test-key-1"
+    let dg = DsyncSecretCache.digest(key)
+    eq(dg.count, 64, "SHA-256 hex digest")
+    let bucketName = "braw|pid|default|app.molinete.aerio"
+    let rawName = "raw|pid|default|tmdbKey", dataName = "data|pid|default|tmdbKey"
+    let bucket = obj(#"{"schemaVersion":3,"categories":{"favorites":{"updatedAt":"2026-11-13T00:00:00Z","data":{"ids":[1]}},"tmdbKey":{"updatedAt":"2026-11-13T00:00:00Z","deviceId":"D","data":{"apiKey":"tmdb-test-key-1","x":1}}}}"#)
+
+    // Redact: the key is gone, its digest sits in its place, everything else is kept.
+    let rb = DsyncSecretCache.redact(bucket, name: bucketName)
+    let rbText = DsyncJSONEncoder.encode(rb)
+    check(!rbText.contains(key), "bucket copy holds no key")
+    check(rbText.contains(#"{"apiKeySha256":"\#(dg)","x":1}"#), "digest in the key's place, order kept")
+    check(rbText.contains(#""favorites":{"updatedAt":"2026-11-13T00:00:00Z","data":{"ids":[1]}}"#), "other categories untouched")
+    // Restore with this device's key: byte for byte the original.
+    eq(DsyncJSONEncoder.encode(DsyncSecretCache.restore(rb, name: bucketName) { key }), DsyncJSONEncoder.encode(bucket), "bucket restores exactly")
+    // Another key here: the category is left out, never a digest.
+    let other = DsyncSecretCache.restore(rb, name: bucketName) { "a-different-key" }
+    check(other[DsyncV2.CATEGORIES]?.asObject?["tmdbKey"] == nil, "unknown key: tmdbKey left out of the bucket")
+    check(other[DsyncV2.CATEGORIES]?.asObject?["favorites"] != nil, "unknown key: other categories kept")
+    check(DsyncSecretCache.restore(rb, name: bucketName) { "" }[DsyncV2.CATEGORIES]?.asObject?["tmdbKey"] == nil, "no key here: left out")
+
+    // Category (raw) and data copies.
+    let raw = obj(#"{"updatedAt":"2026-11-13T00:00:00Z","deviceId":"D","data":{"apiKey":"tmdb-test-key-1"}}"#)
+    let rr = DsyncSecretCache.redact(raw, name: rawName)
+    check(!DsyncJSONEncoder.encode(rr).contains(key), "category copy holds no key")
+    eq(DsyncSecretCache.restore(rr, name: rawName) { key }, raw, "category copy restores")
+    eq(DsyncJSONEncoder.encode(DsyncSecretCache.restore(rr, name: rawName) { "zz" }), #"{"updatedAt":"2026-11-13T00:00:00Z","deviceId":"D","data":{}}"#,
+       "unknown key: data kept without apiKey (a write still has a base)")
+    let data = obj(#"{"apiKey":"tmdb-test-key-1"}"#)
+    let rd = DsyncSecretCache.redact(data, name: dataName)
+    eq(DsyncJSONEncoder.encode(rd), #"{"apiKeySha256":"\#(dg)"}"#, "data copy: digest only")
+    eq(DsyncSecretCache.restore(rd, name: dataName) { key }, data, "data copy restores")
+
+    // A clear is no secret; other blobs and names pass through.
+    let clear = obj(#"{"apiKey":""}"#)
+    eq(DsyncSecretCache.redact(clear, name: dataName), clear, "a clear stays")
+    eq(DsyncSecretCache.restore(clear, name: dataName) { key }, clear, "a clear restores as itself")
+    let fav = obj(#"{"ids":[1,2]}"#)
+    eq(DsyncSecretCache.redact(fav, name: "data|pid|default|favorites"), fav, "other categories untouched")
+    var asked = false
+    _ = DsyncSecretCache.restore(fav, name: "data|pid|default|favorites") { asked = true; return key }
+    check(!asked, "the Keychain is read only when a digest is present")
+    let bare = obj(#"{"apiKey":"not-a-tmdb-copy"}"#)
+    eq(DsyncSecretCache.redact(bare, name: "rstamp|pid|default"), bare, "an apiKey member outside a tmdbKey copy is not touched")
+}
+
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

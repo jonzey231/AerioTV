@@ -67,9 +67,12 @@ final class DsyncStateStore {
         return n
     }
 
+    /// A saved copy holds the TMDB key only as its digest (DsyncSecretCache);
+    /// a read puts this device's key back when it matches.
     func object(_ k: String) -> DsyncObject? {
-        guard let data = try? Data(contentsOf: file(k)) else { return nil }
-        return DsyncJSONParser.parse(data)?.asObject
+        guard let data = try? Data(contentsOf: file(k)),
+              let o = DsyncJSONParser.parse(data)?.asObject else { return nil }
+        return DsyncSecretCache.restore(o, name: k) { TMDBPosters.loadAPIKey().trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
     func setObject(_ k: String, _ o: DsyncObject?) {
@@ -78,9 +81,29 @@ final class DsyncStateStore {
             try? FileManager.default.removeItem(at: url)
             return
         }
-        do { try Data(DsyncJSONEncoder.encode(o).utf8).write(to: url, options: .atomic) } catch {
+        let stored = DsyncSecretCache.redact(o, name: k)
+        do { try Data(DsyncJSONEncoder.encode(stored).utf8).write(to: url, options: .atomic) } catch {
             debugLog("[DSYNC] state write failed: \(type(of: error))")
         }
+    }
+
+    /// Rewrites every saved copy through the redaction, so a copy saved before
+    /// it existed (with the TMDB key in it) does not wait for its next save.
+    /// Returns how many files changed.
+    @discardableResult
+    func redactStoredSecrets() -> Int {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        var n = 0
+        for f in files where f.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: f), let o = DsyncJSONParser.parse(data)?.asObject else { continue }
+            // File names flatten "|" to "_" (file(_:)); the tmdbKey copies end "_tmdbKey".
+            let stem = f.deletingPathExtension().lastPathComponent
+            let name = stem.hasSuffix("_" + DsyncKey.tmdbKey.suffix) ? "copy|" + DsyncKey.tmdbKey.suffix : stem
+            let stored = DsyncSecretCache.redact(o, name: name)
+            guard stored != o else { continue }
+            if (try? Data(DsyncJSONEncoder.encode(stored).utf8).write(to: f, options: .atomic)) != nil { n += 1 }
+        }
+        return n
     }
 
     /// Random install id (section 3), never tied to hardware ids.
