@@ -792,6 +792,22 @@ do {
     check(!L.gateNeedsPresenting(locked: false, scenes: 1, scenesShowingGate: 0), "unlocked: no gate")
 }
 
+// MARK: - The main screen stays laid out under the lock, unreachable (owner 2026-11-13)
+do {
+    let L = LaunchLockRules.self
+    check(L.tvPresentsOverMainScreen, "Apple TV presents the lock over the main screen, so the main screen is laid out before the PIN passes")
+    let up = L.beneath(locked: true, wasInteractive: true, wasAccessibilityHidden: false)
+    check(!up.interactive, "while locked, the screen beneath takes no focus or touch")
+    check(up.accessibilityHidden, "and VoiceOver cannot reach it")
+    let after = L.beneath(locked: false, wasInteractive: true, wasAccessibilityHidden: false)
+    check(after.interactive && !after.accessibilityHidden, "once the PIN passes it is exactly as it was")
+    let wasOff = L.beneath(locked: false, wasInteractive: false, wasAccessibilityHidden: true)
+    check(!wasOff.interactive && wasOff.accessibilityHidden, "a screen that was already off stays off")
+    // The gates that keep the main screen quiet do not depend on it being off screen.
+    check(!L.promptMayShow(gateArmed: true, pickerUp: false), "no prompt while the main screen is laid out under the PIN")
+    check(!L.promptMayShow(gateArmed: false, pickerUp: true), "nor under the Apple TV launch picker")
+}
+
 // MARK: - A stray Setting Up cover is always closed (device report 2026-11-12)
 do {
     let L = LaunchLockRules.self

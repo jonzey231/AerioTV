@@ -103,6 +103,30 @@ final class GuidePreviewArtAnchor: ObservableObject {
     }
 }
 
+/// Reports whether the view it backs is in a window, so geometry from a
+/// layout made before a page is on screen is not published.
+private struct GuideWindowPresenceProbe: UIViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let v = ProbeView()
+        v.isUserInteractionEnabled = false
+        v.isAccessibilityElement = false
+        v.onChange = onChange
+        return v
+    }
+
+    func updateUIView(_ v: ProbeView, context: Context) { v.onChange = onChange }
+
+    final class ProbeView: UIView {
+        var onChange: ((Bool) -> Void)?
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            onChange?(window != nil)
+        }
+    }
+}
+
 struct GuidePreviewBanner: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -135,6 +159,10 @@ struct GuidePreviewBanner: View {
     /// been cleared (layout toggled off and back on) while the geometry is
     /// unchanged, so onGeometryChange never fires again.
     @State private var lastArtBottom: CGFloat = 0
+    /// The banner is in a window (GuideWindowPresenceProbe).
+    @State private var onScreen = false
+    /// Entered a window and no layout has published since.
+    @State private var anchorEntryPending = false
     /// The corner mini player (410 wide, 40 from the trailing edge) sits
     /// over the banner's right end; the copy stops short of it.
     ///
@@ -195,11 +223,30 @@ struct GuidePreviewBanner: View {
                 // that resizes when the image lands moves the mini too.
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { maxY in
                     lastArtBottom = maxY
-                    GuidePreviewArtAnchor.shared.report(maxY, owner: anchorOwner)
+                    anchorEntryPending = false
+                    if onScreen { GuidePreviewArtAnchor.shared.report(maxY, owner: anchorOwner) }
                 }
                 .onAppear {
-                    GuidePreviewArtAnchor.shared.report(lastArtBottom, owner: anchorOwner)
+                    if onScreen { GuidePreviewArtAnchor.shared.report(lastArtBottom, owner: anchorOwner) }
                 }
+                // Only a banner on screen moves the anchor. A TabView page is
+                // first laid out at the full window size before it is put in
+                // the window, and that layout's art bottom (237 on a 1080p TV)
+                // used to be published ahead of the real one (394; tvOS
+                // simulator 2026-11-13).
+                .background(GuideWindowPresenceProbe { inWindow in
+                    onScreen = inWindow
+                    guard inWindow else { return }
+                    // The layout in the window publishes itself. When it is
+                    // the same as the one before (no geometry change), the
+                    // last reading is the on-screen one: publish it.
+                    anchorEntryPending = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        guard anchorEntryPending, onScreen else { return }
+                        anchorEntryPending = false
+                        GuidePreviewArtAnchor.shared.report(lastArtBottom, owner: anchorOwner)
+                    }
+                })
             if let program {
                 copy(for: program)
                     .frame(maxWidth: .infinity, alignment: .leading)

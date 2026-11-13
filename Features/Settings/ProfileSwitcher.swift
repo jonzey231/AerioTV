@@ -510,35 +510,84 @@ final class LaunchLockWindow {
         }
     }
 
+    /// Screens beneath the lock, with what they had before it covered them.
+    private final class Shielded {
+        weak var view: UIView?
+        let interactive: Bool
+        let accessibilityHidden: Bool
+        init(_ view: UIView) {
+            self.view = view
+            interactive = view.isUserInteractionEnabled
+            accessibilityHidden = view.accessibilityElementsHidden
+        }
+    }
+    private var shielded: [Shielded] = []
+
+    /// Nothing beneath the lock takes focus, a touch, or VoiceOver until it
+    /// passes (LaunchLockRules.beneath); afterwards each is exactly as it was.
+    private func shield(_ views: [UIView]) {
+        for v in views where !shielded.contains(where: { $0.view === v }) {
+            shielded.append(Shielded(v))
+            let b = LaunchLockRules.beneath(locked: true, wasInteractive: v.isUserInteractionEnabled,
+                                            wasAccessibilityHidden: v.accessibilityElementsHidden)
+            v.isUserInteractionEnabled = b.interactive
+            v.accessibilityElementsHidden = b.accessibilityHidden
+        }
+    }
+
+    private func unshield() {
+        for s in shielded {
+            guard let v = s.view else { continue }
+            let b = LaunchLockRules.beneath(locked: false, wasInteractive: s.interactive,
+                                            wasAccessibilityHidden: s.accessibilityHidden)
+            v.isUserInteractionEnabled = b.interactive
+            v.accessibilityElementsHidden = b.accessibilityHidden
+        }
+        shielded.removeAll()
+    }
+
     #if os(tvOS)
     /// Apple TV: the lock is presented over the app's topmost controller, the
     /// same proven path as the rejected-key prompt and Fix Login (focus moves
     /// to it); the watchdog presents it again whenever it is not on screen.
+    /// Over the main screen, not in place of it (LaunchLockRules
+    /// .tvPresentsOverMainScreen): a full-screen presentation took the main
+    /// screen out of the window, so it was first laid out when the PIN passed,
+    /// in front of the user (the preview banner stepped down the screen).
     private var host: UIViewController?
 
     private func show() {
         if let h = host, h.viewIfLoaded?.window != nil { return }
         let all = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows).filter { $0.windowLevel == .normal && !$0.isHidden }
-        guard var top = (all.first { $0.isKeyWindow } ?? all.first)?.rootViewController else { return }
-        while let next = top.presentedViewController, next !== host { top = next }
+        guard let rootVC = (all.first { $0.isKeyWindow } ?? all.first)?.rootViewController else { return }
+        var top = rootVC
+        var beneath: [UIView] = [rootVC.view]
+        while let next = top.presentedViewController, next !== host {
+            top = next
+            beneath.append(next.view)
+        }
         guard !top.isBeingDismissed, !top.isBeingPresented, !(top is UIAlertController) else { return }
         var root: AnyView = AnyView(LaunchLockView())
         if let c = AerioApp.sharedContainer { root = AnyView(LaunchLockView().modelContainer(c)) }
         let h = UIHostingController(rootView: root)
-        h.modalPresentationStyle = .fullScreen
+        h.modalPresentationStyle = LaunchLockRules.tvPresentsOverMainScreen ? .overFullScreen : .fullScreen
         h.isModalInPresentation = true
+        // Opaque from its first frame, before SwiftUI draws the lock's own background.
+        h.view.backgroundColor = .black
         host = h
+        shield(beneath)
         top.present(h, animated: false)
-        debugLog("[PROFILE] launch lock on screen (presented over the topmost screen)")
+        debugLog("[PROFILE] launch lock on screen (over the main screen; \(beneath.count) screen(s) beneath take no focus)")
     }
 
     private func hide() {
-        guard let h = host else { return }
+        guard let h = host else { unshield(); return }
         host = nil
         // No animation: the next screen (the Setting Up cover, What's New) can
         // present right away without racing a transition (LaunchLockRules).
         h.presentingViewController?.dismiss(animated: LaunchLockRules.lockDismissAnimated)
+        unshield()
         debugLog("[PROFILE] launch lock passed; its screen is gone")
     }
     #else
@@ -555,6 +604,9 @@ final class LaunchLockWindow {
             let w = UIWindow(windowScene: scene)
             w.windowLevel = .alert + 1
             w.rootViewController = host
+            w.accessibilityViewIsModal = true
+            // The app's own windows under it take no focus, touch, or VoiceOver.
+            shield(scene.windows.filter { $0 !== w && $0.windowLevel == .normal })
             w.makeKeyAndVisible()
             windows[ObjectIdentifier(scene)] = w
             debugLog("[PROFILE] launch lock on screen (its own window above every alert and sheet)")
@@ -562,6 +614,7 @@ final class LaunchLockWindow {
     }
 
     private func hide() {
+        unshield()
         guard !windows.isEmpty else { return }
         for (_, w) in windows {
             w.isHidden = true

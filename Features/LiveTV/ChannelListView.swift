@@ -628,7 +628,7 @@ struct ChannelListView: View {
         let _ = TabProbe.probePublishers(channelStore: channelStore, nowPlaying: nowPlaying,
                                          favorites: favoritesStore, collections: collectionsStore,
                                          guide: GuideStore.shared)
-        NavigationStack {
+        LiveTVStack {
             mainContent
                 #if os(tvOS)
                 .overlay(alignment: .bottom) {
@@ -7097,6 +7097,24 @@ struct ChannelBadge: View {
         }
         .frame(width: slotWidth)
         .accessibilityElement(children: .combine)
+        #endif
+    }
+}
+
+/// Live TV's container: a NavigationStack on iPhone and iPad (their bar and
+/// search live in it), none on Apple TV, where nothing in Live TV pushes and
+/// the bar is always hidden. A tvOS stack lays its navigation bar out for one
+/// pass before `.toolbar(.hidden)` lands, so the page was first placed under a
+/// 145 pt bar and then moved up (tvOS simulator 2026-11-13: the guide region
+/// at y 302, then 157; the preview banner's art bottom at 539, then 394).
+private struct LiveTVStack<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        #if os(tvOS)
+        content
+        #else
+        NavigationStack { content }
         #endif
     }
 }
