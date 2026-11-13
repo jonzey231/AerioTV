@@ -1059,10 +1059,26 @@ struct AddProfileFlow: View {
                 ProfileTextField(label: "Password", text: $mSecret, placeholder: "Dispatcharr password", secure: true)
             } else {
                 ProfileTextField(label: "API Key", text: $mSecret, placeholder: "Paste the user's API key", secure: true)
+                #if os(iOS)
+                // iPhone and iPad (Apple TV has no camera): the user's Dispatcharr QR
+                // code (its Users page shows one per user) fills the API Key field.
+                // Nothing is added until Add Profile (owner 2026-11-12).
+                QrScanActions(enabled: !busy, prompt: ScannedCode.addProfilePrompt,
+                              accept: { ScannedCode.addProfileProblem($0, playlistURLs: playlistURLs) },
+                              linksOnly: true, scanCapsule: true) { r in
+                    if case .userKey(let k) = r { mSecret = k.apiKey; error = nil }
+                }
+                #endif
             }
             if busy { ProgressView().tint(.accentPrimary) }
             if let error { Text(error).scaledFont(ProfileUI.small).foregroundColor(ProfileUI.errorColor) }
         }
+    }
+
+    /// The playlist's server URL and local URL, for a scanned code's server check.
+    private var playlistURLs: [String] {
+        guard let s = DsyncLocal.server(playlistId) else { return [] }
+        return [s.baseURL, s.localURL]
     }
 }
 

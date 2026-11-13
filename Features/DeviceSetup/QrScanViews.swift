@@ -256,6 +256,9 @@ struct QrScanActions: View {
     /// Onboarding Add Profiles: only "Choose from Photos" and "Import file" as small
     /// links; the Scan a QR code card opens the camera through scanTrigger (Android linksOnly).
     var linksOnly = false
+    /// With linksOnly: a full-width outlined "Scan QR code" capsule above the
+    /// links (Add Profile, API Key mode).
+    var scanCapsule = false
     /// Bump to open the camera from outside (the onboarding Scan a QR code card).
     var scanTrigger = 0
     let onResult: (ScannedCode.Result) -> Void
@@ -278,6 +281,21 @@ struct QrScanActions: View {
     var body: some View {
         VStack(alignment: linksOnly ? .center : .leading, spacing: linksOnly ? 2 : 6) {
             if linksOnly {
+                if scanCapsule {
+                    Button { error = nil; scanning = true } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "qrcode.viewfinder")
+                            Text("Scan QR code").scaledFont(.bodyMedium)
+                        }
+                        .foregroundColor(.accentPrimary)
+                        .frame(maxWidth: .infinity, minHeight: 48)
+                        .background(Capsule(style: .continuous).fill(Color.accentPrimary.opacity(0.08)))
+                        .overlay(Capsule(style: .continuous).stroke(Color.accentPrimary.opacity(0.35), lineWidth: 1))
+                        .contentShape(Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!enabled || busy)
+                }
                 HStack(spacing: 8) {
                     linkButton("Choose from Photos") { error = nil; showPhotos = true }
                     linkButton("Import file") { error = nil; showFile = true }

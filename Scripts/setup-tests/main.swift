@@ -483,5 +483,25 @@ do {
     }
 }
 
+// MARK: - Add Profile, API Key mode: a scanned or imported code (owner 2026-11-12)
+do {
+    let mine = ["https://tv.example.com", "http://192.168.1.20:9191"]
+    func key(_ base: String?) -> ScannedCode.Result { .userKey(.init(apiKey: "k", baseUrl: base, username: nil)) }
+    func problem(_ r: ScannedCode.Result, _ urls: [String] = mine) -> String? { ScannedCode.addProfileProblem(r, playlistURLs: urls) }
+    eq(problem(key("https://tv.example.com")), nil, "this server's code fills the key")
+    eq(problem(key("http://TV.example.com:9191")), nil, "the same host over another scheme and port")
+    eq(problem(key("http://192.168.1.20:9191")), nil, "the local URL's host")
+    eq(problem(key(nil)), nil, "a code without a server address is taken as is")
+    eq(problem(key("https://other.example.com")), ScannedCode.otherServerMessage, "another server's code is refused")
+    eq(problem(key("https://other.example.com"), ["", ""]), nil, "a playlist without an address takes the code")
+    eq(problem(.setupLink("aeriotv://setup?v=1")), ScannedCode.setupCodeInAddProfile, "a setup code is refused")
+    eq(problem(.invalid), ScannedCode.invalidMessage, "anything else gets the usual message")
+    eq(ScannedCode.host(" TV.Example.com:9191/x "), "tv.example.com", "a bare address's host")
+    eq(ScannedCode.host(""), nil, "no address, no host")
+    eq(ScannedCode.addProfilePrompt, "Point the camera at a Dispatcharr user QR code.", "camera prompt")
+    eq(ScannedCode.setupCodeInAddProfile, "This is an AerioTV setup code. Scan a Dispatcharr user QR code.", "setup code copy")
+    eq(ScannedCode.otherServerMessage, "This user code is for a different Dispatcharr server.", "other server copy")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

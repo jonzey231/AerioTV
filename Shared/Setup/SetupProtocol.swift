@@ -797,6 +797,10 @@ enum SetupProfileRules {
 enum ScannedCode {
     static let invalidMessage = "This is not a Dispatcharr user code or an AerioTV setup code."
     static let noQRInImage = "No QR code found in that image."
+    /// Add Profile, API Key mode (iPhone and iPad, owner 2026-11-12).
+    static let addProfilePrompt = "Point the camera at a Dispatcharr user QR code."
+    static let setupCodeInAddProfile = "This is an AerioTV setup code. Scan a Dispatcharr user QR code."
+    static let otherServerMessage = "This user code is for a different Dispatcharr server."
     static let userKeyType = "user_api_key"
     static let userKeyVersion = 1
 
@@ -820,6 +824,33 @@ enum ScannedCode {
             return SetupProtocol.parseLink(text) != nil ? .setupLink(text) : .invalid
         }
         return parseUserKey(text).map { .userKey($0) } ?? .invalid
+    }
+
+    /// Add Profile, API Key mode: a Dispatcharr user code for this playlist's
+    /// server fills the API Key field (nil = accepted). The code names its
+    /// server by host name, so the same server over another scheme or port (a
+    /// reverse proxy) still counts. A code without a server address, or a
+    /// playlist without one, is taken as is: Add Profile checks the key with
+    /// the server anyway. `playlistURLs`: the playlist's server URL and local URL.
+    static func addProfileProblem(_ r: Result, playlistURLs: [String]) -> String? {
+        switch r {
+        case .invalid: return invalidMessage
+        case .setupLink: return setupCodeInAddProfile
+        case .userKey(let k):
+            guard let base = k.baseUrl, let codeHost = host(base) else { return nil }
+            let mine = Set(playlistURLs.compactMap { host($0) })
+            return mine.isEmpty || mine.contains(codeHost) ? nil : otherServerMessage
+        }
+    }
+
+    /// The lowercased host name of a server address, nil when it has none.
+    static func host(_ raw: String) -> String? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return nil }
+        let lower = s.lowercased()
+        if !lower.hasPrefix("http://") && !lower.hasPrefix("https://") { s = "http://" + s }
+        guard let h = URL(string: s)?.host?.lowercased(), !h.isEmpty else { return nil }
+        return h
     }
 
     static func parseUserKey(_ text: String) -> UserKey? {
