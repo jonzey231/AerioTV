@@ -184,7 +184,8 @@ not read, has turned off, or does not know) untouched.
 | `extra` (in a sub-object) | object, optional | Fields a newer writer added within the same `schemaVersion` (section 6.2) |
 
 When a device rebuilds a category it writes that sub-object's `updatedAt` as now and `deviceId` as
-its own (the `profiles` stale-device rule in 4.12 reads it).
+its own (the `profiles` stale-device rule in 4.12 reads it). `tmdbKey` carries the key's edit time
+instead (section 4.13), and `syncProviders` its record's own time (section 10b).
 
 Reader rules:
 1. Missing envelope fields or wrong types: the key is malformed; log `[DSYNC] malformed <key>` and do not apply it. A sub-object missing `updatedAt` or `data`, or with a non-object `extra`, is malformed the same way, alone; a missing sub-object `deviceId` falls back to the envelope's. Before a PUT (section 7, item 4a) both apps treat a malformed server value like an absent one and write over it from their last good copy (a copy read from the same server: a server address change discards it, section 6.2); Apple also builds its next `profiles` write with no server rows, which drops the rows of users it has no local profile for. A writer that emits a wrong type therefore costs other devices' data.
@@ -662,18 +663,40 @@ Row: `[userId:int, username:string, displayName:string(max 40 B), pinType:"none"
 - The one secret Dispatcharr Sync carries. Every password, Dispatcharr API key, token, and other
   secret stays out (section 9).
 - Gate: syncs whenever Dispatcharr Sync is on, for every profile role. No Sync Categories row. Never
-  in the iCloud or Drive snapshots (Apple keeps the key in the iCloud Keychain; Drive does not carry
-  it, section 10.2), never forced, never trimmed.
+  forced, never trimmed. Never in the iCloud KVS snapshot or the Drive preferences snapshot. Apple
+  keeps the key in the iCloud Keychain. Drive carries it whenever Google Drive Sync is on, in the
+  Credentials file's `tmdbKey` and `tmdbUpdatedAt` fields, whatever the Credentials item or any
+  other Drive item says; with the Credentials item off, only those two fields are applied or changed
+  (the write rebuilds the file's envelope, as every Drive write does), and the file's entries stay
+  as Drive has them (section 10.2).
 - Writes: a device writes the category when its user saves or clears the key on that device, and
-  seeds an absent category from its own key. A device with no key never creates the category: a fresh
-  `""` would read as a clear newer than every other device's key. A key that reaches an Apple device
-  through iCloud Keychain is not an edit there; the device that edited it sends it.
-- Merge: newest edit wins (section 6.1, rule 3, by the category's `updatedAt`). When a newer remote
-  value differs from the device's key, the device keeps and sends its own value if its last local
-  edit time (the last save, clear, or applied pull, in Unix seconds) is later than that `updatedAt`.
-  With no known local edit time, a key beats a remote clear, and otherwise the remote value applies.
-  Applying `""` clears the key on the device; applying a pull records its `updatedAt` as the local
-  edit time.
+  seeds an absent category from its own key. A device with no key never creates the category: a
+  fresh `""` would read as a clear newer than every other device's key. A key that reaches an Apple
+  device through iCloud Keychain, or an Android device through Google Drive, is not an edit there;
+  the device that edited it sends it. The receiving device can still send it (a keep-local resend, a
+  seed, or an unsent change of its own still queued when the key arrived), stamped as below.
+- Stamp: the category's `updatedAt` (ISO 8601, section 3) carries the writing device's edit time for
+  the key, to the second, not the push time: its last save, clear, or applied pull. An applied pull
+  records the copy's own time (on Android, a Drive apply records `tmdbUpdatedAt` divided by 1000),
+  so a key sent again after an apply keeps its original time. A key that reaches an Apple device
+  through iCloud Keychain does not change that device's edit time. The push time stands in only
+  while the edit time is unknown (0). The envelope's own `updatedAt` stays the push time, and every
+  other category keeps its own rule (section 3; `syncProviders`, section 10b). Drive's
+  `tmdbUpdatedAt` is the same edit time as a number in Unix milliseconds (0 when unknown), never the
+  push time.
+- Merge: newest edit wins, by edit time; for this category this replaces section 6.1, rules 1, 2,
+  and 3. Apart from the first-read rule for an empty copy (section 10a, Rule 2), a pull skips a
+  server copy only when it is the exact copy the device last consumed: the same `updatedAt`, the
+  same `deviceId`, and the same key while the device's saved copy still holds it. Every other copy
+  is weighed, whatever its stamp. When its value differs from the device's key, the device keeps and
+  sends its own value if its last local edit time (the last save, clear, or applied pull, in Unix
+  seconds) is later than that `updatedAt`. With no known local edit time, a key beats a remote
+  clear, and otherwise the remote value applies. Nothing skips a copy because its stamp is not newer
+  than one seen before: not the stamp last consumed, not an unsent change's queue time, and not the
+  envelope's `updatedAt`. Just before a PUT, the device runs the same comparison against the
+  server's current copy and never sends an older edit over a newer one; it takes the server's key
+  instead. Applying `""` clears the key on the device; applying a pull records its `updatedAt` as
+  the local edit time. Android applies the Drive copy by the same rule.
 - One key per device: on a device with several profiles, the key in use is the one last saved or
   applied there, and a profile whose user has no `tmdbKey` yet is seeded from it.
 - Logs never carry the key: `[DSYNC] tmdbKey: set from the server`, `cleared from the server`, or
@@ -868,6 +891,7 @@ tmdbKey are never trimmed. After the last step still fails: "Sync data too large
 | PreferencesSnapshot.tv, .mobile (2026-10-27) | settings.tv, settings.mobile | Same lanes and scope rules as section 4.9; absent in older files |
 | PreferencesSnapshot `recents.v1`, `channelCollections.v1`, `hiddenMovieGroups.v1`, `hiddenSeriesGroups.v1`, `lastGroup`, `recentGroupVisible` (2026-10-27) | recents, collections, hiddenGroups, settings | Drive gaps closed; raw stored strings, default profile only |
 | PreferencesSnapshot `tmdbApiKey` | not synced | No longer written (it was cleartext); still read for one version so an older snapshot restores it, then dropped |
+| CredentialsSnapshot `tmdbKey`, `tmdbUpdatedAt` (2026-11-13) | tmdbKey.apiKey | Carried whenever Google Drive Sync is on, whatever the Credentials item says; with that item off, only these two fields are applied or changed (the write rebuilds the file's envelope, as every Drive write does) and the entries stay as Drive has them. `tmdbUpdatedAt` is the key's edit time as a number in Unix milliseconds (0 when unknown), never the push time. Newest edit wins by the section 4.13 rule |
 | ChannelCollection id, name, memberIds, placement (AppPreferences `channel_collections`, in Drive as `channelCollections.v1` since 2026-10-27) | collections row | Same conversion as Apple |
 | Playlists, Credentials | not synced here | Stay on Drive |
 

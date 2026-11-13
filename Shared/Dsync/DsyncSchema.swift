@@ -21,8 +21,9 @@ enum DsyncKey: String, CaseIterable, Sendable {
     var suffix: String { rawValue }
 
     /// Which Sync Categories toggle gates this key; nil = always (profiles,
-    /// and tmdbKey, which syncs whenever Dispatcharr Sync is on and never
-    /// through iCloud or Drive: section 4.13).
+    /// and tmdbKey, which syncs whenever Dispatcharr Sync is on; iCloud
+    /// Keychain carries it separately, never the iCloud snapshot: section
+    /// 4.13).
     var category: DsyncCategory? {
         switch self {
         case .favorites, .recents, .collections: return .favorites
