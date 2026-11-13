@@ -990,7 +990,7 @@ struct DVRView: View {
     private func heroSecondary(_ rec: Recording) {
         if rec.isInProgress {
             if rec.destination == .dispatcharrServer { actions.playServer(rec, liveEdge: true) }
-        } else if rec.destination == .local, let path = rec.localFilePath {
+        } else if rec.destination == .local, let path = rec.resolvedLocalFilePath {
             // Play from Beginning: local files ignore the saved position.
             if let id = rec.watchProgressID {
                 WatchProgressManager.delete(vodID: id, serverID: rec.serverID)
@@ -1385,9 +1385,9 @@ struct DVRView: View {
     }
 
     private func recordingFacts(_ rec: Recording) -> RecordingFacts {
-        let path = rec.dispatcharrFileURL ?? rec.localFilePath ?? ""
+        let path = rec.dispatcharrFileURL ?? rec.resolvedLocalFilePath ?? ""
         var ext = URL(string: path).map { $0.pathExtension } ?? (path as NSString).pathExtension
-        if ext.isEmpty, let name = rec.remoteFileName ?? rec.localFilePath {
+        if ext.isEmpty, let name = rec.remoteFileName ?? rec.resolvedLocalFilePath {
             ext = (name as NSString).pathExtension
         }
         let location: String

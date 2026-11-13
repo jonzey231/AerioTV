@@ -597,12 +597,12 @@ struct DVRSettingsView: View {
         var keepPaths = Set<String>()
         for r in rows {
             if r.isUpcoming {
-                if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                if let p = r.resolvedLocalFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
                 continue
             }
             if r.isInProgress {
                 guard includingInProgress else {
-                    if let p = r.localFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
+                    if let p = r.resolvedLocalFilePath { keepPaths.insert(URL(fileURLWithPath: p).resolvingSymlinksInPath().path) }
                     continue
                 }
                 await coordinator.stopLocalRecording(r, modelContext: modelContext)

@@ -1265,5 +1265,35 @@ do {
     eq(PlaylistDeleteCopy.savedOnDeviceSection, "Saved on this device", "DVR section")
 }
 
+// MARK: - On-device recording locations survive a container move (2026-11-13)
+do {
+    typealias P = RecordingPathRules
+    let oldRoot = "/var/mobile/Containers/Data/Application/OLD-1111/Documents/Recordings"
+    let newRoot = "/var/mobile/Containers/Data/Application/NEW-2222/Documents/Recordings"
+    let onDisk: Set<String> = [newRoot + "/A.ts", "/private/var/mobile/Custom/Show.ts"]
+    let exists: (String) -> Bool = { onDisk.contains($0) }
+    // New recordings in the default folder are stored relative to it.
+    eq(P.stored(newRoot + "/A.ts", root: newRoot), "recordings:A.ts", "a new default-folder recording is stored relative")
+    eq(P.stored(newRoot + "/A.ts", root: newRoot + "/"), "recordings:A.ts", "a trailing slash on the root is fine")
+    eq(P.stored("/private/var/mobile/Custom/Show.ts", root: newRoot), "/private/var/mobile/Custom/Show.ts", "a custom-folder recording keeps its absolute path")
+    eq(P.resolve("recordings:A.ts", root: newRoot, exists: exists), newRoot + "/A.ts", "a relative value resolves under the current root")
+    // The container moved: the stored absolute path points into the old one.
+    eq(P.resolve(oldRoot + "/A.ts", root: newRoot, exists: exists), newRoot + "/A.ts", "an old absolute path is re-rooted to where the file is now")
+    eq(P.migrated(oldRoot + "/A.ts", root: newRoot, exists: exists), "recordings:A.ts", "and migrated to the relative form at launch")
+    eq(P.migrated(newRoot + "/A.ts", root: newRoot, exists: exists), "recordings:A.ts", "a current absolute default-folder path migrates too")
+    eq(P.migrated("recordings:A.ts", root: newRoot, exists: exists), nil, "a relative value needs nothing")
+    // A file that is really gone stays as it was (no guessing).
+    eq(P.resolve(oldRoot + "/Gone.ts", root: newRoot, exists: exists), oldRoot + "/Gone.ts", "a missing file is not re-rooted onto nothing")
+    eq(P.migrated(oldRoot + "/Gone.ts", root: newRoot, exists: exists), nil, "and not migrated")
+    // Custom folders work as before.
+    eq(P.resolve("/private/var/mobile/Custom/Show.ts", root: newRoot, exists: exists), "/private/var/mobile/Custom/Show.ts", "a custom-folder path resolves as is")
+    eq(P.migrated("/private/var/mobile/Custom/Show.ts", root: newRoot, exists: exists), nil, "and is never migrated")
+    eq(P.resolve(nil, root: newRoot, exists: exists), nil, "no path, nothing")
+    // Apple TV's default folder is Caches/Recordings: the same rules.
+    let tvOld = "/private/var/mobile/Containers/Data/Application/T1/Library/Caches/Recordings"
+    let tvNew = "/private/var/mobile/Containers/Data/Application/T2/Library/Caches/Recordings"
+    eq(P.resolve(tvOld + "/B.ts", root: tvNew, exists: { $0 == tvNew + "/B.ts" }), tvNew + "/B.ts", "Apple TV's Caches folder re-roots too")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

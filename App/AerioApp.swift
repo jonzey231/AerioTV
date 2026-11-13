@@ -587,6 +587,10 @@ struct AerioApp: App {
         }
         #endif
 
+        // Recording locations survive a container move (RecordingPathRules),
+        // before any view reads a recording's file.
+        RecordingCoordinator.migrateStoredRecordingPaths(container: self.sharedModelContainer)
+
         // Fire a throwaway fetch off main to force SQLite open +
         // schema validation off the critical path. Uses a fresh
         // background `ModelContext`, never touches MainActor.

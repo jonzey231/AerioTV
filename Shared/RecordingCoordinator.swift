@@ -82,14 +82,48 @@ final class RecordingCoordinator: ObservableObject {
     /// OS may purge it under pressure, which the DVR settings copy
     /// disclosed already - tvOS treats all app storage as purgeable.
     var localRecordingsDirectory: URL? {
+        guard let dir = Self.defaultRecordingsDirectory else { return nil }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// The default recordings folder in THIS install's container, without
+    /// creating it. Stored recording locations are relative to it
+    /// (RecordingPathRules), because the container's path can change
+    /// between installs and updates.
+    nonisolated static var defaultRecordingsDirectory: URL? {
         #if os(tvOS)
         guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         #else
         guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
         #endif
-        let dir = base.appendingPathComponent("Recordings", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        return base.appendingPathComponent(RecordingPathRules.folderName, isDirectory: true)
+    }
+
+    /// Launch, once per run: stored absolute paths into the default folder
+    /// (this container's, or a previous one's with the file now here) become
+    /// relative. Custom-folder paths are left as they are.
+    nonisolated static func migrateStoredRecordingPaths(container: ModelContainer) {
+        guard let root = defaultRecordingsDirectory?.path else { return }
+        let ctx = ModelContext(container)
+        let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.localFilePath != nil }))) ?? []
+        var relative = 0, migrated = 0, reRooted = 0, kept = 0
+        let exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+        for r in rows {
+            guard let p = r.localFilePath, !p.isEmpty else { continue }
+            if p.hasPrefix(RecordingPathRules.prefix) { relative += 1; continue }
+            if let rel = RecordingPathRules.migrated(p, root: root, exists: exists) {
+                if (p as NSString).deletingLastPathComponent != root { reRooted += 1 }
+                r.localFilePath = rel
+                migrated += 1
+            } else {
+                kept += 1
+            }
+        }
+        if migrated > 0 { try? ctx.save() }
+        if migrated > 0 || kept > 0 {
+            debugLog("[DVR-PATHS] recording locations: \(migrated) made relative (\(reRooted) from a previous container), \(relative) already relative, \(kept) kept as stored (custom folder or file not here)")
+        }
     }
 
     /// Custom folder URL from a security-scoped bookmark (iOS only). If
@@ -213,7 +247,8 @@ final class RecordingCoordinator: ObservableObject {
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
 
         let path = dir.appendingPathComponent("\(recording.id.uuidString).ts").path
-        recording.localFilePath = path
+        // Relative in the default folder, absolute in a custom one.
+        recording.localFilePath = RecordingPathRules.stored(path, root: Self.defaultRecordingsDirectory?.path)
         recording.status = .recording
         try? modelContext.save()
 
@@ -365,7 +400,7 @@ final class RecordingCoordinator: ObservableObject {
         try FileManager.default.moveItem(at: tempURL, to: destPath)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: destPath.path)
-        recording.localFilePath = destPath.path
+        recording.localFilePath = RecordingPathRules.stored(destPath.path, root: Self.defaultRecordingsDirectory?.path)
         recording.fileSizeBytes = (attrs[.size] as? Int64) ?? 0
         try? modelContext.save()
 
@@ -544,7 +579,7 @@ final class RecordingCoordinator: ObservableObject {
     /// Deletes a local recording's file from disk and removes the
     /// SwiftData row.
     func deleteLocalRecording(_ recording: Recording, modelContext: ModelContext) {
-        if let path = recording.localFilePath {
+        if let path = recording.resolvedLocalFilePath {
             try? FileManager.default.removeItem(atPath: path)
         }
         modelContext.delete(recording)
@@ -594,5 +629,16 @@ final class RecordingCoordinator: ObservableObject {
         activeSessions.removeAll()
         updateRecordingState()
         try? modelContext.save()
+    }
+}
+
+extension Recording {
+    /// Where this recording's file is on this device now: the stored value
+    /// resolved against the current container (RecordingPathRules). Every
+    /// file access goes through this, never the raw `localFilePath`.
+    var resolvedLocalFilePath: String? {
+        RecordingPathRules.resolve(localFilePath,
+                                   root: RecordingCoordinator.defaultRecordingsDirectory?.path,
+                                   exists: { FileManager.default.fileExists(atPath: $0) })
     }
 }

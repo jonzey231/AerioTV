@@ -31,7 +31,7 @@ enum PlaylistLockdown {
         let sid = server.id.uuidString
         let rows = (try? ctx.fetch(FetchDescriptor<Recording>(predicate: #Predicate { $0.serverID == sid }))) ?? []
         return rows.filter { r in
-            guard let path = r.localFilePath, !path.isEmpty,
+            guard let path = r.resolvedLocalFilePath, !path.isEmpty,
                   r.status != .failed, r.status != .cancelled, r.status != .scheduled else { return false }
             return FileManager.default.fileExists(atPath: path) || RecordingCoordinator.shared.activeSessions[r.id] != nil
         }
