@@ -54,11 +54,31 @@ enum PlaylistLockdown {
         case .dispatcharrAPI:
             break
         }
-        // Hosts only this playlist used: anything sent there was for it.
-        let mine = Set([server.baseURL, server.localURL].filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
-        let others = Set(remaining.flatMap { [$0.baseURL, $0.localURL, $0.epgURL, $0.localEPGURL] }
-            .filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
-        if server.type != .m3uPlaylist { f.hosts = mine.subtracting(others) }
+        // Its hosts; revocable below keeps only those no remaining playlist
+        // uses, so anything sent there was for it.
+        if server.type != .m3uPlaylist {
+            f.hosts = Set([server.baseURL, server.localURL].filter { !$0.isEmpty }.map(DispatcharrRequestGate.serverKey))
+        }
+        // A key, host, or URL a remaining playlist still uses is never refused
+        // (the same account or server added twice keeps working).
+        return f.revocable(keeping: remaining.map(inUse),
+                           serverBases: remaining.filter { $0.type == .dispatcharrAPI }.flatMap { [$0.baseURL, $0.localURL] })
+    }
+
+    /// What a remaining playlist sends: its key and its profiles' keys, its
+    /// Xtream Codes credentials, every URL it requests, and every host it reaches.
+    private static func inUse(_ server: ServerConnection) -> PlaylistFingerprint {
+        let sid = server.id.uuidString
+        var f = PlaylistFingerprint(playlistID: sid)
+        for k in [server.baseApiKey] + ProfileManager.shared.storedKeys(sid) {
+            let t = k.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { f.keys.insert(t) }
+        }
+        let urls = [server.baseURL, server.epgURL, server.localURL, server.localEPGURL]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        f.urlSecrets = (server.type == .xtreamCodes
+            ? PlaylistFingerprint.xtreamSecrets(username: server.username, password: server.effectivePassword) : []) + urls
+        f.hosts = Set(urls.map(DispatcharrRequestGate.serverKey))
         return f
     }
 

@@ -1184,6 +1184,40 @@ struct PlaylistFingerprint: Sendable, Equatable {
         return ["/\(u)/\(p)/", "username=\(u)&password=\(p)"]
     }
 
+    /// Xtream Codes credentials an M3U URL carries in its query
+    /// (get.php?username=...&password=...); that account's streams carry them too.
+    static func xtreamSecrets(inURL url: String) -> [String] {
+        guard let items = URLComponents(string: url)?.queryItems else { return [] }
+        func value(_ name: String) -> String { items.first { $0.name == name }?.value ?? "" }
+        return xtreamSecrets(username: value("username"), password: value("password"))
+    }
+
+    /// What a delete may refuse (owner 2026-11-13, as Android): only what no
+    /// remaining playlist also uses, so deleting one of two playlists on the
+    /// same account, key, or server never cuts off the other. [others] are
+    /// the remaining playlists as they send: their keys and their profiles',
+    /// their credentials and every URL they request, and every host they
+    /// reach. [serverBases] are the remaining Dispatcharr playlists'
+    /// addresses, whose /output/m3u and /output/epg those playlists read too.
+    func revocable(keeping others: [PlaylistFingerprint], serverBases: [String] = []) -> PlaylistFingerprint {
+        var f = self
+        f.keys.subtract(others.flatMap(\.keys))
+        f.hosts.subtract(others.flatMap(\.hosts))
+        let carried = others.flatMap(\.urlSecrets)
+        let accounts = carried.filter { !$0.contains("://") } + carried.flatMap(Self.xtreamSecrets(inURL:))
+        let bases = serverBases.map { s -> String in
+            var b = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            while b.hasSuffix("/") { b.removeLast() }
+            return b
+        }.filter { !$0.isEmpty }
+        f.urlSecrets = urlSecrets.filter { s in
+            !(carried.contains { $0.contains(s) }                  // a remaining playlist's own URL or credentials
+              || accounts.contains { s.contains($0) }              // the same Xtream Codes account
+              || bases.contains { s == $0 || s.hasPrefix($0 + "/") }) // a remaining Dispatcharr server's output
+        }
+        return f
+    }
+
     var isEmpty: Bool { keys.isEmpty && urlSecrets.isEmpty && hosts.isEmpty }
 }
 

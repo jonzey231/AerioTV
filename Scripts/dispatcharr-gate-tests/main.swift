@@ -1256,6 +1256,82 @@ do {
     check((try? gate.check(url: "https://x.example.com/api/channels/channels/", apiKey: "key-x")) != nil, "and its requests go out again")
 }
 
+// MARK: - A delete never cuts off a remaining playlist on the same key, account, or server (owner 2026-11-13)
+do {
+    func goesOut(_ gate: PlaylistRevocation, _ url: String, _ key: String?) -> Bool {
+        (try? gate.check(url: url, apiKey: key)) != nil
+    }
+    let d = "https://d.example.com"
+    // A and B: the same Dispatcharr account added twice (same key, same host).
+    // A also has a profile whose key only A stores.
+    var a = PlaylistFingerprint(playlistID: "A", keys: ["key-shared", "key-a-kid"])
+    a.hosts = [DispatcharrRequestGate.serverKey(d)]
+    var b = PlaylistFingerprint(playlistID: "B", keys: ["key-shared"])
+    b.urlSecrets = [d]
+    b.hosts = [DispatcharrRequestGate.serverKey(d)]
+    let cutA = a.revocable(keeping: [b], serverBases: [d])
+    eq(cutA.keys, ["key-a-kid"], "a key the remaining playlist uses is never refused; A's own profile key is")
+    check(cutA.hosts.isEmpty, "a host the remaining playlist uses is never refused")
+    let gate = PlaylistRevocation()
+    final class Counter: @unchecked Sendable { var n = 0 }
+    let cancelled = Counter()
+    let flight = gate.track(url: "\(d)/api/epg/grid/", apiKey: "key-shared") { cancelled.n += 1 }
+    eq(gate.revoke(cutA), 0, "deleting A cancels none of B's requests in flight")
+    gate.untrack(flight)
+    eq(cancelled.n, 0, "and B's request is never cancelled")
+    check(goesOut(gate, "\(d)/api/channels/channels/", "key-shared"), "B's API calls with the shared key go out")
+    check(goesOut(gate, "\(d)/api/channels/logos/12/cache/", nil), "B's logos go out")
+    check(goesOut(gate, "\(d)/proxy/ts/stream/abc", "key-shared"), "B's streams go out")
+    check(!goesOut(gate, "\(d)/api/accounts/users/me/", "key-a-kid"), "A's profile key alone is still refused")
+
+    // C and E: the same Xtream Codes account added twice on one panel; F: another user there.
+    let panel = "http://panel.example.net"
+    var c = PlaylistFingerprint(playlistID: "C")
+    c.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: "alice", password: "pw1")
+    c.hosts = [DispatcharrRequestGate.serverKey(panel)]
+    var e = PlaylistFingerprint(playlistID: "E")
+    e.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: "alice", password: "pw1") + [panel]
+    e.hosts = [DispatcharrRequestGate.serverKey(panel)]
+    let cutC = c.revocable(keeping: [e])
+    check(cutC.isEmpty, "the same Xtream Codes account added twice: deleting one refuses nothing")
+    var f = PlaylistFingerprint(playlistID: "F")
+    f.urlSecrets = PlaylistFingerprint.xtreamSecrets(username: "bob", password: "pw2") + [panel]
+    f.hosts = [DispatcharrRequestGate.serverKey(panel)]
+    let cutCbyF = c.revocable(keeping: [f])
+    eq(cutCbyF.urlSecrets, PlaylistFingerprint.xtreamSecrets(username: "alice", password: "pw1"),
+       "another user on the same panel leaves the deleted account's credentials refused")
+    check(cutCbyF.hosts.isEmpty, "while the shared panel stays reachable")
+    let gate2 = PlaylistRevocation()
+    gate2.revoke(cutCbyF)
+    check(goesOut(gate2, "\(panel)/live/bob/pw2/1.ts", nil), "the remaining user's streams go out")
+    check(!goesOut(gate2, "\(panel)/live/alice/pw1/1.ts", nil), "the deleted account's streams are refused")
+
+    // An Xtream Codes playlist deleted while an M3U playlist of the same account remains.
+    let m3uOfAlice = "\(panel)/get.php?username=alice&password=pw1&type=m3u_plus"
+    var g = PlaylistFingerprint(playlistID: "G")
+    g.urlSecrets = [m3uOfAlice]
+    check(c.revocable(keeping: [g]).urlSecrets.isEmpty, "the M3U playlist of the same account keeps its streams")
+    // And the reverse: the M3U playlist deleted while the Xtream Codes account remains.
+    check(g.revocable(keeping: [e]).urlSecrets.isEmpty, "the Xtream Codes playlist of the same account keeps that M3U URL")
+    check(!g.revocable(keeping: [f]).urlSecrets.isEmpty, "another account's M3U URL stays refused")
+
+    // Two M3U playlists sharing one XMLTV EPG URL.
+    let epg = "https://epg.example.org/guide.xml"
+    var h = PlaylistFingerprint(playlistID: "H")
+    h.urlSecrets = ["https://m3u.example.org/h.m3u", epg]
+    var i = PlaylistFingerprint(playlistID: "I")
+    i.urlSecrets = ["https://m3u.example.org/i.m3u", epg]
+    eq(h.revocable(keeping: [i]).urlSecrets, ["https://m3u.example.org/h.m3u"], "a shared EPG URL is never refused")
+
+    // An M3U playlist of a Dispatcharr server that a remaining Dispatcharr playlist reads.
+    var j = PlaylistFingerprint(playlistID: "J")
+    j.urlSecrets = ["\(d)/output/m3u", "\(d)/output/epg"]
+    let cutJ = j.revocable(keeping: [b], serverBases: ["\(d)/"])
+    check(cutJ.urlSecrets.isEmpty, "the remaining Dispatcharr playlist's own /output reads go out")
+    eq(j.revocable(keeping: []).urlSecrets, j.urlSecrets, "with no remaining playlist, everything of it is refused")
+    eq(a.revocable(keeping: []), a, "and a lone playlist's fingerprint is unchanged")
+}
+
 // MARK: - On-device recordings with no capture behind them (owner 2026-11-13)
 do {
     typealias C = InterruptedCapture
