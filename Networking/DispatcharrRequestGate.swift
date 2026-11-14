@@ -1534,6 +1534,20 @@ enum PlaylistDeleteCopy {
 /// container) keeps its absolute path. An old absolute path into a previous
 /// container's default folder is re-rooted when the file is under the current
 /// one.
+/// The channel a recording's Program Info names (AerioTV for Android's
+/// LocalRecordingRules.shownChannelName, c24e45aa): the name saved with it,
+/// trimmed. Nil when none was saved (an adopted file) or when what was saved
+/// only repeats the title shown above it, so Program Info leaves out its
+/// Channel row and the line above the title instead of drawing them blank.
+enum RecordingChannelName {
+    static func shown(saved: String?, title: String) -> String? {
+        guard let name = saved?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shownTitle = trimmedTitle.isEmpty ? name : trimmedTitle
+        return name == shownTitle ? nil : name
+    }
+}
+
 enum RecordingPathRules {
     static let prefix = "recordings:"
     /// The default folder's own name (the last component of the root).

@@ -1392,14 +1392,18 @@ struct DVRView: View {
         )
         descriptor.fetchLimit = 1
         let epg = try? modelContext.fetch(descriptor).first
-        let channelName = rec.channelName.isEmpty
-            ? (ChannelStore.shared.channels.first(where: {
+        let shownTitle = title.isEmpty ? "Recording" : title
+        // The recording's own saved channel first, then the playlist's
+        // channel by id. None saved (an adopted file) or a saved name that
+        // only repeats the title is no channel: Program Info then leaves its
+        // Channel row and the line above the title out (Android c24e45aa).
+        let channelName = RecordingChannelName.shown(saved: rec.channelName, title: shownTitle)
+            ?? (ChannelStore.shared.channels.first(where: {
                 $0.id == rec.channelID || $0.dispatcharrChannelID.map(String.init) == rec.channelID
             })?.name ?? "")
-            : rec.channelName
         infoTarget = ProgramInfoTarget(
             channelName: channelName,
-            title: title.isEmpty ? "Recording" : title,
+            title: shownTitle,
             start: epg?.startTime ?? start,
             end: epg?.endTime ?? end,
             description: rec.programDescription.isEmpty ? (epg?.programDescription ?? "") : rec.programDescription,
