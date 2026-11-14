@@ -733,8 +733,11 @@ struct AddServerView: View {
                 .fontWeight(.medium)
                 .foregroundColor(.textPrimary)
             // Android GuideHistoryRow: pills for 1, 3, 7, 14, and All
-            // (0 = All Available; legacy 30 reads as All).
-            HStack(spacing: 8) {
+            // (0 = All Available; legacy 30 reads as All), 8 apart at their
+            // full width. When they do not fit on one line (a 375-point
+            // iPhone, or a large Text Size) the row wraps instead of
+            // shortening a label ("14 Da..." on iPhone 17 at 100%).
+            CategoryPillsLayout(spacing: 8) {
                 ForEach([1, 3, 7, 14, 0], id: \.self) { days in
                     guideDaysPill(days)
                 }
@@ -760,7 +763,7 @@ struct AddServerView: View {
             Text(label)
                 .scaledFont(.bodyMedium)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .fixedSize()
                 .foregroundColor(selected ? .white : .textPrimary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
