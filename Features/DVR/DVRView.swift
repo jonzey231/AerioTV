@@ -171,10 +171,16 @@ struct DVRView: View {
             .sorted { $0.effectiveStart < $1.effectiveStart }
     }
 
-    /// Finished recordings that can be watched (failed / cancelled rows
-    /// stay in the Settings list, not in the library).
+    /// Finished recordings that can be watched, plus an on-device recording
+    /// that captured nothing: listed as Failed with its reason in Program
+    /// Info (owner 2026-11-13, AerioTV for Android parity: otherwise the
+    /// user just thinks it is missing). Failed server rows and cancelled
+    /// rows stay out of the library, as on Android.
     private var completed: [Recording] {
-        visibleRecordings.filter { $0.status == .completed || $0.status == .stopped || $0.status == .interrupted }
+        visibleRecordings.filter {
+            $0.status == .completed || $0.status == .stopped || $0.status == .interrupted
+                || ($0.status == .failed && $0.destination == .local)
+        }
     }
 
     /// The library: everything recorded or recording, newest first.
@@ -1402,6 +1408,11 @@ struct DVRView: View {
         case .scheduled: status = "Scheduled"
         case .recording: status = "Recording"
         case .completed: status = "Completed"
+        case .failed:
+            // The reason a recording failed rides its status ("Failed: No
+            // data was written"), as on Android.
+            let reason = rec.failureReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            status = reason.isEmpty ? "Failed" : "Failed: \(reason)"
         default: status = rec.statusRaw.capitalized
         }
         return RecordingFacts(recordedOn: rec.shownStart,
@@ -1910,6 +1921,14 @@ struct DVRPosterCard: View {
                 .padding(.horizontal, 5).padding(.vertical, 2)
                 .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
                 .padding(5)
+            } else if recording.status == .failed {
+                // An on-device recording that captured nothing: the REC
+                // badge's red on black, as Android's poster card shows it.
+                Text("Failed").scaledFont(.system(size: 9, weight: .heavy))
+                    .foregroundColor(.red)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
+                    .padding(5)
             }
         }
         .overlay(alignment: .bottom) {
@@ -2108,6 +2127,15 @@ struct DVRRecordingCard: View {
             .padding(.horizontal, 10).padding(.vertical, 5)
             .background(Capsule().fill(Color.black.opacity(0.6)))
             .padding(10)
+        } else if recording.status == .failed {
+            // An on-device recording that captured nothing (Android's TV
+            // card: "Failed" on red), ahead of Missing and Partial.
+            Text("Failed")
+                .scaledFont(.system(size: badgeSize, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(Color.red.opacity(0.85)))
+                .padding(10)
         } else if recording.isLocalFileMissing {
             Text("Missing")
                 .scaledFont(.system(size: badgeSize, weight: .bold))
