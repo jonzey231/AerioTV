@@ -110,8 +110,9 @@ enum DsyncItemCatalog {
     static let groups: [DsyncItemGroup] = [
         DsyncItemGroup(id: "appearance", title: "Appearance", items: [
             S("selectedTheme", "Color Theme", ["selectedTheme", "customThemeHex"]),
-            S("appearanceMode", "Light and Dark Mode", ["appearanceMode"]),
-            S("trueBlack", "True Black Background", ["trueBlack"]),
+            // True Black is a Mode choice, so it rides this item's scope
+            // (SyncItemCatalog does the same with appearance.trueBlack).
+            S("appearanceMode", "Light and Dark Mode", ["appearanceMode", "trueBlack"]),
             S("customAccent", "Custom Accent Color", ["useCustomAccent", "customAccentHex"]),
             S("textScale", "Text Size", ["textScale"]),
             S("subtextScale", "Subtext Size", ["subtextScale"]),

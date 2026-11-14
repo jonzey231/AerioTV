@@ -276,8 +276,11 @@ enum SyncItemCatalog {
     static let groups: [SyncItemGroup] = [
         SyncItemGroup(id: "appearance", title: "Appearance", items: [
             SyncItem("selectedTheme", "Color Theme", ["selectedTheme", "customThemeHex"]),
-            SyncItem("appearanceMode", "Light and Dark Mode", ["appearanceMode"]),
-            SyncItem("trueBlack", "True Black Background", ["appearance.trueBlack"]),
+            // True Black is a Mode choice (Dark plus appearance.trueBlack), so
+            // it rides this item's scope: two rows with different scopes let
+            // another device land on plain Dark. A stored syncScope.trueBlack
+            // from the old row is no longer read.
+            SyncItem("appearanceMode", "Light and Dark Mode", ["appearanceMode", "appearance.trueBlack"]),
             SyncItem("customAccent", "Custom Accent Color", ["useCustomAccent", "customAccentHex"]),
             SyncItem("glassEffect", "Glass Effect", ["liquidGlassStyle"]),
             SyncItem("textScale", "Text Size", ["textScale"]),

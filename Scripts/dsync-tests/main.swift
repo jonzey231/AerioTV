@@ -377,7 +377,7 @@ do {
     check(SetupSourceChoice.convergePlan(de, xe, skip: [], lastPushed: [:]).isEmpty, "empty converge plan")
 
     // categoryOffOnThisDeviceIsNeitherComparedNorConverged
-    let scopes: [String: DsyncScope] = ["favorites": .off, "trueBlack": .off]
+    let scopes: [String: DsyncScope] = ["favorites": .off, "appearanceMode": .off]
     let xo = dsyncSummary([(.favorites, DsyncPayloads.encodeFavorites(nil, [2, 1])),
                            (.settings, DsyncPayloads.encodeSettingsLanes(nil, ["v": ["trueBlack": .bool(true)]]))], scopes: scopes)
     check(xo.categories["favorites"] == nil, "Off favorites not summarized")
@@ -1356,6 +1356,18 @@ do {
     check(!asked, "the Keychain is read only when a digest is present")
     let bare = obj(#"{"apiKey":"not-a-tmdb-copy"}"#)
     eq(DsyncSecretCache.redact(bare, name: "rstamp|pid|default"), bare, "an apiKey member outside a tmdbKey copy is not touched")
+}
+
+// True Black rides Light and Dark Mode (2026-11-13): one item, one scope,
+// so another device never lands on plain Dark. Wire names are unchanged.
+do {
+    eq(DsyncItemCatalog.itemForName("trueBlack")?.id, "appearanceMode", "True Black is carried by Light and Dark Mode")
+    eq(DsyncItemCatalog.itemForName("appearanceMode")?.id, "appearanceMode", "the mode still is")
+    check(!DsyncItemCatalog.allItems.contains { $0.id == "trueBlack" }, "no separate True Black Background row")
+    let oldScopes: [String: DsyncScope] = ["trueBlack": .off]
+    let item = DsyncItemCatalog.itemForName("trueBlack")!
+    check((oldScopes[item.id] ?? .all) == .all, "a stored scope for the old trueBlack row no longer applies")
+    eq(DsyncSettingsMap.entry("trueBlack")?.appleKey, "appearance.trueBlack", "the wire name and Apple key are unchanged")
 }
 
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
