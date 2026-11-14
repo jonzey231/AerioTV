@@ -3495,8 +3495,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
-            // Loopback only; never expose the stream on the LAN.
+            // Loopback only; never expose the stream on the LAN. The
+            // 127.0.0.1 bind is what refuses a connection made to the LAN
+            // address (measured 2026-11-14 in the iOS 27 simulator: the
+            // interface requirement alone still accepted one). The AirPlay
+            // receiver has its own LAN listener.
             params.requiredInterfaceType = .loopback
+            params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
             let listener = try NWListener(using: params, on: .any)
             self.listener = listener
             listener.newConnectionHandler = { [weak self] connection in
