@@ -492,7 +492,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 19 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection (last resort: the `/api/channels/` index) |
 | 20 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
 | 21 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
-| 22 | Channels and guide | `/api/epg/programs/search/` | every program airing now, with categories, in one request (`airing_at`, `fields`, `page_size`), for tinted guide cards |
+| 22 | Channels and guide | `/api/epg/programs/search/` | every program airing now, with categories, in pages of up to 500 (`airing_at`, `fields`, `page_size`, `page`), for tinted guide cards |
 | 23 | Channels and guide | `/api/epg/programs/<id>/` | one program's full detail (categories, rating) for tinted cards and the info sheet |
 | 24 | Channels and guide | `/api/epg/current-programs/` | what is airing now on a set of channels (Live TV cards, Top Shelf) |
 | 25 | Channels and guide | `/api/epg/epgdata/` | the EPG channel rows that map tvg ids to EPG sources |
