@@ -62,6 +62,9 @@ struct DVRView: View {
     @State private var tabBarTracker = TabBarScrollTracker()
     #endif
     @State private var infoTarget: ProgramInfoTarget?
+    /// The short message a tap on a recording with nothing to play shows
+    /// for 2.5 s (Android's toast in DvrMediaTabContent.play).
+    @State private var playToast: String?
 
     #if os(tvOS)
     /// "<recording id>|primary | secondary | stop" while a hero button has focus.
@@ -388,6 +391,18 @@ struct DVRView: View {
                     emptyState
                 } else {
                     content
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let playToast {
+                    playToastView(playToast)
+                        #if os(tvOS)
+                        .padding(.bottom, 60)
+                        #else
+                        .padding(.bottom, 110)
+                        #endif
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
                 }
             }
             #if os(tvOS)
@@ -1431,7 +1446,46 @@ struct DVRView: View {
         } else if rec.isUpcoming {
             // Scheduled: nothing to play; the menu carries Cancel.
             debugLog("[DVR] select scheduled \(rec.programTitle): use the context menu to cancel")
+        } else {
+            // Nothing to play (an on-device capture that failed or is still
+            // writing, or a file that is gone): say so, in Android's words
+            // (DvrMediaTabContent.play), instead of doing nothing.
+            debugLog("[DVR] select \(rec.statusRaw) \(rec.destination == .local ? "on-device" : "server") recording: nothing to play"
+                     + (rec.isLocalFileMissing ? " (file missing)" : ""))
+            showPlayToast(rec.isInProgress ? "This recording is not playable yet."
+                                           : "This recording has no playable file yet.")
         }
+    }
+
+    private func showPlayToast(_ message: String) {
+        withAnimation(.easeInOut(duration: 0.2)) { playToast = message }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if playToast == message {
+                withAnimation(.easeInOut(duration: 0.2)) { playToast = nil }
+            }
+        }
+    }
+
+    /// The app's toast capsule (the Guide's staging toast and the Multiview
+    /// picker's use the same look).
+    private func playToastView(_ text: String) -> some View {
+        Text(text)
+            #if os(tvOS)
+            .scaledFont(.system(size: 22, weight: .semibold))
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            #else
+            .scaledFont(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            #endif
+            .multilineTextAlignment(.center)
+            .foregroundColor(.white)
+            .background(Capsule().fill(Color.black.opacity(0.85)))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+            .padding(.horizontal, 16)
+            .accessibilityLabel(text)
     }
 
     // MARK: Menu
