@@ -817,24 +817,35 @@ final class ServerConnection {
         RedirectAuthPolicy.ownAddresses(serverURL: baseURL, localURL: localURL)
     }
 
-    /// The URL a stream opens at, and the headers it carries, for a URL that
-    /// would carry this playlist's key (RedirectAuthPolicy.keyedStream). A
-    /// channel, VOD, catch-up, or recording URL saved before Edit Playlist
-    /// moved the Server URL or Local URL still names the old address, and
-    /// sending the key there hands it to whoever has that address now: on a
-    /// current address it opens as is; with the server's own path it is
-    /// rebuilt on the address in use; otherwise it opens without the key.
-    /// Only Dispatcharr playlists carry a key in `authHeaders`.
-    func keyedStream(_ url: URL, headers: [String: String]) -> (url: URL, headers: [String: String]) {
-        guard type == .dispatcharrAPI else { return (url, headers) }
+    /// The URL a stream opens at, and the headers it carries, after the gate
+    /// every stream request with this playlist's sign-in passes
+    /// (RedirectAuthPolicy.keyedStream, the same rule as AerioTV for
+    /// Android). A channel, VOD, catch-up, or recording URL saved before Edit
+    /// Playlist moved the Server URL or Local URL still names the old address:
+    /// on a current address it opens as is; for the active playlist and one of
+    /// the server's own paths it is rebuilt on the address in use (stored rows
+    /// are not rewritten); otherwise it opens without the Dispatcharr key. Nil:
+    /// Xtream Codes credentials in the URL of an address the playlist left, not
+    /// sent at all. `headers` are built from the key the playlist uses now, so
+    /// a rebuilt URL carries that one.
+    func keyedStream(_ url: URL, headers: [String: String]) -> (url: URL, headers: [String: String])? {
         let current = RedirectAuthPolicy.ownAddresses(serverURL: effectiveBaseURL, localURL: "").first
-        let opened = RedirectAuthPolicy.keyedStream(url, ownAddresses: ownAddresses, current: current)
-        if opened.url != url {
-            debugLog("[ROUTE] stream on \(url.host ?? "?"), an address this playlist no longer uses: rebuilt on the address in use (\(opened.url.host ?? "?"))")
-        } else if !opened.keepsKey, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            debugLog("[ROUTE] stream on \(url.host ?? "?"), not one of this playlist's addresses: opened without its key")
+        let carriesKey = type == .dispatcharrAPI && headers.keys.contains { RedirectAuthPolicy.isSignInHeader($0) }
+        let xtream: (user: String, pass: String)? = type == .xtreamCodes ? (username, effectivePassword) : nil
+        switch RedirectAuthPolicy.keyedStream(url, ownAddresses: ownAddresses, current: current, isActive: isActive,
+                                              carriesKey: carriesKey, xtream: xtream) {
+        case .send(let u):
+            return (u, headers)
+        case .rebuilt(let u):
+            debugLog("[STALE-ADDRESS] stream request to an address its playlist no longer uses: rebuilt on its current address")
+            return (u, headers)
+        case .withoutKey(let u):
+            debugLog("[STALE-ADDRESS] stream request to an address its playlist no longer uses: sent without the sign-in")
+            return (u, RedirectAuthPolicy.withoutSignIn(headers))
+        case .refuse:
+            debugLog("[STALE-ADDRESS] stream request to an address its playlist no longer uses: refused (credentials in the URL)")
+            return nil
         }
-        return (opened.url, opened.keepsKey ? headers : RedirectAuthPolicy.withoutSignIn(headers))
     }
 
     /// Returns localEPGURL when the server is reachable on the local

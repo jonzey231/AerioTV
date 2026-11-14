@@ -874,13 +874,18 @@ final class PlayerSession: ObservableObject {
                 headers["X-API-Key"] = key
                 headers["Authorization"] = "ApiKey \(key)"
             }
-            // The key goes only to this playlist's current addresses: a
-            // channel URL still on an address the playlist left (its list not
-            // reloaded yet after an address change) is rebuilt on the address
-            // in use when its path is the server's own, and otherwise opens
-            // without the key, never with the key the playlist has now
-            // (owner 2026-11-13: one snapshot per request).
-            let opened = server.keyedStream(url, headers: headers)
+        }
+        // The sign-in goes only to this playlist's current addresses: a channel
+        // URL still on an address the playlist left (its list not reloaded yet
+        // after an address change) is rebuilt on the address in use when its
+        // path is the server's own, otherwise opens without the key, and with
+        // Xtream Codes credentials in it does not open at all
+        // (ServerConnection.keyedStream; owner 2026-11-13: one snapshot per
+        // request).
+        if let server {
+            guard let opened = server.keyedStream(url, headers: headers) else {
+                return ResolvedEngine(engine: .mpv, routeURL: URL(string: "about:blank")!, headers: [:])
+            }
             url = opened.url
             headers = opened.headers
         }

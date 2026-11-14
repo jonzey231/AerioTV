@@ -204,7 +204,10 @@ struct RecordingActions {
         // the key goes only to the playlist's current addresses, so the URL
         // is rebuilt on the address in use or played without the key
         // (ServerConnection.keyedStream).
-        let opened = server.keyedStream(url, headers: server.authHeaders)
+        guard let opened = server.keyedStream(url, headers: server.authHeaders) else {
+            debugLog("⚠️ Cannot play server recording: its URL is on an address this playlist no longer uses (\(rec.programTitle))")
+            return
+        }
         url = opened.url
         // Issue #29: the from-beginning sentinel is an mpv-only in-process
         // signal (setupMPV consumes and strips it).
@@ -257,7 +260,13 @@ struct RecordingActions {
         let trimmed = relative.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let absolute = URL(string: trimmed), absolute.scheme != nil {
-            return absolute
+            // A server behind a TLS proxy it does not trust reports its own
+            // file URL as http (Dispatcharr takes the forwarded scheme only
+            // from a trusted proxy): http on the server's own host, on port 80
+            // or the server's port, is used as https on the server's port, so
+            // an in-progress recording keeps its HLS URL and the key stays on
+            // TLS (RedirectAuthPolicy.serverURL, as on Android).
+            return RedirectAuthPolicy.serverURL(for: absolute, ownAddresses: server.ownAddresses) ?? absolute
         }
         let base = server.effectiveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let baseURL = URL(string: base) else { return nil }

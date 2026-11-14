@@ -33,8 +33,9 @@
 //  The same rule decides where a playlist's key may go before any redirect:
 //  `isOwnAddress` matches a URL against the playlist's Server URL and Local
 //  URL, `keyedStream` moves a stream URL saved before the playlist moved
-//  onto its current address (or sends it without the key), and `reanchored`
-//  keeps server-supplied page links on the address the app is already using.
+//  onto its current address (or sends it without the key, or not at all
+//  with Xtream Codes credentials in it), and `reanchored` keeps
+//  server-supplied page links on the address the app is already using.
 //
 //  Pure Foundation with no app singletons, so
 //  Scripts/cast-hls-proxy-tests/run.sh compiles it next to the proxy sources
@@ -145,15 +146,15 @@ enum RedirectAuthPolicy {
         return out.url
     }
 
-    /// The path segments where Dispatcharr's own routes start: live streams
-    /// and VOD (`/proxy/ts/stream/`, `/proxy/vod/`), HLS sessions
-    /// (`/proxy/hls/`), and recordings and catch-up (`/api/`).
-    static let serverRouteMarkers = ["/proxy/", "/api/"]
+    /// Paths only the playlist's server serves, where a rebuild may start:
+    /// Dispatcharr's proxy (live, VOD, HLS sessions) and the Xtream Codes
+    /// stream paths. The same list as AerioTV for Android's StreamAddresses.
+    static let serverRouteMarkers = ["/proxy/", "/live/", "/timeshift/", "/movie/", "/series/"]
 
     /// `url` moved onto `current` when its path is the server's own: from its
-    /// first `/proxy/` or `/api/` segment on, after `current`'s own path prefix
-    /// (a server behind a sub-path keeps it), with `url`'s query. Nil when the
-    /// path has neither segment: that URL is not the server's to move.
+    /// first `serverRouteMarkers` segment on, after `current`'s own path
+    /// prefix (a server behind a sub-path keeps it), with `url`'s query. Nil
+    /// when the path has none of them: that URL is not the server's to move.
     static func rebuiltOnCurrentAddress(_ url: URL, current: URL) -> URL? {
         guard let target = URLComponents(url: url, resolvingAgainstBaseURL: false),
               var base = URLComponents(url: current, resolvingAgainstBaseURL: false) else { return nil }
@@ -170,23 +171,70 @@ enum RedirectAuthPolicy {
         return base.url
     }
 
-    /// Where a stream URL that would carry a playlist's key opens, and whether
-    /// the key goes with it. A channel, VOD, catch-up, or recording URL saved
-    /// before the playlist moved (Edit Playlist changed its Server URL or
-    /// Local URL, and the list was not reloaded yet) still names the old
-    /// address, and sending the key there hands it to whoever has that
-    /// address now. So: on one of `ownAddresses`, as is with the key; on an
-    /// address the playlist left but with the server's own path, rebuilt on
-    /// `current` (the address in use) with the key; anything else, as is
-    /// without the key.
-    static func keyedStream(_ url: URL, ownAddresses: [URL], current: URL?) -> (url: URL, keepsKey: Bool) {
-        if isOwnAddress(url, ownAddresses: ownAddresses) { return (url, true) }
-        if let current, isOwnAddress(current, ownAddresses: ownAddresses),
+    /// True when `url` carries the Xtream Codes `user` and `pass`, as adjacent
+    /// path segments (`/live/<user>/<pass>/...`) or as the `username` and
+    /// `password` query items.
+    static func carriesXtreamCredentials(_ url: URL, user: String, pass: String) -> Bool {
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        let p = pass.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty, !p.isEmpty else { return false }
+        let segments = url.pathComponents.filter { $0 != "/" }
+        if segments.count > 1, (0..<(segments.count - 1)).contains(where: { segments[$0] == u && segments[$0 + 1] == p }) {
+            return true
+        }
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return items.first { $0.name == "username" }?.value == u && items.first { $0.name == "password" }?.value == p
+    }
+
+    /// What a stream request that may carry a playlist's sign-in becomes.
+    enum StreamOpen: Equatable {
+        /// As is, sign-in included.
+        case send(URL)
+        /// Rebuilt on the playlist's current address, with the sign-in it uses now.
+        case rebuilt(URL)
+        /// As is, without the Dispatcharr key.
+        case withoutKey(URL)
+        /// Not sent at all: Xtream Codes credentials in the URL of an address
+        /// the playlist no longer uses.
+        case refuse
+    }
+
+    /// The gate before every stream request that carries a playlist's
+    /// sign-in: the Dispatcharr key in its headers (`carriesKey`) or the
+    /// Xtream Codes credentials in its URL (`xtream`). A channel, VOD,
+    /// catch-up, or recording URL saved before Edit Playlist moved the Server
+    /// URL or Local URL still names the old address, and sending the sign-in
+    /// there hands it to whoever has that address now. The same rule as
+    /// AerioTV for Android's StreamAddresses: on one of `ownAddresses` as is;
+    /// for the active playlist and one of the server's own paths, rebuilt on
+    /// `current` (the address in use: the Local URL when its probe reached
+    /// it, else the Server URL); otherwise without the key, and not at all
+    /// when Xtream Codes credentials are in the URL.
+    static func keyedStream(_ url: URL, ownAddresses: [URL], current: URL?, isActive: Bool,
+                            carriesKey: Bool, xtream: (user: String, pass: String)? = nil) -> StreamOpen {
+        let xtreamInURL = xtream.map { carriesXtreamCredentials(url, user: $0.user, pass: $0.pass) } ?? false
+        guard carriesKey || xtreamInURL else { return .send(url) }
+        if isOwnAddress(url, ownAddresses: ownAddresses) { return .send(url) }
+        if isActive, let current, isOwnAddress(current, ownAddresses: ownAddresses),
            let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
            let rebuilt = rebuiltOnCurrentAddress(url, current: current) {
-            return (rebuilt, true)
+            return .rebuilt(rebuilt)
         }
-        return (url, false)
+        return xtreamInURL ? .refuse : .withoutKey(url)
+    }
+
+    /// `url` as it may be requested with the sign-in of the server at one of
+    /// `ownAddresses`, or nil. On an own address as is; an absolute http URL
+    /// the server reported for its own host (port 80 or the server's port),
+    /// as a server behind a TLS proxy it does not trust reports a recording's
+    /// file URL, comes back as https on the server's port (`tlsUpgraded`
+    /// applied to a first request). AerioTV for Android's serverUrlFor.
+    static func serverURL(for url: URL, ownAddresses: [URL]) -> URL? {
+        for own in ownAddresses {
+            if keepsSignIn(from: own, to: url) { return url }
+            if let upgraded = tlsUpgraded(url, previous: own, original: own) { return upgraded }
+        }
+        return nil
     }
 
     /// The verdict for one hop to `next` by URL, checked against the URL that
@@ -223,8 +271,9 @@ enum RedirectAuthPolicy {
     /// one redirected (`previous`) are https, the target is the same host,
     /// and it is http on the default port 80 or on the https request's own
     /// port, the hop is followed as https on the original request's port.
-    /// Nil for any other downgrade, and for a redirect to the http form of
-    /// the very URL that answered (following it as https would loop).
+    /// Nil for any other downgrade. As on Android, a server that keeps
+    /// answering with its own http form ends at the transport's redirect
+    /// limit, still over https.
     static func tlsUpgraded(_ next: URL?, previous: URL?, original: URL?) -> URL? {
         let prior = previous ?? original
         guard let next, let original, let prior,
@@ -234,13 +283,10 @@ enum RedirectAuthPolicy {
               host == original.host?.lowercased(), host == prior.host?.lowercased(),
               let targetPort = effectivePort(next), let priorPort = effectivePort(prior),
               targetPort == 80 || targetPort == priorPort,
-              var upgraded = URLComponents(url: next, resolvingAgainstBaseURL: false),
-              let answered = URLComponents(url: prior, resolvingAgainstBaseURL: false) else { return nil }
+              var upgraded = URLComponents(url: next, resolvingAgainstBaseURL: false) else { return nil }
         upgraded.scheme = "https"
         let originalPort = effectivePort(original) ?? 443
         upgraded.port = originalPort == 443 ? nil : originalPort
-        if upgraded.percentEncodedPath == answered.percentEncodedPath,
-           upgraded.percentEncodedQuery == answered.percentEncodedQuery { return nil }
         guard let url = upgraded.url, keepsSignIn(next: url, previous: prior, original: original) else { return nil }
         return url
     }

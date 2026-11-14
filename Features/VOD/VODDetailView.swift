@@ -2146,15 +2146,24 @@ struct VODDetailView: View {
         }
 
         var resolvedURL = url
+        // A VOD URL saved before the playlist moved is rebuilt on the address
+        // in use, or played without the key, or not at all with Xtream Codes
+        // credentials in it (ServerConnection.keyedStream).
+        if let server {
+            guard let gated = server.keyedStream(url, headers: playingHeaders) else {
+                debugLog("[STALE-ADDRESS] VOD play refused: its URL is on an address this playlist no longer uses")
+                return
+            }
+            resolvedURL = gated.url
+            playingHeaders = gated.headers
+        }
         if let server, server.type == .dispatcharrAPI {
             isResolvingURL = true
             let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
-            // A VOD URL saved before the playlist moved is rebuilt on the
-            // address in use first (ServerConnection.keyedStream).
-            let start = server.keyedStream(url, headers: playingHeaders).url
+            let start = resolvedURL
             resolvedURL = (try? await api.resolveFinalURLForPlayback(start, ownAddresses: server.ownAddresses)) ?? start
             isResolvingURL = false
             // Audit #38 parity (Android ee06e17): a session URL that resolved

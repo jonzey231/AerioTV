@@ -4722,9 +4722,9 @@ do {
                          original: entry) == nil, "tls: a chain with an http hop so far is not upgraded")
     expect(P.tlsUpgraded(u("https://dispatcharr.example.com/x"), previous: entry, original: entry) == nil,
            "tls: an https target needs no upgrade")
-    expect(P.tlsUpgraded(u("http://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8"),
-                         previous: entry, original: entry) == nil,
-           "tls: the http form of the URL that answered is not followed (it would loop)")
+    expectEq(P.tlsUpgraded(u("http://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8"),
+                           previous: entry, original: entry)?.absoluteString, entry.absoluteString,
+             "tls: a redirect to its own http form is followed as https too (the redirect limit ends a loop, as on Android)")
 
     // redirect(): the rewritten hop keeps the sign-in; anything else drops it.
     let o = req("https://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8")
@@ -4766,33 +4766,72 @@ do {
     expect(P.carriesSignIn(URLRequest(url: u("http://x/")), of: URLRequest(url: u("http://x/"))),
            "chain: no sign-in to keep counts as kept")
 
-    // Stream URLs saved before a playlist move (keyedStream).
+    // The stream gate (keyedStream): URLs saved before a playlist move.
     let now = P.ownAddresses(serverURL: "https://new.example.com", localURL: "192.168.1.20:9191")
     let current = u("http://192.168.1.20:9191")
-    let moved = P.keyedStream(u("http://192.168.1.10:9191/proxy/ts/stream/abc?output_format=mpegts"),
-                              ownAddresses: now, current: current)
-    expectEq(moved.url.absoluteString, "http://192.168.1.20:9191/proxy/ts/stream/abc?output_format=mpegts",
+    func gate(_ s: String, active: Bool = true, key: Bool = true, xtream: (user: String, pass: String)? = nil,
+              current c: URL? = nil) -> P.StreamOpen {
+        P.keyedStream(u(s), ownAddresses: now, current: c ?? current, isActive: active, carriesKey: key, xtream: xtream)
+    }
+    expectEq(gate("http://192.168.1.10:9191/proxy/ts/stream/abc?output_format=mpegts"),
+             .rebuilt(u("http://192.168.1.20:9191/proxy/ts/stream/abc?output_format=mpegts")),
              "stale: a live URL on the old address is rebuilt on the address in use")
-    expect(moved.keepsKey, "stale: the rebuilt URL keeps the key")
-    let vod = P.keyedStream(u("https://old.example.com/dispatcharr/proxy/vod/movie/u1/vod_s1"),
-                            ownAddresses: now, current: u("https://new.example.com/d2"))
-    expectEq(vod.url.absoluteString, "https://new.example.com/d2/proxy/vod/movie/u1/vod_s1",
+    expectEq(gate("https://old.example.com/dispatcharr/proxy/vod/movie/u1/vod_s1", current: u("https://new.example.com/d2")),
+             .rebuilt(u("https://new.example.com/d2/proxy/vod/movie/u1/vod_s1")),
              "stale: a VOD URL keeps its server path under the new address's prefix")
-    let rec = P.keyedStream(u("http://dispatcharr:9191/api/channels/recordings/7/file/"), ownAddresses: now, current: current)
-    expectEq(rec.url.absoluteString, "http://192.168.1.20:9191/api/channels/recordings/7/file/",
-             "stale: a recording file_url on an internal host is rebuilt")
-    let provider = P.keyedStream(u("http://provider.example/live/abc.ts"), ownAddresses: now, current: current)
-    expect(!provider.keepsKey && provider.url.host == "provider.example",
-           "stale: a URL without the server's path opens as is, without the key")
-    let onNew = P.keyedStream(u("https://new.example.com/proxy/ts/stream/abc"), ownAddresses: now, current: current)
-    expect(onNew.keepsKey && onNew.url.host == "new.example.com", "stale: a URL on a current address opens as is with the key")
-    let lan = P.keyedStream(u("http://192.168.1.20:9191/proxy/ts/stream/abc"), ownAddresses: now,
-                            current: u("https://new.example.com"))
-    expect(lan.keepsKey && lan.url.host == "192.168.1.20", "stale: the Local URL stays current while the Server URL is in use")
-    expect(!P.keyedStream(u("file:///var/rec.ts"), ownAddresses: now, current: current).keepsKey,
-           "stale: a local file never carries the key")
-    expectEq(P.rebuiltOnCurrentAddress(u("http://old/x/api/v?a=1#f"), current: u("http://new:9191/"))?.absoluteString,
-             "http://new:9191/api/v?a=1", "stale: the first server segment wins, query kept, fragment dropped")
+    expectEq(gate("https://new.example.com/proxy/ts/stream/abc"), .send(u("https://new.example.com/proxy/ts/stream/abc")),
+             "stale: a URL on the Server URL opens as is")
+    expectEq(gate("http://192.168.1.20:9191/proxy/ts/stream/abc", current: u("https://new.example.com")),
+             .send(u("http://192.168.1.20:9191/proxy/ts/stream/abc")), "stale: the Local URL stays current while the Server URL is in use")
+    expectEq(gate("http://dispatcharr:9191/api/channels/recordings/7/file/"),
+             .withoutKey(u("http://dispatcharr:9191/api/channels/recordings/7/file/")),
+             "stale: /api/ is not one of the server paths, so it goes without the key (as on Android)")
+    expectEq(gate("http://provider.example/stream.ts"), .withoutKey(u("http://provider.example/stream.ts")),
+             "stale: a URL without a server path goes without the key")
+    expectEq(gate("http://192.168.1.10:9191/proxy/ts/stream/abc", active: false),
+             .withoutKey(u("http://192.168.1.10:9191/proxy/ts/stream/abc")), "stale: only the active playlist's URLs are rebuilt")
+    expectEq(gate("http://192.168.1.10:9191/proxy/ts/stream/abc", key: false), .send(u("http://192.168.1.10:9191/proxy/ts/stream/abc")),
+             "stale: a request that carries no sign-in is not judged")
+    expectEq(gate("file:///var/rec.ts"), .withoutKey(u("file:///var/rec.ts")), "stale: a local file never carries the key")
+
+    // Xtream Codes credentials in the URL.
+    let xc = (user: "standin", pass: "s3cret")
+    expect(P.carriesXtreamCredentials(u("http://old.example:8080/live/standin/s3cret/101.ts"), user: "standin", pass: "s3cret"),
+           "xtream: credentials as path segments")
+    expect(P.carriesXtreamCredentials(u("http://old.example:8080/player_api.php?username=standin&password=s3cret"),
+                                      user: "standin", pass: "s3cret"), "xtream: credentials as query items")
+    expect(!P.carriesXtreamCredentials(u("http://old.example:8080/live/standin/other/101.ts"), user: "standin", pass: "s3cret"),
+           "xtream: a different password is not this playlist's")
+    expectEq(gate("http://old.example:8080/live/standin/s3cret/101.ts", key: false, xtream: xc),
+             .rebuilt(u("http://192.168.1.20:9191/live/standin/s3cret/101.ts")), "xtream: a stale /live/ URL is rebuilt on the address in use")
+    expectEq(gate("http://old.example:8080/timeshift/standin/s3cret/60/2026-11-13:20-00/101.ts", key: false, xtream: xc),
+             .rebuilt(u("http://192.168.1.20:9191/timeshift/standin/s3cret/60/2026-11-13:20-00/101.ts")),
+             "xtream: a stale /timeshift/ URL is rebuilt too")
+    expectEq(gate("http://old.example:8080/standin/s3cret/101", key: false, xtream: xc), .refuse,
+             "xtream: credentials on an address the playlist left, off the server paths, are not sent at all")
+    expectEq(gate("http://old.example:8080/live/standin/s3cret/101.ts", active: false, key: false, xtream: xc), .refuse,
+             "xtream: another playlist's stale URL with credentials is refused")
+    expectEq(gate("http://cdn.example/stream.ts", key: false, xtream: xc), .send(u("http://cdn.example/stream.ts")),
+             "xtream: a URL without the credentials is not judged")
+    expectEq(gate("https://new.example.com/live/standin/s3cret/101.ts", key: false, xtream: xc),
+             .send(u("https://new.example.com/live/standin/s3cret/101.ts")), "xtream: credentials on a current address go as is")
+
+    // Server-reported recording URLs (serverURL, Android's serverUrlFor).
+    let httpsServer = P.ownAddresses(serverURL: "https://dispatcharr.example.com", localURL: "")
+    expectEq(P.serverURL(for: u("http://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8"), ownAddresses: httpsServer)?.absoluteString,
+             "https://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8", "recording: http on port 80 is used as https on the server's port")
+    let https8443 = P.ownAddresses(serverURL: "https://d.example:8443", localURL: "")
+    expectEq(P.serverURL(for: u("http://d.example:8443/api/x"), ownAddresses: https8443)?.absoluteString, "https://d.example:8443/api/x",
+             "recording: http on the server's port is used as https there")
+    expectEq(P.serverURL(for: u("http://d.example/api/x"), ownAddresses: https8443)?.absoluteString, "https://d.example:8443/api/x",
+             "recording: http on 80 goes to the server's port")
+    expectEq(P.serverURL(for: u("https://dispatcharr.example.com/api/x"), ownAddresses: httpsServer)?.absoluteString,
+             "https://dispatcharr.example.com/api/x", "recording: a URL on the server's address is used as is")
+    expect(P.serverURL(for: u("http://dispatcharr.example.com:9191/api/x"), ownAddresses: httpsServer) == nil,
+           "recording: http on another port is not the server's")
+    expect(P.serverURL(for: u("http://other.example/api/x"), ownAddresses: httpsServer) == nil, "recording: another host is not the server's")
+    expectEq(P.rebuiltOnCurrentAddress(u("http://old/x/live/u/p/1.ts?a=1#f"), current: u("http://new:9191/"))?.absoluteString,
+             "http://new:9191/live/u/p/1.ts?a=1", "stale: the first server segment wins, query kept, fragment dropped")
     expect(P.rebuiltOnCurrentAddress(u("http://old/stream.ts"), current: current) == nil,
            "stale: no server segment, nothing to rebuild")
 }

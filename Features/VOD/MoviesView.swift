@@ -852,21 +852,25 @@ struct MoviesView: View {
 
     private func resumePicked(_ progress: WatchProgress, startAt: Int32? = nil) {
         // If we have a stored stream URL, launch playback directly with the saved position
-        if let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) {
+        let resumeServer: ServerConnection? = progress.serverID
+            .flatMap(UUID.init(uuidString:))
+            .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
+        // A Continue Watching URL saved before the playlist moved is rebuilt on
+        // the address in use, or played without the key; with Xtream Codes
+        // credentials on an address the playlist left it is not used at all,
+        // and the catalog title below plays instead (ServerConnection.keyedStream).
+        let savedHeaders = resumeServer?.authHeaders ?? dispatcharrHeaders
+        let gated: (url: URL, headers: [String: String])? = {
+            guard let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) else { return nil }
+            guard let resumeServer else { return (storedURL, savedHeaders) }
+            return resumeServer.keyedStream(storedURL, headers: savedHeaders)
+        }()
+        if let opened = gated {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = startAt ?? progress.positionMs
-            let resumeServer: ServerConnection? = progress.serverID
-                .flatMap(UUID.init(uuidString:))
-                .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
-            // A Continue Watching URL saved before the playlist moved is
-            // rebuilt on the address in use, or played without the key
-            // (ServerConnection.keyedStream).
-            let savedHeaders = resumeServer?.authHeaders ?? dispatcharrHeaders
-            let opened = resumeServer?.keyedStream(storedURL, headers: savedHeaders)
-                ?? (url: storedURL, headers: savedHeaders)
             let url = opened.url
             resumePlayingHeaders = opened.headers
             // ATV log 2026-08-17 (Logan): this fast path mounted the player
@@ -1402,14 +1406,23 @@ struct MoviesView: View {
                                                       itemType: "movie", itemID: item.id)
         Task { @MainActor in
             var resolved = url
+            // A VOD URL saved before the playlist moved is rebuilt on the
+            // address in use, or played without the key, or not at all with
+            // Xtream Codes credentials in it (ServerConnection.keyedStream).
+            if let server {
+                guard let gated = server.keyedStream(url, headers: headers) else {
+                    debugLog("[STALE-ADDRESS] movie play refused: its URL is on an address this playlist no longer uses")
+                    return
+                }
+                resolved = gated.url
+                headers = gated.headers
+            }
             if let server, server.type == .dispatcharrAPI {
                 let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                          auth: .apiKey(server.effectiveApiKey),
                                          userAgent: server.effectiveUserAgent,
                                          authMode: server.dispatcharrHeaderMode)
-                // A VOD URL saved before the playlist moved is rebuilt on the
-                // address in use first (ServerConnection.keyedStream).
-                let start = server.keyedStream(url, headers: headers).url
+                let start = resolved
                 resolved = (try? await api.resolveFinalURLForPlayback(start, ownAddresses: server.ownAddresses)) ?? start
                 // Off the server's own addresses (host and port) or from
                 // https to http: no key.

@@ -332,25 +332,26 @@ struct TVShowsView: View {
     }
 
     private func resumePicked(_ progress: WatchProgress) {
-        if let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) {
+        let progressServer: ServerConnection? = progress.serverID
+            .flatMap(UUID.init(uuidString:))
+            .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
+        // A Continue Watching URL saved before the playlist moved is rebuilt on
+        // the address in use, or played without the key; with Xtream Codes
+        // credentials on an address the playlist left it is not used at all,
+        // and the catalog title below opens instead (ServerConnection.keyedStream).
+        let gated: (url: URL, headers: [String: String])? = {
+            guard let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) else { return nil }
+            guard let progressServer else { return (storedURL, dispatcharrHeaders) }
+            return progressServer.keyedStream(storedURL, headers: progressServer.authHeaders)
+        }()
+        if let opened = gated {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = progress.positionMs
-            var url = storedURL
-            if let sid = progress.serverID,
-               let serverUUID = UUID(uuidString: sid),
-               let server = servers.first(where: { $0.id == serverUUID }) {
-                // A Continue Watching URL saved before the playlist moved is
-                // rebuilt on the address in use, or played without the key
-                // (ServerConnection.keyedStream).
-                let opened = server.keyedStream(storedURL, headers: server.authHeaders)
-                url = opened.url
-                resumePlayingHeaders = opened.headers
-            } else {
-                resumePlayingHeaders = dispatcharrHeaders
-            }
+            let url = opened.url
+            resumePlayingHeaders = opened.headers
             // ATV log 2026-08-17: same defect as MoviesView's resume path -
             // mounting the cover directly skipped the teardown VODDetailView
             // does, so a minimized live channel kept decoding (and playing
