@@ -43,18 +43,8 @@ final class CloudSnapshotSync: ObservableObject {
 
     // MARK: - Keys and gates
 
-    /// The iCloud key of one shared snapshot (the Android Drive file name, prefixed).
-    static func kvsKey(_ c: DsyncCategory) -> String {
-        switch c {
-        case .favorites: return "snapshot.favorites.v1.json"
-        case .watchProgress: return "snapshot.watch_progress.v1.json"
-        case .reminders: return "snapshot.reminders.v1.json"
-        case .watchlist: return "snapshot.watchlist.v1.json"
-        case .preferences: return "snapshot.preferences.v1.json"
-        case .playlists: return "snapshot.playlists.v1.json"
-        case .credentials: return "snapshot.credentials.v1.json"
-        }
-    }
+    /// The iCloud key of one shared snapshot (CloudCanon.kvsKey).
+    nonisolated static func kvsKey(_ c: DsyncCategory) -> String { CloudCanon.kvsKey(c) }
 
     /// The older iCloud keys a shared file's rows lived in before snapshots.
     private static let legacyPrefs = "syncedPreferences"
@@ -760,6 +750,19 @@ final class CloudSnapshotSync: ObservableObject {
         guard let d = readSharedSummary() else {
             debugLog("[SYNC] converge skipped: iCloud unreadable (unknown, not empty)")
             return
+        }
+        // A backup file deleted from iCloud on a device (Delete from iCloud,
+        // Clear iCloud Data) since this one last looked: forget what converge
+        // pushed for it, so this device's Dispatcharr copy rebuilds the backup.
+        // Local data is never touched (LaneClearRule tokens).
+        let tokens = kvs.dictionary(forKey: SyncManager.laneClearedKVSKey) as? [String: String] ?? [:]
+        for file in CloudCanon.SHARED_FILES {
+            let lane = CloudCanon.clearLane(file)
+            let seenKey = "syncLaneClearedSeen.\(lane)"
+            guard !LaneClearRule.baseStillValid(cloudToken: tokens[lane], seenToken: UserDefaults.standard.string(forKey: seenKey)) else { continue }
+            UserDefaults.standard.set(tokens[lane], forKey: seenKey)
+            for n in SetupSourceChoice.namesInFile(file) { state.remove(convergeKey(pid, n)) }
+            debugLog("[CLOUD] \(CloudCanon.fileName(file)) backup was deleted from iCloud on a device; converge rebuilds it, local data stays")
         }
         var marked: [String: String] = [:]
         for n in SetupSourceChoice.SHARED { if let v = state.string(convergeKey(pid, n)) { marked[n] = v } }

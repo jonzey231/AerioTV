@@ -655,8 +655,11 @@ final class SyncManager: ObservableObject {
                 kvs.removeObject(forKey: k)
             }
             kvs.removeObject(forKey: "lastSyncPing")
+            // The backup snapshots too, so the Dispatcharr Sync Turn On step
+            // cannot apply an "iCloud backup" the user just deleted.
+            for c in DsyncCategory.allCases { kvs.removeObject(forKey: CloudCanon.kvsKey(c)) }
             // Other devices keep their local copies: nothing missing is a deletion.
-            SyncManager.markLanesCleared(SyncManager.seenLanes, in: kvs)
+            SyncManager.markLanesCleared(SyncManager.seenLanes + DsyncCategory.allCases.map(CloudCanon.clearLane), in: kvs)
             kvs.synchronize()
             debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
         }
@@ -695,6 +698,17 @@ final class SyncManager: ObservableObject {
     @MainActor
     func clearCloudCategory(_ category: SyncCategory, localServers: [ServerConnection]) {
         debugLog("🔵 SyncManager.clearCloudCategory: starting category=\(category.rawValue)")
+        // The backup snapshots holding this category's data go too (a token
+        // per file, so other devices keep their data and rebuild the backup).
+        let snapshots = CloudCanon.snapshotsCleared(by: category.rawValue)
+        if !snapshots.isEmpty {
+            DispatchQueue.main.async {
+                let kvs = NSUbiquitousKeyValueStore.default
+                for c in snapshots { kvs.removeObject(forKey: CloudCanon.kvsKey(c)) }
+                SyncManager.markLanesCleared(snapshots.map(CloudCanon.clearLane), in: kvs)
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared \(snapshots.count) backup snapshot(s): \(snapshots.map(CloudCanon.fileName).joined(separator: ", "))")
+            }
+        }
 
         switch category {
         case .servers:

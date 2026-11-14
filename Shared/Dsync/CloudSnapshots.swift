@@ -737,6 +737,38 @@ extension CloudCanon {
 
     /// The shared cloud files, in Android's update order.
     static let SHARED_FILES: [DsyncCategory] = [.favorites, .watchProgress, .reminders, .watchlist, .preferences]
+
+    /// The iCloud key of one shared snapshot (the Android Drive file name, prefixed).
+    static func kvsKey(_ c: DsyncCategory) -> String {
+        switch c {
+        case .favorites: return "snapshot.favorites.v1.json"
+        case .watchProgress: return "snapshot.watch_progress.v1.json"
+        case .reminders: return "snapshot.reminders.v1.json"
+        case .watchlist: return "snapshot.watchlist.v1.json"
+        case .preferences: return "snapshot.preferences.v1.json"
+        case .playlists: return "snapshot.playlists.v1.json"
+        case .credentials: return "snapshot.credentials.v1.json"
+        }
+    }
+
+    /// Delete from iCloud for one Sync Category (SyncCategory raw value): the
+    /// backup snapshots that hold its data, so the Dispatcharr Sync Turn On
+    /// step cannot offer a backup the user just deleted. Favorites, Watchlist,
+    /// and the settings ride App Preferences. Clear iCloud Data clears every
+    /// snapshot (DsyncCategory.allCases).
+    static func snapshotsCleared(by syncCategory: String) -> [DsyncCategory] {
+        switch syncCategory {
+        case "servers": return [.playlists]
+        case "watchProgress": return [.watchProgress]
+        case "reminders": return [.reminders]
+        case "preferences": return [.favorites, .watchlist, .preferences]
+        case "credentials": return [.credentials]
+        default: return []
+        }
+    }
+
+    /// The clear-marker lane of a snapshot (LaneClearRule tokens, SyncManager).
+    static func clearLane(_ c: DsyncCategory) -> String { "snapshot.\(c.rawValue)" }
 }
 
 // MARK: - Rule 4 replace (the user chose the iCloud backup)
