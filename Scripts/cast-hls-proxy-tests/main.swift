@@ -4837,5 +4837,91 @@ do {
 }
 
 
+// MARK: LAN stream path token (AirPlay copy and Cast proxy, 2026-11-14)
+// Both LAN listeners accept any device on the network; the per-session token
+// in the path is what keeps the stream to the URL this session handed out.
+do {
+    typealias T = LANStreamToken
+    let token = T.make()
+    expectEq(token.count, 32, "token: 128 random bits as 32 hex characters")
+    expect(token.allSatisfy { "0123456789abcdef".contains($0) }, "token: lowercase hex only")
+    var seen = Set<String>()
+    for _ in 0..<1000 { seen.insert(T.make()) }
+    expectEq(seen.count, 1000, "token: a new value every session (1000 of 1000 distinct)")
+
+    expectEq(T.path("live.m3u8", token: token), "/\(token)/live.m3u8", "token: the AirPlay playlist path")
+    expectEq(T.path("/demuxed.m3u8", token: token), "/\(token)/demuxed.m3u8", "token: the Cast master path")
+
+    expectEq(T.strip("/\(token)/live.m3u8", token: token), "/live.m3u8", "strip: the handed-out path reaches the playlist")
+    expectEq(T.strip("/\(token)/seg12.ts", token: token), "/seg12.ts", "strip: a listed segment")
+    expectEq(T.strip("/\(token)/vinit3.mp4", token: token), "/vinit3.mp4", "strip: a Cast init segment")
+    expect(T.strip("/live.m3u8", token: token) == nil, "strip: no token, no playlist")
+    expect(T.strip("/seg12.ts", token: token) == nil, "strip: no token, no segment")
+    expect(T.strip("/demuxed.m3u8", token: token) == nil, "strip: no token, no Cast master")
+    expect(T.strip("/\(T.make())/live.m3u8", token: token) == nil, "strip: another session's token is refused")
+    expect(T.strip("/\(token)", token: token) == nil, "strip: the token alone names nothing")
+    expect(T.strip("/\(token.dropLast())/live.m3u8", token: token) == nil, "strip: a shortened token is refused")
+    expect(T.strip("/\(token.uppercased())/live.m3u8", token: token) == nil
+           || token.uppercased() == token, "strip: the token is case sensitive")
+    expect(T.strip("/\(token)0/live.m3u8", token: token) == nil, "strip: a longer first segment is refused")
+    expect(T.strip("/x/\(token)/live.m3u8", token: token) == nil, "strip: the token must be the first segment")
+    expect(T.strip("/\(token)/live.m3u8", token: "") == nil, "strip: no session token, nothing passes")
+
+    // The AirPlay copy (TSHLSPlaylist): every URI under the token, nothing else changed.
+    let entries = (40...42).map { TSHLSPlaylist.Entry(seq: $0, duration: 2.0, uri: "seg\($0).ts") }
+    let ts = TSHLSPlaylist.render(window: entries, targetDuration: 4, version: 3, discontinuitySeqs: [41],
+                                  eventPlaylist: false, mapURI: nil, complete: false)
+    let tsTok = T.tokenize(playlist: ts, token: token)
+    let tsUris = tsTok.split(separator: "\n").filter { !$0.hasPrefix("#") }
+    expectEq(tsUris.count, 3, "AirPlay playlist: three segment URIs")
+    expect(tsUris.allSatisfy { $0.hasPrefix("/\(token)/seg") && $0.hasSuffix(".ts") }, "AirPlay playlist: every URI carries the token")
+    expect(tsUris.allSatisfy { T.strip(String($0), token: token) != nil }, "AirPlay playlist: every listed URI is served")
+    expectEq(tsTok.replacingOccurrences(of: "/\(token)/", with: ""), ts, "AirPlay playlist: tags and order unchanged")
+    // fMP4 arm: the EXT-X-MAP URI too; an inlined data: URI stays as it is.
+    let fmp4 = TSHLSPlaylist.render(window: [TSHLSPlaylist.Entry(seq: 7, duration: 2.0, uri: "seg7.m4s"),
+                                             TSHLSPlaylist.Entry(seq: 8, duration: 2.0, uri: "data:video/iso.segment;base64,AAAA")],
+                                    targetDuration: 4, version: 7, discontinuitySeqs: [],
+                                    eventPlaylist: false, mapURI: "init.mp4", complete: false)
+    let fmp4Tok = T.tokenize(playlist: fmp4, token: token)
+    expect(fmp4Tok.contains("#EXT-X-MAP:URI=\"/\(token)/init.mp4\""), "AirPlay fMP4: the map URI carries the token")
+    expect(fmp4Tok.contains("\n/\(token)/seg7.m4s\n"), "AirPlay fMP4: the segment URI carries the token")
+    expect(fmp4Tok.contains("\ndata:video/iso.segment;base64,AAAA\n"), "AirPlay fMP4: a data: URI is left alone")
+    expectEq(T.tokenize(playlist: TSHLSPlaylist.emptyText(targetDuration: 4), token: token),
+             TSHLSPlaylist.emptyText(targetDuration: 4), "AirPlay playlist: an empty playlist is unchanged")
+
+    // The Cast proxy: the demuxed master, the audio-only master, and the media playlists.
+    let store = CastHLSSegmentStore()
+    let gen = store.beginGeneration()
+    store.setDemuxedInitSegments(generation: gen, video: Data("init-avcC".utf8), audio: Data("mp4a".utf8))
+    for _ in 0..<3 {
+        store.addSegment(generation: gen, durationTicks: 3 * 90_000,
+                         videoData: Data("vseg".utf8), audioData: Data("aseg".utf8))
+    }
+    let master = T.tokenize(playlist: store.demuxedMasterPlaylistText(), token: token)
+    expect(master.contains("URI=\"/\(token)/audio.m3u8\""), "Cast master: the audio rendition URI carries the token")
+    expect(master.contains("\n/\(token)/video.m3u8\n"), "Cast master: the variant URI carries the token")
+    expectEq(master.replacingOccurrences(of: "/\(token)/", with: ""), store.demuxedMasterPlaylistText(),
+             "Cast master: codecs and attributes unchanged")
+    let audioOnly = T.tokenize(playlist: CastHLSSegmentStore.audioOnlyMasterPlaylistText(audioCodec: "ac-3"), token: token)
+    expect(audioOnly.hasSuffix("\n/\(token)/audio.m3u8\n"), "Cast audio-only master: the URI carries the token")
+    for (name, text) in [("video", store.videoPlaylistText()), ("audio", store.audioPlaylistText())] {
+        let tok = T.tokenize(playlist: text, token: token)
+        let uris = tok.split(separator: "\n").filter { !$0.hasPrefix("#") }.map(String.init)
+        let maps = tok.split(separator: "\n").filter { $0.hasPrefix("#EXT-X-MAP:URI=") }
+        expect(!uris.isEmpty && uris.allSatisfy { $0.hasPrefix("/\(token)/") && T.strip($0, token: token) != nil },
+               "Cast \(name) playlist: every segment URI carries the token")
+        expect(!maps.isEmpty && maps.allSatisfy { $0.contains("URI=\"/\(token)/") }, "Cast \(name) playlist: the init URI carries the token")
+        expectEq(tok.replacingOccurrences(of: "/\(token)/", with: ""), text, "Cast \(name) playlist: nothing else changed")
+    }
+
+    // The log writes the token as <token>, never its value.
+    expectEq(T.redacted("http://192.168.1.20:50123/\(token)/live.m3u8"), "http://192.168.1.20:50123/<token>/live.m3u8",
+             "log: the handed-out URL is redacted")
+    expectEq(T.redacted("GET /\(token)/seg12.ts HTTP/1.1 | Host: 192.168.1.20"), "GET /<token>/seg12.ts HTTP/1.1 | Host: 192.168.1.20",
+             "log: a request line is redacted")
+    expect(!T.redacted(tsTok).contains(token), "log: a tokened playlist is redacted")
+    expectEq(T.redacted("GET /seg12.ts HTTP/1.1"), "GET /seg12.ts HTTP/1.1", "log: text without a token is unchanged")
+}
+
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)
