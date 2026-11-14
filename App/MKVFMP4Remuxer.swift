@@ -2769,7 +2769,18 @@ final class MKVVODServer: @unchecked Sendable {
                 DispatchQueue.main.async { self.onSubtitleTracks?(subTracks) }
             }
             do {
-                let listener = try NWListener(using: .tcp, on: .any)
+                // Loopback only. This server hands out the decoded movie with
+                // no token, and the player is the only client (its URL is
+                // 127.0.0.1, which an AirPlay receiver could never reach
+                // anyway). Bound to every interface, any device on the LAN
+                // could fetch a playing title from its port. The address
+                // bind is what refuses a connection to the LAN address
+                // (measured 2026-11-14 in the iOS 27 simulator: the
+                // loopback interface requirement alone still accepted one).
+                let params = NWParameters.tcp
+                params.requiredInterfaceType = .loopback
+                params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+                let listener = try NWListener(using: params, on: .any)
                 listener.newConnectionHandler = { [weak self] conn in self?.handle(conn) }
                 listener.stateUpdateHandler = { [weak self] state in
                     guard let self else { return }
