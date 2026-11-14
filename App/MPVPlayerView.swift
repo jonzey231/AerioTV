@@ -1253,7 +1253,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let routedURL = routeThroughLiveRewind(newURL)
             mpvQueue.async { [weak self] in
                 guard let self, let mpv = self.activeMPVHandle() else { return }
-                self.mpvCommand(mpv, ["loadfile", routedURL.absoluteString, "replace"])
+                self.mpvCommand(mpv, ["loadfile", self.loadTarget(routedURL.absoluteString), "replace"])
             }
         }
 
@@ -2282,6 +2282,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var limitProbeFired = false
         private var limitProbeGate: DispatchSemaphore?
 
+        /// mpv (FFmpeg) sends http-header-fields with every request it
+        /// makes, to every host it is redirected to or a playlist names
+        /// (measured 2026-11-13), so it never gets the sign-in. A stream that
+        /// needs the key loads through the loopback relay (PlayerRelay),
+        /// which makes the requests itself; one session per upstream URL,
+        /// reused across reloads, released with the coordinator.
+        private let relayLock = NSLock()
+        private var relayHandle: PlayerRelay.Handle?
+
+        /// The URL mpv loads for `target`: the relay URL when this
+        /// coordinator's headers carry the sign-in and the target is
+        /// http(s), else the target as is (aeriots://, aeriocu://, file).
+        private func loadTarget(_ target: String) -> String {
+            guard let url = URL(string: target), HLSRelayPlaylist.isRelayable(url),
+                  RedirectAuthPolicy.headersCarrySignIn(headers) else { return target }
+            relayLock.lock(); defer { relayLock.unlock() }
+            if let handle = relayHandle, handle.upstream == url { return handle.url.absoluteString }
+            guard let handle = PlayerRelay.shared.open(url, headers: headers, purpose: .mpv) else {
+                debugLog("[MPV-DIAG] relay unavailable; loading without the key \(streamTag)")
+                relayHandle = nil
+                return target
+            }
+            relayHandle = handle
+            return handle.url.absoluteString
+        }
+
+        private func releaseRelay() {
+            relayLock.lock(); relayHandle = nil; relayLock.unlock()
+        }
+
         /// The headers for the next open: a replaced key swapped for its
         /// successor (StreamKeyGate). nil while the key is held as
         /// rejected: play() stops before any load, and probes skip.
@@ -2291,9 +2321,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             return nil
         }
 
-        /// Re-sets mpv's request headers before a load (key replaced).
+        /// Re-sets mpv's request headers before a load (key replaced). Never
+        /// the sign-in: keyed loads go through the relay (loadTarget).
         private func applyHeaderFields(_ h: [String: String], to mpv: OpaquePointer) {
-            let custom = h.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            let custom = RedirectAuthPolicy.withoutSignIn(h).filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
             let list = custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
             mpv_set_property_string(mpv, "http-header-fields", list)
         }
@@ -4354,7 +4385,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     cachedRenderer?.flush(removingDisplayedImage: false)
                     mpvQueue.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else { return }
-                        self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
+                        self.mpvCommand(mpv, ["loadfile", self.loadTarget(reloadTarget), "replace"])
                     }
                 }
             }
@@ -4844,7 +4875,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     cachedRenderer?.flush(removingDisplayedImage: false)
                     mpvQueue.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else { return }
-                        self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
+                        self.mpvCommand(mpv, ["loadfile", self.loadTarget(reloadTarget), "replace"])
                     }
                 }
             }
@@ -5098,6 +5129,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func stop() {
             let mpvToStop = markShuttingDownAndSnapshotMPV()
             stopStreamInfoTimer()
+            releaseRelay()
             #if os(tvOS)
             // Task #186: drop our refresh-rate preference so the UI
             // returns to the panel default outside the player.
@@ -5862,7 +5894,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 checkError(mpv_set_option_string(mpv, "user-agent", ua))
             }
-            let preInitCustomHeaders = (openHeaders ?? headers).filter {
+            // Never the sign-in: keyed loads go through the relay (loadTarget).
+            let preInitCustomHeaders = RedirectAuthPolicy.withoutSignIn(openHeaders ?? headers).filter {
                 $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame &&
                 $0.key.caseInsensitiveCompare(startFromBeginningHeader) != .orderedSame
             }
@@ -6292,7 +6325,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 mpv_set_property_string(mpv, "user-agent", ua)
             }
-            let customHeaders = (openHeaders ?? headers).filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            let customHeaders = RedirectAuthPolicy.withoutSignIn(openHeaders ?? headers)
+                .filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
             if !customHeaders.isEmpty {
                 let headerList = customHeaders.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
                 mpv_set_property_string(mpv, "http-header-fields", headerList)
@@ -6653,7 +6687,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // needs it again, rebuild it delegate-based (cancel on first
             // response) and skip live URLs.
 
-            mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
+            mpvCommand(mpv, ["loadfile", loadTarget(url.absoluteString), "replace"])
         }
 
         // MARK: - Event Processing
@@ -7782,7 +7816,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             logStore.append("↻ MPV: unpause live → snap to live edge")
                             mpvQueue.async { [weak self] in
                                 guard let self, let mpv = self.activeMPVHandle() else { return }
-                                self.mpvCommand(mpv, ["loadfile", target.absoluteString, "replace"])
+                                self.mpvCommand(mpv, ["loadfile", self.loadTarget(target.absoluteString), "replace"])
                             }
                             // Solo fullscreen only (same shape as the relay
                             // router): the unified player IS a tile, so a

@@ -858,6 +858,12 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
     private var callbackContext: Unmanaged<HeadlessMPVAudioEngine>?
     /// Bumped by stop() so a delayed reload scheduled before it is dropped.
     private var retryGeneration = 0
+    /// mpv (FFmpeg) sends http-header-fields with every request it makes,
+    /// to every host, so a stream that needs the key loads through the
+    /// loopback relay instead (PlayerRelay). Touched only on `queue`.
+    private var relay: PlayerRelay.Handle?
+    /// What mpv actually loads for `currentURL` (the relay URL when keyed).
+    private var currentLoad: String?
 
     func play(url: URL, headers: [String: String]) {
         queue.async { [self] in
@@ -865,15 +871,30 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
                 self.setup(headers: headers)
             }
             guard let mpv = self.mpv else { return }
-            // This open's headers (a replaced key reaches a running engine).
-            let custom = headers.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
-            if !custom.isEmpty {
-                let list = custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
-                mpv_set_property_string(mpv, "http-header-fields", list)
+            // This open's headers (a replaced key reaches a running engine),
+            // never the sign-in.
+            let custom = RedirectAuthPolicy.withoutSignIn(headers)
+                .filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+            mpv_set_property_string(mpv, "http-header-fields",
+                                    custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n"))
+            var load = url.absoluteString
+            if RedirectAuthPolicy.headersCarrySignIn(headers), HLSRelayPlaylist.isRelayable(url) {
+                if let handle = self.relay, handle.upstream == url {
+                    load = handle.url.absoluteString
+                } else if let handle = PlayerRelay.shared.open(url, headers: headers, purpose: .mpv) {
+                    self.relay = handle
+                    load = handle.url.absoluteString
+                } else {
+                    self.relay = nil
+                    debugLog("[CARPLAY] engine: relay unavailable; mpv loads without the key")
+                }
+            } else {
+                self.relay = nil
             }
             self.currentURL = url
+            self.currentLoad = load
             self.retriedCurrentLoad = false
-            self.command(mpv, ["loadfile", url.absoluteString, "replace"])
+            self.command(mpv, ["loadfile", load, "replace"])
         }
     }
 
@@ -899,6 +920,8 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
             guard let mpv = self.mpv else { return }
             self.mpv = nil
             self.currentURL = nil
+            self.currentLoad = nil
+            self.relay = nil
             // Detach the wakeup callback BEFORE destroy, then release the
             // retained context it carried (setup's passRetained).
             mpv_set_wakeup_callback(mpv, nil, nil)
@@ -929,7 +952,9 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
         if let ua = headers["User-Agent"], !ua.isEmpty {
             mpv_set_option_string(handle, "user-agent", ua)
         }
-        let custom = headers.filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
+        // Never the sign-in: a keyed stream loads through the relay (play).
+        let custom = RedirectAuthPolicy.withoutSignIn(headers)
+            .filter { $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame }
         if !custom.isEmpty {
             let list = custom.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
             mpv_set_option_string(handle, "http-header-fields", list)
@@ -990,7 +1015,7 @@ final class HeadlessMPVAudioEngine: @unchecked Sendable {
                     queue.asyncAfter(deadline: .now() + 2) { [weak self] in
                         guard let self, self.retryGeneration == generation,
                               let mpv = self.mpv, self.currentURL == url else { return }
-                        self.command(mpv, ["loadfile", url.absoluteString, "replace"])
+                        self.command(mpv, ["loadfile", self.currentLoad ?? url.absoluteString, "replace"])
                     }
                 }
             case MPV_EVENT_SHUTDOWN:
