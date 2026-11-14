@@ -416,5 +416,45 @@ do {
           "Credentials off: nothing is migrated")
 }
 
+// MARK: - Delete from iCloud never deletes another device's playlists (2026-11-14)
+do {
+    let now: TimeInterval = 10_000
+    func row(_ id: String, _ t: TimeInterval, secret: Bool) -> [String: Any] {
+        var r: [String: Any] = ["id": id, "name": id, "_changedAt": t]
+        if secret { r["_password"] = "pw"; r["_apiKey"] = "key" }
+        return r
+    }
+    func stamps(_ rows: [[String: Any]]) -> [String: TimeInterval] {
+        Dictionary(uniqueKeysWithValues: rows.map { ($0["id"] as! String, $0["_changedAt"] as! TimeInterval) })
+    }
+    // iCloud holds device A's playlist P1 and device B's playlist P2 (A lacks
+    // P2), both written by an older version with their credentials.
+    let cloud = [row("P1", 100, secret: true), row("P2", 200, secret: true)]
+    // Device B has both and saw both in iCloud.
+    let bLocal: [String: TimeInterval] = ["P1": 100, "P2": 200]
+    let bBase: [String: TimeInterval] = ["P1": 100, "P2": 200]
+    func bPlan(_ rows: [[String: Any]], base: [String: TimeInterval]?) -> [String: LaneMerge.Pick] {
+        LaneMerge.plan(local: .init(live: bLocal), remote: .init(live: stamps(rows)), base: base, now: now)
+    }
+    // The old Credentials clear rewrote the list from A's playlists only.
+    eq(bPlan([KVSSecretRule.scrubbed(cloud[0])], base: bBase)["P2"], .gone,
+       "before: A's Delete from iCloud > Credentials dropped P2, and B deleted it")
+    // Now A removes the credential fields from iCloud's records as they are.
+    let written = KVSSecretRule.scrubbedList(cloud) ?? []
+    eq(Set(written.compactMap { $0["id"] as? String }), ["P1", "P2"], "Credentials clear keeps every record, B's included")
+    check(!written.contains(where: KVSSecretRule.holdsSecret), "and every credential field is gone")
+    let plan = bPlan(written, base: bBase)
+    eq(plan.count, 2, "B's merge plans both playlists")
+    check(plan.values.allSatisfy { $0 == .local || $0 == .remote }, "device B keeps all its playlists")
+    check(KVSSecretRule.scrubbedList(written) == nil, "a second Credentials clear writes nothing")
+    // Delete from iCloud > Playlists (or Clear iCloud Data) on A: the rows go and a token stays.
+    eq(bPlan([], base: bBase)["P2"], .gone, "before: an emptied list read as deletions on B")
+    check(!LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: nil), "a clear B has not seen voids its base")
+    let cleared = bPlan([], base: LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: nil) ? bBase : nil)
+    check(cleared.count == 2 && cleared.values.allSatisfy { $0 == .local }, "B keeps both playlists (and pushes them back)")
+    check(LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: "t1"), "once B has seen the clear, its base works again")
+    check(LaneClearRule.baseStillValid(cloudToken: nil, seenToken: nil), "no clear ever: the base holds")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

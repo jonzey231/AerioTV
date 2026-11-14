@@ -424,7 +424,35 @@ final class SyncManager: ObservableObject {
     /// time), so an older build's absence can count as a deletion. Nil until
     /// a pull recorded it: then nothing is deleted for being absent.
     static func loadSeen(_ lane: String) -> [String: TimeInterval]? {
-        UserDefaults.standard.dictionary(forKey: "syncSeen.\(lane).v1") as? [String: TimeInterval]
+        // A Delete from iCloud on another device since this one last looked:
+        // what it saw there no longer applies (LaneClearRule). The key-value
+        // store is read on the main queue only (every caller is there).
+        if Thread.isMainThread {
+            let cloud = (NSUbiquitousKeyValueStore.default.dictionary(forKey: laneClearedKVSKey) as? [String: String])?[lane]
+            let seenKey = "syncLaneClearedSeen.\(lane)"
+            if !LaneClearRule.baseStillValid(cloudToken: cloud, seenToken: UserDefaults.standard.string(forKey: seenKey)) {
+                UserDefaults.standard.removeObject(forKey: "syncSeen.\(lane).v1")
+                UserDefaults.standard.set(cloud, forKey: seenKey)
+                debugLog("[SYNC] \(lane) was deleted from iCloud on a device: nothing missing there is read as a deletion; local copies stay")
+                return nil
+            }
+        }
+        return UserDefaults.standard.dictionary(forKey: "syncSeen.\(lane).v1") as? [String: TimeInterval]
+    }
+
+    /// Per-lane tokens a Delete from iCloud leaves (LaneClearRule).
+    static let laneClearedKVSKey = "syncLaneCleared.v1"
+
+    /// Delete from iCloud for [lanes]: a new token for each in iCloud, already
+    /// seen here (this device forgets its own base separately). Main queue.
+    static func markLanesCleared(_ lanes: [String], in store: NSUbiquitousKeyValueStore) {
+        var tokens = store.dictionary(forKey: laneClearedKVSKey) as? [String: String] ?? [:]
+        for lane in lanes {
+            let token = UUID().uuidString
+            tokens[lane] = token
+            UserDefaults.standard.set(token, forKey: "syncLaneClearedSeen.\(lane)")
+        }
+        store.set(tokens, forKey: laneClearedKVSKey)
     }
 
     static func saveSeen(_ lane: String, _ seen: [String: TimeInterval]?) {
@@ -432,7 +460,7 @@ final class SyncManager: ObservableObject {
         else { UserDefaults.standard.removeObject(forKey: "syncSeen.\(lane).v1") }
     }
 
-    private static let seenLanes = ["watchProgress", "reminders", "playlists", "favorites"]
+    static let seenLanes = ["watchProgress", "reminders", "playlists", "favorites"]
 
     /// iCloud no longer holds what this device saw there (cleared, turned
     /// off, another account).
@@ -627,6 +655,8 @@ final class SyncManager: ObservableObject {
                 kvs.removeObject(forKey: k)
             }
             kvs.removeObject(forKey: "lastSyncPing")
+            // Other devices keep their local copies: nothing missing is a deletion.
+            SyncManager.markLanesCleared(SyncManager.seenLanes, in: kvs)
             kvs.synchronize()
             debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
         }
@@ -674,6 +704,8 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.serversRemovedKVSKey)
+                // Other devices keep their playlists: nothing missing is a deletion.
+                SyncManager.markLanesCleared(["playlists"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared servers KVS")
             }
@@ -684,6 +716,7 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.progressRemovedKVSKey)
+                SyncManager.markLanesCleared(["watchProgress"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared watch progress KVS")
             }
@@ -694,6 +727,7 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.remindersRemovedKVSKey)
+                SyncManager.markLanesCleared(["reminders"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared reminders KVS")
             }
@@ -703,6 +737,8 @@ final class SyncManager: ObservableObject {
             let key = prefKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                // Favorites ride the preferences entry with their own base.
+                SyncManager.markLanesCleared(["favorites"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared preferences KVS")
             }
@@ -756,20 +792,22 @@ final class SyncManager: ObservableObject {
             UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
             debugLog("🔵 SyncManager.clearCloudCategory: cleared \(keychainCleared) iCloud Keychain entries")
             // SECURITY: versions before 2026-11-14 also wrote cleartext
-            // `_password`/`_apiKey` into the "syncedServers" KVS records, so
-            // deleting only the Keychain could leave copies sitting in iCloud.
-            // Re-push the server records scrubbed (KVSSecretRule). Cancel any
-            // pending server push first so it can't race this one.
-            pushDebounce?.cancel(); pushDebounce = nil
-            nonisolated(unsafe) let capturedServers = localServers.map { $0 }
+            // `_password`/`_apiKey` into the "syncedServers" KVS records. Remove
+            // those fields from iCloud's records as they are, after reading
+            // them: the list itself is never rewritten from this device's
+            // playlists, so another device's playlist this one lacks stays
+            // (a dropped record reads as deleted there; KVSSecretRule.scrubbedList).
             let serversKey = kvsKey
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let stripped = capturedServers.map { KVSSecretRule.scrubbed(self.serialize($0)) }
-                    NSUbiquitousKeyValueStore.default.set(stripped, forKey: serversKey)
-                    NSUbiquitousKeyValueStore.default.synchronize()
-                    debugLog("🔵 SyncManager.clearCloudCategory: re-pushed \(stripped.count) servers to KVS without credentials")
+                let store = NSUbiquitousKeyValueStore.default
+                guard let records = store.array(forKey: serversKey) as? [[String: Any]],
+                      let scrubbed = KVSSecretRule.scrubbedList(records) else {
+                    debugLog("🔵 SyncManager.clearCloudCategory: no credentials in iCloud's playlist records")
+                    return
                 }
+                store.set(scrubbed, forKey: serversKey)
+                store.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: removed credentials from \(records.filter(KVSSecretRule.holdsSecret).count) of \(scrubbed.count) iCloud playlist records")
             }
         }
     }

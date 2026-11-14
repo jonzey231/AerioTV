@@ -750,12 +750,35 @@ enum KVSSecretRule {
         record.keys.contains { secretKeys.contains($0) }
     }
 
+    /// Delete from iCloud > Credentials: iCloud's playlist records as they are,
+    /// each without its secret fields, or nil when none holds one. Never adds
+    /// or drops a record: another device's playlist that this one lacks stays
+    /// in the list (a dropped record reads as deleted, LaneMerge `.gone`).
+    static func scrubbedList(_ records: [[String: Any]]) -> [[String: Any]]? {
+        records.contains(where: holdsSecret) ? records.map(scrubbed) : nil
+    }
+
     /// Whether a secret an older version left in a record is moved into the
     /// Keychain: only when credential sync is on, the Keychain has none for
     /// that slot, and the server has not refused the key. It never replaces
     /// what the Keychain holds and is never written back.
     static func migrate(remote: String, keychainHas: Bool, rejected: Bool, credentialsSyncOn: Bool) -> Bool {
         credentialsSyncOn && !remote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !keychainHas && !rejected
+    }
+}
+
+/// Delete from iCloud for a lane (a Sync Category, or Clear iCloud Data)
+/// removes that lane's rows on every device's view of iCloud. A device that
+/// remembers what it saw there (the base LaneMerge uses) would read every
+/// missing row as deleted by an older build (`.gone`) and delete its local
+/// copy, though the prompt says other devices keep theirs. So the clear
+/// leaves a token per lane in iCloud; a device that has not seen that token
+/// drops its base for the lane first, and nothing missing is read as a
+/// deletion. Tokens, not times, so device clocks do not matter.
+enum LaneClearRule {
+    static func baseStillValid(cloudToken: String?, seenToken: String?) -> Bool {
+        guard let cloudToken else { return true }
+        return cloudToken == seenToken
     }
 }
 
