@@ -58,26 +58,38 @@ struct AuthPosterImage: View {
             if DispatcharrRequestGate.shared.isHeldServer(url) { return }
             var req = URLRequest(url: url, timeoutInterval: 20)
             // SECURITY: attach the server's credential headers ONLY when the
-            // image is on one of the configured server's OWN hosts (public
-            // base + LAN local). A malicious backend can return a poster URL
-            // pointing at an attacker host; without this gate the Dispatcharr
-            // X-API-Key / Authorization would be sent there and harvested.
-            // Foreign posters (TMDB / CDN) are public and load with no
-            // headers. v1.7.9 regression fix: the old check compared against
-            // the SINGLE `effectiveBaseURL` host at render time, but poster
-            // URLs are built at fetch time and the effective host flips
-            // between local/public per TVLANProbe - dual-URL setups routinely
-            // diverged, headers were withheld, and every cover 401'd blank.
-            let allowedHosts = ChannelStore.shared.activeServer?.ownHosts ?? []
-            VODService.registerOwnHosts(allowedHosts)
-            if let host = url.host?.lowercased(), allowedHosts.contains(host) {
+            // image is on one of the configured server's OWN addresses (its
+            // Server URL or Local URL). A malicious backend can return a
+            // poster URL pointing at an attacker host; without this gate the
+            // Dispatcharr X-API-Key / Authorization would be sent there and
+            // harvested. Foreign posters (TMDB / CDN) are public and load
+            // with no headers. v1.7.9 regression fix: the old check compared
+            // against the SINGLE `effectiveBaseURL` host at render time, but
+            // poster URLs are built at fetch time and the effective host
+            // flips between local/public per TVLANProbe - dual-URL setups
+            // routinely diverged, headers were withheld, and every cover
+            // 401'd blank, so BOTH addresses count at any time. Matched by
+            // host AND effective port, never https to http
+            // (RedirectAuthPolicy): an own host on another port can be
+            // another service, and an http link to an https address would
+            // carry the key in cleartext. Dispatcharr serves its logo and VOD
+            // image caches AllowAny (apps/vod and apps/channels api_views,
+            // checked 2026-11-13), so a cover with the key withheld still
+            // loads.
+            let server = ChannelStore.shared.activeServer
+            VODService.registerOwnHosts(server?.ownHosts ?? [])
+            if let server, server.isOwnAddress(url) {
                 DispatcharrHTTPGate.strippingRejectedKey(headers).forEach { req.setValue($1, forHTTPHeaderField: $0) }
             } else if !headers.isEmpty, url.host?.lowercased() != "image.tmdb.org" {
                 // Diagnostics for the next covers report: one grep-able line
                 // that says exactly why credentials were withheld. TMDB's
                 // CDN is expected and skipped: with TMDB-first art it wrote
                 // a line per poster and flooded the log (2026-09-04).
-                debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
+                func address(_ u: URL) -> String {
+                    "\(u.scheme ?? "?")://\(u.host?.lowercased() ?? "nil"):\(RedirectAuthPolicy.effectivePort(u).map(String.init) ?? "?")"
+                }
+                let trusted = (server?.ownAddresses ?? []).map(address).joined(separator: ",")
+                debugLog("🖼️ AuthPosterImage: headers WITHHELD at \(address(url)) trusted=\(trusted)")
             }
             // A deleted playlist's art: no request (PlaylistRevocation).
             if PlaylistRevocation.shared.isRevoked(url: url.absoluteString, apiKey: req.value(forHTTPHeaderField: "X-API-Key")) { return }

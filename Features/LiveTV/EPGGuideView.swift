@@ -2104,12 +2104,18 @@ final class GuideStore: ObservableObject {
         var didLoadXMLTVOverride = false
         if !explicitXMLTV.isEmpty, let xmltvURL = URL(string: explicitXMLTV) {
             debugLog("📺 [EPG source=dispatcharr-api grid + xmltv-override] server=\(server.name) override=\(xmltvURL.host ?? "?")")
+            // The override can be any URL, a separate XMLTV aggregator
+            // included: the API key goes only to this playlist's own
+            // addresses (Server URL or Local URL, by host and port,
+            // RedirectAuthPolicy); anywhere else it is fetched without it.
+            let xmltvHeaders = server.isOwnAddress(xmltvURL)
+                ? api.streamAuthHeaders : RedirectAuthPolicy.withoutSignIn(api.streamAuthHeaders)
             didLoadXMLTVOverride = await fetchXMLTVFromURL(
                 url: xmltvURL,
                 channels: channels,
                 windowStart: windowStart,
                 windowEnd: windowEnd,
-                headers: api.streamAuthHeaders,
+                headers: xmltvHeaders,
                 categoryServerID: categoryServerID,
                 replaceExisting: replaceExisting
             )

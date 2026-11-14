@@ -23,6 +23,10 @@
 //      service the user did not configure and never leaves TLS in cleartext.
 //  A hop that loses the sign-in but would still re-send a request body (the
 //  Direct Connect login's password, a sync upload) is not followed at all.
+//  The same rule decides where a playlist's key may go before any redirect:
+//  `isOwnAddress` matches a URL against the playlist's Server URL and Local
+//  URL, and `reanchored` keeps server-supplied page links on the address
+//  the app is already using.
 //
 //  Pure Foundation with no app singletons, so
 //  Scripts/cast-hls-proxy-tests/run.sh compiles it next to the proxy sources
@@ -81,6 +85,56 @@ enum RedirectAuthPolicy {
               !isDowngrade(from: from, to: to) else { return false }
         if fromPort == toPort { return true }
         return fromScheme == "http" && toScheme == "https" && fromPort == 80 && toPort == 443
+    }
+
+    /// A playlist's own addresses as this rule compares them: its Server URL
+    /// and Local URL, trimmed and read as http when they name no scheme (the
+    /// Local URL field takes a bare host:port; PlaylistRoute.hostKey reads it
+    /// the same way). A blank or hostless value is left out.
+    static func ownAddresses(serverURL: String, localURL: String) -> [URL] {
+        [serverURL, localURL].compactMap { raw in
+            var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !s.isEmpty else { return nil }
+            let lower = s.lowercased()
+            if !lower.hasPrefix("http://") && !lower.hasPrefix("https://") { s = "http://" + s }
+            guard let url = URL(string: s), let host = url.host, !host.isEmpty else { return nil }
+            return url
+        }
+    }
+
+    /// True when `url` is on one of `ownAddresses` by this rule: the same
+    /// host and effective port (http to https only from 80 to 443 or on an
+    /// unchanged port), never https to http. The only places a playlist's
+    /// key may go at all: a stream, the catch-up session, a poster, a logo,
+    /// a custom guide URL. Comparing hosts alone let another service on
+    /// another port of the same machine, or the same address over plain
+    /// http, receive the key.
+    static func isOwnAddress(_ url: URL?, ownAddresses: [URL]) -> Bool {
+        ownAddresses.contains { keepsSignIn(from: $0, to: url) }
+    }
+
+    /// A server-supplied link (a DRF `next` page) moved onto `anchor`'s
+    /// scheme, host, and port, keeping only its path and query. The server
+    /// builds such links from the address it sees itself on, which behind a
+    /// reverse proxy can be plain http or an internal host:port, and the
+    /// page walks followed them with the API key attached wherever they
+    /// pointed. Re-anchored, the key only goes to the address the previous
+    /// page was fetched from, and a link with the wrong scheme or host
+    /// still reaches the next page. Relative links resolve against
+    /// `anchor`; credentials and fragments in the link are dropped. Nil
+    /// when the link is missing or does not parse.
+    static func reanchored(_ link: String?, onto anchor: URL) -> URL? {
+        guard let link, !link.isEmpty,
+              let resolved = URL(string: link, relativeTo: anchor)?.absoluteURL,
+              var out = URLComponents(url: resolved, resolvingAgainstBaseURL: false),
+              let base = URLComponents(url: anchor, resolvingAgainstBaseURL: false) else { return nil }
+        out.scheme = base.scheme
+        out.percentEncodedHost = base.percentEncodedHost
+        out.port = base.port
+        out.user = nil
+        out.password = nil
+        out.fragment = nil
+        return out.url
     }
 
     /// The verdict for one hop to `next`, checked against the URL that

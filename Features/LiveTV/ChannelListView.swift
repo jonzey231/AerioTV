@@ -6348,25 +6348,27 @@ final class LogoCache: @unchecked Sendable {
 /// with no headers, so every Dispatcharr-API logo fetch returned
 /// 401/403, the image bytes were unparseable, and every channel
 /// rendered the placeholder icon (jexhammer + Archie iPad sim repro,
-/// v1.6.23 reports). The fix: detect URLs that match the active
-/// server's host and inject `server.authHeaders`. Public CDN URLs
-/// (TMDB, EPG-side logos baked into the M3U) don't match the host
-/// and pass through unauthenticated, preserving today's behaviour.
+/// v1.6.23 reports). The fix: detect URLs on one of the active
+/// server's own addresses (host and port, `headers(for:)`) and inject
+/// `server.authHeaders`. Public CDN URLs (TMDB, EPG-side logos baked
+/// into the M3U) don't match and pass through unauthenticated,
+/// preserving today's behavior.
 enum LogoFetcher {
     /// Returns the auth headers to apply when fetching `url`, or
-    /// `nil` when no server matches (CDN passthrough).
+    /// `nil` when no server matches (CDN passthrough). Matched against the
+    /// active server's Server URL and Local URL by host AND effective port,
+    /// never https to http (RedirectAuthPolicy): a host-only match sent the
+    /// key to another service on another port of the same machine, or over
+    /// plain http to an https address. The app builds Dispatcharr channel
+    /// logo URLs from the configured address (`<base>/api/channels/logos/
+    /// <id>/cache/`), and Dispatcharr serves that cache AllowAny, so logos
+    /// still load.
     @MainActor
     static func headers(for url: URL) -> [String: String]? {
-        guard let host = url.host?.lowercased() else { return nil }
-        guard let server = ChannelStore.shared.activeServer else { return nil }
-        let candidates = [server.effectiveBaseURL, server.normalizedBaseURL, server.normalizedLocalURL]
-        for raw in candidates {
-            guard let candidateHost = URL(string: raw)?.host?.lowercased() else { continue }
-            // A key held as rejected is left off: a logo never counts against
-            // the server's failed-key throttle (stream opens keep it and stop).
-            if candidateHost == host { return DispatcharrHTTPGate.strippingRejectedKey(server.authHeaders) }
-        }
-        return nil
+        guard let server = ChannelStore.shared.activeServer, server.isOwnAddress(url) else { return nil }
+        // A key held as rejected is left off: a logo never counts against
+        // the server's failed-key throttle (stream opens keep it and stop).
+        return DispatcharrHTTPGate.strippingRejectedKey(server.authHeaders)
     }
 
     /// SSRF gate for logo fetches. Channel logos come from untrusted feed

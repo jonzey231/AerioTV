@@ -2454,6 +2454,9 @@ final class ChannelStore: ObservableObject {
         // a SwiftData model; reading a property after an `await`
         // suspension risks a thread-context violation.
         let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
+        // Where the key may go (RedirectAuthPolicy), snapshotted with the
+        // rest: the XMLTV override below gets it only on these addresses.
+        let ownAddresses = server.ownAddresses
         let xtreamXMLTVOverride = server.xtreamXMLTVURL
         let categoryServerID = server.id.uuidString
         // v1.6.20: snapshot the auto-detected auth header mode + UA
@@ -2846,7 +2849,15 @@ final class ChannelStore: ObservableObject {
                                                   userAgent: userAgent,
                                                   authMode: authMode)
                 debugLog("📺 loadAllEPG: honoring user XMLTV override at \(xmltvURL.host ?? "?") (in addition to /api/epg/grid/)")
-                await primeXMLTVFromURL(xmltvURL, headers: dAPIForXMLTV.streamAuthHeaders)
+                // The override can be any URL, a separate XMLTV aggregator
+                // included, and it used to get the API key whatever its
+                // host. The key goes only to this playlist's own addresses
+                // (its Server URL or Local URL, by host and port); anywhere
+                // else the guide is fetched without it.
+                let xmltvHeaders = RedirectAuthPolicy.isOwnAddress(xmltvURL, ownAddresses: ownAddresses)
+                    ? dAPIForXMLTV.streamAuthHeaders
+                    : RedirectAuthPolicy.withoutSignIn(dAPIForXMLTV.streamAuthHeaders)
+                await primeXMLTVFromURL(xmltvURL, headers: xmltvHeaders)
             }
 
         case .xtreamCodes:

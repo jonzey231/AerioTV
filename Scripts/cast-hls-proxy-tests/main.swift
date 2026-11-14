@@ -4615,6 +4615,72 @@ do {
              ["User-Agent": "u"], "redirect: withoutSignIn keeps only headers without a secret")
 }
 
+// MARK: Own addresses and page links (RedirectAuthPolicy, 2026-11-13)
+// Where a playlist's key may go at all: its Server URL and Local URL, by
+// host and effective port, never https to http. Page links (DRF `next`)
+// are re-anchored onto the page that named them.
+do {
+    typealias P = RedirectAuthPolicy
+    func u(_ s: String) -> URL { URL(string: s)! }
+
+    // Reading the configured addresses.
+    let own = P.ownAddresses(serverURL: " https://dispatcharr.example.com/ ", localURL: "192.168.1.10:9191")
+    expectEq(own.map(\.absoluteString), ["https://dispatcharr.example.com/", "http://192.168.1.10:9191"],
+             "own: Server URL trimmed, a bare Local URL read as http")
+    expectEq(P.ownAddresses(serverURL: "https://d.example", localURL: "").count, 1, "own: no Local URL, one address")
+    expectEq(P.ownAddresses(serverURL: "", localURL: "  ").count, 0, "own: blank values are left out")
+    expectEq(P.ownAddresses(serverURL: "HTTP://D.example:9191", localURL: "").first?.port, 9191,
+             "own: an upper-case scheme is still a scheme")
+
+    // Streams and the catch-up session target (ServerConnection.isOwnAddress).
+    expect(P.isOwnAddress(u("http://192.168.1.10:9191"), ownAddresses: own),
+           "own: a catch-up on the LAN address keeps the key")
+    expect(P.isOwnAddress(u("http://192.168.1.10:9191/proxy/ts/stream/abc?output_format=mpegts"), ownAddresses: own),
+           "own: a stream on the Local URL keeps the key")
+    expect(P.isOwnAddress(u("https://dispatcharr.example.com/proxy/ts/stream/abc"), ownAddresses: own),
+           "own: a stream on the Server URL keeps the key")
+    expect(P.isOwnAddress(u("https://dispatcharr.example.com:443/api/channels/logos/7/cache/"), ownAddresses: own),
+           "own: an explicit default port matches the Server URL")
+    expect(!P.isOwnAddress(u("http://192.168.1.10:8080/proxy/ts/stream/abc"), ownAddresses: own),
+           "own: another port on the LAN host drops the key")
+    expect(!P.isOwnAddress(u("https://dispatcharr.example.com:8443/x"), ownAddresses: own),
+           "own: another port on the Server URL host drops the key")
+    expect(!P.isOwnAddress(u("http://dispatcharr.example.com/api/vod/vodlogo/3/cache/"), ownAddresses: own),
+           "own: http to an https Server URL drops the key")
+    expect(P.isOwnAddress(u("https://192.168.1.10:9191/x"), ownAddresses: own),
+           "own: https on the Local URL's own port keeps the key")
+    expect(!P.isOwnAddress(u("https://192.168.1.10/x"), ownAddresses: own),
+           "own: https on 443 when the Local URL is http on 9191 drops the key")
+    expect(P.isOwnAddress(u("https://dispatcharr.lan/x"),
+                          ownAddresses: P.ownAddresses(serverURL: "http://dispatcharr.lan", localURL: "")),
+           "own: 80 to 443 on the Server URL keeps the key")
+    expect(!P.isOwnAddress(u("https://image.tmdb.org/t/p/w500/a.jpg"), ownAddresses: own), "own: a CDN never gets the key")
+    expect(!P.isOwnAddress(u("https://xmltv.aggregator.example/guide.xml"), ownAddresses: own),
+           "own: a custom XMLTV aggregator never gets the key")
+    expect(!P.isOwnAddress(u("http://192.168.1.10:9191"), ownAddresses: []), "own: no configured address, no key")
+    expect(!P.isOwnAddress(nil, ownAddresses: own), "own: no URL, no key")
+
+    // Page links stay on the page that named them.
+    let page1 = u("https://dispatcharr.example.com/api/channels/channels/?page=1&page_size=100")
+    expectEq(P.reanchored("http://dispatcharr:9191/api/channels/channels/?page=2&page_size=100", onto: page1)?.absoluteString,
+             "https://dispatcharr.example.com/api/channels/channels/?page=2&page_size=100",
+             "page link: an internal host:port moves onto the page's address")
+    expectEq(P.reanchored("http://dispatcharr.example.com/api/channels/channels/?page=2", onto: page1)?.absoluteString,
+             "https://dispatcharr.example.com/api/channels/channels/?page=2", "page link: an http link stays on https")
+    expectEq(P.reanchored("https://evil.example/steal?page=2", onto: page1)?.host, "dispatcharr.example.com",
+             "page link: a foreign host is never contacted")
+    expectEq(P.reanchored("?page=3", onto: page1)?.absoluteString,
+             "https://dispatcharr.example.com/api/channels/channels/?page=3", "page link: a relative query resolves on the page")
+    expectEq(P.reanchored("http://u:p@evil.example/api/vod/movies/?category=Movies%7Cmovie&page=2#x",
+                          onto: u("http://[::1]:9191/api/vod/movies/"))?.absoluteString,
+             "http://[::1]:9191/api/vod/movies/?category=Movies%7Cmovie&page=2",
+             "page link: IPv6 anchor, encoded query kept, credentials and fragment dropped")
+    expect(P.reanchored(nil, onto: page1) == nil, "page link: no link ends the walk")
+    expect(P.reanchored("", onto: page1) == nil, "page link: an empty link ends the walk")
+    expect(P.keepsSignIn(from: page1, to: P.reanchored("http://dispatcharr:9191/api/channels/channels/?page=2", onto: page1)),
+           "page link: the re-anchored page passes the sign-in rule")
+}
+
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

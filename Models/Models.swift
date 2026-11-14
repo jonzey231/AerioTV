@@ -785,21 +785,25 @@ final class ServerConnection {
         return normalizedLocalURL
     }
 
-    /// BOTH of this server's own hosts (public base + LAN local), lowercased.
-    /// The poster/image trust boundary must accept either at ANY time:
-    /// poster URLs are built at fetch time while `effectiveBaseURL` flips
-    /// between the two per TVLANProbe, so a single-host-at-one-instant
-    /// comparison strips auth headers / rejects the server's own LAN-IP
-    /// covers whenever fetch-time and check-time routing diverge (the
-    /// v1.7.9 blank-VOD-covers regression, Discord 2026-07-23).
-    /// `url` is on one of this playlist's addresses now (its address, its
-    /// local address, or the one in use): where its key may go.
+    /// `url` is on one of this playlist's addresses (its Server URL or its
+    /// Local URL, whichever is in use): where its key may go. Both count at
+    /// ANY time: URLs are built at fetch time while `effectiveBaseURL` flips
+    /// between the two per TVLANProbe (the v1.7.9 blank-VOD-covers
+    /// regression, Discord 2026-07-23). Compared by RedirectAuthPolicy's
+    /// rule, host AND effective port, never https to http: a host-only
+    /// match let another service on another port of the same machine, or
+    /// the same address over plain http, receive the key.
     func isOwnAddress(_ url: String) -> Bool {
-        guard let host = URL(string: url)?.host?.lowercased() else { return false }
-        if ownHosts.contains(host) { return true }
-        return URL(string: effectiveBaseURL)?.host?.lowercased() == host
+        isOwnAddress(URL(string: url))
     }
 
+    func isOwnAddress(_ url: URL?) -> Bool {
+        RedirectAuthPolicy.isOwnAddress(url, ownAddresses: ownAddresses)
+    }
+
+    /// BOTH of this server's own hosts (public base + LAN local), lowercased,
+    /// for host-scoped uses only: the image SSRF registry and cookie domains.
+    /// Never for deciding where the key goes; that is `isOwnAddress`.
     var ownHosts: Set<String> {
         var hosts = Set<String>()
         if let h = URL(string: normalizedBaseURL)?.host?.lowercased() { hosts.insert(h) }
@@ -807,15 +811,10 @@ final class ServerConnection {
         return hosts
     }
 
-    /// This server's own addresses (public base + LAN local) with scheme and
-    /// port intact. Sign-in decisions compare host AND port against these
-    /// (RedirectAuthPolicy): a different port on the same host can be a
-    /// different service, which `ownHosts` cannot tell apart.
+    /// This server's own addresses (Server URL + Local URL) with scheme and
+    /// port intact, read the way RedirectAuthPolicy compares them.
     var ownAddresses: [URL] {
-        var urls: [URL] = []
-        if let u = URL(string: normalizedBaseURL), u.host != nil { urls.append(u) }
-        if !localURL.isEmpty, let u = URL(string: normalizedLocalURL), u.host != nil { urls.append(u) }
-        return urls
+        RedirectAuthPolicy.ownAddresses(serverURL: baseURL, localURL: localURL)
     }
 
     /// Returns localEPGURL when the server is reachable on the local

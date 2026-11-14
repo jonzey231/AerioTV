@@ -2892,17 +2892,18 @@ struct DispatcharrAPI {
         ))
     }
 
-    /// SSRF guard for SERVER-SUPPLIED absolute URLs (pagination `next`,
-    /// redirect `Location`) that we then re-issue with the user's auth
-    /// headers attached. Without it a compromised/malicious Dispatcharr could
-    /// paginate / 30x our API key to a loopback, RFC-1918, or cloud-metadata
-    /// host (confused-deputy SSRF + credential delivery). Reuses the in-tree
-    /// artwork validator (#53); the configured server host is always allowed
-    /// (LAN-only Dispatcharr included). Returns nil to reject, which also
-    /// cleanly ends the pagination loops (same as an absent `next`).
-    private func validatedServerSuppliedURL(_ raw: String?) -> URL? {
-        guard let raw, let parsed = URL(string: raw) else { return nil }
-        return VODService.validateAbsoluteURL(parsed, serverHost: URL(string: baseURL)?.host)
+    /// The next page of a DRF listing, on the address the current page came
+    /// from. `next` is SERVER-SUPPLIED and re-issued with the user's auth
+    /// headers. Taken as-is it could carry the key to any public host (the
+    /// SSRF check that used to sit here refused only loopback, RFC-1918, and
+    /// metadata hosts), and DRF builds it from the address the server sees
+    /// itself on, which behind a reverse proxy can be plain http or an
+    /// internal host:port. RedirectAuthPolicy.reanchored keeps its path and
+    /// query on `current`'s scheme, host, and port, so the key never goes
+    /// anywhere the first page did not, and no request goes to a host the
+    /// server named. Nil (no link) cleanly ends the pagination loops.
+    private func nextPageURL(_ raw: String?, after current: URL) -> URL? {
+        RedirectAuthPolicy.reanchored(raw, onto: current)
     }
 
     // MARK: - Pagination helper
@@ -2921,7 +2922,7 @@ struct DispatcharrAPI {
             }
             let wrapped = try decode(DispatcharrResultsWrapper<T>.self, from: data)
             allItems += wrapped.results
-            if let next = validatedServerSuppliedURL(wrapped.next) {
+            if let next = nextPageURL(wrapped.next, after: url) {
                 nextURL = next
             } else {
                 nextURL = nil
@@ -3334,7 +3335,7 @@ struct DispatcharrAPI {
             allItems = list
         } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
             allItems = wrapped.results
-            var nextURL = validatedServerSuppliedURL(wrapped.next)
+            var nextURL = nextPageURL(wrapped.next, after: url)
             var pagesLeft = 2
             while let pageURL = nextURL, pagesLeft > 0 {
                 pagesLeft -= 1
@@ -3346,7 +3347,7 @@ struct DispatcharrAPI {
                       (200..<300).contains(pageHttp.statusCode) else { break }
                 let page = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: pageData)
                 allItems += page.results
-                nextURL = validatedServerSuppliedURL(page.next)
+                nextURL = nextPageURL(page.next, after: pageURL)
             }
         }
 
@@ -3391,7 +3392,7 @@ struct DispatcharrAPI {
             } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
                 allItems += wrapped.results
                 debugLog("📺 BulkEPG: page fetched, got \(wrapped.results.count) programs (total: \(allItems.count), hasNext: \(wrapped.next != nil))")
-                if let next = validatedServerSuppliedURL(wrapped.next) {
+                if let next = nextPageURL(wrapped.next, after: url) {
                     nextURL = next
                 } else {
                     nextURL = nil
@@ -3896,7 +3897,7 @@ struct DispatcharrAPI {
                             continuation.finish()
                             return
                         }
-                        if let next = validatedServerSuppliedURL(wrapped.next) {
+                        if let next = nextPageURL(wrapped.next, after: nextURL) {
                             nextURL = next
                         } else {
                             continuation.finish(); return
@@ -4035,7 +4036,11 @@ struct DispatcharrAPI {
         debugLog("[VOD-Episodes] no count, falling back to sequential next-walk seriesID=\(seriesID)")
         var nextURLString = firstPage.next
         var pageIdx = 2
-        while let nextURL = validatedServerSuppliedURL(nextURLString) {
+        // Each link is re-anchored onto the page before it (nextPageURL),
+        // starting from the address the first page came from.
+        var currentPage = try buildURL(path: "/api/vod/episodes/")
+        while let nextURL = nextPageURL(nextURLString, after: currentPage) {
+            currentPage = nextURL
             do {
                 var request = URLRequest(url: nextURL)
                 headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
@@ -4174,7 +4179,7 @@ struct DispatcharrAPI {
     /// the key too.
     private func isOwnAddress(_ url: URL, ownAddresses: [URL]) -> Bool {
         let own = ownAddresses.isEmpty ? [URL(string: baseURL)].compactMap { $0 } : ownAddresses
-        return own.contains { RedirectAuthPolicy.keepsSignIn(from: $0, to: url) }
+        return RedirectAuthPolicy.isOwnAddress(url, ownAddresses: own)
     }
 
     /// Whether a player handed `resolved` (from `resolveFinalURLForPlayback`
@@ -7514,8 +7519,9 @@ extension DispatcharrAPI {
                             totalYielded += wrapped.results.count
                         }
                         if totalYielded >= pageItemCap { continuation.finish(); return }
-                        guard let next = wrapped.next, let url = URL(string: next),
-                              url.host == nextURL.host else {
+                        // Re-anchored like every page walk (nextPageURL);
+                        // this one used to compare the host alone.
+                        guard let url = nextPageURL(wrapped.next, after: nextURL) else {
                             continuation.finish(); return
                         }
                         nextURL = url
