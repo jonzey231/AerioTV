@@ -625,19 +625,39 @@ struct ReceiveSetupView: View {
                 .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 16) {
-                OnboardingPillButton(title: "Cancel", filled: false) { model.resolveDuplicate(replace: nil) }
-                    .focused($dupFocus, equals: .cancel)
-                OnboardingPillButton(title: "Add Anyway", filled: false) { model.resolveDuplicate(replace: false) }
-                    .focused($dupFocus, equals: .add)
-                OnboardingPillButton(title: "Replace", filled: true) { model.resolveDuplicate(replace: true) }
-                    .focused($dupFocus, equals: .replace)
+            PromptButtons {
+                HStack(spacing: 16) {
+                    dupButton(.cancel)
+                    dupButton(.add)
+                    dupButton(.replace)
+                }
+            } stacked: {
+                VStack(spacing: 10) {
+                    dupButton(.replace, fullWidth: true)
+                    dupButton(.add, fullWidth: true)
+                    dupButton(.cancel, fullWidth: true)
+                }
             }
             .padding(.top, 12)
         }
         .frame(maxWidth: 640)
         .defaultFocus($dupFocus, .replace)
         .onAppear { if isTV { dupFocus = .replace } }
+    }
+
+    @ViewBuilder
+    private func dupButton(_ which: DupFocus, fullWidth: Bool = false) -> some View {
+        switch which {
+        case .cancel:
+            OnboardingPillButton(title: "Cancel", filled: false, fullWidth: fullWidth) { model.resolveDuplicate(replace: nil) }
+                .focused($dupFocus, equals: .cancel)
+        case .add:
+            OnboardingPillButton(title: "Add Anyway", filled: false, fullWidth: fullWidth) { model.resolveDuplicate(replace: false) }
+                .focused($dupFocus, equals: .add)
+        case .replace:
+            OnboardingPillButton(title: "Replace", filled: true, fullWidth: fullWidth) { model.resolveDuplicate(replace: true) }
+                .focused($dupFocus, equals: .replace)
+        }
     }
 
     private func message(title: String, body: String, primary: (String, () -> Void)) -> some View {
@@ -651,13 +671,46 @@ struct ReceiveSetupView: View {
                 .foregroundColor(Color.contrastText(.textSecondary))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 16) {
-                OnboardingPillButton(title: primary.0, filled: true) { primary.1() }
-                OnboardingPillButton(title: "Cancel", filled: false) { cancel() }
+            PromptButtons {
+                HStack(spacing: 16) {
+                    OnboardingPillButton(title: primary.0, filled: true) { primary.1() }
+                    OnboardingPillButton(title: "Cancel", filled: false) { cancel() }
+                }
+            } stacked: {
+                VStack(spacing: 10) {
+                    OnboardingPillButton(title: primary.0, filled: true, fullWidth: true) { primary.1() }
+                    OnboardingPillButton(title: "Cancel", filled: false, fullWidth: true) { cancel() }
+                }
             }
             .padding(.top, 12)
         }
         .frame(maxWidth: 640)
+    }
+}
+
+/// A prompt's pills: one row while every label fits on one line. Otherwise
+/// they stack full width, primary first and Cancel last, as a stacked alert
+/// orders them: on an iPhone SE the row cut "Add Anyway" to "Add An..." at
+/// the default Text Size, and "Import this user only" from 140%. Apple TV
+/// keeps the row.
+private struct PromptButtons<Row: View, Stacked: View>: View {
+    private let row: Row
+    private let stacked: Stacked
+
+    init(@ViewBuilder row: () -> Row, @ViewBuilder stacked: () -> Stacked) {
+        self.row = row()
+        self.stacked = stacked()
+    }
+
+    var body: some View {
+        #if os(tvOS)
+        row
+        #else
+        ViewThatFits(in: .horizontal) {
+            row
+            stacked
+        }
+        #endif
     }
 }
 
