@@ -500,7 +500,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 27 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
 | 28 | DVR | `/api/channels/recordings/` | list and schedule recordings |
 | 29 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
-| 30 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
+| 30 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed or interrupted recording |
 | 31 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
 | 32 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
 | 33 | DVR | `/api/channels/series-rules/` | series recording rules |
