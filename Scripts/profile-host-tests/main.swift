@@ -1023,9 +1023,9 @@ do {
     check(!StoredSecretRules.setupMayCarry(provenHosts: nil, base: "", local: ""), "no address at all: nothing")
 }
 
-// MARK: - Show User QR Code carries the stored key only to a proven Server URL
-// The code names the Server URL (never the Local URL), and the device that
-// scans it signs in there with the key.
+// MARK: - Show User QR Code follows the setup send's rule (Android 2cc1e8a7)
+// The device that scans the code signs in with the stored key, so the code is
+// held while either address is unproven, exactly as setupMayCarry decides.
 do {
     let (ud, suite) = freshDefaults("user-qr"); defer { ud.removePersistentDomain(forName: suite) }
     let pl = "P-qr"
@@ -1033,16 +1033,15 @@ do {
     let lan = "http://192.168.1.20:9191", newLan = "http://10.0.0.9:9191"
     let holds = ProfileHostHoldStore(defaults: ud)
     func shows(_ base: String, _ local: String) -> Bool {
-        StoredSecretRules.userQrMayCarry(provenHosts: holds.provenHosts(pl), base: base, local: local)
+        StoredSecretRules.setupMayCarry(provenHosts: holds.provenHosts(pl), base: base, local: local)
     }
-    check(shows(oldBase, lan), "no change since the route was proven: the code shows")
+    check(shows(oldBase, lan), "User QR: no change since the route was proven, the code shows")
     holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: oldBase, local: lan), route: R.key(base: newBase, local: lan))
-    check(!shows(newBase, lan), "an unproven Server URL: no code with the stored key")
+    check(!shows(newBase, lan), "User QR: an unproven Server URL holds the code")
     _ = holds.proveHosts(pl, [R.hostKey(newBase)], currentHosts: R.hosts(base: newBase, local: lan))
-    check(shows(newBase, lan), "once the Server URL is proven, the code shows as before")
+    check(shows(newBase, lan), "User QR: once proven, the code shows as before")
     holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: newBase, local: lan), route: R.key(base: newBase, local: newLan))
-    check(shows(newBase, newLan), "only the Local URL changed: the code names the proven Server URL, so it shows")
-    check(!StoredSecretRules.userQrMayCarry(provenHosts: nil, base: "", local: ""), "no Server URL: no code")
+    check(!shows(newBase, newLan), "User QR: an unproven Local URL holds the code too")
 }
 
 // MARK: - The same server at the new address proves it (no profiles needed)

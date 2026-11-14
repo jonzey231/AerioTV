@@ -35,9 +35,9 @@ enum UserQrPayload {
     /// What Show User QR Code shows for a profile.
     enum Outcome: Equatable {
         case code(Code)
-        /// A key is saved here, but the address the code would name is not
-        /// proven after a server address change (StoredSecretRules): no code,
-        /// the refusal line instead.
+        /// A key is saved here, but an address of the playlist is not proven
+        /// after a server address change (StoredSecretRules): no code, the
+        /// refusal line instead.
         case addressUnproven
         /// No key saved here: nothing to show.
         case none
@@ -57,11 +57,13 @@ enum UserQrPayload {
         guard let p = pm.store.byId(profileId) ?? pm.profiles(playlistId).first(where: { $0.id == profileId }) else { return .none }
         let stored = (p.isDefault ? server.baseApiKey : (pm.store.apiKey(p.id) ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !stored.isEmpty else { return .none }
-        // The device that scans the code signs in with the key at the code's
-        // address: never one that is unproven after a server address change.
-        // Another profile's key held after such a change reads as none here.
+        // The device that scans the code signs in with the key, so the code
+        // follows the setup send's rule (Android 2cc1e8a7): held while either
+        // the Server URL or the Local URL is unproven after a server address
+        // change (StoredSecretRules.setupMayCarry). Another profile's key held
+        // after such a change reads the same way.
         let held = !p.isDefault && pm.signIns.apiKey(p.id, for: .setupPayload) == nil
-        guard !held, pm.userQrMayCarryStoredKey(playlistId) else { return .addressUnproven }
+        guard !held, pm.setupMayCarryStoredSecrets(playlistId) else { return .addressUnproven }
         var base = server.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         let user = p.username.isEmpty ? server.username : p.username
@@ -141,7 +143,7 @@ private struct UserQrCard: View {
     @State private var revealToken = 0
     @State private var code: UserQrPayload.Code?
     @State private var image: UIImage?
-    /// The address the code would name is unproven: this line, no code.
+    /// An address of the playlist is unproven: this line, no code.
     @State private var refusal: String?
     /// Advertises this device while the code is up, so a device that scans it can copy the whole setup.
     @StateObject private var source = UserQrSource()
