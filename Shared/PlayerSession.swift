@@ -857,24 +857,15 @@ final class PlayerSession: ObservableObject {
         guard var url = item.streamURL ?? item.streamURLs.first else {
             return ResolvedEngine(engine: .mpv, routeURL: URL(string: "about:blank")!, headers: [:])
         }
-        var headers: [String: String] = [:]
-        if let ua = server?.effectiveUserAgent, !ua.isEmpty {
-            headers["User-Agent"] = ua
-        }
-        if let server, server.type == .dispatcharrAPI {
-            let key = server.effectiveApiKey
-            // A key the server already rejected stays here on purpose: every
-            // open passes StreamKeyGate.headersForOpen, which stops an open
-            // built with a held key before any request goes out ("API key no
-            // longer valid"). Leaving it off (2026-11-09 to 11-11) sent the
-            // open keyless: a plain 401 the player could not tell from any
-            // other (measured 2026-11-11: "Unable to Play, ingest failed:
-            // HTTP 401" instead of the key notice).
-            if !key.isEmpty {
-                headers["X-API-Key"] = key
-                headers["Authorization"] = "ApiKey \(key)"
-            }
-        }
+        // The playlist's User-Agent and key (ServerConnection.liveStreamHeaders,
+        // shared with on-device recording). A key the server already rejected
+        // stays in on purpose: every open passes StreamKeyGate.headersForOpen,
+        // which stops an open built with a held key before any request goes
+        // out ("API key no longer valid"). Leaving it off (2026-11-09 to
+        // 11-11) sent the open keyless: a plain 401 the player could not tell
+        // from any other (measured 2026-11-11: "Unable to Play, ingest
+        // failed: HTTP 401" instead of the key notice).
+        var headers: [String: String] = server?.liveStreamHeaders ?? [:]
         // The sign-in goes only to this playlist's current addresses: a channel
         // URL still on an address the playlist left (its list not reloaded yet
         // after an address change) is rebuilt on the address in use when its

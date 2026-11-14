@@ -266,8 +266,10 @@ final class RecordingCoordinator: ObservableObject {
 
     /// Starts a local recording for the given `Recording` model object.
     /// The `Recording` should already be inserted into SwiftData with
-    /// `status == .scheduled` before calling this.
-    func startLocalRecording(_ recording: Recording, streamURL: URL,
+    /// `status == .scheduled` before calling this. `server` is the channel's
+    /// playlist: the stream opens with the headers live playback sends for
+    /// the same channel (its User-Agent and key), through the same gates.
+    func startLocalRecording(_ recording: Recording, streamURL: URL, server: ServerConnection? = nil,
                              modelContext: ModelContext) async {
         // Quota check
         guard !isQuotaExceeded else {
@@ -287,6 +289,27 @@ final class RecordingCoordinator: ObservableObject {
             return
         }
 
+        // The headers live playback opens this channel with, and the URL and
+        // headers after the stream-address gate (ServerConnection.keyedStream):
+        // a URL on an address the playlist left is rebuilt on the address in
+        // use, or sent without the key, or, with Xtream Codes credentials in
+        // it, not opened at all. Before this the recorder sent no key and the
+        // system User-Agent, unlike live playback and AerioTV for Android.
+        var openURL = streamURL
+        var openHeaders: [String: String] = [:]
+        if let server {
+            guard let opened = server.keyedStream(streamURL, headers: server.liveStreamHeaders) else {
+                recording.status = .failed
+                recording.failureReason = InterruptedCapture.nothingWritten
+                try? modelContext.save()
+                debugLog("[DVR] on-device recording \(recording.id.uuidString.prefix(8)): its stream URL is on an address the playlist left; nothing opened")
+                refreshGuideRecordingMarkers(modelContext: modelContext)
+                return
+            }
+            openURL = opened.url
+            openHeaders = opened.headers
+        }
+
         // Access security-scoped resource if custom dir
         let needsScope = customRecordingsDirectory != nil
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
@@ -297,8 +320,8 @@ final class RecordingCoordinator: ObservableObject {
         recording.status = .recording
         try? modelContext.save()
 
-        let session = LocalRecordingSession(streamURL: streamURL, filePath: path,
-                                            userAgent: nil)
+        let session = LocalRecordingSession(streamURL: openURL, filePath: path,
+                                            userAgent: nil, headers: openHeaders)
         activeSessions[recording.id] = session
         updateRecordingState()
 

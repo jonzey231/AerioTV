@@ -1231,7 +1231,7 @@ struct RecordProgramSheet: View {
                     return
                 }
                 await coordinator.startLocalRecording(
-                    rec, streamURL: streamURL, modelContext: modelContext
+                    rec, streamURL: streamURL, server: activeServer, modelContext: modelContext
                 )
             }
         }

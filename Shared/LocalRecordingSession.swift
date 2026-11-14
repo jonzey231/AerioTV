@@ -14,8 +14,14 @@ import Foundation
 actor LocalRecordingSession: NSObject {
     let streamURL: URL
     let filePath: String
-    /// Optional User-Agent override. If nil the system default is used.
+    /// Optional User-Agent override, used when `headers` carry none. If nil
+    /// the app's default User-Agent is used.
     let userAgent: String?
+    /// The headers live playback opens the same channel with
+    /// (ServerConnection.liveStreamHeaders, after keyedStream). Each open
+    /// passes StreamKeyGate.headersForOpen, and a redirect keeps them only
+    /// by RedirectAuthPolicy.
+    let headers: [String: String]
 
     private var writer: StreamFileWriter?
     private var urlSession: URLSession?
@@ -27,10 +33,11 @@ actor LocalRecordingSession: NSObject {
     /// 0 before start().
     func getBytesWritten() -> Int64 { writer?.byteCount ?? 0 }
 
-    init(streamURL: URL, filePath: String, userAgent: String? = nil) {
+    init(streamURL: URL, filePath: String, userAgent: String? = nil, headers: [String: String] = [:]) {
         self.streamURL = streamURL
         self.filePath = filePath
         self.userAgent = userAgent
+        self.headers = headers
         super.init()
     }
 
@@ -44,6 +51,19 @@ actor LocalRecordingSession: NSObject {
     /// that has been removed.)
     func start() async throws {
         guard writer == nil else { return }
+
+        // The open passes the same gate as live ingest (StreamKeyGate): a key
+        // a re-login replaced goes out as its successor, a key leaves for no
+        // address but its playlist's, and a key held as rejected (or a held
+        // profile's placeholder) is never sent: nothing opens, and the
+        // recording finishes failed with nothing written, as on Android.
+        let openHeaders: [String: String]
+        switch StreamKeyGate.headersForOpen(headers, url: streamURL.absoluteString) {
+        case .send(let h): openHeaders = h
+        case .held:
+            debugLog("🔴 LocalRecordingSession: the stream's key is held; nothing opened")
+            throw RecordingError.keyHeld
+        }
 
         // Ensure the parent directory exists.
         let dir = (filePath as NSString).deletingLastPathComponent
@@ -78,8 +98,9 @@ actor LocalRecordingSession: NSObject {
         urlSession = session
 
         var request = URLRequest(url: streamURL)
-        if let ua = userAgent {
-            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+        for (k, v) in openHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        if StreamKeyGate.header(openHeaders, "User-Agent") == nil {
+            request.setValue(userAgent ?? DeviceInfo.defaultUserAgent, forHTTPHeaderField: "User-Agent")
         }
         let task = session.dataTask(with: request)
         dataTask = task
@@ -177,6 +198,30 @@ private final class SessionDelegate: NSObject, URLSessionDataDelegate {
         self.onComplete = onComplete
     }
 
+    /// The sign-in follows a redirect only by the shared rule (the same host
+    /// and port, never from https to http), as live ingest's does.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
+    }
+
+    /// A refusal (a 401 for a key the server no longer takes, a 404, a 5xx)
+    /// is not the stream: none of its body is written, as on Android
+    /// (LocalRecordingService checks isSuccessful), so the recording ends
+    /// with nothing written instead of saving an error page as video.
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            debugLog("🔴 LocalRecordingSession: HTTP \(http.statusCode) from the stream; nothing recorded")
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive data: Data) {
         // Synchronous, ordered append on the serial delegate queue.
@@ -198,6 +243,9 @@ enum RecordingError: LocalizedError {
     case fileCreationFailed(String)
     case quotaExceeded(usedMB: Int, maxMB: Int)
     case appBackgrounded
+    /// The stream's key is held as rejected: nothing was opened, so nothing
+    /// was written (Android's row reads the same).
+    case keyHeld
 
     var errorDescription: String? {
         switch self {
@@ -207,6 +255,8 @@ enum RecordingError: LocalizedError {
             return "Local storage quota exceeded (\(used) MB used of \(max) MB limit)"
         case .appBackgrounded:
             return "Recording stopped because the app was moved to the background"
+        case .keyHeld:
+            return InterruptedCapture.nothingWritten
         }
     }
 }
