@@ -438,19 +438,22 @@ struct AddServerView: View {
                 }
                 #endif
             } else {
-                // Android ConnectServerParts: Scan QR code + Enter details.
+                // Android ConnectServerParts: Scan QR code + Enter details,
+                // equal width. At a large Text Size the labels wrap, as on
+                // Android, and both pills take the taller one's height.
                 HStack(spacing: 10) {
                     OnboardingPillButton(title: "Scan QR code", filled: true, fullWidth: true,
-                                         systemImage: "qrcode.viewfinder", minHeight: 48) {
+                                         systemImage: "qrcode.viewfinder", minHeight: 48, fillsHeight: true) {
                         autoScanOnForm = true
                         choose(.dispatcharrAPI)
                     }
                     OnboardingPillButton(title: "Enter details", filled: false, fullWidth: true,
-                                         systemImage: "arrow.right.circle", minHeight: 48) {
+                                         systemImage: "arrow.right.circle", minHeight: 48, fillsHeight: true) {
                         autoScanOnForm = false
                         choose(.dispatcharrAPI)
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(isTV ? 32 : 18)

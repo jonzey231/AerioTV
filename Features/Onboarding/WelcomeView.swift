@@ -824,6 +824,11 @@ struct OnboardingActionCard: View {
 }
 
 /// Capsule pill button: filled (primary) or outlined.
+///
+/// iPhone and iPad: the label wraps onto more lines instead of shrinking or
+/// cutting short, so it reads in full at every Text Size, as Android's
+/// buttons do (Connect a Server on the iPhone SE showed "Scan..." and
+/// "Enter..."). Apple TV keeps one line: its onboarding columns are wide.
 struct OnboardingPillButton: View {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
     @ObservedObject private var themeLive = ThemeManager.shared
@@ -834,6 +839,10 @@ struct OnboardingPillButton: View {
     var systemImage: String? = nil
     /// Overrides the default minimum height (44 pt, 60 on TV).
     var minHeight: CGFloat? = nil
+    /// Takes the height its row offers. For pills side by side in a row
+    /// sized to its tallest pill, so a wrapped label does not leave its
+    /// neighbor shorter.
+    var fillsHeight: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -844,14 +853,24 @@ struct OnboardingPillButton: View {
                     Image(systemName: systemImage)
                         .font(.system(size: tv ? 22 : 17, weight: .semibold))
                 }
+                #if os(tvOS)
                 Text(title)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
+                #else
+                Text(title)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                #endif
             }
                 .scaledFont(.system(size: tv ? 24 : 16, weight: .semibold))
                 .foregroundColor(filled ? .white : .textPrimary)
-                .padding(.horizontal, tv ? 36 : 22)
-                .frame(maxWidth: fullWidth ? .infinity : nil)
+                // A full-width pill centers its label, so its side inset only
+                // shows once the label wraps. 12 pt, not 22, leaves "details"
+                // room for one line in half an iPhone SE card at 150%.
+                .padding(.horizontal, tv ? 36 : (fullWidth ? 12 : 22))
+                .padding(.vertical, tv ? 0 : 8)
+                .frame(maxWidth: fullWidth ? .infinity : nil, maxHeight: fillsHeight ? .infinity : nil)
                 .frame(minHeight: minHeight ?? (tv ? 60 : 44))
                 .background {
                     if filled {
