@@ -209,7 +209,8 @@ final class MP4HEVCTagLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecke
         req.timeoutInterval = 15
         // bytes(for:) so a server that ignores Range (200 with the whole
         // file) is cut off at the headers instead of downloaded. The VOD
-        // URL can 30x elsewhere: the guard keeps the sign-in off other hosts.
+        // URL can 30x elsewhere: the guard keeps the sign-in off other hosts
+        // and ports.
         guard let (stream, resp) = try? await URLSession.shared.bytes(for: req, delegate: RedirectAuthGuard.shared) else { return nil }
         guard let http = resp as? HTTPURLResponse, http.statusCode == 206 else {
             stream.task.cancel()
@@ -441,8 +442,8 @@ private final class MP4HEVCTagSessionDelegate: NSObject, URLSessionDataDelegate,
     weak var owner: MP4HEVCTagLoader?
     init(owner: MP4HEVCTagLoader) { self.owner = owner }
 
-    /// Range reads carry the stream sign-in; a 30x to another host, or
-    /// from https to http, must not (RedirectAuthPolicy).
+    /// Range reads carry the stream sign-in; a 30x to another host or
+    /// port, or from https to http, must not (RedirectAuthPolicy).
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
@@ -618,7 +619,7 @@ final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @
             loadingRequest.finishLoading()
         }
         // The playlist fetch carries the stream sign-in: a 30x to another
-        // host, or from https to http, drops it (RedirectAuthPolicy).
+        // host or port, or from https to http, drops it (RedirectAuthPolicy).
         task.delegate = RedirectAuthGuard.shared
         task.resume()
         return true
@@ -1199,7 +1200,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var redirectSniffPending = false
     private var redirectSniffBuffer = Data()
     /// A hop of this ingest dropped Dispatcharr's sign-in
-    /// (RedirectAuthPolicy: another host, or https to http).
+    /// (RedirectAuthPolicy: another host or port, or https to http).
     private var redirectDroppedSignIn = false
     private var redirectLandedURL: URL?
     /// Set when a redirected live open answered an HLS playlist: the
@@ -4741,7 +4742,8 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     /// URLSession re-sends X-API-Key and Cookie to any host a redirect
     /// names (measured 2026-11-13), so each hop runs RedirectAuthPolicy,
     /// the rule every redirect-following path in the app uses: removed on
-    /// another host or from https to http, copied back on the same host.
+    /// another host or port or from https to http, copied back on the same
+    /// host and port (or an http to https upgrade from 80 to 443).
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
@@ -4821,7 +4823,7 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
             data = redirectSniffBuffer
             redirectSniffBuffer.removeAll()
             let content = Self.sniffContent(data)
-            debugLog("[LIVE] redirect -> \(redirectDroppedSignIn ? "sign-in dropped" : "same-host") content=\(content.rawValue)")
+            debugLog("[LIVE] redirect -> \(redirectDroppedSignIn ? "sign-in dropped" : "sign-in kept") content=\(content.rawValue)")
             if content == .hls, let landed = redirectLandedURL {
                 upstreamHLSRedirect = (landed, redirectDroppedSignIn)
                 dataTask.cancel()
@@ -4892,7 +4894,7 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
         if redirectSniffPending, error == nil, !redirectSniffBuffer.isEmpty {
             redirectSniffPending = false
             let content = Self.sniffContent(redirectSniffBuffer)
-            debugLog("[LIVE] redirect -> \(redirectDroppedSignIn ? "sign-in dropped" : "same-host") content=\(content.rawValue)")
+            debugLog("[LIVE] redirect -> \(redirectDroppedSignIn ? "sign-in dropped" : "sign-in kept") content=\(content.rawValue)")
             redirectSniffBuffer.removeAll()
             if content == .hls, let landed = redirectLandedURL {
                 upstreamHLSRedirect = (landed, redirectDroppedSignIn)
@@ -6198,8 +6200,8 @@ struct AVPlayerMultiviewTile: View {
     /// jonzey231/AerioTV-Android#159: a Redirect-profile live URL whose
     /// target answered an HLS playlist. start() plays it through direct
     /// HLS (without Dispatcharr's auth headers when a hop dropped them:
-    /// another host, or https to http) instead of the TS remux. Cleared
-    /// on a channel flip.
+    /// another host or port, or https to http) instead of the TS remux.
+    /// Cleared on a channel flip.
     @State private var redirectHLSTarget: (url: URL, signInDropped: Bool)?
     /// Developer Force HLS: when the forced direct-HLS tile started, for
     /// the [FORCE-HLS] first-frame time. Nil on every other path.
@@ -8651,14 +8653,14 @@ struct AVPlayerMultiviewTile: View {
                         debugLog("[FORCE-HLS] tile channel=\(channelName) entry 302 -> \(resolved.playlistURL.absoluteString) token=\(resolved.token?.prefix(8) ?? "none") in \(ms)ms")
                         debugLog("[FORCE-HLS] tile channel=\(channelName) AVPlayer opening token playlist (engine=AVPlayer direct HLS, no TS remuxer, no mpv)")
                         // Security (Android 5381694d parity): a token
-                        // playlist on another host, or on http when the
-                        // entry was https, never receives the server's
+                        // playlist on another host or port, or on http when
+                        // the entry was https, never receives the server's
                         // X-API-Key / Authorization (RedirectAuthPolicy).
                         // AVPlayer sends its asset headers with every
                         // request it makes, so this is the only gate.
                         let keepsSignIn = RedirectAuthPolicy.keepsSignIn(from: entry, to: resolved.playlistURL)
                         if !keepsSignIn {
-                            debugLog("[FORCE-HLS] tile channel=\(channelName) token playlist is on another host or over http; server auth headers dropped")
+                            debugLog("[FORCE-HLS] tile channel=\(channelName) token playlist is on another host or port, or over http; server auth headers dropped")
                         }
                         startPlayer(url: resolved.playlistURL,
                                     requestHeaders: keepsSignIn ? hdrs : RedirectAuthPolicy.withoutSignIn(hdrs))

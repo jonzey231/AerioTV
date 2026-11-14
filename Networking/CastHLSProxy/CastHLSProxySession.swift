@@ -1050,8 +1050,9 @@ final class CastHLSProxySession: @unchecked Sendable {
         /// A Redirect stream profile answers the channel URL with a 302 to
         /// the provider, and URLSession re-sends X-API-Key to whatever host
         /// a redirect names. RedirectAuthPolicy, the rule the live player's
-        /// ingest uses too, keeps the sign-in on the same host only, never
-        /// from https to http.
+        /// ingest uses too, keeps the sign-in on the same host and port only
+        /// (an http to https upgrade from 80 to 443 included), never from
+        /// https to http.
         func urlSession(_ session: URLSession, task: URLSessionTask,
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,

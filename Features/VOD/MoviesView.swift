@@ -84,7 +84,7 @@ struct AuthPosterImage: View {
             let data: Data
             do {
                 // A server's art URL can 30x to a CDN: the guard keeps the
-                // headers above off any other host (RedirectAuthPolicy).
+                // headers above off any other host or port (RedirectAuthPolicy).
                 let (d, resp) = try await URLSession.shared.data(for: req, delegate: RedirectAuthGuard.shared)
                 if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                     debugLog("🖼️ AuthPosterImage: HTTP \(http.statusCode) host=\(url.host ?? "nil") path=\(url.path.suffix(40))")
@@ -1388,9 +1388,10 @@ struct MoviesView: View {
                                          auth: .apiKey(server.effectiveApiKey),
                                          userAgent: server.effectiveUserAgent,
                                          authMode: server.dispatcharrHeaderMode)
-                resolved = (try? await api.resolveFinalURLForPlayback(url)) ?? url
-                // Off the server's own hosts or from https to http: no key.
-                if !api.playbackKeepsSignIn(from: url, to: resolved) {
+                resolved = (try? await api.resolveFinalURLForPlayback(url, ownAddresses: server.ownAddresses)) ?? url
+                // Off the server's own addresses (host and port) or from
+                // https to http: no key.
+                if !api.playbackKeepsSignIn(from: url, to: resolved, ownAddresses: server.ownAddresses) {
                     headers = headers.filter {
                         $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                     }

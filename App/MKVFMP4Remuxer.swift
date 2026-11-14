@@ -619,9 +619,9 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// grinding out doomed builds against a stale one.
     var expectedTotalLength: Int64 = 0
 
-    /// The VOD proxy's per-session 301 stays on the server's host and keeps
-    /// the sign-in; a hop to another host, or from https to http, drops it
-    /// (RedirectAuthPolicy).
+    /// The VOD proxy's per-session 301 stays on the server's host and port
+    /// and keeps the sign-in; a hop to another host or port, or from https
+    /// to http, drops it (RedirectAuthPolicy).
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,

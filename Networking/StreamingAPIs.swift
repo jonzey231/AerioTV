@@ -2198,8 +2198,8 @@ struct DispatcharrAPI {
     // the follow-up request then lands at the auth wall and 401s while the
     // user blames the API key. URLSession also re-sends `X-API-Key` to any
     // other host (measured 2026-11-13), so the delegate runs
-    // RedirectAuthPolicy: sign-in copied back on a same-host hop, removed
-    // on a hop to another host or from https to http.
+    // RedirectAuthPolicy: sign-in copied back on a hop to the same host and
+    // port, removed on another host or port or from https to http.
     private static let redirectDelegate = RedirectPreservingDelegate()
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -4157,35 +4157,41 @@ struct DispatcharrAPI {
         return out
     }
 
-    /// True when [url] points at one of the user's OWN server hosts (the
-    /// fetch-time base plus every configured server's public + LAN host).
-    /// The auth boundary for playback URLs: Dispatcharr's 301 hands back a
-    /// one-time session URL that needs no further auth, so anything that
-    /// resolved OFF the server's own hosts must never receive the API key
-    /// (Android parity: AerioTV-Android ee06e17, audit finding #38 - a
-    /// hostile server response or cleartext-LAN MITM could otherwise
-    /// bounce the key to an arbitrary public third-party host, which
-    /// `validateAbsoluteURL` deliberately permits for playback).
-    func isOwnHost(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased() else { return false }
-        if let own = URL(string: baseURL)?.host?.lowercased(), host == own {
-            return true
-        }
-        return VODService.knownOwnHosts().contains(host)
+    /// True when the API key may go to [url]: it is on one of THIS server's
+    /// own addresses (`ownAddresses`: its public base and LAN local URLs;
+    /// the API's own base when none are passed) by RedirectAuthPolicy's
+    /// rule, host AND effective port, http to https only from 80 to 443 or
+    /// on the same port, never https to http. The auth boundary for
+    /// playback URLs: Dispatcharr's 301 hands back a one-time session URL
+    /// that needs no further auth, so anything that resolved OFF the
+    /// server's own addresses must never receive the API key (Android
+    /// parity: AerioTV-Android ee06e17, audit finding #38 - a hostile
+    /// server response or cleartext-LAN MITM could otherwise bounce the key
+    /// to an arbitrary public third-party host, which `validateAbsoluteURL`
+    /// deliberately permits for playback). This used to compare the host
+    /// alone against every configured server's hosts, so another service on
+    /// a different port of an own host, or another configured server, got
+    /// the key too.
+    private func isOwnAddress(_ url: URL, ownAddresses: [URL]) -> Bool {
+        let own = ownAddresses.isEmpty ? [URL(string: baseURL)].compactMap { $0 } : ownAddresses
+        return own.contains { RedirectAuthPolicy.keepsSignIn(from: $0, to: url) }
     }
 
     /// Whether a player handed `resolved` (from `resolveFinalURLForPlayback`
-    /// on `original`) may also get the sign-in headers: only on the server's
-    /// own hosts, and never when the walk went from https to http. AVPlayer
-    /// sends its asset headers to every host it touches, so this is the
-    /// only gate those headers get.
-    func playbackKeepsSignIn(from original: URL, to resolved: URL) -> Bool {
-        isOwnHost(resolved) && !RedirectAuthPolicy.isDowngrade(from: original, to: resolved)
+    /// on `original`) may also get the sign-in headers: only on one of the
+    /// server's own addresses, and never when the walk went from https to
+    /// http. AVPlayer sends its asset headers with every request it makes,
+    /// so this is the only gate those headers get.
+    func playbackKeepsSignIn(from original: URL, to resolved: URL, ownAddresses: [URL]) -> Bool {
+        isOwnAddress(resolved, ownAddresses: ownAddresses)
+            && !RedirectAuthPolicy.isDowngrade(from: original, to: resolved)
     }
 
     /// Resolve Dispatcharr proxy URLs that redirect to a session-based path.
     /// Some media players (and some CDN/proxy setups) behave better when given the final URL up-front.
-    func resolveFinalURLForPlayback(_ url: URL) async throws -> URL {
+    /// `ownAddresses`: the server's own addresses (ServerConnection.ownAddresses),
+    /// the only places a hop may carry the API key.
+    func resolveFinalURLForPlayback(_ url: URL, ownAddresses: [URL]) async throws -> URL {
         if DispatcharrRequestGate.shared.isHeldServer(url) { throw DispatcharrRequestGate.heldRefusal() }
         var current = url
         var previous: URL?
@@ -4197,12 +4203,12 @@ struct DispatcharrAPI {
             req.httpMethod = "GET"
             req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
             req.setValue("*/*", forHTTPHeaderField: "Accept")
-            // Auth rides only to the server's own hosts; a foreign hop
+            // Auth rides only to the server's own addresses; a foreign hop
             // (already vetted against private/loopback ranges below) gets
             // an anonymous probe - session URLs need no auth, and the API
             // key must never be replayed off-origin, nor on a hop that went
             // from https to http (RedirectAuthPolicy).
-            if playbackKeepsSignIn(from: url, to: current),
+            if playbackKeepsSignIn(from: url, to: current, ownAddresses: ownAddresses),
                !RedirectAuthPolicy.isDowngrade(from: previous, to: current) {
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
             } else {
@@ -5089,9 +5095,10 @@ actor AsyncSemaphore {
 ///
 /// Each hop runs RedirectAuthPolicy, the rule every redirect-following path
 /// in the app uses: the sign-in is copied back from `task.originalRequest`
-/// on a same-host hop (an http to https upgrade included), removed on a hop
-/// to another host or from https to http, and a hop that would carry a
-/// request body where the sign-in may not go is not followed. Accept,
+/// on a hop to the same host and port (and on an http to https upgrade from
+/// 80 to 443), removed on a hop to another host or port or from https to
+/// http, and a hop that would carry a request body where the sign-in may
+/// not go is not followed. Accept,
 /// Content-Type, and User-Agent carry no secret and are restored on every
 /// hop, as before.
 final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
@@ -5126,7 +5133,7 @@ final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
             let kept = RedirectAuthPolicy.keepsSignIn(next: request.url, previous: response.url, original: original.url)
             let from = original.url?.absoluteString ?? "<unknown>"
             let to   = request.url?.absoluteString ?? "<unknown>"
-            let authNote = kept ? "auth preserved (same host)" : "AUTH STRIPPED (other host or https to http)"
+            let authNote = kept ? "auth preserved (same host and port)" : "AUTH STRIPPED (other host or port, or https to http)"
             debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) -> \(to) (\(authNote))")
             #endif
         }

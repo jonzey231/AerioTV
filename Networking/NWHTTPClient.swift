@@ -222,8 +222,9 @@ enum NWHTTPClient {
                 }
             }
             // A malicious or compromised server can 30x anywhere: the sign-in
-            // follows only to the same host and never from https to http, the
-            // rule every URLSession path uses (RedirectAuthPolicy). Measured
+            // follows only to the same host and port (or an http to https
+            // upgrade from 80 to 443) and never from https to http, the rule
+            // every URLSession path uses (RedirectAuthPolicy). Measured
             // 2026-11-13: the old host-only check here still replayed a 307
             // POST body to the other host, and the Direct Connect login sends
             // the password in one. Checked after the 303-style GET switch,

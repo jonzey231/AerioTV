@@ -12,12 +12,15 @@
 //  same way. So a Redirect stream profile (jonzey231/AerioTV-Android#159) or
 //  any server 30x to another host handed that host the user's API key. Every
 //  path that follows redirects with sign-in attached decides each hop here:
-//    - another host: the sign-in headers are removed before the hop;
-//    - the same host: they are kept, copied back from the original request,
-//      so reverse-proxy canonicalization and an http to https upgrade on the
-//      same host still authenticate, Bearer tokens included;
-//    - the same host, https to http: removed, so sign-in that went out under
-//      TLS is never replayed in cleartext.
+//    - the same host and the same effective port (the explicit port, else 80
+//      for http and 443 for https): kept, copied back from the original
+//      request, so reverse-proxy canonicalization still authenticates,
+//      Bearer tokens included;
+//    - http to https on the same host: kept only from 80 to 443 or on an
+//      unchanged port, the shape of an ordinary TLS upgrade;
+//    - another host, another port (a different port can be a different
+//      service), or https to http: removed, so the key never reaches a
+//      service the user did not configure and never leaves TLS in cleartext.
 //  A hop that loses the sign-in but would still re-send a request body (the
 //  Direct Connect login's password, a sync upload) is not followed at all.
 //
@@ -41,8 +44,8 @@ enum RedirectAuthPolicy {
     }
 
     /// `headers` for a request that must not carry sign-in (a player handed
-    /// a URL on a host the sign-in may not reach). User-Agent and the rest
-    /// carry no secret and stay.
+    /// a URL on an address the sign-in may not reach). User-Agent and the
+    /// rest carry no secret and stay.
     static func withoutSignIn(_ headers: [String: String]) -> [String: String] {
         headers.filter { !isSignInHeader($0.key) }
     }
@@ -52,21 +55,38 @@ enum RedirectAuthPolicy {
         from?.scheme?.lowercased() == "https" && to?.scheme?.lowercased() == "http"
     }
 
+    /// The port a URL connects to: the explicit one, else 80 for http and
+    /// 443 for https. Nil for any other scheme.
+    static func effectivePort(_ url: URL?) -> Int? {
+        guard let url, let scheme = url.scheme?.lowercased() else { return nil }
+        if let port = url.port { return port }
+        switch scheme {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+
     /// True when sign-in sent to `from` may also go to `to`: both http(s),
-    /// the same non-empty host (case-insensitive), and not a downgrade.
-    /// A missing URL or host fails closed.
+    /// the same non-empty host (case-insensitive), the same effective port,
+    /// and not https to http. The one port change kept is http to https
+    /// from 80 to 443, the default ports of an ordinary TLS upgrade. A
+    /// missing URL, host, or port fails closed.
     static func keepsSignIn(from: URL?, to: URL?) -> Bool {
         guard let fromScheme = from?.scheme?.lowercased(), fromScheme == "http" || fromScheme == "https",
               let toScheme = to?.scheme?.lowercased(), toScheme == "http" || toScheme == "https",
               let fromHost = from?.host?.lowercased(), !fromHost.isEmpty,
-              let toHost = to?.host?.lowercased(), fromHost == toHost else { return false }
-        return !isDowngrade(from: from, to: to)
+              let toHost = to?.host?.lowercased(), fromHost == toHost,
+              let fromPort = effectivePort(from), let toPort = effectivePort(to),
+              !isDowngrade(from: from, to: to) else { return false }
+        if fromPort == toPort { return true }
+        return fromScheme == "http" && toScheme == "https" && fromPort == 80 && toPort == 443
     }
 
     /// The verdict for one hop to `next`, checked against the URL that
     /// answered with the redirect (`previous`) AND the request the app built
-    /// (`original`): a chain that leaves the host and comes back never gets
-    /// the sign-in again.
+    /// (`original`): a chain that leaves the host or port and comes back
+    /// never gets the sign-in again.
     static func keepsSignIn(next: URL?, previous: URL?, original: URL?) -> Bool {
         keepsSignIn(from: previous ?? original, to: next) && keepsSignIn(from: original ?? previous, to: next)
     }

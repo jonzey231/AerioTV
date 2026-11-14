@@ -4458,14 +4458,22 @@ do {
 
 // MARK: Redirect sign-in rule (RedirectAuthPolicy, 2026-11-13)
 // One rule for every path that follows a redirect with sign-in attached:
-// another host drops it, the same host keeps it, https to http drops it.
+// kept on the same host and effective port, and on an http to https
+// upgrade from 80 to 443 or on an unchanged port; dropped on another host,
+// another port, or https to http.
 do {
     typealias P = RedirectAuthPolicy
     func u(_ s: String) -> URL { URL(string: s)! }
 
-    // The hop verdict.
+    // Effective port: the explicit one, else the scheme's default.
+    expectEq(P.effectivePort(u("http://h.example/a")), 80, "redirect: http defaults to port 80")
+    expectEq(P.effectivePort(u("https://h.example/a")), 443, "redirect: https defaults to port 443")
+    expectEq(P.effectivePort(u("http://h.example:9191/a")), 9191, "redirect: an explicit port wins")
+    expectEq(P.effectivePort(u("ftp://h.example/a")), nil, "redirect: no port for other schemes")
+
+    // The hop verdict: host.
     expect(P.keepsSignIn(from: u("http://dispatcharr.lan:9191/proxy/ts/stream/x"),
-                         to: u("http://dispatcharr.lan:9191/proxy/ts/stream/x/")), "redirect: same host keeps")
+                         to: u("http://dispatcharr.lan:9191/proxy/ts/stream/x/")), "redirect: same host and port keeps")
     expect(P.keepsSignIn(from: u("http://Dispatcharr.LAN/a"), to: u("http://dispatcharr.lan/b")),
            "redirect: host compare ignores case")
     expect(!P.keepsSignIn(from: u("http://dispatcharr.lan/a"), to: u("http://provider.example/b")),
@@ -4474,14 +4482,32 @@ do {
            "redirect: 127.0.0.1 and localhost are different hosts")
     expect(!P.keepsSignIn(from: u("http://a.example/b"), to: u("http://a.example.evil/b")),
            "redirect: a longer host is another host")
+
+    // The hop verdict: port and scheme.
+    expect(!P.keepsSignIn(from: u("http://dispatcharr.lan:9191/a"), to: u("http://dispatcharr.lan:8080/a")),
+           "redirect: a port change on the same host drops")
+    expect(!P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("https://dispatcharr.lan:8443/a")),
+           "redirect: https 443 to 8443 on the same host drops")
     expect(P.keepsSignIn(from: u("http://dispatcharr.lan/a"), to: u("https://dispatcharr.lan/a")),
-           "redirect: same-host http to https keeps")
+           "redirect: http to https from 80 to 443 keeps")
+    expect(P.keepsSignIn(from: u("http://dispatcharr.lan:80/a"), to: u("https://dispatcharr.lan:443/a")),
+           "redirect: http to https with 80 and 443 written out keeps")
+    expect(P.keepsSignIn(from: u("http://dispatcharr.lan:8443/a"), to: u("https://dispatcharr.lan:8443/a")),
+           "redirect: http to https on an explicitly unchanged port keeps")
+    expect(!P.keepsSignIn(from: u("http://dispatcharr.lan:9191/a"), to: u("https://dispatcharr.lan/a")),
+           "redirect: http to https from 9191 to 443 drops")
+    expect(!P.keepsSignIn(from: u("http://dispatcharr.lan/a"), to: u("https://dispatcharr.lan:8443/a")),
+           "redirect: http to https from 80 to 8443 drops")
+    expect(P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("https://dispatcharr.lan:443/b")),
+           "redirect: an explicit default port equals the implicit one")
     expect(P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("https://dispatcharr.lan/b")),
            "redirect: same-host https to https keeps")
     expect(!P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("http://dispatcharr.lan/a")),
-           "redirect: same-host https to http drops")
-    expect(P.keepsSignIn(from: u("http://dispatcharr.lan:9191/a"), to: u("http://dispatcharr.lan:8080/a")),
-           "redirect: the rule is per host, a port change on the same host keeps")
+           "redirect: https to http drops")
+    expect(!P.keepsSignIn(from: u("https://dispatcharr.lan:8443/a"), to: u("http://dispatcharr.lan:8443/a")),
+           "redirect: https to http on an unchanged port drops")
+    expect(!P.keepsSignIn(from: u("https://dispatcharr.lan:443/a"), to: u("http://dispatcharr.lan:80/a")),
+           "redirect: https to http from 443 to 80 drops")
     expect(!P.keepsSignIn(from: nil, to: u("http://a.example/b")), "redirect: no original fails closed")
     expect(!P.keepsSignIn(from: u("http://a.example/b"), to: nil), "redirect: no target fails closed")
     expect(!P.keepsSignIn(from: u("http://a.example/b"), to: u("ftp://a.example/b")),
@@ -4502,6 +4528,13 @@ do {
     expect(!P.keepsSignIn(next: u("http://a.example/3"), previous: u("http://a.example/2"),
                           original: u("https://a.example/1")),
            "redirect: http after an https original drops")
+    expect(P.keepsSignIn(next: u("https://a.example/3"), previous: u("https://a.example/2"), original: a1),
+           "redirect: https hops after an 80 to 443 upgrade keep")
+    expect(!P.keepsSignIn(next: u("https://a.example:8443/3"), previous: u("https://a.example/2"), original: a1),
+           "redirect: a port change after an upgrade drops")
+    expect(!P.keepsSignIn(next: u("http://a.example:9191/3"), previous: u("http://a.example:9191/2"),
+                          original: u("http://a.example:8080/1")),
+           "redirect: a later hop on another port than the original drops")
 
     // The request to follow. URLSession hands the delegate a copy that
     // already lacks Authorization (measured on the iOS 27 simulator).
@@ -4525,7 +4558,7 @@ do {
     let same = P.redirect(sameNext, previous: a1, original: original)
     for name in P.signInHeaders {
         expectEq(same?.value(forHTTPHeaderField: name), original.value(forHTTPHeaderField: name),
-                 "redirect: same host keeps \(name)")
+                 "redirect: same host and port keeps \(name)")
     }
     var bare = URLRequest(url: a1)
     bare.setValue("standin-key", forHTTPHeaderField: "X-API-Key")
@@ -4537,6 +4570,16 @@ do {
     downNext.url = u("http://a.example/2")
     expect(P.redirect(downNext, previous: u("https://a.example/1"), original: original)?
             .value(forHTTPHeaderField: "X-API-Key") == nil, "redirect: https to http strips the key")
+    var portNext = crossNext
+    portNext.url = u("http://a.example:8080/2")
+    let port = P.redirect(portNext, previous: a1, original: original)
+    for name in P.signInHeaders {
+        expect(port?.value(forHTTPHeaderField: name) == nil, "redirect: another port on the same host gets no \(name)")
+    }
+    var upNext = crossNext
+    upNext.url = u("https://a.example/2")
+    expectEq(P.redirect(upNext, previous: a1, original: original)?.value(forHTTPHeaderField: "Authorization"),
+             "ApiKey standin-key", "redirect: an 80 to 443 upgrade keeps the sign-in")
 
     // A body never follows where the sign-in may not go.
     var post = original
@@ -4550,10 +4593,14 @@ do {
     post307Down.url = u("http://a.example/2")
     expect(P.redirect(post307Down, previous: u("https://a.example/1"), original: post) == nil,
            "redirect: a 307 POST from https to http is not followed")
+    var post307Port = post
+    post307Port.url = u("http://a.example:8080/2")
+    expect(P.redirect(post307Port, previous: a1, original: post) == nil,
+           "redirect: a 307 POST to another port on the same host is not followed")
     var post307Same = post
     post307Same.url = u("http://a.example/2")
     expect(P.redirect(post307Same, previous: a1, original: post)?.httpBody != nil,
-           "redirect: a 307 POST on the same host keeps its body")
+           "redirect: a 307 POST on the same host and port keeps its body")
     var post302Cross = post307Cross
     post302Cross.httpMethod = "GET"
     post302Cross.httpBody = nil

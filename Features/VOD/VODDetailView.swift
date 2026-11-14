@@ -2152,15 +2152,15 @@ struct VODDetailView: View {
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
-            resolvedURL = (try? await api.resolveFinalURLForPlayback(url)) ?? url
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(url, ownAddresses: server.ownAddresses)) ?? url
             isResolvingURL = false
             // Audit #38 parity (Android ee06e17): a session URL that resolved
-            // OFF the server's own hosts plays without auth headers - the
-            // one-time session handle needs none, and the API key must never
-            // be replayed to a foreign host, nor from https to http
-            // (RedirectAuthPolicy). User-Agent stays (some upstreams gate on
-            // it; it carries no secret).
-            if !api.playbackKeepsSignIn(from: url, to: resolvedURL) {
+            // OFF the server's own addresses (host and port) plays without
+            // auth headers - the one-time session handle needs none, and the
+            // API key must never be replayed to a foreign host, nor from
+            // https to http (RedirectAuthPolicy). User-Agent stays (some
+            // upstreams gate on it; it carries no secret).
+            if !api.playbackKeepsSignIn(from: url, to: resolvedURL, ownAddresses: server.ownAddresses) {
                 playingHeaders = playingHeaders.filter {
                     $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                 }

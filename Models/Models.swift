@@ -807,6 +807,17 @@ final class ServerConnection {
         return hosts
     }
 
+    /// This server's own addresses (public base + LAN local) with scheme and
+    /// port intact. Sign-in decisions compare host AND port against these
+    /// (RedirectAuthPolicy): a different port on the same host can be a
+    /// different service, which `ownHosts` cannot tell apart.
+    var ownAddresses: [URL] {
+        var urls: [URL] = []
+        if let u = URL(string: normalizedBaseURL), u.host != nil { urls.append(u) }
+        if !localURL.isEmpty, let u = URL(string: normalizedLocalURL), u.host != nil { urls.append(u) }
+        return urls
+    }
+
     /// Returns localEPGURL when the server is reachable on the local
     /// network (per `TVLANProbe`), otherwise returns epgURL.
     var effectiveEPGURL: String {
