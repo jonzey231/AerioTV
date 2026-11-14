@@ -588,7 +588,7 @@ do {
     eq(K.promptActions(isTV: true, canSignIn: true, canEditPlaylist: true).map { K.label($0, isTV: true) }, ["Update from Phone", "Sign In with Remote", "Not Now"], "TV labels")
     eq(K.formTitle, "Sign in to Dispatcharr", "form title")
     eq([K.username, K.password, K.submit, K.cancel], ["Username", "Password", "Sign In", "Cancel"], "form fields and buttons")
-    eq(K.footnote, "AerioTV keeps your password on this device so it can reconnect if the key changes again.", "footnote")
+    eq(K.footnote, "AerioTV saves your password with this playlist's sign-in so it can reconnect if the API key changes again.", "footnote")
     eq(K.message(.wrongCredentials), "Dispatcharr did not accept that username or password.", "wrong username or password")
     eq(K.message(.noAPIKey), "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it.", "no API key")
     eq(K.message(.failed("line")), "line", "network or rate limit: the existing line")

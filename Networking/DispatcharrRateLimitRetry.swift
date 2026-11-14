@@ -137,7 +137,7 @@ enum KeySignInCopy {
     static let password = "Password"
     static let submit = "Sign In"
     static let cancel = "Cancel"
-    static let footnote = "AerioTV keeps your password on this device so it can reconnect if the key changes again."
+    static let footnote = "AerioTV saves your password with this playlist's sign-in so it can reconnect if the API key changes again."
     static let wrongCredentials = "Dispatcharr did not accept that username or password."
     static let noAPIKey = "This account has no API key yet. Ask your Dispatcharr administrator to turn on API access for it."
 
