@@ -187,6 +187,53 @@ struct ProfileRoleBadge: View {
     }
 }
 
+/// A server user row's caption (Android ServerUserCaption): the server level,
+/// plus a key note when the list has no API key for the user. One line while
+/// it fits. Beside a role chip at a large Text Size it did not: the level split
+/// mid-word ("Stan" over "dard") and the note was cut to "Nee...". There the
+/// note moves under the level and wraps, so both read in full.
+struct ServerUserCaption: View {
+    /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
+    @ObservedObject private var themeLive = ThemeManager.shared
+    let user: DispatcharrUserSummary
+
+    var body: some View {
+        if (user.apiKey ?? "").isEmpty {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    level
+                    key
+                    note.lineLimit(1)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    level
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        key
+                        note.fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        } else {
+            level
+        }
+    }
+
+    private var level: some View {
+        Text(ProfileLevel.of(user.serverLevel).rawValue)
+            .scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    private var key: some View {
+        Image(systemName: "key.fill").font(.system(size: ProfileUI.s(11, 17))).foregroundColor(.textSecondary)
+    }
+
+    private var note: some View {
+        Text("Needs a password or API key").scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
+    }
+}
+
 /// The card button look for profile rows: theme card, accent focus ring on TV.
 struct ProfileRowButtonStyle: ButtonStyle {
     /// Re-renders on a live theme change (sync apply, profile switch); the Color tokens read ThemeManager.shared directly.
