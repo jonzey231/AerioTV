@@ -136,7 +136,8 @@ Default Live TV view (List or Guide) syncs since 2026-10-27 (owner decision); a 
 own form-factor default sets that item to its class lane or Off (section 4.9).
 
 Per-item choices: every synced option is its own row in Settings > Sync > Sync Categories, shared by
-Drive and Dispatcharr Sync. Settings rows take a scope (section 4.9 lanes); data rows (favorites,
+Drive and Dispatcharr Sync, except that trueBlack shares the appearanceMode row ("Light and Dark
+Mode") so the two always sync under one scope. Settings rows take a scope (section 4.9 lanes); data rows (favorites,
 recents, collections, progress, reminders, watchlist, hiddenTitles, hiddenGroups, groupOrder,
 profiles, remoteMap, radioDefault) take a plain on/off. A data row that is off neither writes nor
 applies its category (one exception: Apple still applies a pulled `profiles` category while its row
@@ -333,7 +334,7 @@ compatibility):
 | selectedTheme | string | selectedTheme | selectedTheme | selected_theme | |
 | customThemeHex | string | selectedTheme | customThemeHex | custom_theme_hex | |
 | appearanceMode | string | appearanceMode | appearanceMode | appearance_mode | |
-| trueBlack | bool | trueBlack | appearance.trueBlack | appearance_true_black | appearanceTrueBlack |
+| trueBlack | bool | appearanceMode | appearance.trueBlack | appearance_true_black | appearanceTrueBlack |
 | useCustomAccent | bool | customAccent | useCustomAccent | use_custom_accent | |
 | customAccentHex | string | customAccent | customAccentHex | custom_accent_hex | |
 | liquidGlassStyle | string | glassEffect | liquidGlassStyle | (Apple only: round-trip) | |
@@ -414,7 +415,7 @@ wrong type is ignored and the local setting is left unchanged:
 | defaultLiveTvView | the Android wire value as stored, up to 20 characters; `""` = the device's form-factor default |
 | customAccentHex, categoryColor.<bucket> | `"RRGGBB"` hex, an optional leading `#` accepted; customAccentHex `""` = the theme's accent |
 | customThemeHex | `"RRGGBB"` hex, an optional leading `#` accepted; the Custom theme's base color (the whole Custom palette and its matching accent derive from it) |
-| appearanceMode, trueBlack | Unchanged on the wire. Since 2026-11-05 the UI shows one Mode choice (System, Light, Dark, True Black): True Black is written as appearanceMode `"dark"` plus trueBlack `true`, and every other choice writes trueBlack `false`. Readers honor trueBlack only with `"dark"`, so a received System or Light with trueBlack `true` renders as plain System or Light |
+| appearanceMode, trueBlack | Unchanged on the wire. Since 2026-11-05 the UI shows one Mode choice (System, Light, Dark, True Black): True Black is written as appearanceMode `"dark"` plus trueBlack `true`, and every other choice writes trueBlack `false`. Readers honor trueBlack only with `"dark"`, so a received System or Light with trueBlack `true` renders as plain System or Light. Since 2026-11-13 both names share the "Light and Dark Mode" Sync Categories row, so one scope covers the whole Mode choice; a scope stored under the retired trueBlack row is ignored |
 | hiddenEpgBadges | one string, badge ids separated by commas (no spaces), up to 1024 characters; `""` = none hidden |
 | customCategories | JSON array string, up to 4 KiB |
 | skipBack, skipForward | int seconds, one of 5, 10, 15, 30, 60 |
