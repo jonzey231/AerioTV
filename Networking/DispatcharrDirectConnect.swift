@@ -1576,6 +1576,11 @@ enum PlaylistHostChange {
                            allServers: [ServerConnection]) async {
         var cleared: [String] = []
 
+        // From now on a stream URL that still names the old address opens
+        // without the key (StreamKeyGate.headersForOpen).
+        DispatcharrKeyBroker.refreshKeyRoutes()
+        cleared.append("stream key routes")
+
         // A live stream (or Dispatcharr proxy connection) opened against the
         // old host keeps that URL for its whole life.
         if server.isActive {

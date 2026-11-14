@@ -41,6 +41,28 @@ enum DispatcharrKeyBroker {
     /// Install the SwiftData lookup. Called once from RootView.
     @MainActor static func install(container: ModelContainer) {
         Self.container = container
+        refreshKeyRoutes()
+    }
+
+    /// Every saved Dispatcharr playlist's keys and current addresses, for the
+    /// stream-open backstop (StreamKeyGate.headersForOpen): a stream URL
+    /// saved before a playlist moved opens without the key. Run at launch and
+    /// after a playlist moves (PlaylistHostChange); a key added later is
+    /// simply not judged there, the playback entry points decide it.
+    @MainActor static func refreshKeyRoutes() {
+        guard let container else { return }
+        let all = ((try? container.mainContext.fetch(FetchDescriptor<ServerConnection>())) ?? [])
+            .filter { !$0.isGone && $0.type == .dispatcharrAPI }
+        var map: [String: [String]] = [:]
+        for s in all {
+            var routes = [s.normalizedBaseURL]
+            if !s.localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { routes.append(s.normalizedLocalURL) }
+            let keys = Set([s.baseApiKey, s.effectiveApiKey]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty })
+            for key in keys { map[key, default: []] += routes }
+        }
+        DispatcharrRequestGate.shared.setKeyRoutes(map)
     }
 
     /// The saved Dispatcharr playlist that uses `key` (its own key or the

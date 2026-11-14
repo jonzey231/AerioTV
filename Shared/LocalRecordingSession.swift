@@ -1127,7 +1127,7 @@ extension LiveRewindEngine: URLSessionDataDelegate {
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -1492,7 +1492,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,

@@ -448,7 +448,7 @@ private final class MP4HEVCTagSessionDelegate: NSObject, URLSessionDataDelegate,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -4750,13 +4750,17 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         guard isCurrentIngest(session) else { completionHandler(nil); return }
         let original = task.originalRequest ?? URLRequest(url: sourceURL)
-        if !RedirectAuthPolicy.keepsSignIn(next: request.url, previous: response.url, original: original.url) {
+        let followed = RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: original)
+        if !RedirectAuthPolicy.carriesSignIn(followed, of: original) {
             redirectDroppedSignIn = true
         }
         redirectSniffPending = true
         redirectSniffBuffer.removeAll()
-        redirectLandedURL = request.url
-        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: original))
+        // The URL actually followed: a same-host http hop from an https
+        // chain goes out as https (RedirectAuthPolicy.tlsUpgraded), and the
+        // direct HLS re-tune must play that one, not the server's http form.
+        redirectLandedURL = followed?.url ?? request.url
+        completionHandler(followed)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,

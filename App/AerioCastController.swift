@@ -1011,14 +1011,20 @@ final class AerioCastController: NSObject, ObservableObject {
     /// gate is the real arbiter and refuses by name at load time.
     static func castContent(for item: ChannelDisplayItem) -> Content? {
         guard let url = item.streamURL ?? item.streamURLs.first else { return nil }
+        // The phone's proxy ingests this URL with the key: a row saved before
+        // the playlist moved is rebuilt on the address in use, or ingested
+        // without the key (ServerConnection.keyedStream).
+        let server = ChannelStore.shared.activeServer
+        let opened = server.map { $0.keyedStream(url, headers: $0.authHeaders) }
+            ?? (url: url, headers: ["Accept": "*/*"])
         return Content(
             mediaID: item.id,
             kind: .live,
             title: item.name,
             subtitle: item.currentProgram,
             artURL: item.logoURL?.absoluteString,
-            streamURL: url,
-            streamHeaders: ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
+            streamURL: opened.url,
+            streamHeaders: opened.headers
         )
     }
 

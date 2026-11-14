@@ -854,20 +854,14 @@ final class PlayerSession: ObservableObject {
     static func resolveEngine(item: ChannelDisplayItem,
                               server: ServerConnection?,
                               isLive: Bool) -> ResolvedEngine {
-        guard let url = item.streamURL ?? item.streamURLs.first else {
+        guard var url = item.streamURL ?? item.streamURLs.first else {
             return ResolvedEngine(engine: .mpv, routeURL: URL(string: "about:blank")!, headers: [:])
         }
         var headers: [String: String] = [:]
         if let ua = server?.effectiveUserAgent, !ua.isEmpty {
             headers["User-Agent"] = ua
         }
-        // The key goes only to this playlist's own addresses: a channel URL
-        // still on an address the playlist left (its list not reloaded yet
-        // after an address change) opens without it, never with the key the
-        // playlist has now (owner 2026-11-13: one snapshot per request).
-        if let server, server.type == .dispatcharrAPI, !server.isOwnAddress(url.absoluteString) {
-            debugLog("[ROUTE] stream on \(url.host ?? "?"), an address this playlist no longer uses: opened without its key")
-        } else if let server, server.type == .dispatcharrAPI {
+        if let server, server.type == .dispatcharrAPI {
             let key = server.effectiveApiKey
             // A key the server already rejected stays here on purpose: every
             // open passes StreamKeyGate.headersForOpen, which stops an open
@@ -880,6 +874,15 @@ final class PlayerSession: ObservableObject {
                 headers["X-API-Key"] = key
                 headers["Authorization"] = "ApiKey \(key)"
             }
+            // The key goes only to this playlist's current addresses: a
+            // channel URL still on an address the playlist left (its list not
+            // reloaded yet after an address change) is rebuilt on the address
+            // in use when its path is the server's own, and otherwise opens
+            // without the key, never with the key the playlist has now
+            // (owner 2026-11-13: one snapshot per request).
+            let opened = server.keyedStream(url, headers: headers)
+            url = opened.url
+            headers = opened.headers
         }
         if !isLive {
             // VOD (never DVR/catchup: those come through their own URLs

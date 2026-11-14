@@ -2152,7 +2152,10 @@ struct VODDetailView: View {
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
-            resolvedURL = (try? await api.resolveFinalURLForPlayback(url, ownAddresses: server.ownAddresses)) ?? url
+            // A VOD URL saved before the playlist moved is rebuilt on the
+            // address in use first (ServerConnection.keyedStream).
+            let start = server.keyedStream(url, headers: playingHeaders).url
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(start, ownAddresses: server.ownAddresses)) ?? start
             isResolvingURL = false
             // Audit #38 parity (Android ee06e17): a session URL that resolved
             // OFF the server's own addresses (host and port) plays without
@@ -2160,7 +2163,7 @@ struct VODDetailView: View {
             // API key must never be replayed to a foreign host, nor from
             // https to http (RedirectAuthPolicy). User-Agent stays (some
             // upstreams gate on it; it carries no secret).
-            if !api.playbackKeepsSignIn(from: url, to: resolvedURL, ownAddresses: server.ownAddresses) {
+            if !api.playbackKeepsSignIn(from: start, to: resolvedURL, ownAddresses: server.ownAddresses) {
                 playingHeaders = playingHeaders.filter {
                     $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                 }

@@ -184,7 +184,7 @@ struct RecordingActions {
             debugLog("⚠️ Cannot play server recording. Missing server / api / remoteID for \(rec.programTitle)")
             return
         }
-        let url: URL
+        var url: URL
         let urlSource: String
         if let fileURL = rec.dispatcharrFileURL,
            !fileURL.isEmpty,
@@ -198,9 +198,17 @@ struct RecordingActions {
             debugLog("⚠️ Cannot play server recording. URL construction failed for \(rec.programTitle)")
             return
         }
+        // The server's file_url can be absolute, built from the address the
+        // server sees itself on (behind a proxy that can be plain http or an
+        // internal host:port), and a saved one can predate a playlist move:
+        // the key goes only to the playlist's current addresses, so the URL
+        // is rebuilt on the address in use or played without the key
+        // (ServerConnection.keyedStream).
+        let opened = server.keyedStream(url, headers: server.authHeaders)
+        url = opened.url
         // Issue #29: the from-beginning sentinel is an mpv-only in-process
         // signal (setupMPV consumes and strips it).
-        var headers = server.authHeaders
+        var headers = opened.headers
         if fromStart { headers["X-Aerio-Start-From-Beginning"] = "1" }
         let headerKeys = headers.keys.sorted().joined(separator: ",")
         let inProgressTag = (rec.status == .recording) ? " [IN-PROGRESS]" : ""

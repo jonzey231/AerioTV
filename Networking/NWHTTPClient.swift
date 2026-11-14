@@ -229,14 +229,18 @@ enum NWHTTPClient {
             // POST body to the other host, and the Direct Connect login sends
             // the password in one. Checked after the 303-style GET switch,
             // which has already dropped the body.
-            guard let nextRequest = RedirectAuthPolicy.redirect(candidate, previous: currentURL,
+            var redirected = originalRequest
+            redirected.url = currentURL
+            guard let nextRequest = RedirectAuthPolicy.redirect(candidate, previous: redirected,
                                                                 original: firstRequest) else {
                 debugLog("NWHTTP redirect \(status) not followed: the hop would carry a request body where the sign-in may not go")
                 return (data, http)
             }
+            // The policy may follow a same-host http hop as https
+            // (RedirectAuthPolicy.tlsUpgraded): connect to the URL it chose.
             return try await perform(request: nextRequest,
                                      firstRequest: firstRequest,
-                                     currentURL: nextURL,
+                                     currentURL: nextRequest.url ?? nextURL,
                                      redirectsLeft: redirectsLeft - 1,
                                      timeout: timeout,
                                      bodySink: bodySink)

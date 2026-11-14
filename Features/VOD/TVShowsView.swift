@@ -332,16 +332,22 @@ struct TVShowsView: View {
     }
 
     private func resumePicked(_ progress: WatchProgress) {
-        if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
+        if let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = progress.positionMs
+            var url = storedURL
             if let sid = progress.serverID,
                let serverUUID = UUID(uuidString: sid),
                let server = servers.first(where: { $0.id == serverUUID }) {
-                resumePlayingHeaders = server.authHeaders
+                // A Continue Watching URL saved before the playlist moved is
+                // rebuilt on the address in use, or played without the key
+                // (ServerConnection.keyedStream).
+                let opened = server.keyedStream(storedURL, headers: server.authHeaders)
+                url = opened.url
+                resumePlayingHeaders = opened.headers
             } else {
                 resumePlayingHeaders = dispatcharrHeaders
             }

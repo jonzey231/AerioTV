@@ -563,7 +563,12 @@ final class MultiviewStore: ObservableObject {
         guard let scheme = url.scheme?.lowercased(),
               allowedSchemes.contains(scheme) else { return nil }
         let headers = server?.authHeaders ?? ["Accept": "*/*"]
-        return (url, headers)
+        // A row saved before the playlist moved still names the old address:
+        // rebuilt on the address in use, or opened without the key
+        // (ServerConnection.keyedStream). Every tile, swap, and warm start
+        // takes its URL and headers from here.
+        guard let server else { return (url, headers) }
+        return server.keyedStream(url, headers: headers)
     }
 
     // MARK: - Add / Remove

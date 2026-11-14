@@ -852,7 +852,7 @@ struct MoviesView: View {
 
     private func resumePicked(_ progress: WatchProgress, startAt: Int32? = nil) {
         // If we have a stored stream URL, launch playback directly with the saved position
-        if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
+        if let urlStr = progress.streamURL, let storedURL = URL(string: urlStr) {
             resumePlayingTitle = progress.title
             resumeVodID = progress.vodID
             resumePosterURL = progress.posterURL
@@ -861,7 +861,14 @@ struct MoviesView: View {
             let resumeServer: ServerConnection? = progress.serverID
                 .flatMap(UUID.init(uuidString:))
                 .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
-            resumePlayingHeaders = resumeServer?.authHeaders ?? dispatcharrHeaders
+            // A Continue Watching URL saved before the playlist moved is
+            // rebuilt on the address in use, or played without the key
+            // (ServerConnection.keyedStream).
+            let savedHeaders = resumeServer?.authHeaders ?? dispatcharrHeaders
+            let opened = resumeServer?.keyedStream(storedURL, headers: savedHeaders)
+                ?? (url: storedURL, headers: savedHeaders)
+            let url = opened.url
+            resumePlayingHeaders = opened.headers
             // ATV log 2026-08-17 (Logan): this fast path mounted the player
             // cover directly, skipping the teardown VODDetailView does before
             // its own cover. A minimized live channel therefore kept decoding
@@ -1400,10 +1407,13 @@ struct MoviesView: View {
                                          auth: .apiKey(server.effectiveApiKey),
                                          userAgent: server.effectiveUserAgent,
                                          authMode: server.dispatcharrHeaderMode)
-                resolved = (try? await api.resolveFinalURLForPlayback(url, ownAddresses: server.ownAddresses)) ?? url
+                // A VOD URL saved before the playlist moved is rebuilt on the
+                // address in use first (ServerConnection.keyedStream).
+                let start = server.keyedStream(url, headers: headers).url
+                resolved = (try? await api.resolveFinalURLForPlayback(start, ownAddresses: server.ownAddresses)) ?? start
                 // Off the server's own addresses (host and port) or from
                 // https to http: no key.
-                if !api.playbackKeepsSignIn(from: url, to: resolved, ownAddresses: server.ownAddresses) {
+                if !api.playbackKeepsSignIn(from: start, to: resolved, ownAddresses: server.ownAddresses) {
                     headers = headers.filter {
                         $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                     }

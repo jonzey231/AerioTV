@@ -1503,12 +1503,15 @@ struct AddToMultiviewSheet: View {
                                      auth: .apiKey(server.effectiveApiKey),
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
-            resolvedURL = (try? await api.resolveFinalURLForPlayback(proxyURL, ownAddresses: server.ownAddresses)) ?? proxyURL
+            // A VOD URL saved before the playlist moved is rebuilt on the
+            // address in use first (ServerConnection.keyedStream).
+            let start = server.keyedStream(proxyURL, headers: headers).url
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(start, ownAddresses: server.ownAddresses)) ?? start
             // Audit #38 parity (Android ee06e17): never replay the API key
             // to a session URL that resolved OFF the server's own addresses
             // (host and port), nor from https to http (RedirectAuthPolicy).
             // User-Agent stays; it carries no secret.
-            if !api.playbackKeepsSignIn(from: proxyURL, to: resolvedURL, ownAddresses: server.ownAddresses) {
+            if !api.playbackKeepsSignIn(from: start, to: resolvedURL, ownAddresses: server.ownAddresses) {
                 headers = headers.filter {
                     $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                 }
@@ -1573,9 +1576,14 @@ struct AddToMultiviewSheet: View {
         // file (kind .vod). vodID stays nil so there's no
         // continue-watching, matching the single recording player.
         let kind: TilePlaybackKind = (rec.isInProgress && isHLS) ? .dvr : .vod
+        // Same rule as MyRecordingsView: an absolute file_url the server built
+        // for another address, or one saved before the playlist moved, is
+        // rebuilt on the address in use or added without the key
+        // (ServerConnection.keyedStream).
+        let opened = server.keyedStream(url, headers: server.authHeaders)
         commitAddVOD(
-            streamURL: url,
-            headers: server.authHeaders,
+            streamURL: opened.url,
+            headers: opened.headers,
             title: rec.programTitle.isEmpty ? "Recording" : rec.programTitle,
             posterURL: nil,
             kind: kind,

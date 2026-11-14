@@ -1057,7 +1057,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                         willPerformHTTPRedirection response: HTTPURLResponse,
                         newRequest request: URLRequest,
                         completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-            completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+            completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,

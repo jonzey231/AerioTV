@@ -817,6 +817,26 @@ final class ServerConnection {
         RedirectAuthPolicy.ownAddresses(serverURL: baseURL, localURL: localURL)
     }
 
+    /// The URL a stream opens at, and the headers it carries, for a URL that
+    /// would carry this playlist's key (RedirectAuthPolicy.keyedStream). A
+    /// channel, VOD, catch-up, or recording URL saved before Edit Playlist
+    /// moved the Server URL or Local URL still names the old address, and
+    /// sending the key there hands it to whoever has that address now: on a
+    /// current address it opens as is; with the server's own path it is
+    /// rebuilt on the address in use; otherwise it opens without the key.
+    /// Only Dispatcharr playlists carry a key in `authHeaders`.
+    func keyedStream(_ url: URL, headers: [String: String]) -> (url: URL, headers: [String: String]) {
+        guard type == .dispatcharrAPI else { return (url, headers) }
+        let current = RedirectAuthPolicy.ownAddresses(serverURL: effectiveBaseURL, localURL: "").first
+        let opened = RedirectAuthPolicy.keyedStream(url, ownAddresses: ownAddresses, current: current)
+        if opened.url != url {
+            debugLog("[ROUTE] stream on \(url.host ?? "?"), an address this playlist no longer uses: rebuilt on the address in use (\(opened.url.host ?? "?"))")
+        } else if !opened.keepsKey, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            debugLog("[ROUTE] stream on \(url.host ?? "?"), not one of this playlist's addresses: opened without its key")
+        }
+        return (opened.url, opened.keepsKey ? headers : RedirectAuthPolicy.withoutSignIn(headers))
+    }
+
     /// Returns localEPGURL when the server is reachable on the local
     /// network (per `TVLANProbe`), otherwise returns epgURL.
     var effectiveEPGURL: String {

@@ -21,12 +21,20 @@
 //    - another host, another port (a different port can be a different
 //      service), or https to http: removed, so the key never reaches a
 //      service the user did not configure and never leaves TLS in cleartext.
-//  A hop that loses the sign-in but would still re-send a request body (the
-//  Direct Connect login's password, a sync upload) is not followed at all.
+//    - one exception to https to http (`tlsUpgraded`): Dispatcharr builds
+//      absolute redirect URLs with http:// when it does not trust the TLS
+//      proxy in front of it, and the app tolerates what the server sends. A
+//      same-host hop to http on port 80, or on the https request's own port,
+//      from a chain that has been https with the sign-in all along, is
+//      followed as https on the original request's port, sign-in kept.
+//  Once a hop drops the sign-in, no later hop gets it back. A hop that loses
+//  the sign-in but would still re-send a request body (the Direct Connect
+//  login's password, a sync upload) is not followed at all.
 //  The same rule decides where a playlist's key may go before any redirect:
 //  `isOwnAddress` matches a URL against the playlist's Server URL and Local
-//  URL, and `reanchored` keeps server-supplied page links on the address
-//  the app is already using.
+//  URL, `keyedStream` moves a stream URL saved before the playlist moved
+//  onto its current address (or sends it without the key), and `reanchored`
+//  keeps server-supplied page links on the address the app is already using.
 //
 //  Pure Foundation with no app singletons, so
 //  Scripts/cast-hls-proxy-tests/run.sh compiles it next to the proxy sources
@@ -137,33 +145,140 @@ enum RedirectAuthPolicy {
         return out.url
     }
 
-    /// The verdict for one hop to `next`, checked against the URL that
+    /// The path segments where Dispatcharr's own routes start: live streams
+    /// and VOD (`/proxy/ts/stream/`, `/proxy/vod/`), HLS sessions
+    /// (`/proxy/hls/`), and recordings and catch-up (`/api/`).
+    static let serverRouteMarkers = ["/proxy/", "/api/"]
+
+    /// `url` moved onto `current` when its path is the server's own: from its
+    /// first `/proxy/` or `/api/` segment on, after `current`'s own path prefix
+    /// (a server behind a sub-path keeps it), with `url`'s query. Nil when the
+    /// path has neither segment: that URL is not the server's to move.
+    static func rebuiltOnCurrentAddress(_ url: URL, current: URL) -> URL? {
+        guard let target = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              var base = URLComponents(url: current, resolvingAgainstBaseURL: false) else { return nil }
+        let path = target.percentEncodedPath
+        guard let marker = serverRouteMarkers.compactMap({ path.range(of: $0) })
+                .min(by: { $0.lowerBound < $1.lowerBound }) else { return nil }
+        var prefix = base.percentEncodedPath
+        while prefix.hasSuffix("/") { prefix.removeLast() }
+        base.percentEncodedPath = prefix + String(path[marker.lowerBound...])
+        base.percentEncodedQuery = target.percentEncodedQuery
+        base.user = nil
+        base.password = nil
+        base.fragment = nil
+        return base.url
+    }
+
+    /// Where a stream URL that would carry a playlist's key opens, and whether
+    /// the key goes with it. A channel, VOD, catch-up, or recording URL saved
+    /// before the playlist moved (Edit Playlist changed its Server URL or
+    /// Local URL, and the list was not reloaded yet) still names the old
+    /// address, and sending the key there hands it to whoever has that
+    /// address now. So: on one of `ownAddresses`, as is with the key; on an
+    /// address the playlist left but with the server's own path, rebuilt on
+    /// `current` (the address in use) with the key; anything else, as is
+    /// without the key.
+    static func keyedStream(_ url: URL, ownAddresses: [URL], current: URL?) -> (url: URL, keepsKey: Bool) {
+        if isOwnAddress(url, ownAddresses: ownAddresses) { return (url, true) }
+        if let current, isOwnAddress(current, ownAddresses: ownAddresses),
+           let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+           let rebuilt = rebuiltOnCurrentAddress(url, current: current) {
+            return (rebuilt, true)
+        }
+        return (url, false)
+    }
+
+    /// The verdict for one hop to `next` by URL, checked against the URL that
     /// answered with the redirect (`previous`) AND the request the app built
-    /// (`original`): a chain that leaves the host or port and comes back
-    /// never gets the sign-in again.
+    /// (`original`). `redirect` adds the rest: a chain that already dropped
+    /// the sign-in never gets it back, and the https form of a same-host
+    /// downgrade (`tlsUpgraded`).
     static func keepsSignIn(next: URL?, previous: URL?, original: URL?) -> Bool {
         keepsSignIn(from: previous ?? original, to: next) && keepsSignIn(from: original ?? previous, to: next)
     }
 
+    /// True when `request` still carries every sign-in header `original` was
+    /// sent with, so no hop before it dropped the sign-in. True when the
+    /// original carried none.
+    static func carriesSignIn(_ request: URLRequest?, of original: URLRequest?) -> Bool {
+        guard let original else { return true }
+        for name in signInHeaders where original.value(forHTTPHeaderField: name) != nil {
+            if request?.value(forHTTPHeaderField: name) == nil { return false }
+        }
+        return true
+    }
+
+    /// True when `request` carries any sign-in header.
+    static func hasSignIn(_ request: URLRequest?) -> Bool {
+        signInHeaders.contains { request?.value(forHTTPHeaderField: $0) != nil }
+    }
+
+    /// The https form of a same-host hop the server sent as plain http, or nil.
+    /// Dispatcharr builds absolute redirect URLs (an in-progress recording, a
+    /// session) from the scheme it trusts, so behind a TLS proxy it does not
+    /// trust they come back http:// although the user only reaches it over
+    /// https, and dropping the sign-in there broke those servers. The app
+    /// tolerates what the server sends: when the original request and the
+    /// one redirected (`previous`) are https, the target is the same host,
+    /// and it is http on the default port 80 or on the https request's own
+    /// port, the hop is followed as https on the original request's port.
+    /// Nil for any other downgrade, and for a redirect to the http form of
+    /// the very URL that answered (following it as https would loop).
+    static func tlsUpgraded(_ next: URL?, previous: URL?, original: URL?) -> URL? {
+        let prior = previous ?? original
+        guard let next, let original, let prior,
+              original.scheme?.lowercased() == "https", prior.scheme?.lowercased() == "https",
+              next.scheme?.lowercased() == "http",
+              let host = next.host?.lowercased(), !host.isEmpty,
+              host == original.host?.lowercased(), host == prior.host?.lowercased(),
+              let targetPort = effectivePort(next), let priorPort = effectivePort(prior),
+              targetPort == 80 || targetPort == priorPort,
+              var upgraded = URLComponents(url: next, resolvingAgainstBaseURL: false),
+              let answered = URLComponents(url: prior, resolvingAgainstBaseURL: false) else { return nil }
+        upgraded.scheme = "https"
+        let originalPort = effectivePort(original) ?? 443
+        upgraded.port = originalPort == 443 ? nil : originalPort
+        if upgraded.percentEncodedPath == answered.percentEncodedPath,
+           upgraded.percentEncodedQuery == answered.percentEncodedQuery { return nil }
+        guard let url = upgraded.url, keepsSignIn(next: url, previous: prior, original: original) else { return nil }
+        return url
+    }
+
     /// The request to follow for one hop. `next` is the request the transport
-    /// built, `previous` the URL that answered with the redirect, `original`
-    /// the request the app sent first. A kept hop gets the original sign-in
-    /// copied back; a dropped hop has it removed. Nil means stop at the
-    /// redirect, so the caller gets the 3xx as its answer: that happens when
-    /// a dropped hop would still re-send a body.
-    static func redirect(_ next: URLRequest, previous: URL?, original: URLRequest?) -> URLRequest? {
+    /// built, `previous` the request that was redirected (URLSession's
+    /// `task.currentRequest`), `original` the request the app sent first. A
+    /// kept hop gets the original sign-in copied back; a same-host downgrade
+    /// from an all-https chain is followed as https (`tlsUpgraded`) with it; a
+    /// dropped hop has it removed, and so does every hop after a drop. Nil
+    /// means stop at the redirect, so the caller gets the 3xx as its answer:
+    /// that happens when a dropped hop would still re-send a body.
+    static func redirect(_ next: URLRequest, previous: URLRequest?, original: URLRequest?) -> URLRequest? {
         var out = next
-        if keepsSignIn(next: next.url, previous: previous, original: original?.url) {
-            for name in signInHeaders {
-                if let value = original?.value(forHTTPHeaderField: name) {
-                    out.setValue(value, forHTTPHeaderField: name)
-                }
+        let previousURL = previous?.url ?? original?.url
+        if carriesSignIn(previous ?? original, of: original) {
+            if hasSignIn(original),
+               let upgraded = tlsUpgraded(next.url, previous: previousURL, original: original?.url) {
+                out.url = upgraded
+                copySignIn(from: original, to: &out)
+                return out
             }
-            return out
+            if keepsSignIn(next: next.url, previous: previousURL, original: original?.url) {
+                copySignIn(from: original, to: &out)
+                return out
+            }
         }
         if next.httpBody != nil || next.httpBodyStream != nil { return nil }
         for name in signInHeaders { out.setValue(nil, forHTTPHeaderField: name) }
         return out
+    }
+
+    private static func copySignIn(from original: URLRequest?, to request: inout URLRequest) {
+        for name in signInHeaders {
+            if let value = original?.value(forHTTPHeaderField: name) {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+        }
     }
 }
 
@@ -180,8 +295,7 @@ final class RedirectAuthGuard: NSObject, URLSessionTaskDelegate, Sendable {
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(RedirectAuthPolicy.redirect(request,
-                                                      previous: response.url ?? task.currentRequest?.url,
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest,
                                                       original: task.originalRequest))
     }
 }

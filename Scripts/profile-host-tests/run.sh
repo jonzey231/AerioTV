@@ -29,5 +29,6 @@ xcrun swiftc -swift-version 6 -O -o "$OUT/profile_host_tests" \
     "$SRC/DsyncSettingsMap.swift" \
     "$SRC/CloudSnapshots.swift" \
     ../../Networking/DispatcharrRequestGate.swift \
-    ../../Networking/DispatcharrRateLimitRetry.swift
+    ../../Networking/DispatcharrRateLimitRetry.swift \
+    ../../Networking/RedirectAuthPolicy.swift
 "$OUT/profile_host_tests"

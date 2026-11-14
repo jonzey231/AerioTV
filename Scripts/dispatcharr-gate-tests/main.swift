@@ -1493,5 +1493,35 @@ do {
     check(mb == 100 * 1024 && n == 37, "10 to 100 GB in 37 adjustments (got \(n), \(mb))")
 }
 
+// Stream key routes (2026-11-13): a stream URL saved before its playlist
+// moved never carries the key to the old address (StreamKeyGate backstop).
+do {
+    let g = freshGate()
+    g.setKeyRoutes(["KEY-A": ["https://new.example.com", "192.168.1.20:9191"]])
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A", "User-Agent": "ua"],
+                                    url: "http://192.168.1.10:9191/proxy/ts/stream/u", gate: g),
+       .send(["User-Agent": "ua"]), "routes: the old address gets the open without the key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A"], url: "https://new.example.com/proxy/ts/stream/u", gate: g),
+       .send(["X-API-Key": "KEY-A"]), "routes: the Server URL keeps the key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A", "Authorization": "ApiKey KEY-A"],
+                                    url: "http://192.168.1.20:9191/proxy/ts/stream/u", gate: g),
+       .send(["X-API-Key": "KEY-A", "Authorization": "ApiKey KEY-A"]), "routes: the Local URL keeps the key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A"], url: "http://new.example.com/proxy/ts/stream/u", gate: g),
+       .send([:]), "routes: http to the https Server URL opens without the key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A"], url: "http://192.168.1.20:8080/proxy/ts/stream/u", gate: g),
+       .send([:]), "routes: another port on the Local URL host opens without the key")
+    eq(StreamKeyGate.headersForOpen(["Authorization": "ApiKey KEY-A"], url: "http://192.168.1.10:9191/x", gate: g),
+       .send([:]), "routes: the ApiKey header shape is judged too")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "OTHER"], url: "http://192.168.1.10:9191/proxy/ts/stream/u", gate: g),
+       .send(["X-API-Key": "OTHER"]), "routes: a key with no known routes is not judged here")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A"], url: nil, gate: g),
+       .send(["X-API-Key": "KEY-A"]), "routes: no URL, nothing to judge")
+    g.setKeyRoutes(["SHARED": ["https://one.example", "http://two.example:9191"]])
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "SHARED"], url: "http://two.example:9191/proxy/ts/stream/u", gate: g),
+       .send(["X-API-Key": "SHARED"]), "routes: a key two playlists share may go to either one's addresses")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "KEY-A"], url: "http://192.168.1.10:9191/x", gate: g),
+       .send(["X-API-Key": "KEY-A"]), "routes: a refresh replaces the old routes")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

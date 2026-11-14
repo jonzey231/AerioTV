@@ -168,7 +168,13 @@ enum HLSSessionResolver {
                         newRequest request: URLRequest,
                         completionHandler: @escaping (URLRequest?) -> Void) {
             let token = response.value(forHTTPHeaderField: tokenHeader)
-            if let target = request.url, HLSCapabilityStore.redirectLooksLikeHLS(target) {
+            // A same-host http Location from an https entry (Dispatcharr
+            // behind a TLS proxy it does not trust) is played as https with
+            // the sign-in (RedirectAuthPolicy.tlsUpgraded), so AVPlayer gets
+            // the https playlist and its headers.
+            let upgraded = RedirectAuthPolicy.hasSignIn(task.originalRequest)
+                ? RedirectAuthPolicy.tlsUpgraded(request.url, previous: response.url, original: entry) : nil
+            if let target = upgraded ?? request.url, HLSCapabilityStore.redirectLooksLikeHLS(target) {
                 report(.hls(Resolved(playlistURL: target, token: token, status: response.statusCode, entry: entry)))
             } else {
                 // Redirect stream profile: the 302 goes to the raw provider
@@ -578,7 +584,7 @@ final class DispatcharrLimitProbe: NSObject, URLSessionDataDelegate, @unchecked 
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
-        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -4213,8 +4219,9 @@ struct DispatcharrAPI {
             // an anonymous probe - session URLs need no auth, and the API
             // key must never be replayed off-origin, nor on a hop that went
             // from https to http (RedirectAuthPolicy).
-            if playbackKeepsSignIn(from: url, to: current, ownAddresses: ownAddresses),
-               !RedirectAuthPolicy.isDowngrade(from: previous, to: current) {
+            let sentAuth = playbackKeepsSignIn(from: url, to: current, ownAddresses: ownAddresses)
+                && !RedirectAuthPolicy.isDowngrade(from: previous, to: current)
+            if sentAuth {
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
             } else {
                 req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -4226,8 +4233,13 @@ struct DispatcharrAPI {
 
             if (300...399).contains(http.statusCode),
                let loc = http.value(forHTTPHeaderField: "Location"),
-               let next = URL(string: loc, relativeTo: current)?.absoluteURL,
+               let located = URL(string: loc, relativeTo: current)?.absoluteURL,
+               case let next = (sentAuth ? RedirectAuthPolicy.tlsUpgraded(located, previous: current, original: url) : nil) ?? located,
                let safeNext = VODService.validateAbsoluteURL(next, serverHost: URL(string: baseURL)?.host) {
+                // A same-host http Location from this https walk (Dispatcharr
+                // behind a TLS proxy it does not trust) is walked as https,
+                // so the session URL the player gets is https and keeps the
+                // key (RedirectAuthPolicy.tlsUpgraded).
                 // SSRF guard: never follow a redirect to a loopback/private/
                 // metadata host with the API key attached. A rejected 3xx falls
                 // through to `return response.url ?? current` (last-good URL).
@@ -5101,11 +5113,11 @@ actor AsyncSemaphore {
 /// Each hop runs RedirectAuthPolicy, the rule every redirect-following path
 /// in the app uses: the sign-in is copied back from `task.originalRequest`
 /// on a hop to the same host and port (and on an http to https upgrade from
-/// 80 to 443), removed on a hop to another host or port or from https to
-/// http, and a hop that would carry a request body where the sign-in may
-/// not go is not followed. Accept,
-/// Content-Type, and User-Agent carry no secret and are restored on every
-/// hop, as before.
+/// 80 to 443), a same-host http hop from an all-https chain is followed as
+/// https with it, it is removed on a hop to another host or port or any
+/// other https to http, and a hop that would carry a request body where the
+/// sign-in may not go is not followed. Accept, Content-Type, and User-Agent
+/// carry no secret and are restored on every hop, as before.
 final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
 
     private static let nonCredentialHeaders: [String] = [
@@ -5120,7 +5132,7 @@ final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest,
                     completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
         let original = task.originalRequest
-        guard var modified = RedirectAuthPolicy.redirect(request, previous: response.url, original: original) else {
+        guard var modified = RedirectAuthPolicy.redirect(request, previous: task.currentRequest, original: original) else {
             debugLog("DispatcharrAPI redirect: \(response.statusCode) to \(request.url?.host ?? "?") not followed: the request body would go where the sign-in may not")
             completionHandler(nil)
             return
@@ -5135,9 +5147,9 @@ final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
             // One-line audit so a misbehaving reverse-proxy redirect
             // shows up in the debug log without needing a packet
             // capture. Note whether auth was preserved or stripped.
-            let kept = RedirectAuthPolicy.keepsSignIn(next: request.url, previous: response.url, original: original.url)
+            let kept = RedirectAuthPolicy.carriesSignIn(modified, of: original)
             let from = original.url?.absoluteString ?? "<unknown>"
-            let to   = request.url?.absoluteString ?? "<unknown>"
+            let to   = modified.url?.absoluteString ?? "<unknown>"
             let authNote = kept ? "auth preserved (same host and port)" : "AUTH STRIPPED (other host or port, or https to http)"
             debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) -> \(to) (\(authNote))")
             #endif
@@ -7183,8 +7195,12 @@ enum CatchupSupport {
                 creds = (user.username, xcPass)
                 xcCredsCache[server.id] = creds
             }
-            // Follow the live stream's host (LAN/WAN-aware) when possible.
-            let base = dispatcharrBase(fromStreamURL: channel.streamURL) ?? server.effectiveBaseURL
+            // Follow the live stream's host (LAN/WAN-aware) when it is one of
+            // the playlist's addresses now, as the native session does: this
+            // URL carries the account's XC password in its path, and a
+            // channel row saved before the playlist moved would hand it to
+            // the old address.
+            let base = streamBase.flatMap { server.isOwnAddress($0) ? $0 : nil } ?? server.effectiveBaseURL
             guard let streamID = channel.dispatcharrChannelID.map(String.init) ?? Optional(channel.id),
                   let url = buildTimeshiftURL(base: base,
                                               username: creds.0,

@@ -4547,7 +4547,7 @@ do {
     var crossNext = original
     crossNext.url = b2
     crossNext.setValue(nil, forHTTPHeaderField: "Authorization")
-    let cross = P.redirect(crossNext, previous: a1, original: original)
+    let cross = P.redirect(crossNext, previous: original, original: original)
     expect(cross != nil, "redirect: a GET to another host is still followed")
     for name in P.signInHeaders {
         expect(cross?.value(forHTTPHeaderField: name) == nil, "redirect: another host gets no \(name)")
@@ -4555,7 +4555,7 @@ do {
     expectEq(cross?.value(forHTTPHeaderField: "User-Agent"), "AerioTV", "redirect: User-Agent survives a dropped hop")
     var sameNext = crossNext
     sameNext.url = u("http://a.example/2")
-    let same = P.redirect(sameNext, previous: a1, original: original)
+    let same = P.redirect(sameNext, previous: original, original: original)
     for name in P.signInHeaders {
         expectEq(same?.value(forHTTPHeaderField: name), original.value(forHTTPHeaderField: name),
                  "redirect: same host and port keeps \(name)")
@@ -4564,21 +4564,23 @@ do {
     bare.setValue("standin-key", forHTTPHeaderField: "X-API-Key")
     var bareNext = bare
     bareNext.url = u("http://a.example/2")
-    expect(P.redirect(bareNext, previous: a1, original: bare)?.value(forHTTPHeaderField: "Cookie") == nil,
+    expect(P.redirect(bareNext, previous: bare, original: bare)?.value(forHTTPHeaderField: "Cookie") == nil,
            "redirect: a kept hop adds nothing the first request did not send")
     var downNext = original
     downNext.url = u("http://a.example/2")
-    expect(P.redirect(downNext, previous: u("https://a.example/1"), original: original)?
+    var httpsPrevious = original
+    httpsPrevious.url = u("https://a.example/1")
+    expect(P.redirect(downNext, previous: httpsPrevious, original: original)?
             .value(forHTTPHeaderField: "X-API-Key") == nil, "redirect: https to http strips the key")
     var portNext = crossNext
     portNext.url = u("http://a.example:8080/2")
-    let port = P.redirect(portNext, previous: a1, original: original)
+    let port = P.redirect(portNext, previous: original, original: original)
     for name in P.signInHeaders {
         expect(port?.value(forHTTPHeaderField: name) == nil, "redirect: another port on the same host gets no \(name)")
     }
     var upNext = crossNext
     upNext.url = u("https://a.example/2")
-    expectEq(P.redirect(upNext, previous: a1, original: original)?.value(forHTTPHeaderField: "Authorization"),
+    expectEq(P.redirect(upNext, previous: original, original: original)?.value(forHTTPHeaderField: "Authorization"),
              "ApiKey standin-key", "redirect: an 80 to 443 upgrade keeps the sign-in")
 
     // A body never follows where the sign-in may not go.
@@ -4587,24 +4589,26 @@ do {
     post.httpBody = Data("{\"password\":\"standin\"}".utf8)
     var post307Cross = post
     post307Cross.url = b2
-    expect(P.redirect(post307Cross, previous: a1, original: post) == nil,
+    expect(P.redirect(post307Cross, previous: post, original: post) == nil,
            "redirect: a 307 POST to another host is not followed")
     var post307Down = post
     post307Down.url = u("http://a.example/2")
-    expect(P.redirect(post307Down, previous: u("https://a.example/1"), original: post) == nil,
+    var postHttpsPrevious = post
+    postHttpsPrevious.url = u("https://a.example/1")
+    expect(P.redirect(post307Down, previous: postHttpsPrevious, original: post) == nil,
            "redirect: a 307 POST from https to http is not followed")
     var post307Port = post
     post307Port.url = u("http://a.example:8080/2")
-    expect(P.redirect(post307Port, previous: a1, original: post) == nil,
+    expect(P.redirect(post307Port, previous: post, original: post) == nil,
            "redirect: a 307 POST to another port on the same host is not followed")
     var post307Same = post
     post307Same.url = u("http://a.example/2")
-    expect(P.redirect(post307Same, previous: a1, original: post)?.httpBody != nil,
+    expect(P.redirect(post307Same, previous: post, original: post)?.httpBody != nil,
            "redirect: a 307 POST on the same host and port keeps its body")
     var post302Cross = post307Cross
     post302Cross.httpMethod = "GET"
     post302Cross.httpBody = nil
-    expect(P.redirect(post302Cross, previous: a1, original: post)?.value(forHTTPHeaderField: "X-API-Key") == nil,
+    expect(P.redirect(post302Cross, previous: post, original: post)?.value(forHTTPHeaderField: "X-API-Key") == nil,
            "redirect: a 302 POST (now a GET) to another host follows without the key")
 
     // Header helpers.
@@ -4679,6 +4683,118 @@ do {
     expect(P.reanchored("", onto: page1) == nil, "page link: an empty link ends the walk")
     expect(P.keepsSignIn(from: page1, to: P.reanchored("http://dispatcharr:9191/api/channels/channels/?page=2", onto: page1)),
            "page link: the re-anchored page passes the sign-in rule")
+}
+
+// MARK: TLS-proxy downgrade, drop-once chains, stale stream URLs (2026-11-13)
+// A same-host http hop from an all-https chain is followed as https with the
+// sign-in; once a hop drops the sign-in no later hop gets it back; a stream
+// URL saved before the playlist moved is rebuilt or sent without the key.
+do {
+    typealias P = RedirectAuthPolicy
+    func u(_ s: String) -> URL { URL(string: s)! }
+    func req(_ s: String, signIn: Bool = true) -> URLRequest {
+        var r = URLRequest(url: u(s))
+        if signIn {
+            r.setValue("standin-key", forHTTPHeaderField: "X-API-Key")
+            r.setValue("ApiKey standin-key", forHTTPHeaderField: "Authorization")
+        }
+        return r
+    }
+
+    // The rewrite rule (tlsUpgraded).
+    let entry = u("https://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8")
+    expectEq(P.tlsUpgraded(u("http://dispatcharr.example.com/api/channels/recordings/7/hls/stream.m3u8"),
+                           previous: entry, original: entry)?.absoluteString,
+             "https://dispatcharr.example.com/api/channels/recordings/7/hls/stream.m3u8",
+             "tls: http on 80 from an https request is followed as https")
+    let entry8443 = u("https://d.example:8443/proxy/vod/movie/x")
+    expectEq(P.tlsUpgraded(u("http://d.example:8443/proxy/vod/movie/x/s1"), previous: entry8443, original: entry8443)?.absoluteString,
+             "https://d.example:8443/proxy/vod/movie/x/s1", "tls: http on the https request's own port is followed as https there")
+    expectEq(P.tlsUpgraded(u("http://d.example/proxy/vod/movie/x/s1"), previous: entry8443, original: entry8443)?.absoluteString,
+             "https://d.example:8443/proxy/vod/movie/x/s1", "tls: http on 80 goes back to the original request's port")
+    expect(P.tlsUpgraded(u("http://d.example:9191/x"), previous: entry8443, original: entry8443) == nil,
+           "tls: http on another port is not upgraded")
+    expect(P.tlsUpgraded(u("http://other.example/x"), previous: entry, original: entry) == nil,
+           "tls: another host is not upgraded")
+    expect(P.tlsUpgraded(u("http://dispatcharr.example.com/x"), previous: u("http://dispatcharr.example.com/a"),
+                         original: u("http://dispatcharr.example.com/a")) == nil, "tls: an http original is not upgraded")
+    expect(P.tlsUpgraded(u("http://dispatcharr.example.com/x"), previous: u("http://dispatcharr.example.com/b"),
+                         original: entry) == nil, "tls: a chain with an http hop so far is not upgraded")
+    expect(P.tlsUpgraded(u("https://dispatcharr.example.com/x"), previous: entry, original: entry) == nil,
+           "tls: an https target needs no upgrade")
+    expect(P.tlsUpgraded(u("http://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8"),
+                         previous: entry, original: entry) == nil,
+           "tls: the http form of the URL that answered is not followed (it would loop)")
+
+    // redirect(): the rewritten hop keeps the sign-in; anything else drops it.
+    let o = req("https://dispatcharr.example.com/api/channels/recordings/7/hls/index.m3u8")
+    var n = o
+    n.url = u("http://dispatcharr.example.com/api/channels/recordings/7/hls/stream.m3u8")
+    n.setValue(nil, forHTTPHeaderField: "Authorization")
+    let up = P.redirect(n, previous: o, original: o)
+    expectEq(up?.url?.absoluteString, "https://dispatcharr.example.com/api/channels/recordings/7/hls/stream.m3u8",
+             "tls: redirect follows the upgraded URL")
+    expectEq(up?.value(forHTTPHeaderField: "Authorization"), "ApiKey standin-key", "tls: the upgraded hop keeps the sign-in")
+    var n9191 = n
+    n9191.url = u("http://dispatcharr.example.com:9191/x")
+    expect(P.redirect(n9191, previous: o, original: o)?.value(forHTTPHeaderField: "X-API-Key") == nil,
+           "tls: any other downgrade still drops the sign-in")
+    let keyless = req("https://dispatcharr.example.com/a", signIn: false)
+    var kn = keyless
+    kn.url = u("http://dispatcharr.example.com/b")
+    expectEq(P.redirect(kn, previous: keyless, original: keyless)?.url?.scheme, "http",
+             "tls: a request without sign-in follows the server as sent")
+
+    // Drop once, dropped for good.
+    let a = req("http://a.example/1")
+    var dropped = a
+    dropped.url = u("http://b.example/2")
+    for name in P.signInHeaders { dropped.setValue(nil, forHTTPHeaderField: name) }
+    var back = a
+    back.url = u("http://a.example/3")
+    expect(P.redirect(back, previous: dropped, original: a)?.value(forHTTPHeaderField: "X-API-Key") == nil,
+           "chain: back on the first host after a drop stays without the key")
+    var droppedSameHost = a
+    droppedSameHost.url = u("http://a.example/2")
+    for name in P.signInHeaders { droppedSameHost.setValue(nil, forHTTPHeaderField: name) }
+    var later = a
+    later.url = u("http://a.example/4")
+    expect(P.redirect(later, previous: droppedSameHost, original: a)?.value(forHTTPHeaderField: "X-API-Key") == nil,
+           "chain: a same-host hop after a drop stays without the key")
+    expect(P.carriesSignIn(a, of: a) && !P.carriesSignIn(dropped, of: a),
+           "chain: carriesSignIn tells a kept request from a dropped one")
+    expect(P.carriesSignIn(URLRequest(url: u("http://x/")), of: URLRequest(url: u("http://x/"))),
+           "chain: no sign-in to keep counts as kept")
+
+    // Stream URLs saved before a playlist move (keyedStream).
+    let now = P.ownAddresses(serverURL: "https://new.example.com", localURL: "192.168.1.20:9191")
+    let current = u("http://192.168.1.20:9191")
+    let moved = P.keyedStream(u("http://192.168.1.10:9191/proxy/ts/stream/abc?output_format=mpegts"),
+                              ownAddresses: now, current: current)
+    expectEq(moved.url.absoluteString, "http://192.168.1.20:9191/proxy/ts/stream/abc?output_format=mpegts",
+             "stale: a live URL on the old address is rebuilt on the address in use")
+    expect(moved.keepsKey, "stale: the rebuilt URL keeps the key")
+    let vod = P.keyedStream(u("https://old.example.com/dispatcharr/proxy/vod/movie/u1/vod_s1"),
+                            ownAddresses: now, current: u("https://new.example.com/d2"))
+    expectEq(vod.url.absoluteString, "https://new.example.com/d2/proxy/vod/movie/u1/vod_s1",
+             "stale: a VOD URL keeps its server path under the new address's prefix")
+    let rec = P.keyedStream(u("http://dispatcharr:9191/api/channels/recordings/7/file/"), ownAddresses: now, current: current)
+    expectEq(rec.url.absoluteString, "http://192.168.1.20:9191/api/channels/recordings/7/file/",
+             "stale: a recording file_url on an internal host is rebuilt")
+    let provider = P.keyedStream(u("http://provider.example/live/abc.ts"), ownAddresses: now, current: current)
+    expect(!provider.keepsKey && provider.url.host == "provider.example",
+           "stale: a URL without the server's path opens as is, without the key")
+    let onNew = P.keyedStream(u("https://new.example.com/proxy/ts/stream/abc"), ownAddresses: now, current: current)
+    expect(onNew.keepsKey && onNew.url.host == "new.example.com", "stale: a URL on a current address opens as is with the key")
+    let lan = P.keyedStream(u("http://192.168.1.20:9191/proxy/ts/stream/abc"), ownAddresses: now,
+                            current: u("https://new.example.com"))
+    expect(lan.keepsKey && lan.url.host == "192.168.1.20", "stale: the Local URL stays current while the Server URL is in use")
+    expect(!P.keyedStream(u("file:///var/rec.ts"), ownAddresses: now, current: current).keepsKey,
+           "stale: a local file never carries the key")
+    expectEq(P.rebuiltOnCurrentAddress(u("http://old/x/api/v?a=1#f"), current: u("http://new:9191/"))?.absoluteString,
+             "http://new:9191/api/v?a=1", "stale: the first server segment wins, query kept, fragment dropped")
+    expect(P.rebuiltOnCurrentAddress(u("http://old/stream.ts"), current: current) == nil,
+           "stale: no server segment, nothing to rebuild")
 }
 
 

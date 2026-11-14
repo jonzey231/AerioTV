@@ -115,9 +115,44 @@ final class DispatcharrRequestGate: @unchecked Sendable {
     /// Key hash -> the key a silent re-login minted in its place, when, and
     /// the addresses (serverKey) that key is for.
     private var replacedBy: [String: (key: String, at: TimeInterval, servers: Set<String>)] = [:]
+    /// Key hash -> the current addresses (Server URL, Local URL) of every
+    /// saved playlist that uses the key: where its streams may carry it
+    /// (StreamKeyGate.headersForOpen). Filled by DispatcharrKeyBroker at
+    /// launch and after a playlist moves; a key not listed is not judged.
+    private var keyRoutes: [String: [URL]] = [:]
     private var pendingPrompt: Prompt?
 
     init() {}
+
+    /// Replace the stream-key routes: each key with the Server URL and Local
+    /// URL of every saved playlist that uses it.
+    func setKeyRoutes(_ routes: [String: [String]]) {
+        var hashed: [String: [URL]] = [:]
+        for (key, raws) in routes {
+            let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !k.isEmpty else { continue }
+            let urls = raws.flatMap { RedirectAuthPolicy.ownAddresses(serverURL: $0, localURL: "") }
+            guard !urls.isEmpty else { continue }
+            hashed[Self.keyHash(k), default: []] += urls
+        }
+        lock.lock()
+        keyRoutes = hashed
+        lock.unlock()
+    }
+
+    /// False only when `key` has known routes and `url` is on none of them
+    /// (RedirectAuthPolicy.isOwnAddress: host and port, never https to
+    /// http): a stream URL saved before its playlist moved. Unknown keys and
+    /// URLs are not judged here; the playback entry points decide those.
+    func keyMayGo(_ key: String, to url: String?) -> Bool {
+        guard let url, let parsed = URL(string: url) else { return true }
+        let hash = Self.keyHash(key)
+        lock.lock()
+        let routes = keyRoutes[hash]
+        lock.unlock()
+        guard let routes else { return true }
+        return RedirectAuthPolicy.isOwnAddress(parsed, ownAddresses: routes)
+    }
 
     // MARK: Retry-After and the server pause
 
@@ -823,6 +858,13 @@ enum StreamKeyGate {
             set(&h, "Authorization", swapped.authorization)
         }
         if let key = apiKey(in: h), gate.isKeyRejected(key) { return .held }
+        // Last line for a stream URL saved before its playlist moved (a
+        // reconnect, a kept pipeline, a path that skipped
+        // ServerConnection.keyedStream): the key goes only to the playlist's
+        // current addresses, so here it opens without it.
+        if let key = apiKey(in: h), !gate.keyMayGo(key, to: url) {
+            return .send(RedirectAuthPolicy.withoutSignIn(h))
+        }
         return .send(h)
     }
 
