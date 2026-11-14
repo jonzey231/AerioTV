@@ -4222,7 +4222,12 @@ struct DispatcharrAPI {
             let sentAuth = playbackKeepsSignIn(from: url, to: current, ownAddresses: ownAddresses)
                 && !RedirectAuthPolicy.isDowngrade(from: previous, to: current)
             if sentAuth {
-                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+                // This probe can be the request that opens the server's VOD
+                // session, whose Authorization header Dispatcharr forwards
+                // to the provider: the key goes as X-API-Key only.
+                RedirectAuthPolicy.vodStreamHeaders(headers, url: current).forEach {
+                    req.setValue($1, forHTTPHeaderField: $0)
+                }
             } else {
                 req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
             }

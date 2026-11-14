@@ -865,7 +865,9 @@ enum StreamKeyGate {
         if let key = apiKey(in: h), !gate.keyMayGo(key, to: url) {
             return .send(RedirectAuthPolicy.withoutSignIn(h))
         }
-        return .send(h)
+        // Dispatcharr's VOD proxy forwards a request's Authorization header
+        // to the provider: VOD carries the key as X-API-Key only.
+        return .send(RedirectAuthPolicy.vodStreamHeaders(h, url: url.flatMap { URL(string: $0) }))
     }
 
     enum Probe: Equatable, Sendable { case accepted, rejected, unknown }

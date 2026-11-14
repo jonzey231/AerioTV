@@ -1523,5 +1523,23 @@ do {
        .send(["X-API-Key": "KEY-A"]), "routes: a refresh replaces the old routes")
 }
 
+// VOD opens carry the key as X-API-Key only: Dispatcharr's VOD proxy
+// forwards a session's Authorization header to the provider.
+do {
+    let g = freshGate()
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "K", "Authorization": "ApiKey K", "User-Agent": "ua"],
+                                    url: "http://192.168.1.10:9191/proxy/vod/movie/u/vod_1_2", gate: g),
+       .send(["X-API-Key": "K", "User-Agent": "ua"]), "VOD open: Authorization dropped, X-API-Key kept")
+    eq(StreamKeyGate.headersForOpen(["Authorization": "ApiKey K"], url: "http://192.168.1.10:9191/proxy/vod/episode/u/s", gate: g),
+       .send(["X-API-Key": "K"]), "VOD open: the ApiKey header shape moves to X-API-Key")
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "K", "Authorization": "ApiKey K"],
+                                    url: "http://192.168.1.10:9191/proxy/ts/stream/u", gate: g),
+       .send(["X-API-Key": "K", "Authorization": "ApiKey K"]), "live open keeps both shapes")
+    g.setKeyRoutes(["K": ["https://new.example.com"]])
+    eq(StreamKeyGate.headersForOpen(["X-API-Key": "K", "Authorization": "ApiKey K"],
+                                    url: "http://192.168.1.10:9191/proxy/vod/movie/u/s", gate: g),
+       .send([:]), "VOD open on an address the key may not reach: no key in any shape")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
