@@ -313,7 +313,17 @@ struct DVRView: View {
     /// to the previous page's last button (Logan 2026-09-08).
     @FocusState private var heroBackCatcherFocused: Bool
     private var primaryFocusID: String {
-        "\(heroPageID ?? heroPages.first.map { "\($0.id)" } ?? "")|primary"
+        let pageID = heroPageID ?? heroPages.first.map { "\($0.id)" } ?? ""
+        return "\(pageID)|\(heroFirstRole(pageID))"
+    }
+    /// The role of a hero page's first button (DVRHero.actions): Play, Watch
+    /// from Start, or Stop Recording when it has one, else Details. A failed
+    /// capture or a file that is gone has no Play, so a hop to "primary"
+    /// found nothing and left focus on the invisible catcher above the hero.
+    private func heroFirstRole(_ pageID: String) -> String {
+        guard let rec = heroPages.first(where: { "\($0.id)" == pageID }) else { return "primary" }
+        let hasPrimary = rec.isInProgress ? (actions.canPlay(rec) || actions.canManage(rec)) : actions.canPlay(rec)
+        return hasPrimary ? "primary" : "details"
     }
     private func heroPageLabel(_ id: String?) -> String {
         guard let id, let i = heroPages.firstIndex(where: { "\($0.id)" == id }) else { return "nil" }
