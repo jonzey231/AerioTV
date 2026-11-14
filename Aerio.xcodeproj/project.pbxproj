@@ -86,6 +86,7 @@
 		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		A1RDAP000000000000000B01 /* RedirectAuthPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RDAP000000000000000F01 /* RedirectAuthPolicy.swift */; };
 		A1PRLY000000000000000B01 /* PlayerRelayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1PRLY000000000000000F01 /* PlayerRelayPolicy.swift */; };
+		A1PRLY000000000000000B03 /* PlayerRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1PRLY000000000000000F02 /* PlayerRelay.swift */; };
 		2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
 		9F0F11E60000000000000051 /* ProfileSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F0F11E60000000000000050 /* ProfileSwitcher.swift */; };
@@ -115,6 +116,7 @@
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		A1RDAP000000000000000B02 /* RedirectAuthPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RDAP000000000000000F01 /* RedirectAuthPolicy.swift */; };
 		A1PRLY000000000000000B02 /* PlayerRelayPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1PRLY000000000000000F01 /* PlayerRelayPolicy.swift */; };
+		A1PRLY000000000000000B04 /* PlayerRelay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1PRLY000000000000000F02 /* PlayerRelay.swift */; };
 		44F7FF2C4A005239299CEFBB /* AerioCastController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75154966450E03A3443CF312 /* AerioCastController.swift */; };
 		47124970CDB0AF253294C1D7 /* DVRArtResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43C00B0A074DF5B79B493571 /* DVRArtResolver.swift */; };
 		48336325ACADA131557D4C58 /* PlayerSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* PlayerSettingsView.swift */; };
@@ -505,6 +507,7 @@
 		1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPRouter.swift; sourceTree = "<group>"; };
 		A1RDAP000000000000000F01 /* RedirectAuthPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedirectAuthPolicy.swift; sourceTree = "<group>"; };
 		A1PRLY000000000000000F01 /* PlayerRelayPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerRelayPolicy.swift; sourceTree = "<group>"; };
+		A1PRLY000000000000000F02 /* PlayerRelay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerRelay.swift; sourceTree = "<group>"; };
 		1B49D3D628E066566A26EEA9 /* RecordingActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActions.swift; sourceTree = "<group>"; };
 		1B5E9F08316B8E04572BCA96 /* AboutSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AboutSettingsView.swift; sourceTree = "<group>"; };
 		20C769771A1085A303FFC0F0 /* VODDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODDetailView.swift; sourceTree = "<group>"; };
@@ -1242,6 +1245,7 @@
 				A1R8ABB50566B8495C3C8342 /* TSHLSPlaylist.swift */,
 				A1R3EEB47325934697D79C89 /* AirPlayReceiverResolver.swift */,
 				A1R11426AB13986BB21FB3FC /* AirPlayMonitor.swift */,
+				A1PRLY000000000000000F02 /* PlayerRelay.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -1680,6 +1684,7 @@
 				2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */,
 				A1RDAP000000000000000B01 /* RedirectAuthPolicy.swift in Sources */,
 				A1PRLY000000000000000B01 /* PlayerRelayPolicy.swift in Sources */,
+				A1PRLY000000000000000B03 /* PlayerRelay.swift in Sources */,
 				DA7E0A7E0000000000000101 /* DispatcharrRequestGate.swift in Sources */,
 				DA7E0A7E0000000000000102 /* DispatcharrRateLimitRetry.swift in Sources */,
 				DA7E0A7E0000000000000103 /* DispatcharrHTTPGate.swift in Sources */,
@@ -1885,6 +1890,7 @@
 				3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */,
 				A1RDAP000000000000000B02 /* RedirectAuthPolicy.swift in Sources */,
 				A1PRLY000000000000000B02 /* PlayerRelayPolicy.swift in Sources */,
+				A1PRLY000000000000000B04 /* PlayerRelay.swift in Sources */,
 				DA7E0A7E0000000000000201 /* DispatcharrRequestGate.swift in Sources */,
 				DA7E0A7E0000000000000202 /* DispatcharrRateLimitRetry.swift in Sources */,
 				DA7E0A7E0000000000000203 /* DispatcharrHTTPGate.swift in Sources */,

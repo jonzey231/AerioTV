@@ -460,176 +460,16 @@ private final class MP4HEVCTagSessionDelegate: NSObject, URLSessionDataDelegate,
     }
 }
 
-/// GH #93: in-progress server recordings (Dispatcharr DVR HLS) through a
-/// locally rewritten media playlist. Device 2026-10-12 (f1729e2): Watch
-/// from Beginning ran audio from media time 0 while the video output
-/// delivered its first frame only at 10.24 s; Resume at ~675 s showed
-/// picture at once. The difference is the head of the playlist: it opens
-/// with #EXT-X-DISCONTINUITY before seg_00000, and seg_00000's audio
-/// starts 1.26 s before its video. This loader fetches the real playlist
-/// (same auth headers), drops any #EXT-X-DISCONTINUITY that comes before
-/// the first segment, and makes every URI absolute so the segments still
-/// load straight from the server over plain HTTP (AVFoundation only
-/// takes playlists from a resource loader, see HLSResourceLoaderRegistry).
-/// Developer A/B switch: UserDefaults "dvrPlaylistRewriteDisabled" = true.
-final class DVRPlaylistRewriteLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
-    static let scheme = "aeriodvr"
-    static let secureScheme = "aeriodvrs"
+/// GH #93: in-progress server recordings play through the player relay
+/// (App/PlayerRelay.swift), which applies DVRPlaylistTransform to every
+/// playlist (leading #EXT-X-DISCONTINUITY dropped, start point as
+/// #EXT-X-START) and carries the key the recording needs on every segment.
+/// Developer A/B switch for the transform: UserDefaults
+/// "dvrPlaylistRewriteDisabled" = true (the relay still carries the key).
+enum DVRPlaylistRewrite {
     static var disabled: Bool { UserDefaults.standard.bool(forKey: "dvrPlaylistRewriteDisabled") }
-
-    let queue = DispatchQueue(label: "com.aerio.dvr-playlist-loader")
-    private let headers: [String: String]
-    /// Seconds for #EXT-X-START:TIME-OFFSET (PRECISE). 0 = Watch from
-    /// Beginning, >0 = Resume; nil keeps the server's own start point
-    /// (live edge). Replaces the client-side start seek, which raced the
-    /// live-edge prebuffer (device 2026-10-12, build 9520249: the seek to
-    /// 0 "landed" but loaded stayed at [1222.62-1234.87] and no further
-    /// media request followed).
-    let startOffset: Double?
-    private let lock = NSLock()
-    private var fetches = 0
-    private var lastLoggedDropped = -1
-
-    init(headers: [String: String], startOffset: Double?) {
-        self.headers = headers
-        self.startOffset = startOffset
-    }
-
-    /// http(s) -> custom scheme; nil when the URL is not plain http(s).
-    static func customURL(for url: URL) -> URL? {
-        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
-        switch c.scheme?.lowercased() {
-        case "http": c.scheme = scheme
-        case "https": c.scheme = secureScheme
-        default: return nil
-        }
-        return c.url
-    }
-
-    static func realURL(for url: URL) -> URL? {
-        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
-        switch c.scheme?.lowercased() {
-        case scheme: c.scheme = "http"
-        case secureScheme: c.scheme = "https"
-        default: return nil
-        }
-        return c.url
-    }
-
-    /// Pure rewrite. Returns the new text, how many leading
-    /// discontinuities were dropped, the segment count and the tags seen
-    /// before the first segment (for the log).
-    static func rewrite(_ text: String, base: URL, startOffset: Double? = nil) -> (text: String, dropped: Int, segments: Int, head: [String]) {
-        var out: [String] = []
-        var seenSegment = false
-        var dropped = 0
-        var segments = 0
-        var head: [String] = []
-        func resolve(_ ref: String) -> String {
-            guard let abs = URL(string: ref, relativeTo: base)?.absoluteURL else { return ref }
-            if abs.path.lowercased().hasSuffix(".m3u8"), let custom = customURL(for: abs) {
-                return custom.absoluteString
-            }
-            return abs.absoluteString
-        }
-        for raw in text.components(separatedBy: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if line.isEmpty { out.append(line); continue }
-            if line.hasPrefix("#") {
-                if startOffset != nil, line.hasPrefix("#EXT-X-START") {
-                    head.append(String(line.prefix(80)) + " (replaced)")
-                    continue
-                }
-                if line == "#EXTM3U", let off = startOffset {
-                    out.append(line)
-                    out.append(String(format: "#EXT-X-START:TIME-OFFSET=%.3f,PRECISE=YES", off))
-                    continue
-                }
-                if !seenSegment {
-                    if line == "#EXT-X-DISCONTINUITY" { dropped += 1; head.append(line + " (dropped)"); continue }
-                    if !line.hasPrefix("#EXTINF") { head.append(String(line.prefix(80))) }
-                }
-                if line.hasPrefix("#EXTINF") { seenSegment = true }
-                if let r = line.range(of: "URI=\""),
-                   let end = line[r.upperBound...].firstIndex(of: "\"") {
-                    let ref = String(line[r.upperBound..<end])
-                    out.append(line.replacingCharacters(in: r.upperBound..<end, with: resolve(ref)))
-                } else {
-                    out.append(line)
-                }
-                continue
-            }
-            segments += 1
-            out.append(resolve(line))
-        }
-        return (out.joined(separator: "\n"), dropped, segments, head)
-    }
-
-    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
-                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
-        guard let url = loadingRequest.request.url, let real = Self.realURL(for: url) else { return false }
-        guard let sendHeaders = StreamFetchAuth.headers(headers, url: real) else {
-            loadingRequest.finishLoading(with: StreamFetchAuth.heldError)
-            return true
-        }
-        var req = URLRequest(url: real, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
-        for (k, v) in sendHeaders { req.setValue(v, forHTTPHeaderField: k) }
-        let task = URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
-            guard let self else { return }
-            if let error {
-                debugLog("[AVP-DVR] playlist rewrite fetch failed: \(error.localizedDescription)")
-                loadingRequest.finishLoading(with: error)
-                return
-            }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if status == 401 { StreamFetchAuth.note401(sendHeaders, url: real) }
-            guard status == 200, let data, let text = String(data: data, encoding: .utf8),
-                  text.hasPrefix("#EXTM3U") else {
-                // Not a playlist (finalized recording answering with the
-                // SPA's HTML, or an HTTP error): hand the bytes through
-                // untouched so AVPlayer fails exactly as it did before and
-                // the completed-file migration still runs.
-                debugLog("[AVP-DVR] playlist rewrite passthrough: HTTP \(status), \(data?.count ?? 0) bytes, not a playlist")
-                if status != 200 {
-                    loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorBadServerResponse,
-                                                               userInfo: [NSLocalizedDescriptionKey: "DVR playlist HTTP \(status)"]))
-                    return
-                }
-                if let data { loadingRequest.dataRequest?.respond(with: data) }
-                loadingRequest.finishLoading()
-                return
-            }
-            let result = Self.rewrite(text, base: real, startOffset: self.startOffset)
-            self.lock.lock()
-            self.fetches += 1
-            let n = self.fetches
-            let logIt = n <= 2 || result.dropped != self.lastLoggedDropped
-            self.lastLoggedDropped = result.dropped
-            self.lock.unlock()
-            if logIt {
-                debugLog("[AVP-DVR] playlist rewrite #\(n): start=\(self.startOffset.map { String(format: "%.3f", $0) } ?? "server") dropped \(result.dropped) leading DISCONTINUITY, segments=\(result.segments), head=[\(result.head.joined(separator: " | "))]")
-            }
-            let body = Data(result.text.utf8)
-            if let info = loadingRequest.contentInformationRequest {
-                info.contentType = "public.m3u8-playlist"
-                info.contentLength = Int64(body.count)
-                info.isByteRangeAccessSupported = false
-            }
-            loadingRequest.dataRequest?.respond(with: body)
-            loadingRequest.finishLoading()
-        }
-        // The playlist fetch carries the stream sign-in: a 30x to another
-        // host or port, or from https to http, drops it (RedirectAuthPolicy).
-        task.delegate = RedirectAuthGuard.shared
-        task.resume()
-        return true
-    }
-
-    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
-                        didCancel loadingRequest: AVAssetResourceLoadingRequest) {}
 }
 
-nonisolated(unsafe) private var dvrPlaylistLoaderKey: UInt8 = 0
 nonisolated(unsafe) private var mp4HEVCTagLoaderKey: UInt8 = 0
 
 /// Thread-safe scalar slot.
@@ -6993,7 +6833,7 @@ struct AVPlayerMultiviewTile: View {
     /// not, replace the item once with a fresh one on the same rewritten
     /// playlist URL.
     static func armDVRNoMediaWatchdog(_ avPlayer: AVPlayer, item: AVPlayerItem, url: URL,
-                                      options: [String: Any], loader: DVRPlaylistRewriteLoader) {
+                                      options: [String: Any]) {
         func mediaReqs() -> Int { (item.accessLog()?.events ?? []).reduce(0) { $0 + $1.numberOfMediaRequests } }
         let reqsAtPlay = mediaReqs()
         let clockAtPlay = item.currentTime().seconds
@@ -7019,9 +6859,8 @@ struct AVPlayerMultiviewTile: View {
                 String(format: "%.2f-%.2f", $0.timeRangeValue.start.seconds, CMTimeRangeGetEnd($0.timeRangeValue).seconds)
             }.joined(separator: ",")
             debugLog("[AVP-DVR] no media loaded at \(String(format: "%.1f", now.seconds))s (loaded=[\(loaded)]); reloading item")
+            // Same relay URL: the session is the player's, so it is still up.
             let asset = AVURLAsset(url: url, options: options)
-            asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-            objc_setAssociatedObject(asset, &dvrPlaylistLoaderKey, loader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
             let fresh = AVPlayerItem(asset: asset)
             avPlayer.replaceCurrentItem(with: fresh)
             avPlayer.play()
@@ -8656,18 +8495,15 @@ struct AVPlayerMultiviewTile: View {
                         forceHLSSession = resolved
                         debugLog("[FORCE-HLS] tile channel=\(channelName) entry 302 -> \(resolved.playlistURL.absoluteString) token=\(resolved.token?.prefix(8) ?? "none") in \(ms)ms")
                         debugLog("[FORCE-HLS] tile channel=\(channelName) AVPlayer opening token playlist (engine=AVPlayer direct HLS, no TS remuxer, no mpv)")
-                        // Security (Android 5381694d parity): a token
-                        // playlist on another host or port, or on http when
-                        // the entry was https, never receives the server's
-                        // X-API-Key / Authorization (RedirectAuthPolicy).
-                        // AVPlayer sends its asset headers with every
-                        // request it makes, so this is the only gate.
-                        let keepsSignIn = RedirectAuthPolicy.keepsSignIn(from: entry, to: resolved.playlistURL)
-                        if !keepsSignIn {
-                            debugLog("[FORCE-HLS] tile channel=\(channelName) token playlist is on another host or port, or over http; server auth headers dropped")
-                        }
+                        // The token playlist and its segments need no key:
+                        // the token authorizes them, and the mint above
+                        // (with the key) made the session the user's for
+                        // limits, stats, and the DELETE (Dispatcharr
+                        // live_proxy/output/hls, main 1241b3f). AVPlayer
+                        // sends its asset headers with every request it
+                        // makes, to every host, so it gets none.
                         startPlayer(url: resolved.playlistURL,
-                                    requestHeaders: keepsSignIn ? hdrs : RedirectAuthPolicy.withoutSignIn(hdrs))
+                                    requestHeaders: RedirectAuthPolicy.withoutSignIn(hdrs))
                     } else {
                         // Unresolved entry: handing AVPlayer the entry URL
                         // with the server's auth headers let AVFoundation
@@ -9206,47 +9042,86 @@ struct AVPlayerMultiviewTile: View {
         // like a video tile so the focus border and the Show Channel Logos
         // corner overlay size against it.
         if audioOnlyNow { MultiviewStore.shared.registerVideoAspect(16.0 / 9.0, for: tileID) }
+        // AVPlayer sends its asset headers with every request it makes for
+        // the asset, to every host (measured 2026-11-13: segments a playlist
+        // names elsewhere, 302s, inits, keys, MP4 ranges), so it never gets
+        // the sign-in. A source that needs the key plays through the
+        // loopback relay, which makes the requests itself
+        // (App/PlayerRelay.swift); `requestHeaders` keeps the key for that
+        // and for the 401 handling below.
         var options: [String: Any] = [:]
-        if !requestHeaders.isEmpty {
-            options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
+        let playerHeaders = RedirectAuthPolicy.withoutSignIn(requestHeaders)
+        if !playerHeaders.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = playerHeaders
         }
         var driverJoinOffset = 0.0
         var driverOffsetFloor = 0.0
-        // GH #93: in-progress recording over the server's HLS goes through
-        // the playlist rewrite (see DVRPlaylistRewriteLoader).
         var assetURL = url
-        var dvrLoader: DVRPlaylistRewriteLoader?
-        if isDVR, adoptedPlayer == nil, !DVRPlaylistRewriteLoader.disabled,
-           url.host != "127.0.0.1", url.host != "localhost",
-           url.path.lowercased().hasSuffix(".m3u8"),
-           let custom = DVRPlaylistRewriteLoader.customURL(for: url) {
-            assetURL = custom
+        var relay: PlayerRelay.Handle?
+        let keyedOpen = adoptedPlayer == nil && RedirectAuthPolicy.headersCarrySignIn(requestHeaders)
+            && HLSRelayPlaylist.isRelayable(url)
+        // GH #93: an in-progress recording over the server's HLS gets its
+        // playlist transformed (DVRPlaylistTransform: leading DISCONTINUITY
+        // dropped, start point as #EXT-X-START) by the relay, which also
+        // carries the key the recording needs on every segment.
+        var dvrRewrite = false
+        // A keyed recording always goes through the relay, whatever its
+        // host; without a key, the app's own loopback URLs are left alone.
+        if isDVR, adoptedPlayer == nil, HLSRelayPlaylist.isRelayable(url),
+           keyedOpen || (url.host != "127.0.0.1" && url.host != "localhost") {
+            let transform = !DVRPlaylistRewrite.disabled && url.path.lowercased().hasSuffix(".m3u8")
             // Same resume rule as below: 0 = from the beginning, >2 s =
             // resume there, nil = server start point (live edge).
             let startMs = progressStore.explicitResumeMs ?? resumePositionMs
             let startOffset: Double? = startMs.flatMap { ms in
                 ms == 0 ? 0 : (ms > 2_000 ? Double(ms) / 1000.0 : nil)
             }
-            dvrLoader = DVRPlaylistRewriteLoader(headers: requestHeaders, startOffset: startOffset)
-            debugLog("[AVP-DVR] playlist rewrite on (leading DISCONTINUITY dropped locally) title=\(channelName)")
-        } else if isDVR {
-            debugLog("[AVP-DVR] playlist rewrite off (\(DVRPlaylistRewriteLoader.disabled ? "developer switch" : "not a server HLS URL")) title=\(channelName)")
+            if transform || keyedOpen,
+               let handle = PlayerRelay.shared.open(url, headers: requestHeaders,
+                                                    purpose: .dvr(startOffset: startOffset, transform: transform)) {
+                relay = handle
+                assetURL = handle.url
+                dvrRewrite = transform
+                debugLog("[AVP-DVR] playlist rewrite \(transform ? "on (leading DISCONTINUITY dropped locally)" : "off (\(DVRPlaylistRewrite.disabled ? "developer switch" : "not a server HLS URL"))"), through the relay title=\(channelName)")
+            } else if keyedOpen {
+                debugLog("[AVP-DVR] relay unavailable: playing without the key title=\(channelName)")
+            }
         }
         var hvcLoader: MP4HEVCTagLoader?
-        if adoptedPlayer == nil, dvrLoader == nil, let probe = MP4HEVCTagLoader.take(for: url),
+        if adoptedPlayer == nil, relay == nil, let probe = MP4HEVCTagLoader.take(for: url),
            let custom = MP4HEVCTagLoader.customURL(for: url) {
+            // The loader fetches every byte itself, with the key and the
+            // redirect rule; the player only sees the custom scheme.
             assetURL = custom
             hvcLoader = MP4HEVCTagLoader(realURL: url, headers: requestHeaders, probe: probe)
+        }
+        if keyedOpen, relay == nil, hvcLoader == nil, !isDVR {
+            // On demand stays the user's on Dispatcharr (limits, flags,
+            // stats) only with the key on every request, so it plays through
+            // the relay. With a system HTTP proxy or PAC (it can capture
+            // 127.0.0.1, see HLSDelivery) it plays the server's own session
+            // URL with no key at all, which the server answers anonymously.
+            // A recording needs the key on every request and has no such
+            // form.
+            let headerFree: String? = {
+                guard isVOD, !PlayerRelayPolicy.needsSignInOnEveryRequest(url) else { return nil }
+                if HLSDelivery.systemProxyDescription() != nil { return "system proxy" }
+                return nil
+            }()
+            if let headerFree {
+                if headerFree == "system proxy" { PlayerRelay.shared.noteSystemProxyFallback() }
+                debugLog("[AVP-MV] VOD plays without the key (\(headerFree)) title=\(channelName)")
+            } else if let handle = PlayerRelay.shared.open(url, headers: requestHeaders, purpose: isVOD ? .vod : .live) {
+                relay = handle
+                assetURL = handle.url
+            } else {
+                debugLog("[AVP-MV] relay unavailable: playing without the key title=\(channelName)")
+            }
         }
         let asset = AVURLAsset(url: assetURL, options: options)
         if let hvcLoader {
             asset.resourceLoader.setDelegate(hvcLoader, queue: hvcLoader.queue)
             objc_setAssociatedObject(asset, &mp4HEVCTagLoaderKey, hvcLoader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        }
-        if let dvrLoader {
-            asset.resourceLoader.setDelegate(dvrLoader, queue: dvrLoader.queue)
-            // resourceLoader holds its delegate weakly; the asset owns it.
-            objc_setAssociatedObject(asset, &dvrPlaylistLoaderKey, dvrLoader, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         }
         if url.scheme == HLSDelivery.scheme {
             asset.resourceLoader.setDelegate(HLSResourceLoaderRegistry.shared,
@@ -9419,6 +9294,9 @@ struct AVPlayerMultiviewTile: View {
         // starts a live remux stream; leave it alone.
         debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : (isForceHLSDirect ? "\(Int(Self.forceHLSForwardBuffer))s (Force HLS)" : "automatic")) channel=\(channelName)")
         let avPlayer = adoptedPlayer ?? AVPlayer(playerItem: playerItem)
+        // The relay session lives as long as this player (Kept Live keeps
+        // it; the DVR no-media reload rebuilds the item on the same URL).
+        avPlayer.retainRelay(relay)
         // FORCE-HLS: automaticallyWaitsToMinimizeStalling stays ON for server
         // HLS items. Turning it off (tested 2026-10-05, iPhone) started 2 ms
         // after open but parked AVPlayer at the live edge with no buffer: the
@@ -9527,7 +9405,7 @@ struct AVPlayerMultiviewTile: View {
         // item is ready, so firing it here is safe and race-free.
         let resumeMs = progressStore.explicitResumeMs ?? resumePositionMs
         var deferDVRStartPlay = false
-        if isDVR, resumeMs == 0, dvrLoader == nil {
+        if isDVR, resumeMs == 0, !dvrRewrite {
             // "Watch from Beginning" on an in-progress recording: without
             // a seek, a live-shaped playlist starts at the live edge.
             // The pre-ready queued seek alone is NOT enough: when the item
@@ -9592,7 +9470,7 @@ struct AVPlayerMultiviewTile: View {
             }
             debugLog("[AVP-MV] DVR from-beginning seek queued (play held until it lands) title=\(channelName)")
         }
-        if isVOD || (isDVR && dvrLoader == nil), let ms = resumeMs, ms > 2_000 {
+        if isVOD || (isDVR && !dvrRewrite), let ms = resumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
             // EXACT seek: infinite tolerance snapped to the nearest
             // segment boundary - up to ~6s drift per version switch with
@@ -9607,13 +9485,12 @@ struct AVPlayerMultiviewTile: View {
         let userHeld = progressStore.userPaused
         if userHeld { debugLog("[AVP-NUDGE] skipped: user paused (pipeline start) channel=\(channelName)") }
         if !shouldPause, !deferDVRStartPlay, !userHeld {
-            if let dvrLoader {
+            if dvrRewrite {
                 // Start point comes from #EXT-X-START in the rewritten
                 // playlist; no client seek. Prove the rate took, and
                 // reload the item once if nothing is loaded at the clock.
                 Self.playAndVerify(avPlayer, item: playerItem)
-                Self.armDVRNoMediaWatchdog(avPlayer, item: playerItem, url: assetURL,
-                                           options: options, loader: dvrLoader)
+                Self.armDVRNoMediaWatchdog(avPlayer, item: playerItem, url: assetURL, options: options)
             } else {
                 avPlayer.play()
             }

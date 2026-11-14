@@ -531,6 +531,11 @@ final class HeadlessAVPlayerEngine {
     private var lanURL: URL?
     private var keepaliveHeld = false
     private var itemReissues = 0
+    /// The relay session of a direct HLS source that needs the key.
+    private var relay: PlayerRelay.Handle?
+    /// The Dispatcharr HLS session minted for a Force HLS entry, ended
+    /// with DELETE at teardown (the tile does the same).
+    private var hlsSession: (resolved: HLSSessionResolver.Resolved, token: String, headers: [String: String])?
     static let keepaliveHolder = "carplay-video"
 
     func play(_ resolved: ResolvedEngine, allowsVideo: Bool) {
@@ -539,7 +544,7 @@ final class HeadlessAVPlayerEngine {
         let t = token
         switch resolved.engine {
         case .avPlayerDirectHLS, .mpv:
-            startPlayer(url: resolved.routeURL, headers: resolved.headers, allowsVideo: allowsVideo)
+            playDirect(resolved, allowsVideo: allowsVideo, token: t)
         case .avPlayerRemuxTS:
             let mux = TSHLSRemuxer(sourceURL: resolved.routeURL, headers: resolved.headers)
             mux.reportsIngestStall = true
@@ -608,6 +613,52 @@ final class HeadlessAVPlayerEngine {
         }
     }
 
+    /// Direct HLS. AVPlayer sends its asset headers with every request it
+    /// makes, to every host, so a source that needs the key never reaches
+    /// it with the key: a Force HLS entry is minted once here with the key
+    /// (the session becomes the user's) and AVPlayer gets the token
+    /// playlist, which needs none; any other keyed source plays through the
+    /// loopback relay. An entry that proves not to be HLS (a Redirect
+    /// stream profile) goes to the TS remuxer, as on the tile.
+    private func playDirect(_ resolved: ResolvedEngine, allowsVideo: Bool, token t: UUID) {
+        let url = resolved.routeURL
+        let headers = resolved.headers
+        guard RedirectAuthPolicy.headersCarrySignIn(headers), HLSRelayPlaylist.isRelayable(url) else {
+            startPlayer(url: url, headers: headers, allowsVideo: allowsVideo)
+            return
+        }
+        if (url.query ?? "").contains("output_format=hls"), url.path.lowercased().contains("/proxy/ts/") {
+            Task { @MainActor [weak self] in
+                let outcome = await HLSSessionResolver.resolve(entry: url, headers: headers)
+                guard let self, self.token == t else {
+                    if case .hls(let r) = outcome, let tok = r.token {
+                        HLSSessionResolver.endSession(r, token: tok, headers: headers)
+                    }
+                    return
+                }
+                switch outcome {
+                case .hls(let r):
+                    if let tok = r.token { self.hlsSession = (r, tok, headers) }
+                    debugLog("[CARPLAY] engine: HLS session minted; AVPlayer plays the token playlist without the key")
+                    self.startPlayer(url: r.playlistURL, headers: RedirectAuthPolicy.withoutSignIn(headers),
+                                     allowsVideo: allowsVideo)
+                case .notHLS, .unknown:
+                    debugLog("[CARPLAY] engine: HLS entry did not resolve to a session; playing the channel through the TS remuxer")
+                    self.play(ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: removingHLSOutputFormat(url),
+                                             headers: headers), allowsVideo: allowsVideo)
+                }
+            }
+            return
+        }
+        guard let handle = PlayerRelay.shared.open(url, headers: headers, purpose: .live) else {
+            debugLog("[CARPLAY] engine: relay unavailable; playing without the key")
+            startPlayer(url: url, headers: RedirectAuthPolicy.withoutSignIn(headers), allowsVideo: allowsVideo)
+            return
+        }
+        relay = handle
+        startPlayer(url: handle.url, headers: RedirectAuthPolicy.withoutSignIn(headers), allowsVideo: allowsVideo)
+    }
+
     /// CarPlay video (2026-10-08, cp3): with external playback the HEAD UNIT
     /// fetches the item URL itself, and AVURLAsset's header option never
     /// leaves the phone, so a Dispatcharr URL that needs X-API-Key / the
@@ -671,6 +722,11 @@ final class HeadlessAVPlayerEngine {
         player = nil
         lanURL = nil
         itemReissues = 0
+        relay = nil
+        if let s = hlsSession {
+            hlsSession = nil
+            HLSSessionResolver.endSession(s.resolved, token: s.token, headers: s.headers)
+        }
         if keepaliveHeld {
             keepaliveHeld = false
             BackgroundKeepalive.release(Self.keepaliveHolder)
@@ -721,9 +777,13 @@ final class HeadlessAVPlayerEngine {
             fail(.playback(DispatcharrRateLimitCopy.heldStreamMessage(headers)))
             return
         }
+        // Never the sign-in: AVPlayer sends these with every request it
+        // makes for the asset, to every host (playDirect routes keyed
+        // sources).
         var options: [String: Any] = [:]
-        if !headers.isEmpty {
-            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        let playerHeaders = RedirectAuthPolicy.withoutSignIn(headers)
+        if !playerHeaders.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = playerHeaders
         }
         let asset = AVURLAsset(url: url, options: options)
         if url.scheme == HLSDelivery.scheme {
