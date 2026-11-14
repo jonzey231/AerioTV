@@ -728,6 +728,37 @@ enum PlaylistMergePlan {
 
 // MARK: - Credentials
 
+/// iCloud Sync carries no secret in the key-value store (2026-11-14).
+/// Passwords and API keys sync through iCloud Keychain only (the
+/// synchronizable `password_<id>` and `apiKey_<id>` items), gated by the
+/// Credentials toggle, which is what Settings tells the user. Earlier
+/// versions also wrote them as plain strings into each `syncedServers`
+/// record; a push now rewrites every record without them, and a copy an
+/// older version left there is read only once, to fill a Keychain that has
+/// none.
+enum KVSSecretRule {
+    /// The record keys that held a secret or its change time.
+    static let secretKeys: Set<String> = ["_password", "_apiKey", "_passwordChangedAt", "_apiKeyChangedAt"]
+
+    /// `record` without them.
+    static func scrubbed(_ record: [String: Any]) -> [String: Any] {
+        record.filter { !secretKeys.contains($0.key) }
+    }
+
+    /// Whether `record` still holds one.
+    static func holdsSecret(_ record: [String: Any]) -> Bool {
+        record.keys.contains { secretKeys.contains($0) }
+    }
+
+    /// Whether a secret an older version left in a record is moved into the
+    /// Keychain: only when credential sync is on, the Keychain has none for
+    /// that slot, and the server has not refused the key. It never replaces
+    /// what the Keychain holds and is never written back.
+    static func migrate(remote: String, keychainHas: Bool, rejected: Bool, credentialsSyncOn: Bool) -> Bool {
+        credentialsSyncOn && !remote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !keychainHas && !rejected
+    }
+}
+
 /// Whether a credential carried by the iCloud server list replaces this
 /// device's. Stamps are the time each device last changed that credential
 /// (0 when unknown: older clients, or set before this rule shipped).

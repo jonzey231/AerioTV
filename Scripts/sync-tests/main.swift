@@ -394,5 +394,27 @@ do {
     eq(ActivePlaylistRule.heal([e("b", "Home", 10), e("a", "Home", 10)]), "a", "same name and age: by id")
 }
 
+// MARK: - No secret in the iCloud key-value store (2026-11-14)
+do {
+    let legacy: [String: Any] = ["id": "P1", "name": "Home", "baseURL": "http://tv.example.com", "username": "logan",
+                                 "_password": "pw", "_apiKey": "key", "_passwordChangedAt": 10.0, "_apiKeyChangedAt": 20.0,
+                                 "_changedAt": 30.0]
+    let clean = KVSSecretRule.scrubbed(legacy)
+    check(KVSSecretRule.holdsSecret(legacy), "an older record holds a password and a key")
+    check(!KVSSecretRule.holdsSecret(clean), "the push rewrites it with no secret and no secret stamp")
+    eq(Set(clean.keys), ["id", "name", "baseURL", "username", "_changedAt"], "every other field stays, the record's own change time too")
+    eq(KVSSecretRule.scrubbed(clean).count, clean.count, "a clean record is unchanged")
+    check(KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: false, credentialsSyncOn: true),
+          "an older record's key fills an empty Keychain (one-version migration)")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: true, rejected: false, credentialsSyncOn: true),
+          "it never replaces what the Keychain holds")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: true, credentialsSyncOn: true),
+          "a key the server refused is never migrated")
+    check(!KVSSecretRule.migrate(remote: " ", keychainHas: false, rejected: false, credentialsSyncOn: true),
+          "an empty value is never migrated")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: false, credentialsSyncOn: false),
+          "Credentials off: nothing is migrated")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

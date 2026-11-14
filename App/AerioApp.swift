@@ -463,10 +463,6 @@ struct AerioApp: App {
         DeviceInfo.recordLaunch()
         // Profiles: the request overlay (the active profile's API key) is in place before any load.
         _ = ProfileManager.shared
-        // Before any load: calls carrying a key iCloud may replace wait for
-        // the iCloud credential merge (bounded), so a stale device adopts
-        // iCloud's key instead of spending failed attempts on its own.
-        SyncManager.armLaunchCredentialBarrier()
         // Carries a pre-split "Rounded corners on logos and artwork" choice
         // into the List key before any view reads it, so nobody's current
         // setting changes (Logan 2026-09-16).
@@ -2130,8 +2126,6 @@ struct RootView: View {
             let pick = plan.picks[remote.id.uuidString]
             if let local = localByID[remote.id] {
                 // Existing server: copy the fields when iCloud's record is newer.
-                let localDate = local.lastConnected ?? local.createdAt
-                let remoteDate = remote.lastConnected ?? remote.createdAt
                 if replace || (pick == .remote && plan.newer.contains(remote.id.uuidString)) {
                     didMutate = true
                     if local.type == .dispatcharrAPI {
@@ -2228,11 +2222,9 @@ struct RootView: View {
                     DebugLogger.shared.log("SyncManager: updated server \(remote.name) from iCloud",
                                            category: "Sync", level: .info)
                 }
-                // Credentials go by their own change time, not the playlist
-                // record's: never empty, never a rejected key, never older
-                // than this device's (SyncManager.credentialsToAdopt).
-                pendingCredentials += SyncManager.shared.credentialsToAdopt(
-                    remote, local: local, legacyRemoteNewer: replace || remoteDate > localDate, replace: replace)
+                // Credentials sync through iCloud Keychain; an old record's copy
+                // only fills a Keychain that has none (SyncManager.credentialsToAdopt).
+                pendingCredentials += SyncManager.shared.credentialsToAdopt(remote)
             } else {
                 // Deleted here (or by its deletion time elsewhere): not re-added.
                 guard replace || pick == .remote else {
@@ -2304,10 +2296,9 @@ struct RootView: View {
                 // Catch-up: inherit the guide-history retention setting.
                 newServer.epgRetentionDays = remote.epgRetentionDays
                 remote.applyPlaylistSettings(to: newServer)
-                // Queue credential writes for after the merge (never empty,
-                // never a rejected key).
-                pendingCredentials += SyncManager.shared.credentialsToAdopt(
-                    remote, local: nil, legacyRemoteNewer: true, replace: replace)
+                // Queue credential writes for after the merge: an old record's
+                // copy, only where the Keychain has none.
+                pendingCredentials += SyncManager.shared.credentialsToAdopt(remote)
                 didMutate = true
                 modelContext.insert(newServer)
                 inserted.append(newServer)
