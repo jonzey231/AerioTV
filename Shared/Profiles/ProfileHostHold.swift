@@ -309,6 +309,15 @@ enum StoredSecretRules {
         case dispatcharrSync = "Dispatcharr Sync"
         case defaultProfileSwitch = "default profile switch"
         case deviceSetup = "Set up another device"
+        case userQrCode = "User QR Code"
+    }
+
+    /// Show User QR Code: the code carries a stored key next to the Server
+    /// URL, and the device that scans it signs in there. So the code shows
+    /// only while the Server URL may receive the key (the Local URL is not
+    /// in the code).
+    static func userQrMayCarry(provenHosts: [String]?, base: String, local: String) -> Bool {
+        mayUseStored(provenHosts: provenHosts, target: base, base: base, local: local)
     }
 
     /// Set up another device: the receiving device saves what the setup

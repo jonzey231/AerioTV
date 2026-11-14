@@ -203,7 +203,7 @@ struct ProfileActionsSheet: View {
                 ProfileActionButton(label: "Channel Profiles") { model.route = .channelProfiles(p) }
             }
             #if os(iOS)
-            if (isActive || g.isRoleAdmin) && UserQrPayload.code(playlistId: playlistId, profileId: p.id) != nil {
+            if (isActive || g.isRoleAdmin) && UserQrPayload.outcome(playlistId: playlistId, profileId: p.id) != .none {
                 ProfileActionButton(label: "Show User QR Code") { model.route = .userQr(p) }
             }
             #endif

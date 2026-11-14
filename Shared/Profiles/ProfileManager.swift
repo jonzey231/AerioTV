@@ -1527,6 +1527,14 @@ final class ProfileManager: ObservableObject {
                                                base: s.baseURL, local: s.localURL)
     }
 
+    /// Whether Show User QR Code may put the playlist's stored keys in a code
+    /// (StoredSecretRules.userQrMayCarry).
+    func userQrMayCarryStoredKey(_ playlistId: String) -> Bool {
+        guard let s = DsyncLocal.server(playlistId), !s.isGone else { return false }
+        return StoredSecretRules.userQrMayCarry(provenHosts: holds.provenHosts(playlistId),
+                                                base: s.baseURL, local: s.localURL)
+    }
+
     /// The playlist's route changed and is not proven yet.
     func isRouteUnproven(_ playlistId: String) -> Bool { holds.isRouteUnproven(playlistId) }
 
