@@ -6193,6 +6193,9 @@ struct AVPlayerMultiviewTile: View {
     #if os(iOS)
     /// AirPlay LAN handoff for this tile (2026-09-21 rebuild).
     @State private var airPlayDelivery = AirPlayTileDelivery()
+    /// AirPlay for an on-demand item the relay serves: the receiver gets
+    /// the server's own URL without the key (RelayVODAirPlayHandover).
+    @State private var vodAirPlayHandover: RelayVODAirPlayHandover?
     /// An in-place AirPlay flip retargeted the remuxer and the new
     /// channel has not stored its first segment yet; a codec-gate failure
     /// in that window re-tunes the classic way instead of failing the tile.
@@ -9095,17 +9098,27 @@ struct AVPlayerMultiviewTile: View {
             assetURL = custom
             hvcLoader = MP4HEVCTagLoader(realURL: url, headers: requestHeaders, probe: probe)
         }
+        #if os(iOS)
+        var vodHandoverUpstream: URL?
+        #endif
         if keyedOpen, relay == nil, hvcLoader == nil, !isDVR {
             // On demand stays the user's on Dispatcharr (limits, flags,
             // stats) only with the key on every request, so it plays through
-            // the relay. With a system HTTP proxy or PAC (it can capture
-            // 127.0.0.1, see HLSDelivery) it plays the server's own session
-            // URL with no key at all, which the server answers anonymously.
-            // A recording needs the key on every request and has no such
-            // form.
+            // the relay. Two exceptions play the server's own session URL
+            // with no key at all, which the server answers anonymously:
+            // a system HTTP proxy or PAC (it can capture 127.0.0.1, see
+            // HLSDelivery), and an AirPlay route already up (the receiver
+            // fetches the item URL itself and cannot reach 127.0.0.1; this
+            // is what AirPlay did before). A recording needs the key on
+            // every request and has no such form.
             let headerFree: String? = {
                 guard isVOD, !PlayerRelayPolicy.needsSignInOnEveryRequest(url) else { return nil }
                 if HLSDelivery.systemProxyDescription() != nil { return "system proxy" }
+                #if os(iOS)
+                if AirPlayMonitor.servableAirPlayOutput() != nil, AirPlayMonitor.shared.willServeReceiver {
+                    return "AirPlay route up"
+                }
+                #endif
                 return nil
             }()
             if let headerFree {
@@ -9114,6 +9127,9 @@ struct AVPlayerMultiviewTile: View {
             } else if let handle = PlayerRelay.shared.open(url, headers: requestHeaders, purpose: isVOD ? .vod : .live) {
                 relay = handle
                 assetURL = handle.url
+                #if os(iOS)
+                if isVOD { vodHandoverUpstream = url }
+                #endif
             } else {
                 debugLog("[AVP-MV] relay unavailable: playing without the key title=\(channelName)")
             }
@@ -9380,8 +9396,19 @@ struct AVPlayerMultiviewTile: View {
         // compositor reads; while an AirPlay composite runs they stay on
         // this device and the hidden composite tile owns the route.
         MultiviewCompositeTaps.shared.register(tileID: tileID, player: avPlayer, item: playerItem, remuxer: remuxer)
+        vodAirPlayHandover?.detach()
+        vodAirPlayHandover = nil
         if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) {
             AirPlayMonitor.shared.attach(avPlayer)
+            if let upstream = vodHandoverUpstream {
+                let handover = RelayVODAirPlayHandover(player: avPlayer, upstream: upstream, relayURL: assetURL,
+                                                       options: options, label: channelName)
+                handover.onItemSwapped = { item, receiverPlays in
+                    stallWatchdog?.setSuspended(receiverPlays, item: item)
+                }
+                handover.attach()
+                vodAirPlayHandover = handover
+            }
             if let mux = remuxer {
                 airPlayDelivery.onWatchdogs = { suspend, item in
                     stallWatchdog?.setSuspended(suspend, item: item)
@@ -9966,6 +9993,8 @@ struct AVPlayerMultiviewTile: View {
         if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) || airPlayDelivery.isEngaged {
             airPlayDelivery.reset()
         }
+        vodAirPlayHandover?.detach()
+        vodAirPlayHandover = nil
         AirPlayMonitor.shared.detach(ifAttached: releasedPlayer)
         #endif
         if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {

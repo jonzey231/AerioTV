@@ -734,3 +734,124 @@ extension AVPlayer {
     }
 }
 
+#if os(iOS)
+/// AirPlay for an on-demand item the relay serves. In AirPlay video mode
+/// AVPlayer hands the item URL to the receiver, which cannot reach
+/// 127.0.0.1, so when the receiver takes the item (external playback
+/// active) or a video receiver appears on the route, the item is swapped
+/// at its current position for the server's own URL with no key, the URL
+/// the receiver was handed before the relay existed (the TV fetches from
+/// the server; Dispatcharr VOD answers anonymously). AirPlayTileDelivery's
+/// rule applies: the receiver must take the swapped item within 5 s, or the
+/// relay item comes back and this phone plays it. Once the receiver has it
+/// the item stays as it is for the rest of the play.
+@MainActor
+final class RelayVODAirPlayHandover {
+    private enum State { case relay, swapping, receiver }
+
+    private weak var player: AVPlayer?
+    private let upstream: URL
+    private let relayURL: URL
+    private let options: [String: Any]
+    private let label: String
+    private var state = State.relay
+    private var externalObservation: NSKeyValueObservation?
+    private var routeObserver: NSObjectProtocol?
+    private var pickedObserver: NSObjectProtocol?
+
+    /// The tile rebinds its stall watchdog to the new item: suspended while
+    /// the receiver plays (the local clock is not this phone's render).
+    var onItemSwapped: ((_ item: AVPlayerItem, _ receiverPlays: Bool) -> Void)?
+
+    init(player: AVPlayer, upstream: URL, relayURL: URL, options: [String: Any], label: String) {
+        self.player = player
+        self.upstream = upstream
+        self.relayURL = relayURL
+        self.options = options
+        self.label = label
+    }
+
+    func attach() {
+        guard let player else { return }
+        externalObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] p, _ in
+            let active = p.isExternalPlaybackActive
+            Task { @MainActor in if active { self?.handover("the receiver took the item") } }
+        }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard AirPlayMonitor.shared.willServeReceiver else { return }
+                self?.handover("an AirPlay video receiver is on the route")
+            }
+        }
+        pickedObserver = NotificationCenter.default.addObserver(
+            forName: .aerioAirPlayRoutePicked, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard AirPlayMonitor.shared.willServeReceiver else { return }
+                self?.handover("the AirPlay route was picked again")
+            }
+        }
+    }
+
+    func detach() {
+        externalObservation = nil
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        if let pickedObserver { NotificationCenter.default.removeObserver(pickedObserver) }
+        routeObserver = nil
+        pickedObserver = nil
+        player = nil
+    }
+
+    private func handover(_ why: String) {
+        guard state == .relay, let player, let old = player.currentItem,
+              (old.asset as? AVURLAsset)?.url == relayURL else { return }
+        state = .swapping
+        let position = old.currentTime()
+        let wasPlaying = player.timeControlStatus != .paused || player.rate != 0
+        AirPlayMonitor.enableExternalPlayback(on: player)
+        let item = makeItem(upstream, copying: old)
+        player.replaceCurrentItem(with: item)
+        if position.isValid, position.seconds > 0 {
+            player.seek(to: position, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        if wasPlaying { player.play() }
+        onItemSwapped?(item, true)
+        debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; the receiver gets the server's URL without the key at %.1fs",
+                        label, why, position.seconds.isFinite ? position.seconds : 0))
+        Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(AirPlayTileDelivery.externalConfirmTimeout)
+            while Date() < deadline {
+                guard let self, let player = self.player, player.currentItem === item else { return }
+                if player.isExternalPlaybackActive { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard let self, let player = self.player, player.currentItem === item else { return }
+            if player.isExternalPlaybackActive {
+                self.state = .receiver
+                debugLog("[AVP-AIRPLAY] VOD \(self.label): external playback active on the server's URL")
+                return
+            }
+            // The receiver never took it: back to the relay, played here.
+            let here = item.currentTime()
+            let playing = player.timeControlStatus != .paused || player.rate != 0
+            let back = self.makeItem(self.relayURL, copying: item)
+            player.replaceCurrentItem(with: back)
+            if here.isValid, here.seconds > 0 {
+                player.seek(to: here, toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+            }
+            if playing { player.play() }
+            self.state = .relay
+            self.onItemSwapped?(back, false)
+            debugLog("[AVP-AIRPLAY] VOD \(self.label): the receiver did not take the item within \(Int(AirPlayTileDelivery.externalConfirmTimeout)) s; back on the relay, playing on this device")
+        }
+    }
+
+    private func makeItem(_ url: URL, copying old: AVPlayerItem) -> AVPlayerItem {
+        let item = AVPlayerItem(asset: AVURLAsset(url: url, options: options))
+        item.preferredForwardBufferDuration = old.preferredForwardBufferDuration
+        return item
+    }
+}
+#endif
