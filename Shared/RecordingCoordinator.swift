@@ -344,6 +344,7 @@ final class RecordingCoordinator: ObservableObject {
             recording.failureReason = error.localizedDescription
             activeSessions.removeValue(forKey: recording.id)
             updateRecordingState()
+            discardEmptyCapture(recording)
             try? modelContext.save()
         }
         refreshGuideRecordingMarkers(modelContext: modelContext)
@@ -378,7 +379,10 @@ final class RecordingCoordinator: ObservableObject {
         let written = await session.getBytesWritten()
         recording.fileSizeBytes = written
         recording.status = written > 0 ? .completed : .failed
-        if written == 0 { recording.failureReason = "No data was written" }
+        if written == 0 {
+            recording.failureReason = "No data was written"
+            discardEmptyCapture(recording)
+        }
         // The length shown is what the file holds (stopped early, or started
         // partway into its window), not the scheduled window.
         if written > 0 {
@@ -746,7 +750,22 @@ final class RecordingCoordinator: ObservableObject {
         let what = out.capturedSeconds.map { "kept \(out.bytes) bytes, \(Int($0)) s captured" }
             ?? "nothing captured (\(out.failureReason ?? ""))"
         debugLog("[DVR] on-device recording \(rec.id.uuidString.prefix(8)) had no capture running (\(trigger)): now \(out.statusRaw), \(what)")
+        if rec.status == .failed { discardEmptyCapture(rec) }
         return true
+    }
+
+    /// A capture that wrote nothing leaves no file behind: AerioTV for
+    /// Android discards the empty file too (LocalRecordingService, and its
+    /// recovery of an interrupted capture). The row stays failed with its
+    /// reason and its stored path, so the DVR lists it as before, and a
+    /// failed row is never shown as missing (isLocalFileMissing reads
+    /// finished rows only). Only an empty file is removed.
+    private func discardEmptyCapture(_ rec: Recording) {
+        guard let path = rec.resolvedLocalFilePath,
+              let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
+              size.int64Value == 0 else { return }
+        try? FileManager.default.removeItem(atPath: path)
+        debugLog("[DVR] on-device recording \(rec.id.uuidString.prefix(8)) captured nothing: its empty file is removed")
     }
 
     /// Full variant with model updates, call this from views that have
