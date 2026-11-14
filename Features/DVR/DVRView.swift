@@ -1929,6 +1929,15 @@ struct DVRPosterCard: View {
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
                     .padding(5)
+            } else if recording.isLocalFileMissing {
+                // A finished on-device recording whose file is gone: white on
+                // grey at 85%, as Android's poster card and the iPad rail and
+                // Apple TV card show it.
+                Text("Missing").scaledFont(.system(size: 9, weight: .heavy))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.gray.opacity(0.85)))
+                    .padding(5)
             }
         }
         .overlay(alignment: .bottom) {
