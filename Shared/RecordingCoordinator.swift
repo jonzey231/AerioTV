@@ -453,7 +453,9 @@ final class RecordingCoordinator: ObservableObject {
         // A deleted playlist's recording: nothing is downloaded (PlaylistRevocation).
         try PlaylistRevocation.shared.check(url: playbackURL.absoluteString,
                                             apiKey: request.value(forHTTPHeaderField: "X-API-Key"))
-        let (tempURL, response) = try await URLSession.shared.download(for: request)
+        // The stream sign-in rides this request: a redirect to another host,
+        // or from https to http, drops it (RedirectAuthPolicy).
+        let (tempURL, response) = try await URLSession.shared.download(for: request, delegate: RedirectAuthGuard.shared)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             try? FileManager.default.removeItem(at: tempURL)
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1

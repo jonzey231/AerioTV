@@ -127,7 +127,7 @@ enum HTTPRouter {
                                                timeout: effectiveNWTimeout(for: request, using: session))
         }
         do {
-            return try await session.data(for: request)
+            return try await session.data(for: request, delegate: redirectGuard(for: session))
         } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
             let urlStr = request.url.map { DebugLogger.sanitize($0.absoluteString) } ?? "<unknown>"
             debugLog("HTTPRouter: URLSession failed for \(urlStr) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
@@ -215,7 +215,7 @@ enum HTTPRouter {
             return (try spillToTempFile(data), response)
         }
         do {
-            return try await session.download(for: request)
+            return try await session.download(for: request, delegate: redirectGuard(for: session))
         } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
             let urlStr = request.url.map { DebugLogger.sanitize($0.absoluteString) } ?? "<unknown>"
             debugLog("HTTPRouter: URLSession download failed for \(urlStr) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
@@ -228,6 +228,17 @@ enum HTTPRouter {
                 throw error
             }
         }
+    }
+
+    /// Redirect handling for a request with headers. Callers pass
+    /// URLSession.shared or delegate-less sessions, on which URLSession
+    /// re-sends X-API-Key to any host a redirect names (measured
+    /// 2026-11-13), so the request rides RedirectAuthGuard. The Dispatcharr
+    /// API sessions keep their own RedirectPreservingDelegate, which applies
+    /// the same RedirectAuthPolicy and also restores Accept and User-Agent;
+    /// a task delegate would take its place.
+    private static func redirectGuard(for session: URLSession) -> URLSessionTaskDelegate? {
+        session.delegate is RedirectPreservingDelegate ? nil : RedirectAuthGuard.shared
     }
 
     /// Spill an already-buffered body (the NWConnection fallback path) to a temp

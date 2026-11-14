@@ -9,7 +9,9 @@ struct EmbyAPI {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
+        // The token rides in X-Emby-Authorization; the guard keeps it on this
+        // server's host if a response redirects (RedirectAuthPolicy).
+        return URLSession(configuration: config, delegate: RedirectAuthGuard.shared, delegateQueue: nil)
     }()
     private var session: URLSession { Self.session }
 
@@ -124,7 +126,9 @@ struct JellyfinAPI {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
+        // The token rides in X-Emby-Authorization; the guard keeps it on this
+        // server's host if a response redirects (RedirectAuthPolicy).
+        return URLSession(configuration: config, delegate: RedirectAuthGuard.shared, delegateQueue: nil)
     }()
     private var session: URLSession { Self.session }
 

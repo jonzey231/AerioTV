@@ -102,6 +102,7 @@ enum NWHTTPClient {
                      timeout: TimeInterval = defaultTimeout) async throws -> (Data, URLResponse) {
         guard let url = request.url else { throw NWHTTPError.invalidURL }
         return try await perform(request: request,
+                                 firstRequest: request,
                                  currentURL: url,
                                  redirectsLeft: maxRedirects,
                                  timeout: timeout)
@@ -120,6 +121,7 @@ enum NWHTTPClient {
                        onBody: @escaping @Sendable (Data) -> Void) async throws -> URLResponse {
         guard let url = request.url else { throw NWHTTPError.invalidURL }
         let (_, response) = try await perform(request: request,
+                                              firstRequest: request,
                                               currentURL: url,
                                               redirectsLeft: maxRedirects,
                                               timeout: timeout,
@@ -129,7 +131,10 @@ enum NWHTTPClient {
 
     // MARK: - Core exchange
 
+    /// `firstRequest` is the request the caller sent, carried through every
+    /// redirect hop so RedirectAuthPolicy judges each hop against it.
     private static func perform(request originalRequest: URLRequest,
+                                firstRequest: URLRequest,
                                 currentURL: URL,
                                 redirectsLeft: Int,
                                 timeout: TimeInterval,
@@ -207,27 +212,29 @@ enum NWHTTPClient {
             // Per RFC 7231: 301/302/303 may swap method to GET when the
             // original was non-GET/HEAD. 307/308 preserve method+body.
             // Mirrors URLSession's default behavior.
-            var nextRequest = originalRequest
-            nextRequest.url = nextURL
-            // SSRF / credential-leak guard: a malicious or compromised server
-            // can 30x to an arbitrary host. Do NOT forward credential headers
-            // to a DIFFERENT host (the sibling URLSession path strips them via
-            // RedirectPreservingDelegate.isSameOrigin). Same host keeps them, so
-            // a legitimate Dispatcharr same-host redirect (incl. an http->https
-            // upgrade) still authenticates.
-            if nextURL.host?.lowercased() != currentURL.host?.lowercased() {
-                nextRequest.setValue(nil, forHTTPHeaderField: "Authorization")
-                nextRequest.setValue(nil, forHTTPHeaderField: "X-API-Key")
-                nextRequest.setValue(nil, forHTTPHeaderField: "Cookie")
-            }
+            var candidate = originalRequest
+            candidate.url = nextURL
             if status == 301 || status == 302 || status == 303 {
-                let method = (nextRequest.httpMethod ?? "GET").uppercased()
+                let method = (candidate.httpMethod ?? "GET").uppercased()
                 if method != "GET" && method != "HEAD" {
-                    nextRequest.httpMethod = "GET"
-                    nextRequest.httpBody = nil
+                    candidate.httpMethod = "GET"
+                    candidate.httpBody = nil
                 }
             }
+            // A malicious or compromised server can 30x anywhere: the sign-in
+            // follows only to the same host and never from https to http, the
+            // rule every URLSession path uses (RedirectAuthPolicy). Measured
+            // 2026-11-13: the old host-only check here still replayed a 307
+            // POST body to the other host, and the Direct Connect login sends
+            // the password in one. Checked after the 303-style GET switch,
+            // which has already dropped the body.
+            guard let nextRequest = RedirectAuthPolicy.redirect(candidate, previous: currentURL,
+                                                                original: firstRequest) else {
+                debugLog("NWHTTP redirect \(status) not followed: the hop would carry a request body where the sign-in may not go")
+                return (data, http)
+            }
             return try await perform(request: nextRequest,
+                                     firstRequest: firstRequest,
                                      currentURL: nextURL,
                                      redirectsLeft: redirectsLeft - 1,
                                      timeout: timeout,

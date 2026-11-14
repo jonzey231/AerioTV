@@ -59,8 +59,9 @@ struct MKVRemuxError: Error, CustomStringConvertible {
 // MARK: - Range fetcher
 
 /// Synchronous HTTP Range reader over the VOD proxy. URLSession follows
-/// the per-session 301 redirect transparently; `totalLength` comes from
-/// the first response's Content-Range.
+/// the per-session 301 redirect, with RedirectAuthGuard deciding where the
+/// sign-in may go; `totalLength` comes from the first response's
+/// Content-Range.
 final class MKVRangeFetcher: @unchecked Sendable {
     private let url: URL
     private let headers: [String: String]
@@ -116,6 +117,10 @@ final class MKVRangeFetcher: @unchecked Sendable {
             }
             result = data
         }
+        // Range reads carry the stream sign-in; this session has no delegate
+        // of its own, and URLSession re-sends X-API-Key to any host a
+        // redirect names.
+        task.delegate = RedirectAuthGuard.shared
         task.resume()
         if sem.wait(timeout: .now() + 45) == .timedOut {
             task.cancel()
@@ -613,6 +618,16 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// reason lets the tile auto-retry with a fresh index instead of
     /// grinding out doomed builds against a stale one.
     var expectedTotalLength: Int64 = 0
+
+    /// The VOD proxy's per-session 301 stays on the server's host and keeps
+    /// the sign-in; a hop to another host, or from https to http, drops it
+    /// (RedirectAuthPolicy).
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+    }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,

@@ -83,7 +83,9 @@ struct AuthPosterImage: View {
             if PlaylistRevocation.shared.isRevoked(url: url.absoluteString, apiKey: req.value(forHTTPHeaderField: "X-API-Key")) { return }
             let data: Data
             do {
-                let (d, resp) = try await URLSession.shared.data(for: req)
+                // A server's art URL can 30x to a CDN: the guard keeps the
+                // headers above off any other host (RedirectAuthPolicy).
+                let (d, resp) = try await URLSession.shared.data(for: req, delegate: RedirectAuthGuard.shared)
                 if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                     debugLog("🖼️ AuthPosterImage: HTTP \(http.statusCode) host=\(url.host ?? "nil") path=\(url.path.suffix(40))")
                     return
@@ -1387,7 +1389,8 @@ struct MoviesView: View {
                                          userAgent: server.effectiveUserAgent,
                                          authMode: server.dispatcharrHeaderMode)
                 resolved = (try? await api.resolveFinalURLForPlayback(url)) ?? url
-                if !api.isOwnHost(resolved) {
+                // Off the server's own hosts or from https to http: no key.
+                if !api.playbackKeepsSignIn(from: url, to: resolved) {
                     headers = headers.filter {
                         $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                     }

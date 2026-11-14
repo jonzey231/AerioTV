@@ -4456,6 +4456,118 @@ do {
              ["avp_sess_1", "sess_2"], "sweep: everything unowned, any age")
 }
 
+// MARK: Redirect sign-in rule (RedirectAuthPolicy, 2026-11-13)
+// One rule for every path that follows a redirect with sign-in attached:
+// another host drops it, the same host keeps it, https to http drops it.
+do {
+    typealias P = RedirectAuthPolicy
+    func u(_ s: String) -> URL { URL(string: s)! }
+
+    // The hop verdict.
+    expect(P.keepsSignIn(from: u("http://dispatcharr.lan:9191/proxy/ts/stream/x"),
+                         to: u("http://dispatcharr.lan:9191/proxy/ts/stream/x/")), "redirect: same host keeps")
+    expect(P.keepsSignIn(from: u("http://Dispatcharr.LAN/a"), to: u("http://dispatcharr.lan/b")),
+           "redirect: host compare ignores case")
+    expect(!P.keepsSignIn(from: u("http://dispatcharr.lan/a"), to: u("http://provider.example/b")),
+           "redirect: another host drops")
+    expect(!P.keepsSignIn(from: u("http://127.0.0.1:9191/a"), to: u("http://localhost:9191/a")),
+           "redirect: 127.0.0.1 and localhost are different hosts")
+    expect(!P.keepsSignIn(from: u("http://a.example/b"), to: u("http://a.example.evil/b")),
+           "redirect: a longer host is another host")
+    expect(P.keepsSignIn(from: u("http://dispatcharr.lan/a"), to: u("https://dispatcharr.lan/a")),
+           "redirect: same-host http to https keeps")
+    expect(P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("https://dispatcharr.lan/b")),
+           "redirect: same-host https to https keeps")
+    expect(!P.keepsSignIn(from: u("https://dispatcharr.lan/a"), to: u("http://dispatcharr.lan/a")),
+           "redirect: same-host https to http drops")
+    expect(P.keepsSignIn(from: u("http://dispatcharr.lan:9191/a"), to: u("http://dispatcharr.lan:8080/a")),
+           "redirect: the rule is per host, a port change on the same host keeps")
+    expect(!P.keepsSignIn(from: nil, to: u("http://a.example/b")), "redirect: no original fails closed")
+    expect(!P.keepsSignIn(from: u("http://a.example/b"), to: nil), "redirect: no target fails closed")
+    expect(!P.keepsSignIn(from: u("http://a.example/b"), to: u("ftp://a.example/b")),
+           "redirect: a non-http target drops")
+    expect(P.isDowngrade(from: u("HTTPS://a.example/"), to: u("http://a.example/")), "redirect: downgrade ignores scheme case")
+    expect(!P.isDowngrade(from: u("http://a.example/"), to: u("https://a.example/")), "redirect: an upgrade is not a downgrade")
+
+    // Chains: each hop is judged against the previous hop AND the original.
+    let a1 = u("http://a.example/1"), b2 = u("http://b.example/2")
+    expect(!P.keepsSignIn(next: u("http://a.example/3"), previous: b2, original: a1),
+           "redirect: back to the first host after leaving it drops")
+    expect(!P.keepsSignIn(next: u("http://b.example/3"), previous: b2, original: a1),
+           "redirect: staying on the other host drops")
+    expect(P.keepsSignIn(next: u("http://a.example/3"), previous: u("http://a.example/2"), original: a1),
+           "redirect: a same-host chain keeps")
+    expect(!P.keepsSignIn(next: u("http://a.example/3"), previous: u("https://a.example/2"), original: a1),
+           "redirect: https to http on a later hop drops even when the first request was http")
+    expect(!P.keepsSignIn(next: u("http://a.example/3"), previous: u("http://a.example/2"),
+                          original: u("https://a.example/1")),
+           "redirect: http after an https original drops")
+
+    // The request to follow. URLSession hands the delegate a copy that
+    // already lacks Authorization (measured on the iOS 27 simulator).
+    var original = URLRequest(url: a1)
+    original.setValue("standin-key", forHTTPHeaderField: "X-API-Key")
+    original.setValue("ApiKey standin-key", forHTTPHeaderField: "Authorization")
+    original.setValue("s=1", forHTTPHeaderField: "Cookie")
+    original.setValue("MediaBrowser Token=\"t\"", forHTTPHeaderField: "X-Emby-Authorization")
+    original.setValue("AerioTV", forHTTPHeaderField: "User-Agent")
+    var crossNext = original
+    crossNext.url = b2
+    crossNext.setValue(nil, forHTTPHeaderField: "Authorization")
+    let cross = P.redirect(crossNext, previous: a1, original: original)
+    expect(cross != nil, "redirect: a GET to another host is still followed")
+    for name in P.signInHeaders {
+        expect(cross?.value(forHTTPHeaderField: name) == nil, "redirect: another host gets no \(name)")
+    }
+    expectEq(cross?.value(forHTTPHeaderField: "User-Agent"), "AerioTV", "redirect: User-Agent survives a dropped hop")
+    var sameNext = crossNext
+    sameNext.url = u("http://a.example/2")
+    let same = P.redirect(sameNext, previous: a1, original: original)
+    for name in P.signInHeaders {
+        expectEq(same?.value(forHTTPHeaderField: name), original.value(forHTTPHeaderField: name),
+                 "redirect: same host keeps \(name)")
+    }
+    var bare = URLRequest(url: a1)
+    bare.setValue("standin-key", forHTTPHeaderField: "X-API-Key")
+    var bareNext = bare
+    bareNext.url = u("http://a.example/2")
+    expect(P.redirect(bareNext, previous: a1, original: bare)?.value(forHTTPHeaderField: "Cookie") == nil,
+           "redirect: a kept hop adds nothing the first request did not send")
+    var downNext = original
+    downNext.url = u("http://a.example/2")
+    expect(P.redirect(downNext, previous: u("https://a.example/1"), original: original)?
+            .value(forHTTPHeaderField: "X-API-Key") == nil, "redirect: https to http strips the key")
+
+    // A body never follows where the sign-in may not go.
+    var post = original
+    post.httpMethod = "POST"
+    post.httpBody = Data("{\"password\":\"standin\"}".utf8)
+    var post307Cross = post
+    post307Cross.url = b2
+    expect(P.redirect(post307Cross, previous: a1, original: post) == nil,
+           "redirect: a 307 POST to another host is not followed")
+    var post307Down = post
+    post307Down.url = u("http://a.example/2")
+    expect(P.redirect(post307Down, previous: u("https://a.example/1"), original: post) == nil,
+           "redirect: a 307 POST from https to http is not followed")
+    var post307Same = post
+    post307Same.url = u("http://a.example/2")
+    expect(P.redirect(post307Same, previous: a1, original: post)?.httpBody != nil,
+           "redirect: a 307 POST on the same host keeps its body")
+    var post302Cross = post307Cross
+    post302Cross.httpMethod = "GET"
+    post302Cross.httpBody = nil
+    expect(P.redirect(post302Cross, previous: a1, original: post)?.value(forHTTPHeaderField: "X-API-Key") == nil,
+           "redirect: a 302 POST (now a GET) to another host follows without the key")
+
+    // Header helpers.
+    expect(P.isSignInHeader("x-api-key") && P.isSignInHeader("COOKIE"), "redirect: header names compare case-insensitively")
+    expect(!P.isSignInHeader("User-Agent"), "redirect: User-Agent is not sign-in")
+    expectEq(P.withoutSignIn(["x-api-key": "k", "Authorization": "a", "Cookie": "c",
+                              "X-Emby-Authorization": "e", "User-Agent": "u"]),
+             ["User-Agent": "u"], "redirect: withoutSignIn keeps only headers without a secret")
+}
+
 
 print(failures == 0 ? "\nALL TESTS PASSED" : "\n\(failures) FAILURES")
 exit(failures == 0 ? 0 : 1)

@@ -1047,6 +1047,18 @@ final class CastHLSProxySession: @unchecked Sendable {
             session = nil
         }
 
+        /// A Redirect stream profile answers the channel URL with a 302 to
+        /// the provider, and URLSession re-sends X-API-Key to whatever host
+        /// a redirect names. RedirectAuthPolicy, the rule the live player's
+        /// ingest uses too, keeps the sign-in on the same host only, never
+        /// from https to http.
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+            completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+        }
+
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                         didReceive response: URLResponse,
                         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {

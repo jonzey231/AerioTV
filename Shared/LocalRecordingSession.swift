@@ -1120,6 +1120,16 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
 }
 
 extension LiveRewindEngine: URLSessionDataDelegate {
+    /// The rewind ingest carries the stream sign-in, and a Redirect stream
+    /// profile 302s it to the provider: RedirectAuthPolicy keeps the key on
+    /// the same host only, never from https to http.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
@@ -1473,6 +1483,16 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
 
     private func markFailed() {
         cond.lock(); failed = true; cond.signal(); cond.unlock()
+    }
+
+    /// The archive request carries the stream sign-in: a 30x to another
+    /// host, or from https to http, drops it (RedirectAuthPolicy, the same
+    /// rule NWHTTPClient applies on the http-to-domain path above).
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,

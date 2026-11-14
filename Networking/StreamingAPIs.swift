@@ -75,6 +75,9 @@ enum HLSSessionResolver {
         let playlistURL: URL
         let token: String?
         let status: Int
+        /// The entry URL the sign-in was sent to: the token playlist and the
+        /// session DELETE get it only when RedirectAuthPolicy keeps it from here.
+        let entry: URL
     }
 
     /// The tile's headers may carry only the auth pair; without a User-Agent
@@ -114,7 +117,11 @@ enum HLSSessionResolver {
     }
 
     /// Best effort: stops the server-side client for `token`. Logs only.
-    static func endSession(token: String, playlistURL: URL, headers: [String: String]) {
+    /// The DELETE goes to the token playlist's host, so it carries the
+    /// sign-in only when the rule keeps it from the entry the key was sent
+    /// to; its own redirects ride RedirectAuthGuard.
+    static func endSession(_ session: Resolved, token: String, headers: [String: String]) {
+        let playlistURL = session.playlistURL
         guard !DispatcharrRequestGate.shared.isHeldServer(playlistURL) else { return }
         guard var comps = URLComponents(url: playlistURL, resolvingAgainstBaseURL: false) else { return }
         comps.path = "/api/proxy/hls/sessions/\(token)/"
@@ -122,11 +129,15 @@ enum HLSSessionResolver {
         guard let url = comps.url else { return }
         var request = URLRequest(url: url, timeoutInterval: 10)
         request.httpMethod = "DELETE"
-        for (k, v) in withUserAgent(headers) { request.setValue(v, forHTTPHeaderField: k) }
-        URLSession.shared.dataTask(with: request) { _, response, error in
+        let send = RedirectAuthPolicy.keepsSignIn(from: session.entry, to: url)
+            ? headers : RedirectAuthPolicy.withoutSignIn(headers)
+        for (k, v) in withUserAgent(send) { request.setValue(v, forHTTPHeaderField: k) }
+        let task = URLSession.shared.dataTask(with: request) { _, response, error in
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             debugLog("[FORCE-HLS] session end token=\(token.prefix(8))... status=\(status)\(error.map { " error=\($0.localizedDescription)" } ?? "")")
-        }.resume()
+        }
+        task.delegate = RedirectAuthGuard.shared
+        task.resume()
     }
 
     private final class ResolveBox: @unchecked Sendable {
@@ -158,7 +169,7 @@ enum HLSSessionResolver {
                         completionHandler: @escaping (URLRequest?) -> Void) {
             let token = response.value(forHTTPHeaderField: tokenHeader)
             if let target = request.url, HLSCapabilityStore.redirectLooksLikeHLS(target) {
-                report(.hls(Resolved(playlistURL: target, token: token, status: response.statusCode)))
+                report(.hls(Resolved(playlistURL: target, token: token, status: response.statusCode, entry: entry)))
             } else {
                 // Redirect stream profile: the 302 goes to the raw provider
                 // stream. Not followed (no extra upstream connection).
@@ -558,6 +569,16 @@ final class DispatcharrLimitProbe: NSObject, URLSessionDataDelegate, @unchecked 
         lock.unlock()
         LiveConnectionRegistry.shared.close(id)
         completion(notice, summary)
+    }
+
+    /// The probe GETs the live stream URL with the stream's sign-in, and a
+    /// Redirect stream profile answers it with a 302 to the provider:
+    /// RedirectAuthPolicy keeps the key off that host.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(RedirectAuthPolicy.redirect(request, previous: response.url, original: task.originalRequest))
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -2171,16 +2192,14 @@ struct DispatcharrAPI {
     // app feel "perpetually loading" to a user whose server is actually
     // down. Resource-wide 300s still covers large EPG/VOD payloads.
     //
-    // v1.6.20: a `RedirectPreservingDelegate` is wired here so URLSession
-    // re-applies our auth headers across HTTP 301/302/307/308 redirects.
-    // Apple's URLSession default-strips custom headers (including
-    // `X-API-Key` and `Authorization`) when a redirect crosses origin,
-    // a real-world hit for Dispatcharr deployments behind a reverse
-    // proxy that 301s `/api` → `/api/`. Without re-applying, the
-    // follow-up request lands at the auth wall stripped of credentials
-    // and 401s; the user blames the API key. The delegate copies our
-    // X-API-Key, Authorization, Accept, and User-Agent fields onto the
-    // redirected request before letting URLSession proceed.
+    // v1.6.20: a `RedirectPreservingDelegate` is wired here so a same-host
+    // redirect (a reverse proxy that 301s `/api` → `/api/`) keeps the
+    // sign-in: URLSession drops `Authorization` on every hop by itself, and
+    // the follow-up request then lands at the auth wall and 401s while the
+    // user blames the API key. URLSession also re-sends `X-API-Key` to any
+    // other host (measured 2026-11-13), so the delegate runs
+    // RedirectAuthPolicy: sign-in copied back on a same-host hop, removed
+    // on a hop to another host or from https to http.
     private static let redirectDelegate = RedirectPreservingDelegate()
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -4155,11 +4174,21 @@ struct DispatcharrAPI {
         return VODService.knownOwnHosts().contains(host)
     }
 
+    /// Whether a player handed `resolved` (from `resolveFinalURLForPlayback`
+    /// on `original`) may also get the sign-in headers: only on the server's
+    /// own hosts, and never when the walk went from https to http. AVPlayer
+    /// sends its asset headers to every host it touches, so this is the
+    /// only gate those headers get.
+    func playbackKeepsSignIn(from original: URL, to resolved: URL) -> Bool {
+        isOwnHost(resolved) && !RedirectAuthPolicy.isDowngrade(from: original, to: resolved)
+    }
+
     /// Resolve Dispatcharr proxy URLs that redirect to a session-based path.
     /// Some media players (and some CDN/proxy setups) behave better when given the final URL up-front.
     func resolveFinalURLForPlayback(_ url: URL) async throws -> URL {
         if DispatcharrRequestGate.shared.isHeldServer(url) { throw DispatcharrRequestGate.heldRefusal() }
         var current = url
+        var previous: URL?
         var redirects = 0
 
         while redirects < 5 {
@@ -4171,8 +4200,10 @@ struct DispatcharrAPI {
             // Auth rides only to the server's own hosts; a foreign hop
             // (already vetted against private/loopback ranges below) gets
             // an anonymous probe - session URLs need no auth, and the API
-            // key must never be replayed off-origin.
-            if isOwnHost(current) {
+            // key must never be replayed off-origin, nor on a hop that went
+            // from https to http (RedirectAuthPolicy).
+            if playbackKeepsSignIn(from: url, to: current),
+               !RedirectAuthPolicy.isDowngrade(from: previous, to: current) {
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
             } else {
                 req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
@@ -4189,6 +4220,7 @@ struct DispatcharrAPI {
                 // SSRF guard: never follow a redirect to a loopback/private/
                 // metadata host with the API key attached. A rejected 3xx falls
                 // through to `return response.url ?? current` (last-good URL).
+                previous = current
                 current = safeNext
                 redirects += 1
                 continue
@@ -5042,114 +5074,59 @@ actor AsyncSemaphore {
 }
 
 // MARK: - URLSession Redirect Delegate
-/// Re-applies our auth + identity headers to redirected requests so
-/// they survive `301`/`302`/`307`/`308` hops.
+/// Redirect handling for the Dispatcharr API sessions
+/// (`DispatcharrAPI.session` and `bulkEPGSession`), which every API call
+/// rides.
 ///
-/// **Why this exists.** URLSession's default redirect handler strips
-/// the `Authorization` header on cross-origin redirects (intentional,
-/// otherwise a malicious server could `301` to attacker-controlled
-/// hosts and exfiltrate the credential). It also occasionally drops
-/// non-standard headers like `X-API-Key` depending on the redirect
-/// type. For Dispatcharr deployments behind a reverse proxy that
-/// rewrites paths (e.g., `/api` → `/api/`, or HTTP → HTTPS upgrade
-/// via `301`), this manifests as: the first request includes the API
-/// key, gets `301`'d, the redirected request lands at the auth wall
-/// without credentials, server returns `401`, and the user sees
-/// "Dispatcharr rejected this request" even though the key is valid.
+/// **Why this exists.** URLSession drops `Authorization` on every redirect
+/// hop, the same host included (measured 2026-11-13), so a Dispatcharr
+/// behind a reverse proxy that 301s `/api` to `/api/`, or http to https,
+/// lost a Bearer token or the `ApiKey` header shape on the hop and answered
+/// 401: the user saw "Dispatcharr rejected this request" with a valid key
+/// (v1.6.20: three users on private deployments hit 401 on Test
+/// Connection). URLSession also re-sends `X-API-Key` to any host a Location
+/// names, which would hand the key to that host.
 ///
-/// This delegate is wired onto the shared `DispatcharrAPI.session`
-/// so every API call inherits the behavior. The redirect target
-/// inherits the auth-relevant headers from `task.originalRequest`;
-/// non-auth headers (e.g., `Cookie`, `Referer`) are left to URLSession's
-/// default handling.
-///
-/// v1.6.20 (Aerio): added as part of the auth-fallback work after
-/// three users on private Dispatcharr deployments hit HTTP 401 on
-/// Test Connection. We can't be certain redirects were the trigger
-/// for those specific reports, header-shape was the smoking gun,
-/// but a stripped-on-redirect API key would produce indistinguishable
-/// symptoms, so this is belt-and-suspenders against the same class
-/// of failure.
+/// Each hop runs RedirectAuthPolicy, the rule every redirect-following path
+/// in the app uses: the sign-in is copied back from `task.originalRequest`
+/// on a same-host hop (an http to https upgrade included), removed on a hop
+/// to another host or from https to http, and a hop that would carry a
+/// request body where the sign-in may not go is not followed. Accept,
+/// Content-Type, and User-Agent carry no secret and are restored on every
+/// hop, as before.
 final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
 
-    /// Headers re-applied across same-origin redirects. Strictly
-    /// auth-bearing headers (`Authorization`, `X-API-Key`) are
-    /// stripped on cross-origin redirects per HTTP standard;
-    /// non-credential headers (`Accept`, `Content-Type`,
-    /// `User-Agent`) are safe to forward regardless.
-    private static let credentialHeaders: Set<String> = [
-        "X-API-Key",
-        "Authorization"
-    ]
     private static let nonCredentialHeaders: [String] = [
         "Accept",
         "Content-Type",
         "User-Agent"
     ]
 
-    /// True when redirect target's host (and scheme + port) matches
-    /// the original request's, accounting for nil values on either
-    /// side. v1.6.23: gate credential reapplication on this check
-    /// so a malicious or misconfigured server can't issue HTTP 301
-    /// to attacker.example.com and harvest the user's API key in
-    /// plain text. Same-origin redirects (reverse-proxy
-    /// canonicalization, http -> https upgrade by an explicit
-    /// scheme bump on the same host) keep working.
-    private static func isSameOrigin(_ a: URL?, _ b: URL?) -> Bool {
-        guard let a = a, let b = b else { return false }
-        guard let aHost = a.host?.lowercased(),
-              let bHost = b.host?.lowercased(),
-              aHost == bHost else { return false }
-        guard a.scheme?.lowercased() == b.scheme?.lowercased() else { return false }
-        // Compare effective ports (default port if unset).
-        let aPort = a.port ?? defaultPort(forScheme: a.scheme)
-        let bPort = b.port ?? defaultPort(forScheme: b.scheme)
-        return aPort == bPort
-    }
-
-    private static func defaultPort(forScheme scheme: String?) -> Int? {
-        switch scheme?.lowercased() {
-        case "http": return 80
-        case "https": return 443
-        default: return nil
-        }
-    }
-
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        var modified = request
-        if let original = task.originalRequest {
-            let sameOrigin = Self.isSameOrigin(original.url, request.url)
-            // Always forward non-credential headers.
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        let original = task.originalRequest
+        guard var modified = RedirectAuthPolicy.redirect(request, previous: response.url, original: original) else {
+            debugLog("DispatcharrAPI redirect: \(response.statusCode) to \(request.url?.host ?? "?") not followed: the request body would go where the sign-in may not")
+            completionHandler(nil)
+            return
+        }
+        if let original {
             for name in Self.nonCredentialHeaders {
                 if let value = original.value(forHTTPHeaderField: name) {
                     modified.setValue(value, forHTTPHeaderField: name)
-                }
-            }
-            // Auth headers ONLY on same-origin redirects.
-            if sameOrigin {
-                for name in Self.credentialHeaders {
-                    if let value = original.value(forHTTPHeaderField: name) {
-                        modified.setValue(value, forHTTPHeaderField: name)
-                    }
-                }
-            } else {
-                // Defense in depth: explicitly strip any auth
-                // header URLSession may have copied automatically.
-                for name in Self.credentialHeaders {
-                    modified.setValue(nil, forHTTPHeaderField: name)
                 }
             }
             #if DEBUG
             // One-line audit so a misbehaving reverse-proxy redirect
             // shows up in the debug log without needing a packet
             // capture. Note whether auth was preserved or stripped.
+            let kept = RedirectAuthPolicy.keepsSignIn(next: request.url, previous: response.url, original: original.url)
             let from = original.url?.absoluteString ?? "<unknown>"
             let to   = request.url?.absoluteString ?? "<unknown>"
-            let authNote = sameOrigin ? "auth preserved (same-origin)" : "AUTH STRIPPED (cross-origin)"
+            let authNote = kept ? "auth preserved (same host)" : "AUTH STRIPPED (other host or https to http)"
             debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) -> \(to) (\(authNote))")
             #endif
         }

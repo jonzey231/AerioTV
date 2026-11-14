@@ -1505,9 +1505,10 @@ struct AddToMultiviewSheet: View {
                                      authMode: server.dispatcharrHeaderMode)
             resolvedURL = (try? await api.resolveFinalURLForPlayback(proxyURL)) ?? proxyURL
             // Audit #38 parity (Android ee06e17): never replay the API key
-            // to a session URL that resolved OFF the server's own hosts.
+            // to a session URL that resolved OFF the server's own hosts,
+            // nor from https to http (RedirectAuthPolicy).
             // User-Agent stays; it carries no secret.
-            if !api.isOwnHost(resolvedURL) {
+            if !api.playbackKeepsSignIn(from: proxyURL, to: resolvedURL) {
                 headers = headers.filter {
                     $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
                 }

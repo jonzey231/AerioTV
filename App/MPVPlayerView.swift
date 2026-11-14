@@ -2368,6 +2368,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 debugLog("[MPV-PROBE] \(tag) stream URL answered: \(summary)")
                 self?.streamProbeSummary = summary
             }
+            // The probe carries the stream sign-in, and a Redirect stream
+            // profile 302s it to the provider (RedirectAuthPolicy).
+            task.delegate = RedirectAuthGuard.shared
             task.resume()
         }
 

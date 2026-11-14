@@ -1023,7 +1023,9 @@ enum TMDBService {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
+        // A v4 token rides as Authorization: Bearer; the guard keeps it on
+        // TMDB's host if a response ever redirects (RedirectAuthPolicy).
+        return URLSession(configuration: config, delegate: RedirectAuthGuard.shared, delegateQueue: nil)
     }()
 
     /// title (lowercased) -> poster path ("" = confirmed no-poster miss,
