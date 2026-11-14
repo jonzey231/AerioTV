@@ -308,6 +308,19 @@ enum StoredSecretRules {
         case fixLogin = "Fix Login"
         case dispatcharrSync = "Dispatcharr Sync"
         case defaultProfileSwitch = "default profile switch"
+        case deviceSetup = "Set up another device"
+    }
+
+    /// Set up another device: the receiving device saves what the setup
+    /// carries and signs in with it at every address the setup names (the
+    /// Server URL, and the Local URL when there is one). So the playlist's
+    /// stored secrets (its saved password, its stored key) go only when
+    /// each of those addresses may receive them.
+    static func setupMayCarry(provenHosts: [String]?, base: String, local: String) -> Bool {
+        let named = [base, local].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return !named.isEmpty && named.allSatisfy {
+            mayUseStored(provenHosts: provenHosts, target: $0, base: base, local: local)
+        }
     }
 
     /// A stored secret may go to [target] only when [target] is one of the

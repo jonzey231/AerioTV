@@ -152,6 +152,10 @@ final class SetupApplyModel: ObservableObject {
         guard let ctx = modelContext else { phase = .failed("Setup is not ready. Try again."); return }
         let pl = p.playlist
         let cred = pl.credential
+        // Presence only, never a value.
+        debugLog("[SETUP] receiver: sign-in key=\(cred?.apiKey == nil ? "absent" : "present") "
+                 + "password=\(cred?.password == nil ? "absent" : "present") profiles=\(p.profiles.count) "
+                 + "withSignIn=\(p.profiles.filter { $0.credential != nil }.count)")
         // The sender's playlist id (2026-11-10): a row here with that id IS this
         // playlist, so it is updated in place, never added a second time.
         let senderID = pl.id.flatMap { UUID(uuidString: $0) }

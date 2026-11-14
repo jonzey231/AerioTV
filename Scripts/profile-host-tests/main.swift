@@ -995,6 +995,34 @@ do {
     check(may(newLocal) && !holds.isRouteUnproven(pl), "the whole route is proven")
 }
 
+// MARK: - Set up another device carries stored secrets only to proven addresses
+// The receiving device saves the setup's sign-in and signs in with it at every
+// address the setup names, so the saved password and stored key go only when
+// each of those may receive them.
+do {
+    let (ud, suite) = freshDefaults("setup-carry"); defer { ud.removePersistentDomain(forName: suite) }
+    let pl = "P-setup"
+    let oldBase = "https://tv.example.com", newBase = "https://other.example.net"
+    let lan = "http://192.168.1.20:9191", newLan = "http://10.0.0.9:9191"
+    let holds = ProfileHostHoldStore(defaults: ud)
+    func carries(_ base: String, _ local: String) -> Bool {
+        StoredSecretRules.setupMayCarry(provenHosts: holds.provenHosts(pl), base: base, local: local)
+    }
+    check(carries(oldBase, lan), "no change since the route was proven: the setup carries the saved password and key")
+    check(carries(oldBase, ""), "and with no Local URL")
+    // The Server URL moved to another host and is not proven yet.
+    holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: oldBase, local: lan), route: R.key(base: newBase, local: lan))
+    check(!carries(newBase, lan), "an unproven Server URL: the setup carries no stored secret")
+    check(!carries(newBase, ""), "the same with no Local URL")
+    // A sign-in at the new Server URL with what the user typed proves it.
+    _ = holds.proveHosts(pl, [R.hostKey(newBase)], currentHosts: R.hosts(base: newBase, local: lan))
+    check(carries(newBase, lan), "once the new address is proven, the setup carries them again")
+    // Only the Local URL changed: the receiver may sign in there, so nothing stored goes.
+    holds.markRouteUnproven(pl, trustedHosts: R.hosts(base: newBase, local: lan), route: R.key(base: newBase, local: newLan))
+    check(!carries(newBase, newLan), "an unproven Local URL: nothing stored goes, though the Server URL is proven")
+    check(!StoredSecretRules.setupMayCarry(provenHosts: nil, base: "", local: ""), "no address at all: nothing")
+}
+
 // MARK: - The same server at the new address proves it (no profiles needed)
 do {
     let (ud, suite) = freshDefaults("secrets-same"); defer { ud.removePersistentDomain(forName: suite) }

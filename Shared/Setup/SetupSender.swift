@@ -837,10 +837,24 @@ enum SetupSender {
             case .dispatcharrAPI: return nonEmpty(server.dispatcharrXMLTVURL)
             }
         }()
+        // The receiving device saves the playlist's sign-in and signs in with
+        // it at the addresses below, so its stored secrets (the saved
+        // password, the stored key) go only where this device may send them:
+        // never while an address is unproven after a change (StoredSecretRules).
+        let pid = server.id.uuidString
+        let mayCarry = ProfileManager.shared.setupMayCarryStoredSecrets(pid)
+        let storedKey = server.type == .dispatcharrAPI ? nonEmpty(server.baseApiKey) : nil
+        let storedPassword = server.type == .m3uPlaylist ? nil : nonEmpty(server.effectivePassword)
+        if !mayCarry, storedKey != nil || storedPassword != nil {
+            ProfileManager.shared.noteStoredSecretRefused(pid, .deviceSetup)
+        }
         let cred = SetupProtocol.Credential(
-            apiKey: server.type == .dispatcharrAPI ? nonEmpty(server.baseApiKey) : nil,
+            apiKey: mayCarry ? storedKey : nil,
             username: server.type == .m3uPlaylist ? nil : nonEmpty(server.username),
-            password: server.type == .m3uPlaylist ? nil : nonEmpty(server.effectivePassword))
+            password: mayCarry ? storedPassword : nil)
+        // Presence only, never a value.
+        debugLog("[SETUP] payload sign-in key=\(cred.apiKey == nil ? "absent" : "present") "
+                 + "password=\(cred.password == nil ? "absent" : "present")")
         let playlist = SetupProtocol.PlaylistPart(
             type: type,
             name: server.name,
@@ -860,7 +874,7 @@ enum SetupSender {
         // The default profile always, then the chosen profiles that carry a sign-in
         // (docs/DeviceSetupHandoff.md; Android SetupSender.buildPayload).
         let parts = SetupProfileRules.parts(profileSources(server), selected: profileIds)
-        debugLog("[SETUP] payload profiles=\(parts.count) sync=\(turnOnSync)")
+        debugLog("[SETUP] payload profiles=\(parts.count) withSignIn=\(parts.filter { $0.credential != nil }.count) sync=\(turnOnSync)")
         return SetupProtocol.Payload(playlist: playlist, profiles: parts,
                                      sync: turnOnSync ? SetupProtocol.SyncPart() : nil)
     }

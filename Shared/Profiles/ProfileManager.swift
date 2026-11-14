@@ -1518,6 +1518,15 @@ final class ProfileManager: ObservableObject {
                                               target: target, base: s.baseURL, local: s.localURL)
     }
 
+    /// Whether Set up another device may carry the playlist's stored secrets:
+    /// mayUseStoredSecret for every address the setup names
+    /// (StoredSecretRules.setupMayCarry).
+    func setupMayCarryStoredSecrets(_ playlistId: String) -> Bool {
+        guard let s = DsyncLocal.server(playlistId), !s.isGone else { return false }
+        return StoredSecretRules.setupMayCarry(provenHosts: holds.provenHosts(playlistId),
+                                               base: s.baseURL, local: s.localURL)
+    }
+
     /// The playlist's route changed and is not proven yet.
     func isRouteUnproven(_ playlistId: String) -> Bool { holds.isRouteUnproven(playlistId) }
 
