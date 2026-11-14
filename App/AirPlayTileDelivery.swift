@@ -98,6 +98,11 @@ final class AirPlayTileDelivery {
     /// item is the one now current (re-arm rebinds the watchdog to it).
     var onWatchdogs: ((_ suspend: Bool, _ item: AVPlayerItem?) -> Void)?
 
+    /// Tile hook: rebuild the pipeline with the HEVC delivery `arm` set
+    /// before the PMT (the tune-time path for a non-Apple receiver).
+    /// Returns false when the tile will not (it already rebuilt once).
+    var onRebuildForHEVC: ((_ arm: AirPlayHEVCArm) -> Bool)?
+
     var isServing: Bool { state == .serving }
     /// This delivery holds a player or a LAN state (it was attached as the
     /// route owner). A tile that never owned the route has nothing to
@@ -167,6 +172,17 @@ final class AirPlayTileDelivery {
                 self.state = .idle
                 AirPlayMonitor.shared.headlessTuneFellBack(reason: "audio-only receiver")
                 start(loopbackURL)
+            case .rebuild(let arm):
+                self.state = .idle
+                AirPlayMonitor.shared.noteTileLoading(false)
+                // The tile's stop() resets this delivery; the rebuilt
+                // pipeline comes back through prepareStart.
+                if self.onRebuildForHEVC?(arm) != true {
+                    debugLog("[AVP-AIRPLAY] HEVC rebuild refused (already rebuilt for this tune); playing on this device")
+                    AirPlayMonitor.shared.headlessTuneFellBack(reason: "HEVC rebuild refused")
+                    start(loopbackURL)
+                }
+                return
             }
             AirPlayMonitor.shared.noteTileLoading(false)
         }
@@ -197,8 +213,7 @@ final class AirPlayTileDelivery {
     /// the tile at remuxer creation (before the PMT) and logged once.
     static func plannedHEVCArm(channelName: String) -> AirPlayHEVCArm {
         let receiver = AirPlayMonitor.shared.receiver ?? AirPlayReceiverResolver.shared.resolveNow()
-        let cls: AirPlayReceiverClass
-        if let r = receiver, r.model != nil { cls = r.isApple ? .apple : .nonApple } else { cls = .unknown }
+        let cls = AirPlayReceiverClass.of(model: receiver?.model, isApple: receiver?.isApple ?? false)
         let remembered = AirPlayHEVCArmMemory.remembered(model: receiver?.model)
         let pick = AirPlayHEVCArmSelection.select(receiver: cls, remembered: remembered)
         debugLog("[AVP-AIRPLAY] HEVC delivery plan for \(receiver?.name ?? "AirPlay") (model \(receiver?.model ?? "unknown")): \(pick.arm.label) (\(pick.reason)) channel=\(channelName)")
@@ -550,6 +565,13 @@ final class AirPlayTileDelivery {
                 self.state = .idle
             case .audioOnlyReceiver:
                 self.state = .idle
+            case .rebuild(let arm):
+                self.state = .idle
+                // The tile's stop() resets this delivery; the rebuilt
+                // pipeline comes back through prepareStart.
+                if self.onRebuildForHEVC?(arm) != true {
+                    debugLog("[AVP-AIRPLAY] HEVC rebuild refused (already rebuilt for this tune); leaving the loopback item in place")
+                }
             }
         }
     }
@@ -694,7 +716,7 @@ final class AirPlayTileDelivery {
 
     // MARK: Shared steps
 
-    private enum LANResult { case ready(URL), noAddress, unavailable, audioOnlyReceiver }
+    private enum LANResult { case ready(URL), noAddress, unavailable, audioOnlyReceiver, rebuild(AirPlayHEVCArm) }
 
     /// Plan section 3 then section 4: receiver, audio plan, LAN listener,
     /// then the published-segment handover wait. One path for every plan:
@@ -709,6 +731,20 @@ final class AirPlayTileDelivery {
         // A HomePod / AirPort route plays the phone's audio; there is no
         // screen to hand the video to.
         if receiver.isAudioOnly { return .audioOnlyReceiver }
+        // An HEVC session already on the fMP4 arm (the route was picked
+        // mid-play, or the tune adopted an ingest opened before the arm was
+        // planned) cannot turn into TS, and a non-Apple receiver plays
+        // muxed TS only: the tile rebuilds the pipeline on the arm a tune
+        // opened for this receiver takes, then hands over from there.
+        if onRebuildForHEVC != nil,
+           let arm = AirPlayHEVCArmSelection.rebuildArm(
+            sessionOnFMP4: remuxer.isHEVCFMP4Arm,
+            receiver: AirPlayReceiverClass.of(model: receiver.model, isApple: receiver.isApple),
+            remembered: AirPlayHEVCArmMemory.remembered(model: receiver.model)) {
+            debugLog("[AVP-AIRPLAY] HEVC channel on the fMP4 arm for \(receiver.name) (model \(receiver.model ?? "unknown")): "
+                + "this receiver class plays muxed TS only; rebuilding the pipeline on \(arm.label) channel=\(channelName)")
+            return .rebuild(arm)
+        }
         let codec = remuxer.sourceAudioCodec
         let transcodable = codec == "AC-3" || codec == "E-AC-3"
         plan = (receiver.wantsAAC(mode: mode) && transcodable) ? .aacStereo : .passthrough

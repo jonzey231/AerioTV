@@ -6357,6 +6357,13 @@ struct AVPlayerMultiviewTile: View {
     /// channel has not stored its first segment yet; a codec-gate failure
     /// in that window re-tunes the classic way instead of failing the tile.
     @State private var inPlaceFlipAwaitingSource = false
+    /// AirPlay picked for an HEVC channel already on the fMP4 arm: the
+    /// next pipeline is built on this arm (set before its PMT) and skips
+    /// the warm and retained ingests, which carry the fMP4 arm.
+    @State private var airPlayHEVCRebuildArm: AirPlayHEVCArm?
+    /// One rebuild per tune, so a receiver that still cannot play the
+    /// rebuilt arm never loops the pipeline.
+    @State private var airPlayHEVCRebuildUsed = false
     #endif
     #if os(tvOS)
     /// The display manager our criteria landed on, for teardown. Mirrors
@@ -6693,6 +6700,7 @@ struct AVPlayerMultiviewTile: View {
             streamLockoutRetries = 0
             streamAuthRetries = 0
             #if os(iOS)
+            airPlayDelivery.onRebuildForHEVC = { arm in rebuildForAirPlayHEVC(arm) }
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
             if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID), let mux = remuxer,
@@ -6785,6 +6793,10 @@ struct AVPlayerMultiviewTile: View {
             // so the flip would re-open the OLD channel.
             directHLSFallbackURL = nil
             redirectHLSTarget = nil
+            #if os(iOS)
+            airPlayHEVCRebuildUsed = false
+            airPlayHEVCRebuildArm = nil
+            #endif
             forceHLSStartedAt = nil
             mismatchAutoRetries = 0
             serverBusyRetries = 0
@@ -8541,6 +8553,29 @@ struct AVPlayerMultiviewTile: View {
         start()
     }
 
+    #if os(iOS)
+    /// AirPlay picked for an HEVC channel the remuxer already put on the
+    /// fMP4 arm (AirPlayTileDelivery.prepareLAN): a playlist cannot turn
+    /// from fMP4 into TS mid-stream, and a non-Apple receiver plays muxed
+    /// TS only, so the pipeline restarts with `arm` set before its PMT, the
+    /// path a tune opened with AirPlay up takes. Once per tune. False when
+    /// this tile will not rebuild (already did, or not a live channel).
+    private func rebuildForAirPlayHEVC(_ arm: AirPlayHEVCArm) -> Bool {
+        guard !airPlayHEVCRebuildUsed, !isVOD, !isDVR, catchup == nil else { return false }
+        airPlayHEVCRebuildUsed = true
+        airPlayHEVCRebuildArm = arm
+        debugLog("[AVP-MV] rebuilding the pipeline for the AirPlay receiver (\(arm.label)) channel=\(channelName)")
+        stop(allowRetain: false)
+        statusText = "Preparing..."
+        let token = teardownToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard token == teardownToken else { return }
+            start()
+        }
+        return true
+    }
+    #endif
+
     /// Why this tile must not take Force HLS's direct HLS path, or nil.
     private var forceHLSBypassReason: String? {
         #if os(iOS)
@@ -8744,7 +8779,15 @@ struct AVPlayerMultiviewTile: View {
             sessionRetainKey = sourceURL.absoluteString
             sessionRetainChannelID = channelID
             sessionRetainName = channelName
-            if liveRewindArmed {
+            #if os(iOS)
+            // An AirPlay HEVC rebuild needs a fresh ingest: a retained or
+            // warm one already chose the fMP4 arm at its PMT.
+            let rebuildArm = airPlayHEVCRebuildArm
+            airPlayHEVCRebuildArm = nil
+            #else
+            let rebuildArm: AirPlayHEVCArm? = nil
+            #endif
+            if liveRewindArmed, rebuildArm == nil {
                 debugLog("[AVP-REWIND] armed: \(Int(rewindSeconds))s spill window channel=\(channelName)")
                 // Channel retention: if this channel's remuxer is still
                 // ingesting from a recent flip, adopt it - the rewind
@@ -8791,10 +8834,20 @@ struct AVPlayerMultiviewTile: View {
             // parallel with the multiview transition. Adopting it skips
             // the 125 to 183 ms lock->ingest gap AND overlaps the 220 to
             // 2532 ms upstream open with the SwiftUI transition.
-            if let warm = LivePrewarm.shared.adopt(key: sourceURL.absoluteString,
+            if rebuildArm == nil,
+               let warm = LivePrewarm.shared.adopt(key: sourceURL.absoluteString,
                                                    channelID: channelID,
                                                    rewindSeconds: rewindSeconds) {
                 let mux = warm.remuxer
+                #if os(iOS)
+                // The warm ingest opened at the press, before the tile could
+                // plan the HEVC arm for an AirPlay route that is already up.
+                // Set now it holds when the PMT has not arrived yet; when it
+                // has, the handover rebuilds the pipeline (prepareLAN).
+                if AirPlayMonitor.shared.willServeReceiver {
+                    mux.setHEVCArm(AirPlayTileDelivery.plannedHEVCArm(channelName: channelName))
+                }
+                #endif
                 mux.onReady = { url in readyLocalURL = url }
                 mux.onError = { error in
                     debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
@@ -8837,7 +8890,10 @@ struct AVPlayerMultiviewTile: View {
             let mux = TSHLSRemuxer(sourceURL: sourceURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
             #if os(iOS)
-            if AirPlayMonitor.shared.willServeReceiver {
+            if let rebuildArm {
+                debugLog("[AVP-AIRPLAY] HEVC rebuild: fresh ingest on \(rebuildArm.label) channel=\(channelName)")
+                mux.setHEVCArm(rebuildArm)
+            } else if AirPlayMonitor.shared.willServeReceiver {
                 mux.setHEVCArm(AirPlayTileDelivery.plannedHEVCArm(channelName: channelName))
             }
             #endif
@@ -9509,6 +9565,7 @@ struct AVPlayerMultiviewTile: View {
                     stallWatchdog?.setSuspended(suspend, item: item)
                 }
                 setLANCard(on: mux)
+                airPlayDelivery.onRebuildForHEVC = { arm in rebuildForAirPlayHEVC(arm) }
                 airPlayDelivery.attach(player: avPlayer, remuxer: mux,
                                        loopbackURL: readyLocalURL, channelName: channelName)
                 airPlayDelivery.noteStartItem(playerItem)
