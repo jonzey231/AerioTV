@@ -4088,6 +4088,23 @@ func syntheticHEVCPMT() -> [UInt8] {
     expectEq(AirPlayHEVCArmSelection.next(after: .hevcTS), .h264Transcode, "hevc arm: TS rejected -> transcode")
     expectEq(AirPlayHEVCArmSelection.next(after: .h264Transcode), nil, "hevc arm: transcode rejected -> nothing left")
     expectEq(AirPlayHEVCArmSelection.next(after: .fmp4), nil, "hevc arm: fMP4 has no fallback")
+    // A session already on the fMP4 arm when a receiver is picked mid-play.
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: true, receiver: .nonApple, remembered: nil),
+             .h264Transcode, "hevc rebuild: non-Apple receiver picked mid-play -> rebuild on the H.264 transcode")
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: true, receiver: .nonApple, remembered: .h264Transcode),
+             .h264Transcode, "hevc rebuild: remembered transcode -> transcode")
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: true, receiver: .apple, remembered: nil),
+             nil, "hevc rebuild: Apple receiver plays fMP4, no rebuild")
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: true, receiver: .unknown, remembered: nil),
+             nil, "hevc rebuild: unknown model keeps today's path")
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: false, receiver: .nonApple, remembered: nil),
+             nil, "hevc rebuild: a session already on a TS arm is not rebuilt")
+    expectEq(AirPlayHEVCArmSelection.rebuildArm(sessionOnFMP4: true, receiver: .nonApple, remembered: nil, hevcTS: true),
+             .hevcTS, "hevc rebuild: opt-in, first try -> HEVC in TS")
+    expectEq(AirPlayReceiverClass.of(model: nil, isApple: false), .unknown, "receiver class: no model -> unknown")
+    expectEq(AirPlayReceiverClass.of(model: "", isApple: true), .unknown, "receiver class: empty model -> unknown")
+    expectEq(AirPlayReceiverClass.of(model: "AppleTV14,1", isApple: true), .apple, "receiver class: Apple TV")
+    expectEq(AirPlayReceiverClass.of(model: "3840R", isApple: false), .nonApple, "receiver class: Roku")
 
     // PMT retype: 0x24 -> 0x1B, CRC valid, PCR PID untouched.
     let pmt = syntheticHEVCPMT()

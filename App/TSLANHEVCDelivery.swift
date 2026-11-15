@@ -41,6 +41,12 @@ enum AirPlayReceiverClass: Sendable, Equatable {
     case nonApple
     /// No TXT model yet; treated like an Apple receiver (today's path).
     case unknown
+
+    /// The class of a resolved receiver: unknown until its TXT model is in.
+    static func of(model: String?, isApple: Bool) -> AirPlayReceiverClass {
+        guard let model, !model.isEmpty else { return .unknown }
+        return isApple ? .apple : .nonApple
+    }
 }
 
 enum AirPlayHEVCArmSelection {
@@ -75,6 +81,21 @@ enum AirPlayHEVCArmSelection {
                     ? "remembered: H.264 transcode for this receiver"
                     : "non-Apple receiver: HEVC from TS shows no picture on this class, H.264 transcode")
         }
+    }
+
+    /// The arm to rebuild an HEVC session on before a handover, or nil to
+    /// hand it over as it is. The arm is chosen at the PMT and a playlist
+    /// cannot turn from fMP4 into TS mid-stream, so a session that started
+    /// with no AirPlay route (or adopted an ingest opened before the arm was
+    /// planned) is on the fMP4 arm when a receiver is picked. A non-Apple
+    /// receiver plays muxed TS only (iPhone 2026-11-06 16:07, Roku 3840R:
+    /// init.mp4 read twice, no media segment, -11870), so that session is
+    /// rebuilt on the arm a tune opened for that receiver would take.
+    static func rebuildArm(sessionOnFMP4 onFMP4: Bool, receiver: AirPlayReceiverClass,
+                           remembered: AirPlayHEVCArm?, hevcTS optIn: Bool = hevcTSOptIn) -> AirPlayHEVCArm? {
+        guard onFMP4 else { return nil }
+        let arm = select(receiver: receiver, remembered: remembered, hevcTS: optIn).arm
+        return arm == .fmp4 ? nil : arm
     }
 
     /// The arm to fall back to after the receiver rejected `current`; nil
