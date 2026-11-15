@@ -595,6 +595,9 @@ final class AirPlayTileDelivery {
                 // pipeline comes back through prepareStart.
                 if self.onRebuildForHEVC?(arm) != true {
                     debugLog("[AVP-AIRPLAY] HEVC rebuild refused (already rebuilt for this tune); leaving the loopback item in place")
+                    // No handover: external playback back on. An accepted
+                    // rebuild releases the hold in reset().
+                    self.endExternalHold(myToken, "HEVC rebuild refused")
                 }
             }
         }
