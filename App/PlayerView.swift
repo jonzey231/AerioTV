@@ -7829,6 +7829,10 @@ struct NativeHLSPlayerScreen: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
+    /// Relay session of a direct source that needs the key (PlayerRelay).
+    @State private var relayHandle: PlayerRelay.Handle?
+    /// A Force HLS session minted for the direct path, ended on close.
+    @State private var hlsSession: HLSSessionResolver.Resolved?
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
     @State private var showRecordSheet = false
@@ -8173,7 +8177,7 @@ struct NativeHLSPlayerScreen: View {
                 if headers.isEmpty, let userAgent, !userAgent.isEmpty {
                     headers["User-Agent"] = userAgent
                 }
-                startPlayer(with: url, headers: headers)
+                openDirect(url, headers: headers)
                 DebugLogger.shared.log(
                     "[AVP-HLS] native engine playing channel id=\(item.id)\(overrideURL != nil ? " (server-side HLS)" : "")",
                     category: "Playback", level: .info
@@ -8192,6 +8196,13 @@ struct NativeHLSPlayerScreen: View {
             #endif
             player?.pause()
             player = nil
+            relayHandle = nil
+            if let session = hlsSession {
+                hlsSession = nil
+                if let token = session.token {
+                    HLSSessionResolver.endSession(session, token: token, headers: ingestHeaders)
+                }
+            }
             #if os(iOS)
             AirPlayMonitor.shared.detach()
             #endif
@@ -8583,6 +8594,39 @@ struct NativeHLSPlayerScreen: View {
         return LoadingDetailSample(connected: false, bytes: 0, connectedAt: nil)
     }
 
+    /// The direct (non-remux) open. AVPlayer sends its asset headers with
+    /// every request it makes, to every host, so a source that needs the key
+    /// never reaches it with the key: a Force HLS entry is minted once here
+    /// with the key and AVPlayer gets the token playlist, which needs none;
+    /// any other keyed source plays through the loopback relay.
+    private func openDirect(_ url: URL, headers: [String: String]) {
+        guard RedirectAuthPolicy.headersCarrySignIn(headers), HLSRelayPlaylist.isRelayable(url) else {
+            startPlayer(with: url, headers: headers)
+            return
+        }
+        if (url.query ?? "").contains("output_format=hls"), url.path.lowercased().contains("/proxy/ts/") {
+            Task { @MainActor in
+                let outcome = await HLSSessionResolver.resolve(entry: url, headers: headers)
+                guard !didFallback else { return }
+                if case .hls(let resolved) = outcome {
+                    hlsSession = resolved
+                    startPlayer(with: resolved.playlistURL, headers: RedirectAuthPolicy.withoutSignIn(headers))
+                } else {
+                    // Not an HLS session (a Redirect stream profile): mpv
+                    // takes the channel, as for any unplayable HLS.
+                    fallbackToMPV()
+                }
+            }
+            return
+        }
+        if let handle = PlayerRelay.shared.open(url, headers: headers, purpose: .live) {
+            relayHandle = handle
+            startPlayer(with: handle.url, headers: RedirectAuthPolicy.withoutSignIn(headers))
+        } else {
+            startPlayer(with: url, headers: RedirectAuthPolicy.withoutSignIn(headers))
+        }
+    }
+
     private func startPlayer(with url: URL, headers: [String: String]) {
         // Every open re-reads the key (StreamKeyGate): a replaced key goes
         // out as its successor; a key held as rejected is never sent.
@@ -8593,9 +8637,11 @@ struct NativeHLSPlayerScreen: View {
             stopForLiveNotice(.heldOpen(headers), reason: "HTTP 401 | held")
             return
         }
+        // Never the sign-in (openDirect routes keyed sources).
         var options: [String: Any] = [:]
-        if !headers.isEmpty {
-            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        let playerHeaders = RedirectAuthPolicy.withoutSignIn(headers)
+        if !playerHeaders.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = playerHeaders
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)

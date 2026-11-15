@@ -63,6 +63,39 @@ enum RedirectAuthPolicy {
         headers.filter { !isSignInHeader($0.key) }
     }
 
+    /// True when `headers` carry any sign-in header (names compared
+    /// case-insensitively).
+    static func headersCarrySignIn(_ headers: [String: String]) -> Bool {
+        headers.keys.contains { isSignInHeader($0) }
+    }
+
+    /// The headers for a stream request to Dispatcharr's VOD proxy: the key
+    /// as X-API-Key only, never Authorization. The VOD proxy copies the
+    /// Authorization header of the request that opens a session into the
+    /// session's upstream headers and sends it to the provider on every
+    /// fetch (apps/proxy/vod_proxy/multi_worker_connection_manager.py, main
+    /// 1241b3f lines 1277-1282, dev b0c785d line 1375), so `Authorization:
+    /// ApiKey <key>` handed the user's key to their IPTV provider through the
+    /// server itself. X-API-Key is read first and never forwarded
+    /// (apps/accounts/authentication.py 86-122). An ApiKey Authorization
+    /// becomes X-API-Key; a Bearer one is dropped (it is not a header the VOD
+    /// proxy reads as a key, and VOD plays without one). Any URL that is not
+    /// /proxy/vod/ is returned unchanged.
+    static func vodStreamHeaders(_ headers: [String: String], url: URL?) -> [String: String] {
+        guard let path = url?.path, path.contains("/proxy/vod/") else { return headers }
+        guard let authName = headers.keys.first(where: { $0.caseInsensitiveCompare("Authorization") == .orderedSame })
+        else { return headers }
+        var out = headers
+        let auth = out.removeValue(forKey: authName) ?? ""
+        let hasXKey = out.keys.contains { $0.caseInsensitiveCompare("X-API-Key") == .orderedSame }
+        let parts = auth.split(separator: " ", maxSplits: 1).map(String.init)
+        if !hasXKey, parts.count == 2, parts[0].caseInsensitiveCompare("ApiKey") == .orderedSame,
+           !parts[1].trimmingCharacters(in: .whitespaces).isEmpty {
+            out["X-API-Key"] = parts[1].trimmingCharacters(in: .whitespaces)
+        }
+        return out
+    }
+
     /// https to http: the hop would move the request out of TLS.
     static func isDowngrade(from: URL?, to: URL?) -> Bool {
         from?.scheme?.lowercased() == "https" && to?.scheme?.lowercased() == "http"
