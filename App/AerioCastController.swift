@@ -439,12 +439,16 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Latch the receiver type, log WHICH of the three outcomes happened, and
     /// release any held load.
     private func resolveReceiverTarget(_ target: ReceiverTarget, answered: Bool = true) {
-        // The web receiver answering hello means the AerioTV TV app is no
-        // longer what Cast Connect launches here (uninstalled, measured
-        // 2026-09-27), so the picker must stop listing it as AerioTV on TV.
-        // Ahead of the latch: the answer can land after a handshake timeout
-        // already chose the web receiver.
+        // The web receiver answering a launch that ASKED for the TV app
+        // (picked from AerioTV on TV) means Cast Connect fell back because
+        // the app is gone (uninstalled, measured 2026-09-27), so the picker
+        // must stop listing it as AerioTV on TV. A plain cast (Google Cast
+        // entry) comes up on the web receiver on purpose, even on a TV that
+        // has the app (owner rule 2026-11-14), so its answer says nothing
+        // about the app (Android 7a03952b). Ahead of the latch: the answer
+        // can land after a handshake timeout already chose the web receiver.
         if target == .webReceiver, answered,
+           CastNativeDeviceRegistry.webAnswerDemotes(launchIntent: launchPlan.next),
            let id = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device.deviceID {
             CastNativeDeviceRegistry.shared.forget(id)
         }
@@ -2971,8 +2975,15 @@ final class CastNativeDeviceRegistry: ObservableObject {
         debugLog("[Cast] device \(deviceID) recorded as AerioTV on TV")
     }
 
-    /// Only a web receiver's own answer calls this; a handshake timeout is
-    /// not evidence the TV app is gone.
+    /// A web receiver's answer demotes a device only when the launch asked
+    /// for the TV app (CastLaunchIntent.tvApp).
+    nonisolated static func webAnswerDemotes(launchIntent: CastLaunchIntent) -> Bool {
+        CastPickerRules.webAnswerDemotes(launchIntent: launchIntent)
+    }
+
+    /// Only a web receiver's own answer to an AerioTV on TV launch calls
+    /// this; a handshake timeout or a plain cast is not evidence the TV app
+    /// is gone.
     func forget(_ deviceID: String) {
         guard ids.contains(deviceID) else { return }
         ids.remove(deviceID)
@@ -5352,9 +5363,17 @@ struct CastPickerSheet: View {
                 if showGoogleCast {
                     // Devices that have run the AerioTV Android TV app via
                     // Cast Connect get their own section, so the better path
-                    // is the obvious one to pick.
+                    // is the obvious one to pick. A TV that never had a
+                    // native session is listed too when its AerioTV app is
+                    // running: the app advertises the AerioTV Remote host
+                    // under the TV's device name, which is also its Cast name
+                    // (Android 2d32f325). Without that no TV could join,
+                    // since a Google Cast pick is a plain cast.
+                    let appTVNames = Set(companion.devices.map { CastPickerRules.normalizedTVName($0.name) })
                     let nativeDevices = castDevices.devices.filter {
-                        nativeRegistry.isNative($0.deviceID)
+                        CastPickerRules.listsUnderAerioTVOnTV(castName: $0.friendlyName,
+                                                              recordedNative: nativeRegistry.isNative($0.deviceID),
+                                                              appTVNames: appTVNames)
                     }
                     if !nativeDevices.isEmpty {
                         Section {
