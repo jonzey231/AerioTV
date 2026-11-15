@@ -125,5 +125,11 @@ do {
     check(!AirPlayMidPlayHold.driverMayRetime(itemURL: nil), "no item URL: left alone")
 }
 
+// MARK: A mid-play pick re-tunes with the route up (device pass 2026-11-14 23:37:54, Roku parked)
+
+check(AirPlayMidPlayHold.rebuildsForPick(userPaused: false, audioOnlyReceiver: false), "a playing live tile re-tunes for a screen receiver")
+check(!AirPlayMidPlayHold.rebuildsForPick(userPaused: true, audioOnlyReceiver: false), "a paused tile swaps in place and stays paused")
+check(!AirPlayMidPlayHold.rebuildsForPick(userPaused: false, audioOnlyReceiver: true), "an audio-only speaker keeps the local picture")
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
