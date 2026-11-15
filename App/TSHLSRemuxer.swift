@@ -3371,7 +3371,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     /// Result of `startLANDelivery`.
     enum LANDeliveryResult: Sendable {
-        case ready(ip: String, port: UInt16)
+        /// `path` is the receiver's playlist path under this session's
+        /// token ("/<token>/live.m3u8", LANStreamToken).
+        case ready(ip: String, port: UInt16, path: String)
         /// No Wi-Fi / Ethernet IPv4 address to serve on.
         case noAddress
         /// In-process delivery, or the listener would not come up.
@@ -3384,6 +3386,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Touched only on `queue`.
     private var lanListener: NWListener?
     private var lanPort: UInt16 = 0
+    /// This LAN session's path token (LANStreamToken): set before the
+    /// listener opens, cleared when LAN delivery stops. Any device on the
+    /// network can reach the listener, so a request without the token gets
+    /// 404. Written on `queue`, read under `linkLock` from the connections.
+    private var lanToken: String?
+    private var lanTokenlessLogged = Set<String>()
     private var lanPeersLogged = Set<String>()
     private var lanUALogged = Set<String>()
     private var lanPlaylistLogged = Set<String>()
@@ -3869,13 +3877,26 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             guard let ip = CastHLSProxySession.wifiLANAddress() else { finish(.noAddress); return }
             self.linkLock.lock(); self.linkStats.localIP = ip; self.linkLock.unlock()
             if self.lanListener != nil, self.lanPort != 0 {
-                finish(.ready(ip: ip, port: self.lanPort))
+                // The listener this session already opened, under its token.
+                self.linkLock.lock()
+                let token = self.lanToken ?? LANStreamToken.make()
+                self.lanToken = token
+                self.linkLock.unlock()
+                finish(.ready(ip: ip, port: self.lanPort, path: LANStreamToken.path("live.m3u8", token: token)))
                 return
             }
+            // A new LAN session: a new token, in place before the listener opens.
+            let token = LANStreamToken.make()
+            self.linkLock.lock(); self.lanToken = token; self.linkLock.unlock()
             self.openLANListener(interfaces: [.wifi, .wiredEthernet]) { port in
                 // Runs on `queue`.
                 if port != nil { self.refreshLANHoldBack(now: Date()) }
-                if let port { finish(.ready(ip: ip, port: port)) } else { finish(.unavailable) }
+                if let port {
+                    finish(.ready(ip: ip, port: port, path: LANStreamToken.path("live.m3u8", token: token)))
+                } else {
+                    self.linkLock.lock(); if self.lanToken == token { self.lanToken = nil }; self.linkLock.unlock()
+                    finish(.unavailable)
+                }
             }
             self.queue.asyncAfter(deadline: .now() + 3) { finish(.unavailable) }
         }
@@ -3958,11 +3979,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         lanReserveReleased = false
         lanReceiverTimeBase = nil
         lanHighestRequestedSeq = -1
+        lanTokenlessLogged.removeAll()
         linkLock.lock()
         linkStats.peer = nil
         linkStats.peerRequests = [:]
         linkStats.localIP = nil
         linkStats.receiverHighestSeq = -1
+        lanToken = nil
         linkLock.unlock()
         listener.cancel()
         // Accepted keep-alive connections outlive their listener: close
@@ -4295,7 +4318,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 : connTokens.contains("keep-alive")
 
             if served == 0 && logLAN {
-                var text = lines.joined(separator: " | ")
+                var text = LANStreamToken.redacted(lines.joined(separator: " | "))
                 if text.count > 600 { text = String(text.prefix(600)) }
                 debugLog("[TS-REMUX] LAN request head from \(tag): \(text)")
             }
@@ -4458,7 +4481,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             }
             let r: ServedResource
             if path.hasSuffix("live.m3u8") {
-                let text = self.playlistText(lan: lan)
+                var text = self.playlistText(lan: lan)
+                // The LAN copy lists every URI under this session's token.
+                if lan, let token = self.currentLANToken() { text = LANStreamToken.tokenize(playlist: text, token: token) }
                 if !lan { self.noteLocalPlaylist(text) }
                 if !lan, self.audioOnly { self.audioOnlyDumper?.playlist(text) }
                 r = ServedResource(status: 200, body: Data(text.utf8),
@@ -4546,15 +4571,42 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    /// This LAN session's token, or nil while LAN delivery is off.
+    private func currentLANToken() -> String? {
+        linkLock.lock(); defer { linkLock.unlock() }
+        return lanToken
+    }
+
     /// Serves `path` and records the LAN diagnostics; the HTTP connection
-    /// writes the response.
-    fileprivate func resolve(path: String, lan: Bool, peer: String?,
+    /// writes the response. A LAN request must carry the session token.
+    fileprivate func resolve(path requestPath: String, lan: Bool, peer: String?,
                              completion: @escaping @Sendable (ServedResource) -> Void) {
+        var path = requestPath
+        if lan {
+            // LAN delivery ended (no token): 410, as serve() answers it.
+            guard let token = currentLANToken() else {
+                completion(ServedResource(status: 410, body: Data(), contentType: "text/plain", uti: "public.plain-text"))
+                return
+            }
+            // Only the URL this session handed out reaches the stream.
+            guard let inner = LANStreamToken.strip(requestPath, token: token) else {
+                if let peer {
+                    queue.async { [weak self] in
+                        guard let self, self.lanTokenlessLogged.insert(peer).inserted else { return }
+                        debugLog("[TS-REMUX] LAN request without the session token from \(peer): 404")
+                    }
+                }
+                completion(ServedResource(status: 404, body: Data("not found".utf8), contentType: "text/plain",
+                                          uti: "public.plain-text"))
+                return
+            }
+            path = inner
+        }
         serve(path: path, lan: lan) { [weak self] r in
             defer { completion(r) }
             if lan { self?.noteLANServed(bytes: r.body.count, peer: peer, path: path, status: r.status) }
             if lan, let self, let peer, r.status == 200, path.hasSuffix("live.m3u8") {
-                let text = String(decoding: r.body, as: UTF8.self)
+                let text = LANStreamToken.redacted(String(decoding: r.body, as: UTF8.self))
                     .trimmingCharacters(in: .newlines)
                     .replacingOccurrences(of: "\n", with: " | ")
                 let raw = String(decoding: r.body, as: UTF8.self)

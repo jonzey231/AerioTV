@@ -11,7 +11,7 @@ import Foundation
 /// In AirPlay video mode AVPlayer hands the item's URL to the receiver, so
 /// the loopback URL the tile normally plays is unreachable from the TV.
 /// While a receiver is served this swaps the item for the remuxer's LAN
-/// URL, `/live.m3u8`, whatever the receiver (2026-09-26: a Roku plays the
+/// URL, `/<token>/live.m3u8`, whatever the receiver (2026-09-26: a Roku plays the
 /// muxed TS playlist but rejects any demuxed fMP4 master). Only the audio
 /// inside the LAN TS segments depends on the receiver: the source audio
 /// (passthrough, Apple receivers) or AAC-LC stereo muxed into the same
@@ -80,7 +80,8 @@ final class AirPlayTileDelivery {
     /// The resolved receiver for this session (nil until resolved).
     private var receiver: AirPlayReceiver?
     private var lanEndpoint: (ip: String, port: UInt16)?
-    /// The receiver's `/live.m3u8` (set with `lanEndpoint`).
+    /// The receiver's `/<token>/live.m3u8` (set with `lanEndpoint`; the
+    /// token is the LAN session's, LANStreamToken).
     private var lanURL: URL?
     private var keepaliveHeld = false
     private var externalObservation: NSKeyValueObservation?
@@ -699,7 +700,7 @@ final class AirPlayTileDelivery {
            let url = (item.asset as? AVURLAsset)?.url {
             lanReloadUsed = true
             remuxer?.resetLANReceiverTimeBase()
-            debugLog("[AVP-AIRPLAY] LAN item failed (\(reason)): reloading once on the same LAN URL \(url.absoluteString)")
+            debugLog("[AVP-AIRPLAY] LAN item failed (\(reason)): reloading once on the same LAN URL \(LANStreamToken.redacted(url.absoluteString))")
             let fresh = makeLANItem(url: url, copying: item)
             player.replaceCurrentItem(with: fresh)
             observeLANItem(fresh)
@@ -780,7 +781,7 @@ final class AirPlayTileDelivery {
         }
         guard token == myToken else { return .unavailable }
         switch lan {
-        case .ready(let ip, let port):
+        case .ready(let ip, let port, let path):
             lanEndpoint = (ip, port)
             await waitForPublishedSegments(remuxer: remuxer, timeout: readyTimeout, token: myToken)
             guard token == myToken else { return .unavailable }
@@ -818,7 +819,8 @@ final class AirPlayTileDelivery {
                     hevcArm = .hevcTS
                 }
             }
-            guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else { return .unavailable }
+            // The path carries this LAN session's token (LANStreamToken).
+            guard let url = URL(string: "http://\(ip):\(port)\(path)") else { return .unavailable }
             lanURL = url
             return .ready(url)
         case .noAddress:
@@ -1585,7 +1587,7 @@ final class AirPlayTileDelivery {
         lastEmptyReissueAt = now
         let item = AVPlayerItem(url: url)
         item.automaticallyPreservesTimeOffsetFromLive = true
-        debugLog("[AVP-AIRPLAY] player has no item (\(AirPlayMonitor.playerStatusText(player))) during \(why); reissuing the LAN item \(url.absoluteString)")
+        debugLog("[AVP-AIRPLAY] player has no item (\(AirPlayMonitor.playerStatusText(player))) during \(why); reissuing the LAN item \(LANStreamToken.redacted(url.absoluteString))")
         player.replaceCurrentItem(with: item)
         observeLANItem(item)
         player.play()
