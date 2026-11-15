@@ -35,6 +35,8 @@
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
 		A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */; };
 		A1R9RG000000000000000B01 /* ResumeGatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */; };
+		A1RCLI00000000000000B001 /* CastLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RCLI00000000000000F001 /* CastLaunchIntent.swift */; };
+		A1RCLI00000000000000B002 /* CastLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RCLI00000000000000F001 /* CastLaunchIntent.swift */; };
 		A1RDP0000000000000000B01 /* RewindDiskPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */; };
 		A1R97E4D2C14EFFBDA110A4D /* TSLANAudioRewriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */; };
 		A1RHEVC00000000000000002 /* TSLANHEVCDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */; };
@@ -477,6 +479,7 @@
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
 		A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOnlySampleClock.swift; sourceTree = "<group>"; };
 		A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeGatePolicy.swift; sourceTree = "<group>"; };
+		A1RCLI00000000000000F001 /* CastLaunchIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastLaunchIntent.swift; sourceTree = "<group>"; };
 		A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RewindDiskPolicy.swift; sourceTree = "<group>"; };
 		A1R8ABB50566B8495C3C8231 /* TSLANAudioRewriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANAudioRewriter.swift; sourceTree = "<group>"; };
 		A1RHEVC00000000000000001 /* TSLANHEVCDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSLANHEVCDelivery.swift; sourceTree = "<group>"; };
@@ -1226,6 +1229,7 @@
 				WHATSNEW00000000000ACE000 /* WhatsNew.swift */,
 				8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */,
 				75154966450E03A3443CF312 /* AerioCastController.swift */,
+				A1RCLI00000000000000F001 /* CastLaunchIntent.swift */,
 				A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */,
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
 				A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */,
@@ -1759,6 +1763,7 @@
 				B4874C9D2075467ED09F0552 /* SwitchStreamView.swift in Sources */,
 				FB91CFB478081EFA02CBC818 /* HeadlessPlaybackController.swift in Sources */,
 				44F7FF2C4A005239299CEFBB /* AerioCastController.swift in Sources */,
+				A1RCLI00000000000000B002 /* CastLaunchIntent.swift in Sources */,
 				5EA8DF9CD7FB79463D8B4264 /* RemoteControlMap.swift in Sources */,
 				DC1BFBCAE3EEC76BDFD08C51 /* RemoteControlStore.swift in Sources */,
 				5C8D82B12B1996C98C0B301B /* RemoteControlHints.swift in Sources */,
@@ -1963,6 +1968,7 @@
 				7A11FAB6D3BD7B764BF99C59 /* SwitchStreamView.swift in Sources */,
 				1AA3C3EA66B1387B7A4D6DD4 /* HeadlessPlaybackController.swift in Sources */,
 				5291397500EE0C386FEAEDA5 /* AerioCastController.swift in Sources */,
+				A1RCLI00000000000000B001 /* CastLaunchIntent.swift in Sources */,
 				E915CEF210B6996327E6A4B7 /* RemoteControlMap.swift in Sources */,
 				E242B7EE7D858C8653991D1D /* RemoteControlStore.swift in Sources */,
 				F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */,
