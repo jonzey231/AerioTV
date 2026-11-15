@@ -101,6 +101,10 @@ final class AirPlayTileDelivery {
     /// Tile hook: the user paused this tile (PlayerProgressStore.userPaused).
     /// A mid-play handover resumes the player after its swap unless so.
     var isUserPaused: (() -> Bool)?
+    /// Tile hook: rebuild the pipeline so the receiver gets the fresh-tune
+    /// handover (route already up). Returns false when the tile will not
+    /// (VOD, recordings, catch-up, already rebuilt this tune).
+    var onRebuildForReceiver: (() -> Bool)?
 
     /// Tile hook: rebuild the pipeline with the HEVC delivery `arm` set
     /// before the PMT (the tune-time path for a non-Apple receiver).
@@ -512,12 +516,49 @@ final class AirPlayTileDelivery {
 
     // MARK: Mid-play handoff
 
-    private func beginMidPlay() {
+    private func beginMidPlay(allowRebuild: Bool = true) {
         guard state == .idle, let remuxer, let player, player.currentItem != nil,
               Self.routeHasAirPlay() else { return }
         debugLog("[AVP-AIRPLAY] item audio codec=\(remuxer.sourceAudioCodec) channel=\(channelName)")
         if remuxer.inProcessDelivery {
             debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
+            return
+        }
+        // A live tile re-tunes with the route up instead of swapping the
+        // item on its playing player (device pass 2026-11-14: a quick pick
+        // left the Roku parked on its first playlist fetch, while every
+        // fresh tune with the route up played). The receiver is resolved
+        // first: an audio-only speaker keeps the local picture as before.
+        if allowRebuild, onRebuildForReceiver != nil {
+            state = .preparing
+            let myToken = UUID()
+            token = myToken
+            holdExternal(player, token: myToken)
+            Task { @MainActor in
+                let receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
+                guard self.token == myToken else {
+                    self.endExternalHold(myToken, "handover superseded")
+                    return
+                }
+                self.state = .idle
+                guard AirPlayMidPlayHold.rebuildsForPick(userPaused: self.isUserPaused?() ?? false,
+                                                         audioOnlyReceiver: receiver.isAudioOnly) else {
+                    debugLog("[AVP-AIRPLAY] mid-play pick: \(receiver.isAudioOnly ? "audio-only receiver" : "the user paused"); no re-tune")
+                    self.endExternalHold(myToken, receiver.isAudioOnly ? "audio-only receiver" : "user paused, swapping in place")
+                    if !receiver.isAudioOnly { self.beginMidPlay(allowRebuild: false) }
+                    return
+                }
+                // The old player goes with the pipeline: drop the hold
+                // without turning its external playback back on, so its
+                // loopback item never reaches the receiver.
+                self.dropExternalHold(myToken)
+                if self.onRebuildForReceiver?() == true {
+                    debugLog("[AVP-AIRPLAY] mid-play pick: re-tuning \(self.channelName) with the route up (fresh-tune handover to \(receiver.name))")
+                    return
+                }
+                debugLog("[AVP-AIRPLAY] mid-play pick: the tile cannot re-tune; swapping the item in place")
+                self.beginMidPlay(allowRebuild: false)
+            }
             return
         }
         state = .preparing
@@ -670,6 +711,14 @@ final class AirPlayTileDelivery {
     private func endExternalHold(_ myToken: UUID, _ why: String) {
         guard midPlayHold.end(myToken) else { return }
         releaseHeldPlayer(why)
+    }
+
+    /// Ends this handover's hold and leaves external playback off: the
+    /// player is about to be torn down with its pipeline.
+    private func dropExternalHold(_ myToken: UUID) {
+        guard midPlayHold.end(myToken) else { return }
+        if let p = heldPlayer { Self.externalHeldPlayers.remove(p) }
+        heldPlayer = nil
     }
 
     private func releaseHeldPlayer(_ why: String) {

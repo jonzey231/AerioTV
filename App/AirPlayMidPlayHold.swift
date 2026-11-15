@@ -40,6 +40,14 @@ struct AirPlayMidPlayHold: Equatable, Sendable {
         return holder != nil
     }
 
+    /// A mid-play pick re-tunes the live tile with the route up (the
+    /// fresh-tune handover) unless the user paused it (the in-place swap
+    /// keeps the pause) or the receiver is an audio-only speaker (no
+    /// picture to hand over; the local player keeps it).
+    static func rebuildsForPick(userPaused: Bool, audioOnlyReceiver: Bool) -> Bool {
+        !userPaused && !audioOnlyReceiver
+    }
+
     /// After the swap to the LAN item: play unless the user paused.
     static func resumesAfterSwap(userPaused: Bool) -> Bool { !userPaused }
 
