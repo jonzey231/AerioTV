@@ -5240,6 +5240,8 @@ struct CastPickerSheet: View {
     @ObservedObject private var nativeRegistry = CastNativeDeviceRegistry.shared
     @Environment(\.dismiss) private var dismiss
     @State private var code = ""
+    /// The section of the Cast row tapped last (a device can have two rows).
+    @State private var tappedSection: CastPickerSection?
 
     /// One Cast row, used by both the "AerioTV on TV" and "Google Cast"
     /// sections so their behavior stays identical. The section decides the
@@ -5248,9 +5250,12 @@ struct CastPickerSheet: View {
     /// that has the app.
     @ViewBuilder
     private func castDeviceRow(_ device: GCKDevice, section: CastPickerSection) -> some View {
+        // A TV with the app has a row in each section: only the tapped one spins.
         let connecting = castController.connectingDeviceID == device.deviceID
+            && (tappedSection == nil || tappedSection == section)
         let otherConnecting = castController.connectingDeviceID != nil && !connecting
         Button {
+            tappedSection = section
             if !companion.isControlling { companion.disconnect() }
             // Session start AND the channel to load live in one place now
             // (guide pill parity with the in-player chrome).
@@ -5270,6 +5275,7 @@ struct CastPickerSheet: View {
         // settles.
         .disabled(otherConnecting)
         .opacity(otherConnecting ? 0.4 : 1)
+        .accessibilityIdentifier("cast.row.\(section == .aerioTVOnTV ? "app" : "web").\(device.friendlyName ?? device.deviceID)")
     }
 
     var body: some View {
@@ -5350,8 +5356,11 @@ struct CastPickerSheet: View {
                             Text("Searching for devices…")
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(castDevices.devices.filter { !nativeRegistry.isNative($0.deviceID) },
-                                id: \.deviceID) { device in
+                        // Every Cast device, including one listed above: a
+                        // plain cast must never need the TV app (owner rule
+                        // 2026-11-14), so a TV with the app has two rows, each
+                        // with its own launch intent.
+                        ForEach(castDevices.devices, id: \.deviceID) { device in
                             castDeviceRow(device, section: .googleCast)
                         }
                         if let error = castController.connectError {
