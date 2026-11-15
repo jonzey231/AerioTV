@@ -113,5 +113,17 @@ do {
     check(!AirPlayMidPlayHold.routeMayReenable(held: true), "the monitor leaves a held player alone")
 }
 
+// MARK: The live driver never re-times the LAN item (device pass 2026-11-14 22:51:16.612)
+
+do {
+    let loopback = URL(string: "http://127.0.0.1:61988/live.m3u8")
+    let lan = URL(string: "http://192.168.50.242:61989/0123abcd/live.m3u8")
+    check(AirPlayMidPlayHold.driverMayRetime(itemURL: loopback), "the remuxer's loopback item may get the first-30 s join offset")
+    check(AirPlayMidPlayHold.driverMayRetime(itemURL: URL(string: "http://localhost:8080/live.m3u8")), "localhost is loopback")
+    check(!AirPlayMidPlayHold.driverMayRetime(itemURL: lan), "the LAN item swapped in mid-play carries no configured offset")
+    check(!AirPlayMidPlayHold.driverMayRetime(itemURL: URL(string: "http://10.0.0.5:5000/live.m3u8")), "any LAN address is left alone")
+    check(!AirPlayMidPlayHold.driverMayRetime(itemURL: nil), "no item URL: left alone")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

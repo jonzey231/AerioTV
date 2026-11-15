@@ -45,4 +45,21 @@ struct AirPlayMidPlayHold: Equatable, Sendable {
 
     /// AirPlayMonitor's route-driven re-enable stays away from a held player.
     static func routeMayReenable(held: Bool) -> Bool { !held }
+
+    /// The live driver may re-time an item (write
+    /// configuredTimeOffsetFromLive) only when it is the remuxer's loopback
+    /// item. An AirPlay LAN item must carry no configured offset: the
+    /// receiver starts at the playlist's default point and the LAN
+    /// publication delay sets its distance from the edge. The fresh-tune
+    /// path never wires the driver for a LAN item, but a mid-play swap puts
+    /// one under a driver wired for the loopback item, and inside the
+    /// tune's first 30 s the driver raised its join offset (device pass
+    /// 2026-11-14 22:51:16.612, "join offset raised to 8.3s" 2 ms after the
+    /// swap); the Roku then read the playlist once and AirPlay ended.
+    /// Every quick pick that waited for segments failed this way, every
+    /// pick after 30 s worked.
+    static func driverMayRetime(itemURL: URL?) -> Bool {
+        guard let host = itemURL?.host?.lowercased() else { return false }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
 }
