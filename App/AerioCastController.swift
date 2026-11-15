@@ -439,12 +439,16 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Latch the receiver type, log WHICH of the three outcomes happened, and
     /// release any held load.
     private func resolveReceiverTarget(_ target: ReceiverTarget, answered: Bool = true) {
-        // The web receiver answering hello means the AerioTV TV app is no
-        // longer what Cast Connect launches here (uninstalled, measured
-        // 2026-09-27), so the picker must stop listing it as AerioTV on TV.
-        // Ahead of the latch: the answer can land after a handshake timeout
-        // already chose the web receiver.
+        // The web receiver answering a launch that ASKED for the TV app
+        // (picked from AerioTV on TV) means Cast Connect fell back because
+        // the app is gone (uninstalled, measured 2026-09-27), so the picker
+        // must stop listing it as AerioTV on TV. A plain cast (Google Cast
+        // entry) comes up on the web receiver on purpose, even on a TV that
+        // has the app (owner rule 2026-11-14), so its answer says nothing
+        // about the app (Android 7a03952b). Ahead of the latch: the answer
+        // can land after a handshake timeout already chose the web receiver.
         if target == .webReceiver, answered,
+           CastNativeDeviceRegistry.webAnswerDemotes(launchIntent: launchPlan.next),
            let id = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device.deviceID {
             CastNativeDeviceRegistry.shared.forget(id)
         }
@@ -2971,8 +2975,15 @@ final class CastNativeDeviceRegistry: ObservableObject {
         debugLog("[Cast] device \(deviceID) recorded as AerioTV on TV")
     }
 
-    /// Only a web receiver's own answer calls this; a handshake timeout is
-    /// not evidence the TV app is gone.
+    /// A web receiver's answer demotes a device only when the launch asked
+    /// for the TV app (CastLaunchIntent.tvApp).
+    nonisolated static func webAnswerDemotes(launchIntent: CastLaunchIntent) -> Bool {
+        CastPickerRules.webAnswerDemotes(launchIntent: launchIntent)
+    }
+
+    /// Only a web receiver's own answer to an AerioTV on TV launch calls
+    /// this; a handshake timeout or a plain cast is not evidence the TV app
+    /// is gone.
     func forget(_ deviceID: String) {
         guard ids.contains(deviceID) else { return }
         ids.remove(deviceID)

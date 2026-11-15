@@ -99,3 +99,12 @@ struct CastLaunchPlan: Equatable, Sendable {
         pendingSwitch = nil
     }
 }
+
+/// Picker and registry rules shared with the Android sender.
+enum CastPickerRules {
+    /// A web receiver's hello answer drops a TV from "AerioTV on TV" only
+    /// when the launch asked for the TV app: then Cast Connect fell back
+    /// because the app is gone. A plain cast is meant to reach the web
+    /// receiver (Android 7a03952b).
+    static func webAnswerDemotes(launchIntent: CastLaunchIntent) -> Bool { launchIntent == .tvApp }
+}

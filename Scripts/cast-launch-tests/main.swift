@@ -114,5 +114,10 @@ do {
     eq(CastLaunchPlan(stored: "").next, .webReceiver, "an empty stored value is a plain cast")
 }
 
+// MARK: A plain cast never drops a TV from AerioTV on TV (Android 7a03952b)
+
+check(CastPickerRules.webAnswerDemotes(launchIntent: .tvApp), "a web answer to an AerioTV on TV launch: the TV app is gone")
+check(!CastPickerRules.webAnswerDemotes(launchIntent: .webReceiver), "a web answer to a plain cast says nothing about the app")
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
