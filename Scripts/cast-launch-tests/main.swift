@@ -119,5 +119,22 @@ do {
 check(CastPickerRules.webAnswerDemotes(launchIntent: .tvApp), "a web answer to an AerioTV on TV launch: the TV app is gone")
 check(!CastPickerRules.webAnswerDemotes(launchIntent: .webReceiver), "a web answer to a plain cast says nothing about the app")
 
+// MARK: A TV running AerioTV is listed under AerioTV on TV by name (Android 2d32f325)
+
+do {
+    let remote = Set(["Living Room Google TV (2)", "Guest Room Google TV", "Living Room Apple TV"].map(CastPickerRules.normalizedTVName))
+    check(CastPickerRules.listsUnderAerioTVOnTV(castName: "Living Room Google TV", recordedNative: false, appTVNames: remote),
+          "the AerioTV Remote name (with NSD's (2) suffix) matches the Cast name")
+    check(CastPickerRules.listsUnderAerioTVOnTV(castName: " guest room google tv ", recordedNative: false, appTVNames: remote),
+          "case and spaces do not matter")
+    check(!CastPickerRules.listsUnderAerioTVOnTV(castName: "Upstairs", recordedNative: false, appTVNames: remote),
+          "a speaker with no AerioTV app is not listed")
+    check(CastPickerRules.listsUnderAerioTVOnTV(castName: "Upstairs", recordedNative: true, appTVNames: []),
+          "a TV recorded by a native session stays listed")
+    check(!CastPickerRules.listsUnderAerioTVOnTV(castName: nil, recordedNative: false, appTVNames: remote), "no name, no match")
+    eq(CastPickerRules.normalizedTVName("Living Room Google TV (12)"), "living room google tv", "NSD suffix removed")
+    eq(CastPickerRules.normalizedTVName("TV (Basement)"), "tv (basement)", "only a numeric suffix is NSD's")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

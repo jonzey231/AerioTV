@@ -107,4 +107,25 @@ enum CastPickerRules {
     /// because the app is gone. A plain cast is meant to reach the web
     /// receiver (Android 7a03952b).
     static func webAnswerDemotes(launchIntent: CastLaunchIntent) -> Bool { launchIntent == .tvApp }
+
+    /// A Cast device is listed under "AerioTV on TV" when it ran a native
+    /// session (the registry) or when its name matches a TV that advertises
+    /// the AerioTV Remote host: the AerioTV TV app advertises it under the
+    /// TV's device name, which is also its Cast name (Android 2d32f325).
+    /// Without the name match no TV could ever join the section, since a
+    /// Google Cast pick is a plain cast. A wrong match only costs Cast
+    /// Connect's own fallback to the web receiver.
+    static func listsUnderAerioTVOnTV(castName: String?, recordedNative: Bool, appTVNames: Set<String>) -> Bool {
+        if recordedNative { return true }
+        guard let castName else { return false }
+        return appTVNames.contains(normalizedTVName(castName))
+    }
+
+    /// Lowercased and trimmed, without the " (n)" suffix NSD adds when it
+    /// renames a service on a conflict.
+    static func normalizedTVName(_ name: String) -> String {
+        var s = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = s.range(of: #"\s\(\d+\)$"#, options: .regularExpression) { s.removeSubrange(r) }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 }

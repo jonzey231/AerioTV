@@ -5363,9 +5363,17 @@ struct CastPickerSheet: View {
                 if showGoogleCast {
                     // Devices that have run the AerioTV Android TV app via
                     // Cast Connect get their own section, so the better path
-                    // is the obvious one to pick.
+                    // is the obvious one to pick. A TV that never had a
+                    // native session is listed too when its AerioTV app is
+                    // running: the app advertises the AerioTV Remote host
+                    // under the TV's device name, which is also its Cast name
+                    // (Android 2d32f325). Without that no TV could join,
+                    // since a Google Cast pick is a plain cast.
+                    let appTVNames = Set(companion.devices.map { CastPickerRules.normalizedTVName($0.name) })
                     let nativeDevices = castDevices.devices.filter {
-                        nativeRegistry.isNative($0.deviceID)
+                        CastPickerRules.listsUnderAerioTVOnTV(castName: $0.friendlyName,
+                                                              recordedNative: nativeRegistry.isNative($0.deviceID),
+                                                              appTVNames: appTVNames)
                     }
                     if !nativeDevices.isEmpty {
                         Section {
