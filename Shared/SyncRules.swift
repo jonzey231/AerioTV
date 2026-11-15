@@ -767,6 +767,24 @@ enum KVSSecretRule {
     }
 }
 
+/// The one-time launch copy of this device's sign-ins (local Keychain) into
+/// iCloud Keychain. It runs only with iCloud Sync and Credentials both on,
+/// and once per device: the flag is set whether or not it copied. Delete
+/// from iCloud > Credentials and Clear iCloud Data leave the flag set, so a
+/// relaunch never undoes the clear. After a clear (or with Credentials
+/// turned on later), a sign-in goes back to iCloud Keychain only when a
+/// device saves one with Credentials on (SyncManager.saveCredentialsSynced),
+/// which is all turning the Credentials toggle on has ever done.
+enum CredentialLaunchCopyRule {
+    static let flagKey = "kvsToKeychainMigrationDoneV1"
+    /// What a clear writes to the flag: done.
+    static let flagAfterClear = true
+
+    static func shouldCopy(done: Bool, syncOn: Bool, credentialsOn: Bool) -> Bool {
+        !done && syncOn && credentialsOn
+    }
+}
+
 /// Delete from iCloud for a lane (a Sync Category, or Clear iCloud Data)
 /// removes that lane's rows on every device's view of iCloud. A device that
 /// remembers what it saw there (the base LaneMerge uses) would read every

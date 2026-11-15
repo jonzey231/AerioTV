@@ -608,12 +608,9 @@ final class SyncManager: ObservableObject {
     ///   • iCloud Keychain entries: `password_<id>` and
     ///     `apiKey_<id>` (both `synchronizable: true`) for every
     ///     local server. Local-only Keychain copies are not touched.
-    ///   • Launch-task gating flags
-    ///     (`kvsToKeychainMigrationDoneV1`,
-    ///     `kvsCredentialPurgeDoneV1`). Resetting them lets a
-    ///     subsequent re-enable of Sync trigger a clean migration
-    ///     from local Keychain → iCloud Keychain on this device,
-    ///     replicating what a brand-new install would do.
+    ///   • The launch copy of sign-ins into iCloud Keychain stays done
+    ///     (`kvsToKeychainMigrationDoneV1` set), so a relaunch never
+    ///     re-uploads what was just cleared (CredentialLaunchCopyRule).
     ///
     /// Pending debounced pushes are cancelled first so an in-flight
     /// `pushServers` debounce doesn't immediately repopulate the
@@ -680,13 +677,12 @@ final class SyncManager: ObservableObject {
             }
         }
 
-        // Reset launch-task gating so a future Sync re-enable can
-        // run the migration + purge cleanly. No-op when the flags
-        // weren't set; safe regardless.
-        UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
-        UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+        // The launch copy into iCloud Keychain stays done, so a relaunch
+        // never re-uploads the sign-ins just cleared; one goes back only
+        // when a device saves it with Credentials on (CredentialLaunchCopyRule).
+        UserDefaults.standard.set(CredentialLaunchCopyRule.flagAfterClear, forKey: CredentialLaunchCopyRule.flagKey)
 
-        debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries, reset migration flags")
+        debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries; the launch copy stays done")
     }
 
     // MARK: - Scoped Delete (v1.6.17)
@@ -800,10 +796,9 @@ final class SyncManager: ObservableObject {
                     keychainCleared += 1
                 }
             }
-            // Reset migration flags so re-enabling credential sync later
-            // can re-migrate cleanly (matches clearAllICloudData).
-            UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
-            UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+            // The launch copy into iCloud Keychain stays done (matches
+            // clearAllICloudData): a relaunch never re-uploads these.
+            UserDefaults.standard.set(CredentialLaunchCopyRule.flagAfterClear, forKey: CredentialLaunchCopyRule.flagKey)
             debugLog("🔵 SyncManager.clearCloudCategory: cleared \(keychainCleared) iCloud Keychain entries")
             // SECURITY: versions before 2026-11-14 also wrote cleartext
             // `_password`/`_apiKey` into the "syncedServers" KVS records. Remove

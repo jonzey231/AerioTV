@@ -1842,18 +1842,18 @@ struct RootView: View {
     }
 
     private func migrateCredentialsToICloudKeychainIfNeeded() {
-        let flagKey = "kvsToKeychainMigrationDoneV1"
-        if UserDefaults.standard.bool(forKey: flagKey) { return }
-        // Migration only does useful work when iCloud Sync is on,
-        // otherwise the local Keychain is the only intended store
-        // and copying to iCloud Keychain would defy the user's
-        // explicit "no iCloud" preference. The flag is still set
-        // so we don't re-walk on every launch; if the user enables
-        // iCloud Sync later, `saveCredentialsSynced` writes to both
-        // stores on every credential save and `mergeRemoteServers`
-        // fills in iCloud Keychain when remote servers arrive.
-        guard SyncManager.shared.isSyncEnabled else {
-            UserDefaults.standard.set(true, forKey: flagKey)
+        let flagKey = CredentialLaunchCopyRule.flagKey
+        let done = UserDefaults.standard.bool(forKey: flagKey)
+        // Once per device, and only with iCloud Sync AND Credentials on
+        // (CredentialLaunchCopyRule): with Credentials off, or after Delete
+        // from iCloud > Credentials or Clear iCloud Data (which leave the
+        // flag set), nothing is copied. The flag is set either way, so a
+        // sign-in reaches iCloud Keychain later only when it is saved with
+        // Credentials on (`saveCredentialsSynced`).
+        guard CredentialLaunchCopyRule.shouldCopy(done: done,
+                                                  syncOn: SyncManager.shared.isSyncEnabled,
+                                                  credentialsOn: SyncCategory.credentials.isEnabled) else {
+            if !done { UserDefaults.standard.set(true, forKey: flagKey) }
             return
         }
         var migrated = 0

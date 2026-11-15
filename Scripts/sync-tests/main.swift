@@ -456,5 +456,20 @@ do {
     check(LaneClearRule.baseStillValid(cloudToken: nil, seenToken: nil), "no clear ever: the base holds")
 }
 
+// MARK: - The launch copy into iCloud Keychain never undoes a clear (2026-11-14)
+do {
+    typealias C = CredentialLaunchCopyRule
+    check(C.shouldCopy(done: false, syncOn: true, credentialsOn: true), "first launch with Sync and Credentials on: copies once")
+    check(!C.shouldCopy(done: false, syncOn: true, credentialsOn: false), "Credentials off: never copies")
+    check(!C.shouldCopy(done: false, syncOn: false, credentialsOn: true), "iCloud Sync off: never copies")
+    // A device that copied, then cleared Credentials (or all iCloud data), relaunches.
+    var done = true
+    done = C.flagAfterClear
+    check(!C.shouldCopy(done: done, syncOn: true, credentialsOn: true), "after Delete from iCloud > Credentials a relaunch uploads nothing")
+    // Credentials turned off, cleared, then turned on again: still nothing at launch.
+    check(!C.shouldCopy(done: C.flagAfterClear, syncOn: true, credentialsOn: true), "turning Credentials back on copies nothing at launch")
+    eq(C.flagKey, "kvsToKeychainMigrationDoneV1", "the flag earlier versions set keeps its name")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
