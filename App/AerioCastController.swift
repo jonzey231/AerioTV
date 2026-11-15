@@ -96,8 +96,28 @@ final class AerioCastController: NSObject, ObservableObject {
     private var handoffContent: Content?
     func rememberHandoff() { handoffContent = castingContent }
     /// Device picked while another session was up; started when that
-    /// session reports its end.
+    /// session reports its end, with the launch intent its entry named
+    /// (held in `launchPlan`).
     private var switchTarget: GCKDevice?
+    /// Which receiver the next Cast launch is for (owner rule 2026-11-14: a
+    /// "Google Cast" pick is a plain cast, only "AerioTV on TV" launches the
+    /// TV app). Restored at startup so a session the SDK resumes keeps the
+    /// entry it was picked from.
+    private var launchPlan = CastLaunchPlan(
+        stored: UserDefaults.standard.string(forKey: AerioCastController.launchIntentKey))
+    private static let launchIntentKey = "cast.launchIntent"
+
+    /// Hand the plan's next intent to the SDK, which embeds it in every launch
+    /// request as the launch credentials, and persist it for an app restart.
+    /// An unmarked launch opens the TV app, so this runs before every launch
+    /// path: startup (resume), every pick, a session end, a failed start.
+    private func applyLaunchPlan() {
+        UserDefaults.standard.set(launchPlan.stored, forKey: Self.launchIntentKey)
+        guard GCKCastContext.isSharedInstanceInitialized() else { return }
+        GCKCastContext.sharedInstance().setLaunch(
+            GCKCredentialsData(credentials: launchPlan.next.wire))
+        debugLog("[Cast] next launch: \(launchPlan.next.logDescription)")
+    }
     /// Set by stopCasting() so a deliberate teardown is never reported as a
     /// drop, even if the SDK attaches an error to it (Android parity, dce3074).
     private var userRequestedStop = false
@@ -438,6 +458,11 @@ final class AerioCastController: NSObject, ObservableObject {
                 CastNativeDeviceRegistry.shared.markNative(id)
             }
             debugLog("[Cast] target=android-tv-app, native playback (receiver answered)")
+            if launchPlan.next == .webReceiver {
+                // Only a TV app build without the launch check accepts a
+                // launch marked as a plain cast; it plays there until it updates.
+                debugLog("[Cast] the TV app opened for a plain cast launch: its build predates the launch check")
+            }
         } else if answered {
             debugLog("[Cast] target=web-receiver (receiver answered)")
         } else {
@@ -558,12 +583,19 @@ final class AerioCastController: NSObject, ObservableObject {
         // AC-3 passthrough as in normal playback).
         // Targets without the app (legacy dongles, Nest displays) fall back to
         // the web receiver on their own and keep the local HLS proxy path.
-        // No credentials: the Android TV receiver authenticates nothing; it
-        // validates the load against its own playlist and effective base.
+        // The launch options cannot change after this call, so the picked
+        // entry rides each launch as the launch credentials instead
+        // (applyLaunchPlan, CastLaunchIntent): the TV app declines a "Google
+        // Cast" pick and the framework loads the web receiver (owner rule
+        // 2026-11-14). That marking is not a sign-in: the Android TV receiver
+        // authenticates nothing; it validates the load against its own
+        // playlist and effective base.
         let launchOptions = GCKLaunchOptions()
         launchOptions.androidReceiverCompatible = true
         options.launchOptions = launchOptions
         GCKCastContext.setSharedInstanceWith(options)
+        // Before the session manager can resume (or relaunch) a saved session.
+        applyLaunchPlan()
         GCKCastContext.sharedInstance().sessionManager.add(self)
         // The flag above only makes discovery ELIGIBLE to run without a
         // GCKUICastButton; it does not by itself put a scanner on the wire.
@@ -1039,7 +1071,11 @@ final class AerioCastController: NSObject, ObservableObject {
     /// locally (full or mini player), else the multiview audio tile, else
     /// nothing -- and "nothing" means the cover shows a channel list once the
     /// session connects, never a bare receiver.
-    func beginSession(with device: GCKDevice) {
+    ///
+    /// `intent` is the picker entry's receiver: `.tvApp` only from "AerioTV
+    /// on TV"; a "Google Cast" pick is a plain cast even on a TV that has the
+    /// app (owner rule 2026-11-14). No default, so every caller names one.
+    func beginSession(with device: GCKDevice, intent: CastLaunchIntent) {
         let name = device.friendlyName ?? device.deviceID
         // The SDK refuses startSession while another Cast session is up
         // (measured 2026-09-27 10:24: "startSession refused" when the idle
@@ -1049,11 +1085,15 @@ final class AerioCastController: NSObject, ObservableObject {
         if let current = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
            current.device.deviceID != device.deviceID {
             debugLog("[Cast] picker selected \(name) while \(current.device.friendlyName ?? "?") is connected: ending it first")
+            launchPlan.pick(intent, switching: true)
+            applyLaunchPlan()
             switchTarget = device
             if handoffContent == nil { handoffContent = castingContent }
             stopCasting()
             return
         }
+        launchPlan.pick(intent, switching: false)
+        applyLaunchPlan()
         connectError = nil
         connectingDeviceID = device.deviceID
         awaitingChannelPick = false
@@ -1065,7 +1105,7 @@ final class AerioCastController: NSObject, ObservableObject {
         // locally still wins over the handoff.
         pending = seed.flatMap { Self.castContent(for: $0) } ?? handoffContent
         castingContent = pending
-        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? handoffContent?.title ?? "none")")
+        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? handoffContent?.title ?? "none") launch=\(intent.logDescription)")
         handoffContent = nil
         let started = GCKCastContext.sharedInstance().sessionManager.startSession(with: device)
         if !started {
@@ -1074,6 +1114,8 @@ final class AerioCastController: NSObject, ObservableObject {
             connectingDeviceID = nil
             connectError = "Could not connect to \(name)"
             debugLog("[Cast] startSession refused by the SDK for \(name)")
+            launchPlan.startFailed()
+            applyLaunchPlan()
         }
     }
 
@@ -1772,6 +1814,8 @@ extension AerioCastController: GCKSessionManagerListener {
     /// leave the message on the picker row the user tapped.
     private func onSessionFailedToStart(device: String, message: String) {
         debugLog("[Cast] session failed to start \(device): \(message)")
+        launchPlan.startFailed()
+        applyLaunchPlan()
         pending = nil
         castingContent = nil
         awaitingChannelPick = false
@@ -1865,9 +1909,14 @@ extension AerioCastController: GCKSessionManagerListener {
         awaitingChannelPick = false
         connectingDeviceID = nil
         debugLog("[Cast] session ended reason=\(wasUserStop ? "user stop" : (error != nil ? "error: \(error!.localizedDescription)" : "remote end"))")
+        // The next launch is a plain cast unless a switch picked from
+        // "AerioTV on TV" is waiting (owner rule 2026-11-14).
+        let switchIntent = launchPlan.sessionEnded()
+        applyLaunchPlan()
         if let next = switchTarget {
             switchTarget = nil
-            DispatchQueue.main.async { [weak self] in self?.beginSession(with: next) }
+            let intent = switchIntent ?? .webReceiver
+            DispatchQueue.main.async { [weak self] in self?.beginSession(with: next, intent: intent) }
         }
         if involuntary {
             debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
@@ -5193,16 +5242,19 @@ struct CastPickerSheet: View {
     @State private var code = ""
 
     /// One Cast row, used by both the "AerioTV on TV" and "Google Cast"
-    /// sections so their behavior stays identical.
+    /// sections so their behavior stays identical. The section decides the
+    /// receiver (owner rule 2026-11-14): "AerioTV on TV" launches the TV app;
+    /// "Google Cast" is always a plain cast to the web receiver, even on a TV
+    /// that has the app.
     @ViewBuilder
-    private func castDeviceRow(_ device: GCKDevice) -> some View {
+    private func castDeviceRow(_ device: GCKDevice, section: CastPickerSection) -> some View {
         let connecting = castController.connectingDeviceID == device.deviceID
         let otherConnecting = castController.connectingDeviceID != nil && !connecting
         Button {
             if !companion.isControlling { companion.disconnect() }
             // Session start AND the channel to load live in one place now
             // (guide pill parity with the in-player chrome).
-            castController.beginSession(with: device)
+            castController.beginSession(with: device, intent: section.launchIntent)
         } label: {
             HStack {
                 Label(device.friendlyName ?? "Cast device", systemImage: "sparkles.tv")
@@ -5285,7 +5337,7 @@ struct CastPickerSheet: View {
                     if !nativeDevices.isEmpty {
                         Section {
                             ForEach(nativeDevices, id: \.deviceID) { device in
-                                castDeviceRow(device)
+                                castDeviceRow(device, section: .aerioTVOnTV)
                             }
                         } header: {
                             Text("AerioTV on TV")
@@ -5300,7 +5352,7 @@ struct CastPickerSheet: View {
                         }
                         ForEach(castDevices.devices.filter { !nativeRegistry.isNative($0.deviceID) },
                                 id: \.deviceID) { device in
-                            castDeviceRow(device)
+                            castDeviceRow(device, section: .googleCast)
                         }
                         if let error = castController.connectError {
                             Text(error)
