@@ -5908,8 +5908,10 @@ final class AVPlayerProgressDriver {
     private var loggedReceiverStallSkip = false
     private var externalRenderSuspended: Bool {
         #if os(iOS)
+        // A mid-play handover counts from its swap, as the fresh-tune path
+        // counts from the LAN item's start (AirPlayTileDelivery.isHandingOver).
         return AirPlayTileDelivery.isServingReceiver || AirPlayMonitor.shared.isExternal
-            || player.isExternalPlaybackActive
+            || player.isExternalPlaybackActive || AirPlayTileDelivery.isHandingOver(player)
         #else
         return false
         #endif
@@ -6688,6 +6690,10 @@ final class AVPlayerProgressDriver {
     /// `configuredTimeOffsetFromLive` on a healthy playing item is what
     /// made the player seek backward and replay content (see
     /// `logPerfSummary`).
+    #if os(iOS)
+    /// The LAN item the join-offset skip was logged for (one line per item).
+    private weak var loggedLANItemRetimeSkip: AVPlayerItem?
+    #endif
     private func maybeRaiseJoinOffset() {
         // Deliberately NOT applied mid-stream (2026-09-13): raising
         // configuredTimeOffsetFromLive makes AVPlayer refill to the new
@@ -6699,6 +6705,18 @@ final class AVPlayerProgressDriver {
         guard isLive, !externalRenderSuspended, let provider = liveTargetDuration,
               let item = player.currentItem,
               CACurrentMediaTime() - launchStart < 30 else { return }
+        #if os(iOS)
+        // Only the remuxer's loopback item: a mid-play AirPlay swap puts the
+        // LAN item under this driver, and a LAN item must carry no
+        // configured offset (AirPlayMidPlayHold.driverMayRetime).
+        guard AirPlayMidPlayHold.driverMayRetime(itemURL: (item.asset as? AVURLAsset)?.url) else {
+            if loggedLANItemRetimeSkip !== item {
+                loggedLANItemRetimeSkip = item
+                debugLog("[AVP-HOLDBACK] join offset left alone: the current item is the AirPlay LAN item (no configured offset)")
+            }
+            return
+        }
+        #endif
         let td = provider()
         guard td > 0 else { return }
         let want = min(18.0, max(3 * td, liveOffsetFloor))
