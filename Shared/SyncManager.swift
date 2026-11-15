@@ -526,6 +526,9 @@ final class SyncManager: ObservableObject {
     func syncSettingChanged(enabled: Bool) {
         debugLog("🔵 SyncManager.syncSettingChanged: enabled=\(enabled)")
         if enabled {
+            // Turned on by the user (Settings, onboarding, the providers offer):
+            // with Credentials on, this device's sign-ins go to iCloud Keychain.
+            copySignInsToICloudKeychain(.syncTurnedOn)
             isImporting = true
             startObserving()
 
@@ -1675,6 +1678,37 @@ final class SyncManager: ObservableObject {
         } else {
             KeychainHelper.migrateToSynchronizable(key: "apiKey_\(id)")
         }
+    }
+
+    /// An explicit turn-on or push (CredentialPushRule): this device's
+    /// playlists' sign-ins go into iCloud Keychain where it has none, or an
+    /// older one; never a key held as refused. Counts only in the log.
+    @discardableResult
+    func copySignInsToICloudKeychain(_ trigger: CredentialPushRule.Trigger) -> Int {
+        guard CredentialPushRule.runs(trigger, syncOn: isSyncEnabled, credentialsOn: SyncCategory.credentials.isEnabled),
+              let ctx = WatchProgressManager.modelContext,
+              let servers = try? ctx.fetch(FetchDescriptor<ServerConnection>()) else { return 0 }
+        var copied = 0, keptNewer = 0, refused = 0
+        for server in servers where !server.isGone {
+            for kind in [CredentialKind.password, CredentialKind.apiKey] {
+                let slot = "\(kind.rawValue)_\(server.id.uuidString)"
+                guard let local = KeychainHelper.load(key: slot), !local.isEmpty else { continue }
+                let rejected = kind == .apiKey && DispatcharrRequestGate.shared.isKeyRejected(local)
+                let cloud = KeychainHelper.load(key: slot, synchronizable: true)
+                if CredentialPushRule.shouldCopy(local: local, cloud: cloud,
+                                                 localChangedAt: Self.credentialChangedAt(kind, server.id),
+                                                 cloudModifiedAt: KeychainHelper.modificationDate(key: slot, synchronizable: true)?.timeIntervalSince1970,
+                                                 rejected: rejected) {
+                    if KeychainHelper.save(local, for: slot, synchronizable: true) { copied += 1 }
+                } else if rejected {
+                    refused += 1
+                } else if let cloud, !cloud.isEmpty, cloud != local {
+                    keptNewer += 1
+                }
+            }
+        }
+        debugLog("[SYNC] sign-ins to iCloud Keychain (\(trigger.rawValue)): copied \(copied), kept iCloud's newer \(keptNewer), refused keys skipped \(refused)")
+        return copied
     }
 
     // MARK: - Credential change times (2026-11-10)

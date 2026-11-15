@@ -785,6 +785,49 @@ enum CredentialLaunchCopyRule {
     }
 }
 
+/// This device's playlists' sign-ins into iCloud Keychain on an explicit
+/// user action (2026-11-14). Since the iCloud playlist records stopped
+/// carrying sign-ins (b95f57d), a sign-in saved while iCloud Sync or
+/// Credentials was off reached iCloud Keychain only when saved again. Now
+/// turning Credentials on, turning iCloud Sync on with Credentials on, and
+/// Push to iCloud or Push to both with Credentials on copy them too.
+/// Launches and automatic syncs never do (CredentialLaunchCopyRule), so a
+/// clear is never silently undone.
+enum CredentialPushRule {
+    enum Trigger: String, Sendable {
+        case credentialsTurnedOn = "Credentials turned on"
+        case syncTurnedOn = "iCloud Sync turned on"
+        case pushToICloud = "Push to iCloud"
+        case pushToBoth = "Push to both"
+        case launch = "launch"
+        case backgroundSync = "background sync"
+    }
+
+    static func runs(_ trigger: Trigger, syncOn: Bool, credentialsOn: Bool) -> Bool {
+        guard syncOn, credentialsOn else { return false }
+        switch trigger {
+        case .credentialsTurnedOn, .syncTurnedOn, .pushToICloud, .pushToBoth: return true
+        case .launch, .backgroundSync: return false
+        }
+    }
+
+    /// Whether this device's copy goes into iCloud Keychain: never empty,
+    /// never a key this device holds as refused; always where iCloud Keychain
+    /// has none; never over an equal one. Over a different one only when this
+    /// device changed its copy (SyncManager.credentialChangedAt, seconds)
+    /// after iCloud Keychain's item was last modified (the Keychain's own
+    /// modification date); an unknown local change time keeps iCloud's.
+    static func shouldCopy(local: String, cloud: String?, localChangedAt: TimeInterval,
+                           cloudModifiedAt: TimeInterval?, rejected: Bool) -> Bool {
+        let l = local.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !l.isEmpty, !rejected else { return false }
+        guard let c = cloud?.trimmingCharacters(in: .whitespacesAndNewlines), !c.isEmpty else { return true }
+        guard c != l else { return false }
+        guard localChangedAt > 0, let m = cloudModifiedAt else { return false }
+        return localChangedAt > m
+    }
+}
+
 /// Delete from iCloud for a lane (a Sync Category, or Clear iCloud Data)
 /// removes that lane's rows on every device's view of iCloud. A device that
 /// remembers what it saw there (the base LaneMerge uses) would read every

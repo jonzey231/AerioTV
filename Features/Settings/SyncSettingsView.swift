@@ -217,6 +217,8 @@ struct SyncSettingsView: View {
 
     private func runPushToBoth() {
         guard !manualRunning else { return }
+        // With iCloud Sync and Credentials on, this device's sign-ins go to iCloud Keychain too.
+        SyncManager.shared.copySignInsToICloudKeychain(.pushToBoth)
         bothPushStatus = .running
         Task { @MainActor in
             let ok = await DispatcharrSyncManager.shared.manualPushToBoth {
@@ -338,6 +340,8 @@ struct SyncSettingsView: View {
         .alert("Push to iCloud?", isPresented: $showPushConfirm) {
             Button("Push") {
                 debugLog("🔵 Push to iCloud confirmed")
+                // With Credentials on, this device's sign-ins go to iCloud Keychain too.
+                SyncManager.shared.copySignInsToICloudKeychain(.pushToICloud)
                 pushEverything()
             }
             Button("Cancel", role: .cancel) {}

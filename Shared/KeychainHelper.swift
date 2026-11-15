@@ -83,6 +83,25 @@ enum KeychainHelper {
         return value
     }
 
+    /// The Keychain's own modification date for `key`'s entry, or nil when
+    /// there is none. The value is never read.
+    static func modificationDate(key: String, synchronizable: Bool = false) -> Date? {
+        var query: [CFString: Any] = [
+            kSecClass:            kSecClassGenericPassword,
+            kSecAttrService:      service,
+            kSecAttrAccount:      key,
+            kSecReturnAttributes: true,
+            kSecMatchLimit:       kSecMatchLimitOne
+        ]
+        if synchronizable {
+            query[kSecAttrSynchronizable] = true
+        }
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let attributes = result as? [String: Any] else { return nil }
+        return attributes[kSecAttrModificationDate as String] as? Date
+    }
+
     // MARK: - Delete
 
     /// Deletes the entry for `key`. No-op if it does not exist.

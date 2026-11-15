@@ -471,5 +471,37 @@ do {
     eq(C.flagKey, "kvsToKeychainMigrationDoneV1", "the flag earlier versions set keeps its name")
 }
 
+// MARK: - Sign-ins to iCloud Keychain on an explicit turn-on or push (2026-11-14)
+do {
+    typealias P = CredentialPushRule
+    for t in [P.Trigger.credentialsTurnedOn, .syncTurnedOn, .pushToICloud, .pushToBoth] {
+        check(P.runs(t, syncOn: true, credentialsOn: true), "\(t.rawValue) copies sign-ins with Credentials on")
+        check(!P.runs(t, syncOn: true, credentialsOn: false), "\(t.rawValue) copies nothing with Credentials off")
+        check(!P.runs(t, syncOn: false, credentialsOn: true), "\(t.rawValue) copies nothing with iCloud Sync off")
+    }
+    check(!P.runs(.launch, syncOn: true, credentialsOn: true), "a launch never copies (a clear is never undone)")
+    check(!P.runs(.backgroundSync, syncOn: true, credentialsOn: true), "an automatic sync never copies")
+
+    check(P.shouldCopy(local: "k1", cloud: nil, localChangedAt: 0, cloudModifiedAt: nil, rejected: false),
+          "iCloud Keychain has none: copied (a sign-in saved while sync was off)")
+    check(!P.shouldCopy(local: "k1", cloud: "k1", localChangedAt: 500, cloudModifiedAt: 100, rejected: false), "equal: nothing written")
+    check(!P.shouldCopy(local: "bad", cloud: nil, localChangedAt: 500, cloudModifiedAt: nil, rejected: true),
+          "a key this device holds as refused is never copied")
+    check(P.shouldCopy(local: "new", cloud: "old", localChangedAt: 500, cloudModifiedAt: 100, rejected: false),
+          "this device changed it after iCloud's item: copied")
+    check(!P.shouldCopy(local: "old", cloud: "new", localChangedAt: 100, cloudModifiedAt: 500, rejected: false),
+          "iCloud Keychain's item is newer: kept")
+    check(!P.shouldCopy(local: "mine", cloud: "theirs", localChangedAt: 0, cloudModifiedAt: 500, rejected: false),
+          "this device's change time unknown: iCloud's kept")
+    check(!P.shouldCopy(local: "mine", cloud: "theirs", localChangedAt: 500, cloudModifiedAt: nil, rejected: false),
+          "iCloud's modification date unreadable: iCloud's kept")
+    check(!P.shouldCopy(local: " ", cloud: nil, localChangedAt: 0, cloudModifiedAt: nil, rejected: false), "an empty sign-in is never copied")
+    // After Delete from iCloud > Credentials: the relaunch copies nothing (01710a6); turning
+    // Credentials back on, or Push to iCloud, brings them back.
+    check(!CredentialLaunchCopyRule.shouldCopy(done: CredentialLaunchCopyRule.flagAfterClear, syncOn: true, credentialsOn: true)
+          && P.runs(.credentialsTurnedOn, syncOn: true, credentialsOn: true),
+          "after a clear: not at launch, only on an explicit turn-on or push")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }
