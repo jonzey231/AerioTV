@@ -9513,6 +9513,9 @@ struct AVPlayerMultiviewTile: View {
                 airPlayDelivery.onWatchdogs = { suspend, item in
                     stallWatchdog?.setSuspended(suspend, item: item)
                 }
+                // Class ref, safe across view-struct copies.
+                let store = progressStore
+                airPlayDelivery.isUserPaused = { store.userPaused }
                 setLANCard(on: mux)
                 airPlayDelivery.attach(player: avPlayer, remuxer: mux,
                                        loopbackURL: readyLocalURL, channelName: channelName)

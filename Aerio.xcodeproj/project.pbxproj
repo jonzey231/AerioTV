@@ -33,6 +33,7 @@
 		A033846791D84DCD15BE0E86 /* SetupProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB8724FB2417E85C6830222 /* SetupProtocol.swift */; };
 		A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */; };
 		A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */; };
+		A1RMPH00000000000000B001 /* AirPlayMidPlayHold.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RMPH00000000000000F001 /* AirPlayMidPlayHold.swift */; };
 		A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */; };
 		A1R9RG000000000000000B01 /* ResumeGatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */; };
 		A1RCLI00000000000000B001 /* CastLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1RCLI00000000000000F001 /* CastLaunchIntent.swift */; };
@@ -477,6 +478,7 @@
 		DCB8724FB2417E85C6830222 /* SetupProtocol.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SetupProtocol.swift; sourceTree = "<group>"; };
 		A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionNowPlaying.swift; sourceTree = "<group>"; };
 		A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayTileDelivery.swift; sourceTree = "<group>"; };
+		A1RMPH00000000000000F001 /* AirPlayMidPlayHold.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirPlayMidPlayHold.swift; sourceTree = "<group>"; };
 		A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioOnlySampleClock.swift; sourceTree = "<group>"; };
 		A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeGatePolicy.swift; sourceTree = "<group>"; };
 		A1RCLI00000000000000F001 /* CastLaunchIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastLaunchIntent.swift; sourceTree = "<group>"; };
@@ -1232,6 +1234,7 @@
 				A1RCLI00000000000000F001 /* CastLaunchIntent.swift */,
 				A1R3CA8ADBFEF6FAD0DA0510 /* RemoteSessionNowPlaying.swift */,
 				A1R46F9C5AD64C38F7267B48 /* AirPlayTileDelivery.swift */,
+				A1RMPH00000000000000F001 /* AirPlayMidPlayHold.swift */,
 				A1R8AC0C10C4A1B2C3D4E5F6 /* AudioOnlySampleClock.swift */,
 				A1R9RG000000000000000F01 /* ResumeGatePolicy.swift */,
 				A1RDP0000000000000000F01 /* RewindDiskPolicy.swift */,
@@ -1790,6 +1793,7 @@
 				89D0668D36AB27D423AA395F /* SetupProtocol.swift in Sources */,
 				A1R198FCCDFCE30FD191BF69 /* RemoteSessionNowPlaying.swift in Sources */,
 				A1R865DEBFC0015BAB4F022B /* AirPlayTileDelivery.swift in Sources */,
+				A1RMPH00000000000000B001 /* AirPlayMidPlayHold.swift in Sources */,
 				A1R97E4D2C14EFFBDA110A4E /* AudioOnlySampleClock.swift in Sources */,
 				A1R9RG000000000000000B01 /* ResumeGatePolicy.swift in Sources */,
 				A1RDP0000000000000000B01 /* RewindDiskPolicy.swift in Sources */,

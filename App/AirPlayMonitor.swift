@@ -303,7 +303,7 @@ final class AirPlayMonitor: ObservableObject {
                 perTuneClearTask?.cancel()
             }
             debugLog("[AVP-AIRPLAY] player pinned local (\(latchIsPerTune ? "Play Here" : "user ended AirPlay on this route"))")
-        } else {
+        } else if AirPlayMidPlayHold.routeMayReenable(held: AirPlayTileDelivery.holdsExternalOff(player)) {
             Self.enableExternalPlayback(on: player)
         }
         startObservingRoutes()
@@ -344,11 +344,14 @@ final class AirPlayMonitor: ObservableObject {
 
     /// The attached player, re-enabled for external playback when an
     /// AirPlay output appears (a player from an older build path that
-    /// was never pinned local). Also called by AirPlayTileDelivery before a mid-play
-    /// handoff swaps the item.
+    /// was never pinned local). Not while a mid-play handover holds it on
+    /// this device: its loopback item cannot reach the receiver, and the
+    /// handover turns external playback back on with the LAN item
+    /// (AirPlayMidPlayHold, device pass 2026-11-14).
     func reenableExternalPlaybackForRoute() {
         guard let player, !player.allowsExternalPlayback,
-              Self.servableAirPlayOutput() != nil else { return }
+              Self.servableAirPlayOutput() != nil,
+              AirPlayMidPlayHold.routeMayReenable(held: AirPlayTileDelivery.holdsExternalOff(player)) else { return }
         Self.enableExternalPlayback(on: player)
         debugLog("[AVP-AIRPLAY] external playback re-enabled on the attached player (AirPlay route present)")
     }
