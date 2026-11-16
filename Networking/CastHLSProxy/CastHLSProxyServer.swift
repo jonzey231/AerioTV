@@ -26,6 +26,11 @@
 //  into its own SourceBuffer is how Emby's web receiver reaches its
 //  hardware audio decoder. The muxed endpoints were removed 2026-09-13.
 //
+//  Every path above sits under the server's session token
+//  ("/<token>/demuxed.m3u8", LANStreamToken): the listener accepts any
+//  device on the LAN, so a request without the token gets 404, and the
+//  playlists list every URI under it.
+//
 //  Every response carries `Access-Control-Allow-Origin: *` because the
 //  receiver page's origin is Google's, not ours, and Chromium enforces
 //  CORS on MSE fetches. Mixed content (https receiver page fetching
@@ -74,6 +79,17 @@ final class CastHLSProxyServer: @unchecked Sendable {
     private static let requestLogEvery = 50
 
     private(set) var boundPort: UInt16 = 0
+
+    /// This server's path token (LANStreamToken), one per proxy session:
+    /// the server outlives channel changes, so the receiver's URL does too.
+    private let token = LANStreamToken.make()
+    /// Peers already logged for a request without the token.
+    private let tokenlessPeers = LoggedPeers()
+
+    /// The URL path the receiver is handed for `resource` ("demuxed.m3u8").
+    func lanPath(_ resource: String) -> String {
+        LANStreamToken.path(resource, token: token)
+    }
 
     /// Link counters (device log 2026-09-25 17:04): bytes sent, the last
     /// peer and the newest video segment the receiver fetched.
@@ -159,7 +175,14 @@ final class CastHLSProxyServer: @unchecked Sendable {
         }
     }
 
-    private func respond(_ connection: NWConnection, method: String, path: String, peer: NWEndpoint) {
+    private func respond(_ connection: NWConnection, method: String, path requestPath: String, peer: NWEndpoint) {
+        // Only the URL this session handed out reaches the stream.
+        guard let path = LANStreamToken.strip(requestPath, token: token) else {
+            let host = Self.host(of: peer)
+            if tokenlessPeers.insert(host) { log("request without the session token from \(host): 404") }
+            send(connection, status: "404 Not Found", contentType: "text/plain", body: Data("not found".utf8))
+            return
+        }
         if method == "OPTIONS" {
             send(connection, status: "204 No Content", contentType: nil, body: Data())
             return
@@ -179,12 +202,12 @@ final class CastHLSProxyServer: @unchecked Sendable {
         switch path {
         case "/demuxed.m3u8":
             let text = store.demuxedMasterPlaylistText()
-            body = Data(text.utf8)
+            body = Data(LANStreamToken.tokenize(playlist: text, token: token).utf8)
             mime = Self.mimePlaylist
             if demuxedMasterTextLogged.trySet() { log("demuxed master playlist: \(Self.escaped(text))") }
         case "/video.m3u8":
             let text = store.videoPlaylistText()
-            body = Data(text.utf8)
+            body = Data(LANStreamToken.tokenize(playlist: text, token: token).utf8)
             mime = Self.mimePlaylist
             if firstPlaylistServed.trySet() {
                 log("receiver fetched the playlist for the first time (\(Self.host(of: peer)))")
@@ -192,7 +215,7 @@ final class CastHLSProxyServer: @unchecked Sendable {
             if videoPlaylistTextLogged.trySet() { log("video playlist: \(Self.escaped(text))") }
         case "/audio.m3u8":
             let text = store.audioPlaylistText()
-            body = Data(text.utf8)
+            body = Data(LANStreamToken.tokenize(playlist: text, token: token).utf8)
             mime = Self.mimePlaylist
             // An audio-only program's receiver fetches no video playlist.
             if firstPlaylistServed.trySet() {
@@ -290,6 +313,19 @@ final class CastHLSProxyServer: @unchecked Sendable {
     private static func host(of endpoint: NWEndpoint) -> String {
         if case .hostPort(let host, _) = endpoint { return "\(host)" }
         return "unknown"
+    }
+}
+
+/// Peers logged once each (the serve queue is concurrent).
+private final class LoggedPeers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var peers = Set<String>()
+
+    /// True the first time `peer` is seen.
+    func insert(_ peer: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return peers.insert(peer).inserted
     }
 }
 

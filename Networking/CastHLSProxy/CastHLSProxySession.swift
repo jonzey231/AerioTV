@@ -422,7 +422,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             log("start refused: no Wi-Fi LAN address")
             throw CastHLSProxyError.noLANAddress
         }
-        let (port, isChannelChange): (UInt16, Bool) = try queue.sync {
+        let (port, masterPath, isChannelChange): (UInt16, String, Bool) = try queue.sync {
             let store: CastHLSSegmentStore
             let server: CastHLSProxyServer
             if let existingStore = self.store, let existingServer = self.server, existingServer.boundPort != 0 {
@@ -471,7 +471,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.beginBackgroundKeepaliveIfNeeded()
             self.startLinkLogLocked()
             self.startIngestLocked(url: rawTSURL, headers: headers)
-            return (server.boundPort, isChannelChange)
+            return (server.boundPort, server.lanPath("demuxed.m3u8"), isChannelChange)
         }
         _ = isChannelChange
 
@@ -513,7 +513,8 @@ final class CastHLSProxySession: @unchecked Sendable {
                            ready.segments, seconds,
                            Double(Self.readyMediaTicks) / Double(CastFMP4Remuxer.ticksPerSecond),
                            Self.readyMinSegments))
-                return URL(string: "http://\(lanIP):\(port)/demuxed.m3u8")!
+                // Under the server's session token (LANStreamToken).
+                return URL(string: "http://\(lanIP):\(port)\(masterPath)")!
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }

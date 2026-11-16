@@ -619,14 +619,15 @@ final class HeadlessAVPlayerEngine {
         mux.startLANDelivery { [weak self] result in
             guard let self, self.token == t else { return }
             switch result {
-            case .ready(let ip, let port):
-                guard let url = URL(string: "http://\(ip):\(port)/live.m3u8") else {
+            case .ready(let ip, let port, let path):
+                // The path carries this LAN session's token (LANStreamToken).
+                guard let url = URL(string: "http://\(ip):\(port)\(path)") else {
                     debugLog("[CARPLAY] video: bad LAN url; audio only on loopback")
                     self.startPlayer(url: loopbackURL, headers: [:], allowsVideo: false)
                     return
                 }
                 self.lanURL = url
-                debugLog("[CARPLAY] video: lan url \(url.absoluteString)")
+                debugLog("[CARPLAY] video: lan url \(LANStreamToken.redacted(url.absoluteString))")
                 if !self.keepaliveHeld {
                     // External playback leaves no local audio render, so
                     // the process needs the keepalive AirPlay uses.
