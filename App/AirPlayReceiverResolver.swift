@@ -112,10 +112,19 @@ final class AirPlayReceiverResolver {
         /// TXT `pi` / `psi` / `gid`: AirPlay 2 identifiers a route uid
         /// can carry when it has no MAC.
         let identifiers: [String]
+        /// Every TXT key and value, for the unresolved-route detail line
+        /// only. Held in memory; the log names matching KEYS, never values.
+        let txt: [String: String]
     }
 
     private var browser: NWBrowser?
     private var cache: [String: TXTEntry] = [:]
+    /// Browse state and last results time for the route detail line
+    /// (2026-11-15: the route stayed "AirPlay" for an hour and the log
+    /// could not say whether the browse was even returning results).
+    private var browseState = "none"
+    private var lastResultsAt: Date?
+    private var loggedDetailSignatures: Set<String> = []
     private var restartedAfterFailure = false
     private var ladderToken = UUID()
 
@@ -145,25 +154,37 @@ final class AirPlayReceiverResolver {
                 var model: String?
                 var deviceID: String?
                 var ids: [String] = []
+                var all: [String: String] = [:]
                 if case let .bonjour(txt) = result.metadata {
                     model = txt["model"]
                     deviceID = txt["deviceid"]
                     ids = ["pi", "psi", "gid"].compactMap { txt[$0] }.filter { $0.count >= 8 }
+                    all = txt.dictionary
                 }
                 let key = name.trimmingCharacters(in: .whitespaces)
-                next[key] = TXTEntry(name: key, model: model, deviceID: deviceID, identifiers: ids)
+                next[key] = TXTEntry(name: key, model: model, deviceID: deviceID, identifiers: ids, txt: all)
             }
             Task { @MainActor in
                 let resolver = AirPlayReceiverResolver.shared
                 resolver.cache = next
+                resolver.lastResultsAt = Date()
                 resolver.checkLateResolution()
             }
         }
         b.stateUpdateHandler = { state in
-            guard case let .failed(error) = state else { return }
-            Task { @MainActor in AirPlayReceiverResolver.shared.browseFailed(error) }
+            Task { @MainActor in
+                let resolver = AirPlayReceiverResolver.shared
+                let label = AirPlayReceiverResolver.stateLabel(state)
+                if resolver.browseState != label {
+                    debugLog("[AVP-AIRPLAY] receiver browse state: \(resolver.browseState) -> \(label)")
+                    resolver.browseState = label
+                }
+                if case let .failed(error) = state { resolver.browseFailed(error) }
+            }
         }
         browser = b
+        browseState = "starting"
+        lastResultsAt = nil
         b.start(queue: .main)
     }
 
@@ -177,6 +198,7 @@ final class AirPlayReceiverResolver {
         lastPublished = nil
         guard let b = browser else { return }
         browser = nil
+        browseState = "stopped"
         restartedAfterFailure = false
         b.browseResultsChangedHandler = nil
         b.stateUpdateHandler = nil
@@ -269,6 +291,7 @@ final class AirPlayReceiverResolver {
             best = resolveNow() ?? best
         }
         if best.model == nil { lateWatch = true }
+        if !best.nameResolved { logRouteDetail("handoff, name unresolved") }
         publish(best)
         return best
     }
@@ -303,6 +326,7 @@ final class AirPlayReceiverResolver {
                         // Keep resolving in the background (2026-09-25).
                         resolver.lateWatch = true
                         debugLog("[AVP-AIRPLAY] route name still UNRESOLVED after the retry ladder; still resolving in the background (Bonjour browse stays up while the route exists)")
+                        resolver.logRouteDetail("unresolved after the retry ladder")
                     }
                 }
             }
@@ -358,7 +382,92 @@ final class AirPlayReceiverResolver {
 
     private func publish(_ r: AirPlayReceiver?) {
         lastPublished = r
+        // The same detail for a resolved route, once per route uid, so a
+        // stuck route can be compared with a working one.
+        if let r, r.nameResolved { logRouteDetail("resolved") }
         onReceiverChange?(r)
+    }
+
+    // MARK: Route detail (diagnostics, 2026-11-16)
+
+    /// One line describing the route and how it compares with every
+    /// advertised receiver. Privacy: the uid and TXT values are never
+    /// written; the uid as a shape (run classes and lengths), and per
+    /// receiver only which TXT KEYS appear in the uid and which carry a
+    /// piece of it. Logged once per (uid, cache names, browse state).
+    func logRouteDetail(_ context: String) {
+        guard let out = Self.currentAirPlayOutput() else { return }
+        let uid = out.uid
+        let names = cache.keys.sorted()
+        let signature = "\(Self.uidHash(uid))|\(names.joined(separator: ","))|\(browseState)|\(context == "resolved")"
+        guard !loggedDetailSignatures.contains(signature) else { return }
+        loggedDetailSignatures.insert(signature)
+
+        let age = lastResultsAt.map { "\(Int(Date().timeIntervalSince($0)))s ago" } ?? "never"
+        var line = "[AVP-AIRPLAY] route detail (\(context)): port='\(out.name ?? "nil")' generic=\(AirPlayReceiver.isGenericName(out.name))"
+        line += " \(Self.uidHash(uid)) shape=\(Self.uidShape(uid)) mac=\(Self.macAddress(in: uid) != nil)"
+        line += " browse=\(browser == nil ? "off" : browseState) results=\(age) receivers=\(cache.count)"
+        let rows = names.compactMap { name -> String? in
+            guard let e = cache[name] else { return nil }
+            let m = Self.uidComparison(uid, txt: e.txt)
+            return "'\(name)' model=\(e.model ?? "nil") deviceid=\(e.deviceID != nil) ids=\(e.identifiers.count) inUID=[\(m.valuesInUID.joined(separator: ","))] uidPartIn=[\(m.uidRunsIn.joined(separator: ","))]"
+        }
+        line += rows.isEmpty ? " (no receivers)" : " | " + rows.joined(separator: " | ")
+        debugLog(line)
+    }
+
+    /// The uid as runs of letters/digits with their separators kept:
+    /// `h8-h4-h4-h4-h12` (h hex, d digits, a letters, x mixed). Lengths
+    /// and classes only, nothing identifying.
+    static func uidShape(_ uid: String) -> String {
+        guard !uid.isEmpty else { return "empty" }
+        var out = ""
+        var run = ""
+        func flush() {
+            guard !run.isEmpty else { return }
+            let digits = run.allSatisfy { $0.isASCII && $0.isNumber }
+            let hex = run.allSatisfy { $0.isHexDigit }
+            let letters = run.allSatisfy { $0.isLetter }
+            let cls = digits ? "d" : hex ? "h" : letters ? "a" : "x"
+            out += "\(cls)\(run.count)"
+            run = ""
+        }
+        for ch in uid {
+            if ch.isLetter || ch.isNumber { run.append(ch) } else { flush(); out.append(ch.isASCII ? ch : "?") }
+        }
+        flush()
+        return out
+    }
+
+    /// Which TXT keys have a value (8+ characters, separators stripped,
+    /// case folded) contained in the uid, and which TXT keys contain one
+    /// of the uid's own runs of 8+ characters.
+    static func uidComparison(_ uid: String, txt: [String: String]) -> (valuesInUID: [String], uidRunsIn: [String]) {
+        func norm(_ s: String) -> String { s.lowercased().filter { $0.isLetter || $0.isNumber } }
+        let u = norm(uid)
+        let runs = uid.lowercased()
+            .split(whereSeparator: { !($0.isLetter || $0.isNumber) })
+            .map(String.init)
+            .filter { $0.count >= 8 }
+        var inUID: [String] = []
+        var runsIn: [String] = []
+        for key in txt.keys.sorted() {
+            let v = norm(txt[key] ?? "")
+            if v.count >= 8, u.contains(v) { inUID.append(key) }
+            if !v.isEmpty, runs.contains(where: { v.contains($0) }) { runsIn.append(key) }
+        }
+        return (inUID, runsIn)
+    }
+
+    static func stateLabel(_ state: NWBrowser.State) -> String {
+        switch state {
+        case .setup: return "setup"
+        case .ready: return "ready"
+        case .waiting(let e): return "waiting(\(describe(e)))"
+        case .failed(let e): return "failed(\(describe(e)))"
+        case .cancelled: return "cancelled"
+        @unknown default: return "unknown"
+        }
     }
 
     // MARK: Helpers
