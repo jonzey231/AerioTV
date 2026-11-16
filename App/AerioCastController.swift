@@ -1984,8 +1984,16 @@ extension AerioCastController: GCKSessionManagerListener {
         // AerioTV on TV the TV app keeps playing after the Cast link dies
         // (Google TV Streamer, device pass 2026-11-15), so this is not a
         // failed start. Same words as AerioTV for Android.
+        // By end reason (iPhone 2026-11-16 11:22:38): GCKError 21
+        // "Application is not running" means the receiver app stopped (closed
+        // on the TV, or replaced), so nothing plays there; anything else is
+        // the link dropping.
         if involuntary, UIApplication.shared.applicationState == .active, castingContent != nil {
-            surfaceCastFailure("Lost the connection to \(lastDeviceName ?? "the TV"). It may still be playing on the TV.")
+            let tv = lastDeviceName ?? "the TV"
+            let appStopped = (error as NSError?)?.code == GCKErrorCode.applicationNotRunning.rawValue
+            surfaceCastFailure(appStopped
+                ? "AerioTV on \(tv) stopped."
+                : "Lost the connection to \(tv). It may still be playing on the TV.")
         }
         if involuntary, UIApplication.shared.applicationState != .active {
             let deviceName = lastDeviceName
