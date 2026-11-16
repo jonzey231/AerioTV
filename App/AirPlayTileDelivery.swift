@@ -670,6 +670,20 @@ final class AirPlayTileDelivery {
     /// is in; AirPlayMonitor's route-driven re-enable leaves them alone.
     private static let externalHeldPlayers = NSHashTable<AVPlayer>.weakObjects()
     static func holdsExternalOff(_ player: AVPlayer) -> Bool { externalHeldPlayers.contains(player) }
+
+    /// Another AirPlay path keeps `player` on this device the same way
+    /// (RelayVODAirPlayHandover after a receiver did not take the item:
+    /// its relay item is 127.0.0.1, which the receiver cannot reach).
+    static func holdExternalOff(_ player: AVPlayer) {
+        externalHeldPlayers.add(player)
+        if player.allowsExternalPlayback { player.allowsExternalPlayback = false }
+    }
+
+    /// Ends a hold taken with `holdExternalOff`. External playback stays
+    /// as it is; the caller turns it on when it hands the receiver an item.
+    static func releaseExternalHold(_ player: AVPlayer) {
+        externalHeldPlayers.remove(player)
+    }
     private var midPlayHold = AirPlayMidPlayHold()
     private weak var heldPlayer: AVPlayer?
 
