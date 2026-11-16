@@ -1731,13 +1731,19 @@ final class AerioCastController: NSObject, ObservableObject {
     /// the frontmost scene (mirrors the Android Toast).
     fileprivate func surfaceCastFailure(_ message: String) {
         debugLog("[CAST-HLS] cast failure surfaced: \(message)")
+        Self.presentAlert(title: "Cast", message: message)
+    }
+
+    /// A one-button alert on the topmost presented controller. Shared with
+    /// AirPlay (VODAirPlayFormatGate) so both say things the same way.
+    static func presentAlert(title: String, message: String) {
         let scene = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
         guard let root = scene?.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
         var top = root
         while let presented = top.presentedViewController { top = presented }
-        let alert = UIAlertController(title: "Cast", message: message, preferredStyle: .alert)
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         top.present(alert, animated: true)
     }
