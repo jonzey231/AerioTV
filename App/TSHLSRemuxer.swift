@@ -6253,6 +6253,9 @@ struct AVPlayerMultiviewTile: View {
     /// AirPlay for an on-demand item the relay serves: the receiver gets
     /// the server's own URL without the key (RelayVODAirPlayHandover).
     @State private var vodAirPlayHandover: RelayVODAirPlayHandover?
+    /// AirPlay for an MKV movie or episode (loopback remux): kept on this
+    /// device for a known non-Apple receiver (MKVVODAirPlayGate).
+    @State private var mkvAirPlayGate: MKVVODAirPlayGate?
     /// This tune already rebuilt its pipeline for an AirPlay pick (one
     /// per tune; a channel change clears it).
     @State private var airPlayReceiverRebuildUsed = false
@@ -9204,7 +9207,16 @@ struct AVPlayerMultiviewTile: View {
         }
         #if os(iOS)
         var vodHandoverUpstream: URL?
+        /// A VOD started with a known non-Apple receiver already on the
+        /// route: played through the relay, held on this device, and the
+        /// handover decides once the formats are read (device test
+        /// 2026-11-16: the header-free item froze on a Roku and the
+        /// frozen-clock retry looped).
+        var vodStartHeldForReceiver = false
         #endif
+        /// Set when the handover takes the start decision: the tile does not
+        /// start playback itself (refused stays paused at the resume point).
+        var vodStartAwaitsGate = false
         if keyedOpen, relay == nil, hvcLoader == nil, !isDVR {
             // On demand stays the user's on Dispatcharr (limits, flags,
             // stats) only with the key on every request, so it plays through
@@ -9220,6 +9232,11 @@ struct AVPlayerMultiviewTile: View {
                 if HLSDelivery.systemProxyDescription() != nil { return "system proxy" }
                 #if os(iOS)
                 if AirPlayMonitor.servableAirPlayOutput() != nil, AirPlayMonitor.shared.willServeReceiver {
+                    if let r = AirPlayReceiverResolver.shared.resolveNow(), r.model != nil, !r.isApple, !r.isAudioOnly {
+                        vodStartHeldForReceiver = true
+                        debugLog("[AVP-AIRPLAY] VOD \(channelName): AirPlay route up at start, receiver='\(r.name)' model=\(r.model ?? "unknown") apple=false; relay item held on this device until the formats are read")
+                        return nil
+                    }
                     return "AirPlay route up"
                 }
                 #endif
@@ -9235,6 +9252,10 @@ struct AVPlayerMultiviewTile: View {
                 if isVOD { vodHandoverUpstream = url }
                 #endif
             } else {
+                #if os(iOS)
+                // No relay: today's header-free item, hand-off as before.
+                vodStartHeldForReceiver = false
+                #endif
                 debugLog("[AVP-MV] relay unavailable: playing without the key title=\(channelName)")
             }
         }
@@ -9502,15 +9523,33 @@ struct AVPlayerMultiviewTile: View {
         MultiviewCompositeTaps.shared.register(tileID: tileID, player: avPlayer, item: playerItem, remuxer: remuxer)
         vodAirPlayHandover?.detach()
         vodAirPlayHandover = nil
+        mkvAirPlayGate?.detach()
+        mkvAirPlayGate = nil
         if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) {
+            // Held before attach, which would otherwise hand the receiver
+            // the 127.0.0.1 relay item.
+            if vodStartHeldForReceiver, vodHandoverUpstream != nil { AirPlayTileDelivery.holdExternalOff(avPlayer) }
             AirPlayMonitor.shared.attach(avPlayer)
+            // Only the loopback remux item: a non-Matroska file the MKV
+            // probe bounced to direct play keeps mkvServer set.
+            if isVOD, mkvServer != nil, url == readyLocalURL {
+                let gate = MKVVODAirPlayGate(player: avPlayer, label: channelName)
+                let pauseStore = progressStore
+                gate.onRefused = { pauseStore.noteUserPause(true, positionSeconds: avPlayer.currentTime().seconds) }
+                gate.attach()
+                mkvAirPlayGate = gate
+            }
             if let upstream = vodHandoverUpstream {
                 let handover = RelayVODAirPlayHandover(player: avPlayer, upstream: upstream, relayURL: assetURL,
                                                        options: options, label: channelName)
                 handover.onItemSwapped = { item, receiverPlays in
                     stallWatchdog?.setSuspended(receiverPlays, item: item)
                 }
-                handover.attach()
+                let pauseStore = progressStore
+                handover.onRefused = { pauseStore.noteUserPause(true, positionSeconds: avPlayer.currentTime().seconds) }
+                vodStartAwaitsGate = vodStartHeldForReceiver
+                handover.attach(startHeld: vodStartHeldForReceiver,
+                                playIfAccepted: !shouldPause && !progressStore.userPaused)
                 vodAirPlayHandover = handover
             }
             if let mux = remuxer {
@@ -9619,7 +9658,8 @@ struct AVPlayerMultiviewTile: View {
         // paused stays paused; a new tune clears the flag (streamURL change).
         let userHeld = progressStore.userPaused
         if userHeld { debugLog("[AVP-NUDGE] skipped: user paused (pipeline start) channel=\(channelName)") }
-        if !shouldPause, !deferDVRStartPlay, !userHeld {
+        if vodStartAwaitsGate { debugLog("[AVP-AIRPLAY] VOD \(channelName): start play left to the AirPlay format gate") }
+        if !shouldPause, !deferDVRStartPlay, !userHeld, !vodStartAwaitsGate {
             if dvrRewrite {
                 // Start point comes from #EXT-X-START in the rewritten
                 // playlist; no client seek. Prove the rate took, and
@@ -10103,6 +10143,8 @@ struct AVPlayerMultiviewTile: View {
         }
         vodAirPlayHandover?.detach()
         vodAirPlayHandover = nil
+        mkvAirPlayGate?.detach()
+        mkvAirPlayGate = nil
         AirPlayMonitor.shared.detach(ifAttached: releasedPlayer)
         #endif
         if remuxer != nil, !isVOD, !isDVR, catchup == nil, let releasedKey = sessionRetainKey {

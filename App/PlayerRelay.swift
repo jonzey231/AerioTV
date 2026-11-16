@@ -775,6 +775,16 @@ final class RelayVODAirPlayHandover {
     /// The tile rebinds its stall watchdog to the new item: suspended while
     /// the receiver plays (the local clock is not this phone's render).
     var onItemSwapped: ((_ item: AVPlayerItem, _ receiverPlays: Bool) -> Void)?
+    /// The format gate refused the receiver: the tile records a user-style
+    /// pause so no watchdog, retry, or nudge plays it again (owner
+    /// 2026-11-16: the movie waits, paused, for the user's next move).
+    var onRefused: (() -> Void)?
+    /// Started with the route up: the tile did not start playback, so an
+    /// accepted hand-off plays it on the receiver.
+    private var playAfterDecision = false
+    /// The start decision waits for the item to be ready, so the queued
+    /// resume seek has landed before the position is read for the swap.
+    private var startDecision = false
 
     init(player: AVPlayer, upstream: URL, relayURL: URL, options: [String: Any], label: String) {
         self.player = player
@@ -784,11 +794,20 @@ final class RelayVODAirPlayHandover {
         self.label = label
     }
 
-    func attach() {
+    /// `startHeld`: the tile held external playback off because a known
+    /// non-Apple receiver was already on the route at start; the decision
+    /// (keep here with the message, or the usual swap) runs now.
+    func attach(startHeld: Bool = false, playIfAccepted: Bool = true) {
         guard let player else { return }
         externalObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] p, _ in
             let active = p.isExternalPlaybackActive
             Task { @MainActor in if active { self?.handover("the receiver took the item") } }
+        }
+        if startHeld {
+            heldLocal = true
+            playAfterDecision = playIfAccepted
+            startDecision = true
+            handover("an AirPlay route was already up at start")
         }
         routeObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
@@ -828,8 +847,40 @@ final class RelayVODAirPlayHandover {
         guard state == .relay, let player, let old = player.currentItem,
               (old.asset as? AVURLAsset)?.url == relayURL else { return }
         state = .swapping
+        // A known non-Apple receiver (Roku) cannot play every MP4 (device
+        // pass 2026-11-16: HEVC + AC-3 froze on a music logo), so decide
+        // before handing it the server's URL.
+        let waitForReady = startDecision
+        startDecision = false
+        Task { @MainActor [weak self] in
+            if waitForReady {
+                let readyBy = Date().addingTimeInterval(10)
+                while old.status == .unknown, Date() < readyBy {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            let blocked = await VODAirPlayFormatGate.blocks(item: old, mkvRemux: false, label: self?.label ?? "")
+            guard let self else { return }
+            guard let player = self.player, player.currentItem === old else { self.state = .relay; return }
+            let playAfter = self.playAfterDecision
+            self.playAfterDecision = false
+            if blocked {
+                AirPlayTileDelivery.holdExternalOff(player)
+                self.heldLocal = true
+                self.state = .relay
+                player.pause()
+                self.onRefused?()
+                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; kept on this device, paused at %.1fs, external playback held off until a receiver is picked again",
+                                self.label, why, old.currentTime().seconds.isFinite ? old.currentTime().seconds : 0))
+                return
+            }
+            self.swap(why, player: player, old: old, forcePlay: playAfter)
+        }
+    }
+
+    private func swap(_ why: String, player: AVPlayer, old: AVPlayerItem, forcePlay: Bool = false) {
         let position = old.currentTime()
-        let wasPlaying = player.timeControlStatus != .paused || player.rate != 0
+        let wasPlaying = forcePlay || player.timeControlStatus != .paused || player.rate != 0
         releaseHold()
         AirPlayMonitor.enableExternalPlayback(on: player)
         let item = makeItem(upstream, copying: old)
@@ -856,6 +907,7 @@ final class RelayVODAirPlayHandover {
             if player.isExternalPlaybackActive {
                 self.state = .receiver
                 debugLog("[AVP-AIRPLAY] VOD \(self.label): external playback active on the server's URL")
+                self.watchReceiver(item)
                 return
             }
             // The receiver never took it: back to the relay, played here.
@@ -891,6 +943,222 @@ final class RelayVODAirPlayHandover {
         let item = AVPlayerItem(asset: AVURLAsset(url: url, options: options))
         item.preferredForwardBufferDuration = old.preferredForwardBufferDuration
         return item
+    }
+
+    // MARK: Diagnostics (2026-11-16, Roku movie AirPlay spins)
+
+    /// What the receiver is doing with the server's URL, as far as this
+    /// phone can see: the asset's formats once, then every 5 s for 90 s the
+    /// item and player state, the error log, and the access log.
+    private func watchReceiver(_ item: AVPlayerItem) {
+        let label = self.label
+        Task { @MainActor [weak self] in
+            if let tracks = try? await item.asset.load(.tracks) {
+                var parts: [String] = []
+                for t in tracks {
+                    let descs = (try? await t.load(.formatDescriptions)) ?? []
+                    for d in descs {
+                        let sub = CMFormatDescriptionGetMediaSubType(d)
+                        let fourCC = String(bytes: [24, 16, 8, 0].map { UInt8((sub >> $0) & 0xFF) }, encoding: .ascii) ?? "\(sub)"
+                        var extra = ""
+                        if t.mediaType == .audio, let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(d)?.pointee {
+                            extra = " ch=\(asbd.mChannelsPerFrame) rate=\(Int(asbd.mSampleRate))"
+                        } else if t.mediaType == .video {
+                            let dims = CMVideoFormatDescriptionGetDimensions(d)
+                            extra = " \(dims.width)x\(dims.height)"
+                        }
+                        parts.append("\(t.mediaType.rawValue)=\(fourCC)\(extra)")
+                    }
+                }
+                debugLog("[AVP-AIRPLAY] VOD \(label): receiver item formats: \(parts.joined(separator: ", "))")
+            }
+            for tick in 1...18 {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, let player = self.player, player.currentItem === item else { return }
+                let t = item.currentTime().seconds
+                let loaded = item.loadedTimeRanges.last.map { CMTimeRangeGetEnd($0.timeRangeValue).seconds } ?? -1
+                let errs = item.errorLog()?.events ?? []
+                let lastErr = errs.last.map { "\($0.errorDomain) \($0.errorStatusCode) '\($0.errorComment ?? "")'" } ?? "none"
+                let access = item.accessLog()?.events.last
+                let bytes = access?.numberOfBytesTransferred ?? -1
+                let status: String = {
+                    switch player.timeControlStatus {
+                    case .paused: return "paused"
+                    case .playing: return "playing"
+                    case .waitingToPlayAtSpecifiedRate: return "waiting(\(player.reasonForWaitingToPlay?.rawValue ?? "nil"))"
+                    @unknown default: return "unknown"
+                    }
+                }()
+                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: receiver watch %lds: item=%ld control=%@ external=%@ t=%.1f loadedEnd=%.1f rate=%.2f errors=%ld last=%@ accessEvents=%ld bytes=%lld itemError=%@",
+                                label, tick * 5, item.status.rawValue, status, player.isExternalPlaybackActive ? "yes" : "no",
+                                t.isFinite ? t : -1, loaded.isFinite ? loaded : -1, player.rate, errs.count, lastErr,
+                                item.accessLog()?.events.count ?? 0, bytes,
+                                item.error.map { "\(($0 as NSError).domain) \(($0 as NSError).code)" } ?? "none"))
+            }
+        }
+    }
+}
+
+/// Whether a movie or episode may go to the AirPlay receiver on the route.
+/// Only a receiver KNOWN to be non-Apple (TXT model resolved, not Apple, not
+/// audio-only) is ever refused; Apple and unresolved receivers keep the
+/// hand-off they always had. Device pass 2026-11-16 (Roku 3840R): H.264 +
+/// AAC plays, HEVC + AC-3 sits on a music logo with no error on the phone,
+/// and the MKV remux is served on 127.0.0.1, which a receiver cannot reach.
+@MainActor
+enum VODAirPlayFormatGate {
+    /// One message per pick: a pick can arrive as both a route change and
+    /// our route sheet's notification, a few seconds apart.
+    private static var lastShown: (key: String, at: Date)?
+    private static let messageWindow: TimeInterval = 10
+
+    /// True when the item must stay on this device; shows the message.
+    static func blocks(item: AVPlayerItem, mkvRemux: Bool, label: String) async -> Bool {
+        var receiver = AirPlayReceiverResolver.shared.resolveNow() ?? .unknown
+        if receiver.model == nil {
+            receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
+        }
+        let (video, audio) = await codecs(of: item)
+        let videoText = video.isEmpty ? "none" : video.joined(separator: "+")
+        let audioText = audio.isEmpty ? "none" : audio.joined(separator: "+")
+        let path = mkvRemux ? "mkv-remux" : "direct-mp4"
+        let knownNonApple = receiver.model != nil && !receiver.isApple && !receiver.isAudioOnly
+        let blocked: Bool
+        if !knownNonApple {
+            blocked = false
+        } else if mkvRemux {
+            blocked = true
+        } else if video.isEmpty && audio.isEmpty {
+            // Formats unreadable: no grounds to refuse.
+            blocked = false
+        } else {
+            let videoOK = video.allSatisfy { $0 == "avc1" || $0 == "avc3" }
+            let audioOK = audio.isEmpty || audio.contains { $0.hasPrefix("aac") || $0 == ".mp3" }
+            blocked = !(videoOK && audioOK)
+        }
+        debugLog("[AVP-AIRPLAY] VOD \(label): format gate receiver='\(receiver.name)' model=\(receiver.model ?? "unknown") apple=\(receiver.isApple) audioOnly=\(receiver.isAudioOnly) video=\(videoText) audio=\(audioText) path=\(path) -> \(blocked ? "kept on this device" : "hand-off as before")")
+        if blocked { showMessage(receiver: receiver, label: label) }
+        return blocked
+    }
+
+    /// Codec four-character codes of the item's video and audio tracks.
+    private static func codecs(of item: AVPlayerItem) async -> (video: [String], audio: [String]) {
+        var tracks = item.tracks.compactMap(\.assetTrack)
+        if tracks.isEmpty { tracks = (try? await item.asset.load(.tracks)) ?? [] }
+        var video: [String] = []
+        var audio: [String] = []
+        for t in tracks where t.mediaType == .video || t.mediaType == .audio {
+            let descs = (try? await t.load(.formatDescriptions)) ?? []
+            for d in descs {
+                let sub = CMFormatDescriptionGetMediaSubType(d)
+                let fourCC = String(bytes: [24, 16, 8, 0].map { UInt8((sub >> $0) & 0xFF) }, encoding: .ascii) ?? "\(sub)"
+                if t.mediaType == .video { video.append(fourCC) } else { audio.append(fourCC) }
+            }
+        }
+        return (video, audio)
+    }
+
+    private static func showMessage(receiver: AirPlayReceiver, label: String) {
+        let name = receiver.displayName?.trimmingCharacters(in: .whitespaces) ?? "this TV"
+        let key = "\(label)|\(receiver.name)"
+        if let last = lastShown, last.key == key, Date().timeIntervalSince(last.at) < messageWindow { return }
+        lastShown = (key, Date())
+        let message = "This video's format can't play on \(name) over AirPlay."
+        debugLog("[AVP-AIRPLAY] VOD \(label): message shown: \(message)")
+        AerioCastController.presentAlert(title: "AirPlay", message: message)
+    }
+}
+
+/// AirPlay for an MKV movie or episode, which plays from the phone's
+/// loopback remux (MKVVODServer). AirPlayMonitor turns external playback
+/// on for every attached player, so a picked non-Apple receiver is handed
+/// 127.0.0.1 and cannot play it; this pulls it back to the phone with
+/// external playback held off and tells the user. Apple and unresolved
+/// receivers are left exactly as before.
+@MainActor
+final class MKVVODAirPlayGate {
+    private weak var player: AVPlayer?
+    private let label: String
+    private var held = false
+    private var deciding = false
+    private var externalObservation: NSKeyValueObservation?
+    private var routeObserver: NSObjectProtocol?
+    private var pickedObserver: NSObjectProtocol?
+    /// Same as RelayVODAirPlayHandover.onRefused: a user-style pause.
+    var onRefused: (() -> Void)?
+
+    init(player: AVPlayer, label: String) {
+        self.player = player
+        self.label = label
+    }
+
+    func attach() {
+        guard let player else { return }
+        externalObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] p, _ in
+            let active = p.isExternalPlaybackActive
+            Task { @MainActor in if active { self?.evaluate("the receiver took the item") } }
+        }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            let newDevice = raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .newDeviceAvailable
+            MainActor.assumeIsolated {
+                guard AirPlayMonitor.shared.willServeReceiver else { return }
+                // Held: only a newly picked receiver is worth another look.
+                if self?.held == true, !newDevice { return }
+                self?.evaluate("an AirPlay video receiver is on the route")
+            }
+        }
+        pickedObserver = NotificationCenter.default.addObserver(
+            forName: .aerioAirPlayRoutePicked, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard AirPlayMonitor.shared.willServeReceiver else { return }
+                self?.evaluate("the AirPlay route was picked again")
+            }
+        }
+        // AirPlayMonitor.attach already enabled external playback for a
+        // route that was up before this tile.
+        if AirPlayMonitor.shared.willServeReceiver { evaluate("an AirPlay route was already up") }
+    }
+
+    func detach() {
+        if held, let player { AirPlayTileDelivery.releaseExternalHold(player) }
+        held = false
+        externalObservation = nil
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        if let pickedObserver { NotificationCenter.default.removeObserver(pickedObserver) }
+        routeObserver = nil
+        pickedObserver = nil
+        player = nil
+    }
+
+    private func evaluate(_ why: String) {
+        guard !deciding, let player, let item = player.currentItem else { return }
+        deciding = true
+        Task { @MainActor [weak self] in
+            let blocked = await VODAirPlayFormatGate.blocks(item: item, mkvRemux: true, label: self?.label ?? "")
+            guard let self else { return }
+            self.deciding = false
+            guard let player = self.player else { return }
+            if blocked {
+                AirPlayTileDelivery.holdExternalOff(player)
+                self.held = true
+                player.pause()
+                self.onRefused?()
+                let at = player.currentTime().seconds
+                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; MKV remux kept on this device, paused at %.1fs, external playback held off until a receiver is picked again",
+                                self.label, why, at.isFinite ? at : 0))
+            } else if self.held {
+                // A different receiver was picked: back to what
+                // AirPlayMonitor does for every player.
+                self.held = false
+                AirPlayTileDelivery.releaseExternalHold(player)
+                AirPlayMonitor.enableExternalPlayback(on: player)
+                debugLog("[AVP-AIRPLAY] VOD \(self.label): \(why); hold released, external playback back on")
+            }
+        }
     }
 }
 #endif
