@@ -456,7 +456,14 @@ struct SetUpTvView: View {
                 : SetupSender.buildPayload(pl, profileIds: picked, turnOnSync: sync)
         }
         guard let payload = built else {
-            step = .error(FixLogin.unreadable, back)
+            // Fix Login with nothing to send because the playlist's address is
+            // unproven after a change (StoredSecretRules): say so, not "could
+            // not be read".
+            if t.isFixLogin, !ProfileManager.shared.setupMayCarryStoredSecrets(pl.id.uuidString) {
+                step = .error(StoredSecretCopy.fixLoginNewAddress, back)
+            } else {
+                step = .error(FixLogin.unreadable, back)
+            }
             return
         }
         step = .sending

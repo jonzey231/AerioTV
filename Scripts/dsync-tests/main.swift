@@ -1370,4 +1370,33 @@ do {
     eq(DsyncSettingsMap.entry("trueBlack")?.appleKey, "appearance.trueBlack", "the wire name and Apple key are unchanged")
 }
 
+// MARK: - Delete from iCloud clears the matching backup snapshots (2026-11-14)
+do {
+    // Every Delete from iCloud option with data in a snapshot names those files.
+    eq(CloudCanon.snapshotsCleared(by: "preferences"), [.favorites, .watchlist, .preferences],
+       "App Preferences clears the Favorites, Watchlist, and Preferences backups")
+    eq(CloudCanon.snapshotsCleared(by: "watchProgress"), [.watchProgress], "Watch Progress clears its backup")
+    eq(CloudCanon.snapshotsCleared(by: "reminders"), [.reminders], "Reminders clears its backup")
+    eq(CloudCanon.snapshotsCleared(by: "servers"), [.playlists], "Playlists clears the playlists snapshot if one exists")
+    eq(CloudCanon.snapshotsCleared(by: "credentials"), [.credentials], "Credentials clears the credentials snapshot if one exists")
+    check(CloudCanon.snapshotsCleared(by: "remoteControl").isEmpty && CloudCanon.snapshotsCleared(by: "radioModeDefault").isEmpty,
+          "Remote Control and Radio Mode by Default have no snapshot")
+    // Every shared backup file is reachable from some category, so nothing the
+    // Turn On step reads survives deleting its category.
+    let cleared = Set(["servers", "watchProgress", "reminders", "preferences", "credentials"].flatMap(CloudCanon.snapshotsCleared(by:)))
+    check(Set(CloudCanon.SHARED_FILES).isSubset(of: cleared), "every backup the Turn On step reads is cleared by its category")
+    // Clear iCloud Data removes every snapshot key; the keys are distinct and match the file names.
+    let keys = DsyncCategory.allCases.map(CloudCanon.kvsKey)
+    eq(Set(keys).count, DsyncCategory.allCases.count, "one key per snapshot")
+    eq(CloudCanon.kvsKey(.watchProgress), "snapshot.watch_progress.v1.json", "the watch progress key is unchanged")
+    check(keys.allSatisfy { $0.hasPrefix("snapshot.") && $0.hasSuffix(".v1.json") }, "every key is a snapshot key")
+    // Each snapshot has its own clear-marker lane, apart from the playlist-list lanes.
+    let lanes = DsyncCategory.allCases.map(CloudCanon.clearLane)
+    eq(Set(lanes).count, lanes.count, "one clear marker per snapshot")
+    check(!lanes.contains("playlists") && !lanes.contains("watchProgress"), "snapshot markers never collide with the list lanes")
+    // A cleared file resets converge for every shared category it carries.
+    eq(Set(SetupSourceChoice.namesInFile(.preferences)), ["collections", "recents", "hiddenGroups", "groupOrder", "settings"],
+       "a cleared Preferences backup resets converge for all its categories")
+}
+
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

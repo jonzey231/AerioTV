@@ -62,6 +62,9 @@ struct DVRView: View {
     @State private var tabBarTracker = TabBarScrollTracker()
     #endif
     @State private var infoTarget: ProgramInfoTarget?
+    /// The short message a tap on a recording with nothing to play shows
+    /// for 2.5 s (Android's toast in DvrMediaTabContent.play).
+    @State private var playToast: String?
 
     #if os(tvOS)
     /// "<recording id>|primary | secondary | stop" while a hero button has focus.
@@ -310,7 +313,17 @@ struct DVRView: View {
     /// to the previous page's last button (Logan 2026-09-08).
     @FocusState private var heroBackCatcherFocused: Bool
     private var primaryFocusID: String {
-        "\(heroPageID ?? heroPages.first.map { "\($0.id)" } ?? "")|primary"
+        let pageID = heroPageID ?? heroPages.first.map { "\($0.id)" } ?? ""
+        return "\(pageID)|\(heroFirstRole(pageID))"
+    }
+    /// The role of a hero page's first button (DVRHero.actions): Play, Watch
+    /// from Start, or Stop Recording when it has one, else Details. A failed
+    /// capture or a file that is gone has no Play, so a hop to "primary"
+    /// found nothing and left focus on the invisible catcher above the hero.
+    private func heroFirstRole(_ pageID: String) -> String {
+        guard let rec = heroPages.first(where: { "\($0.id)" == pageID }) else { return "primary" }
+        let hasPrimary = rec.isInProgress ? (actions.canPlay(rec) || actions.canManage(rec)) : actions.canPlay(rec)
+        return hasPrimary ? "primary" : "details"
     }
     private func heroPageLabel(_ id: String?) -> String {
         guard let id, let i = heroPages.firstIndex(where: { "\($0.id)" == id }) else { return "nil" }
@@ -388,6 +401,18 @@ struct DVRView: View {
                     emptyState
                 } else {
                     content
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let playToast {
+                    playToastView(playToast)
+                        #if os(tvOS)
+                        .padding(.bottom, 60)
+                        #else
+                        .padding(.bottom, 110)
+                        #endif
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
                 }
             }
             #if os(tvOS)
@@ -1367,14 +1392,18 @@ struct DVRView: View {
         )
         descriptor.fetchLimit = 1
         let epg = try? modelContext.fetch(descriptor).first
-        let channelName = rec.channelName.isEmpty
-            ? (ChannelStore.shared.channels.first(where: {
+        let shownTitle = title.isEmpty ? "Recording" : title
+        // The recording's own saved channel first, then the playlist's
+        // channel by id. None saved (an adopted file) or a saved name that
+        // only repeats the title is no channel: Program Info then leaves its
+        // Channel row and the line above the title out (Android c24e45aa).
+        let channelName = RecordingChannelName.shown(saved: rec.channelName, title: shownTitle)
+            ?? (ChannelStore.shared.channels.first(where: {
                 $0.id == rec.channelID || $0.dispatcharrChannelID.map(String.init) == rec.channelID
             })?.name ?? "")
-            : rec.channelName
         infoTarget = ProgramInfoTarget(
             channelName: channelName,
-            title: title.isEmpty ? "Recording" : title,
+            title: shownTitle,
             start: epg?.startTime ?? start,
             end: epg?.endTime ?? end,
             description: rec.programDescription.isEmpty ? (epg?.programDescription ?? "") : rec.programDescription,
@@ -1431,7 +1460,46 @@ struct DVRView: View {
         } else if rec.isUpcoming {
             // Scheduled: nothing to play; the menu carries Cancel.
             debugLog("[DVR] select scheduled \(rec.programTitle): use the context menu to cancel")
+        } else {
+            // Nothing to play (an on-device capture that failed or is still
+            // writing, or a file that is gone): say so, in Android's words
+            // (DvrMediaTabContent.play), instead of doing nothing.
+            debugLog("[DVR] select \(rec.statusRaw) \(rec.destination == .local ? "on-device" : "server") recording: nothing to play"
+                     + (rec.isLocalFileMissing ? " (file missing)" : ""))
+            showPlayToast(rec.isInProgress ? "This recording is not playable yet."
+                                           : "This recording has no playable file yet.")
         }
+    }
+
+    private func showPlayToast(_ message: String) {
+        withAnimation(.easeInOut(duration: 0.2)) { playToast = message }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            if playToast == message {
+                withAnimation(.easeInOut(duration: 0.2)) { playToast = nil }
+            }
+        }
+    }
+
+    /// The app's toast capsule (the Guide's staging toast and the Multiview
+    /// picker's use the same look).
+    private func playToastView(_ text: String) -> some View {
+        Text(text)
+            #if os(tvOS)
+            .scaledFont(.system(size: 22, weight: .semibold))
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            #else
+            .scaledFont(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            #endif
+            .multilineTextAlignment(.center)
+            .foregroundColor(.white)
+            .background(Capsule().fill(Color.black.opacity(0.85)))
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+            .padding(.horizontal, 16)
+            .accessibilityLabel(text)
     }
 
     // MARK: Menu
@@ -1928,6 +1996,15 @@ struct DVRPosterCard: View {
                     .foregroundColor(.red)
                     .padding(.horizontal, 5).padding(.vertical, 2)
                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.7)))
+                    .padding(5)
+            } else if recording.isLocalFileMissing {
+                // A finished on-device recording whose file is gone: white on
+                // grey at 85%, as Android's poster card and the iPad rail and
+                // Apple TV card show it.
+                Text("Missing").scaledFont(.system(size: 9, weight: .heavy))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.gray.opacity(0.85)))
                     .padding(5)
             }
         }

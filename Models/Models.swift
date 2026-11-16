@@ -817,6 +817,28 @@ final class ServerConnection {
         RedirectAuthPolicy.ownAddresses(serverURL: baseURL, localURL: localURL)
     }
 
+    /// The headers a live channel's stream opens with: this playlist's
+    /// User-Agent and, for Dispatcharr, its key in both shapes. Live
+    /// playback (PlayerSession.resolveEngine) and an on-device recording of
+    /// the same channel both start from these, then pass `keyedStream` and,
+    /// at each open, StreamKeyGate.headersForOpen. A key the server already
+    /// rejected stays in here on purpose: the gate stops that open before
+    /// any request ("API key no longer valid"), where a keyless open got a
+    /// plain 401 the player could not tell from any other (2026-11-11).
+    var liveStreamHeaders: [String: String] {
+        var headers: [String: String] = [:]
+        let ua = effectiveUserAgent
+        if !ua.isEmpty { headers["User-Agent"] = ua }
+        if type == .dispatcharrAPI {
+            let key = effectiveApiKey
+            if !key.isEmpty {
+                headers["X-API-Key"] = key
+                headers["Authorization"] = "ApiKey \(key)"
+            }
+        }
+        return headers
+    }
+
     /// The URL a stream opens at, and the headers it carries, after the gate
     /// every stream request with this playlist's sign-in passes
     /// (RedirectAuthPolicy.keyedStream, the same rule as AerioTV for

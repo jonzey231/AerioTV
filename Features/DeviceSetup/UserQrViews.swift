@@ -32,30 +32,54 @@ enum UserQrPayload {
             + "\"username\":\(q(username)),\"first_name\":\"\",\"last_name\":\"\",\"email\":\"\"}"
     }
 
-    /// [profileId]'s code on [playlistId]; nil when it has no API key saved here.
+    /// What Show User QR Code shows for a profile.
+    enum Outcome: Equatable {
+        case code(Code)
+        /// A key is saved here, but an address of the playlist is not proven
+        /// after a server address change (StoredSecretRules): no code, the
+        /// refusal line instead.
+        case addressUnproven
+        /// No key saved here: nothing to show.
+        case none
+    }
+
+    /// [profileId]'s code on [playlistId]; nil unless the code may show.
     @MainActor
     static func code(playlistId: String, profileId: String) -> Code? {
-        guard let server = DsyncLocal.server(playlistId), server.type == .dispatcharrAPI else { return nil }
+        if case .code(let c) = outcome(playlistId: playlistId, profileId: profileId) { return c }
+        return nil
+    }
+
+    @MainActor
+    static func outcome(playlistId: String, profileId: String) -> Outcome {
+        guard let server = DsyncLocal.server(playlistId), server.type == .dispatcharrAPI else { return .none }
         let pm = ProfileManager.shared
-        guard let p = pm.store.byId(profileId) ?? pm.profiles(playlistId).first(where: { $0.id == profileId }) else { return nil }
-        // A key held after a server address change never goes into a code for the new address.
-        let key = (p.isDefault ? server.baseApiKey : (pm.signIns.apiKey(p.id, for: .setupPayload) ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return nil }
+        guard let p = pm.store.byId(profileId) ?? pm.profiles(playlistId).first(where: { $0.id == profileId }) else { return .none }
+        let stored = (p.isDefault ? server.baseApiKey : (pm.store.apiKey(p.id) ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !stored.isEmpty else { return .none }
+        // The device that scans the code signs in with the key, so the code
+        // follows the setup send's rule (Android 2cc1e8a7): held while either
+        // the Server URL or the Local URL is unproven after a server address
+        // change (StoredSecretRules.setupMayCarry). Another profile's key held
+        // after such a change reads the same way.
+        let held = !p.isDefault && pm.signIns.apiKey(p.id, for: .setupPayload) == nil
+        guard !held, pm.setupMayCarryStoredSecrets(playlistId) else { return .addressUnproven }
         var base = server.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while base.hasSuffix("/") { base.removeLast() }
         let user = p.username.isEmpty ? server.username : p.username
-        let text = json(apiKey: key, baseUrl: base, username: user)
+        let text = json(apiKey: stored, baseUrl: base, username: user)
         // Must read back exactly as a scan on another device would.
-        guard let back = ScannedCode.parseUserKey(text), back.apiKey == key else { return nil }
-        return Code(json: text, username: user, apiKey: key)
+        guard let back = ScannedCode.parseUserKey(text), back.apiKey == stored else { return .none }
+        return .code(Code(json: text, username: user, apiKey: stored))
     }
 
-    /// The active Dispatcharr playlist's active profile, when it has a key here.
+    /// The active Dispatcharr playlist's active profile, when it has a key
+    /// here (shown, or refused while its address is unproven).
     @MainActor
     static func activeTarget() -> (playlistId: String, profileId: String)? {
         guard let server = DsyncLocal.activeDispatcharrPlaylist() else { return nil }
         let pid = server.id.uuidString
-        guard let id = ProfileManager.shared.activeProfileIdNow(pid), code(playlistId: pid, profileId: id) != nil else { return nil }
+        guard let id = ProfileManager.shared.activeProfileIdNow(pid), outcome(playlistId: pid, profileId: id) != .none else { return nil }
         return (pid, id)
     }
 }
@@ -119,6 +143,8 @@ private struct UserQrCard: View {
     @State private var revealToken = 0
     @State private var code: UserQrPayload.Code?
     @State private var image: UIImage?
+    /// An address of the playlist is unproven: this line, no code.
+    @State private var refusal: String?
     /// Advertises this device while the code is up, so a device that scans it can copy the whole setup.
     @StateObject private var source = UserQrSource()
 
@@ -129,7 +155,13 @@ private struct UserQrCard: View {
                 .foregroundColor(.textPrimary)
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white)
-                if captured {
+                if let refusal {
+                    Text(refusal)
+                        .scaledFont(.bodyMedium)
+                        .foregroundColor(.black)
+                        .multilineTextAlignment(.center)
+                        .padding(20)
+                } else if captured {
                     Text("Hidden while the screen is being recorded or shared.")
                         .scaledFont(.bodyMedium)
                         .foregroundColor(.black)
@@ -161,8 +193,8 @@ private struct UserQrCard: View {
                 revealToken += 1
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(revealed ? "User QR code" : "Tap to show")
-            .accessibilityAddTraits(.isButton)
+            .accessibilityLabel(refusal ?? (revealed ? "User QR code" : "Tap to show"))
+            .accessibilityAddTraits(refusal == nil ? .isButton : [])
             if let code {
                 Text("Anyone who scans this code can sign in as \(code.username). It hides after 60 seconds.")
                     .scaledFont(.bodySmall.subtext())
@@ -178,9 +210,17 @@ private struct UserQrCard: View {
         .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.cardBackground))
         .padding(16)
         .onAppear {
-            code = UserQrPayload.code(playlistId: playlistId, profileId: profileId)
-            image = code.flatMap { SetupQR.imageWithLogo($0.json) }
-            if let code { source.start(apiKey: code.apiKey, playlistId: playlistId) } else { onClose() }
+            switch UserQrPayload.outcome(playlistId: playlistId, profileId: profileId) {
+            case .code(let c):
+                code = c
+                image = SetupQR.imageWithLogo(c.json)
+                source.start(apiKey: c.apiKey, playlistId: playlistId)
+            case .addressUnproven:
+                ProfileManager.shared.noteStoredSecretRefused(playlistId, .userQrCode)
+                refusal = StoredSecretCopy.fixLoginNewAddress
+            case .none:
+                onClose()
+            }
         }
         .task(id: revealToken) {
             guard revealed else { return }

@@ -728,6 +728,121 @@ enum PlaylistMergePlan {
 
 // MARK: - Credentials
 
+/// iCloud Sync carries no secret in the key-value store (2026-11-14).
+/// Passwords and API keys sync through iCloud Keychain only (the
+/// synchronizable `password_<id>` and `apiKey_<id>` items), gated by the
+/// Credentials toggle, which is what Settings tells the user. Earlier
+/// versions also wrote them as plain strings into each `syncedServers`
+/// record; a push now rewrites every record without them, and a copy an
+/// older version left there is read only once, to fill a Keychain that has
+/// none.
+enum KVSSecretRule {
+    /// The record keys that held a secret or its change time.
+    static let secretKeys: Set<String> = ["_password", "_apiKey", "_passwordChangedAt", "_apiKeyChangedAt"]
+
+    /// `record` without them.
+    static func scrubbed(_ record: [String: Any]) -> [String: Any] {
+        record.filter { !secretKeys.contains($0.key) }
+    }
+
+    /// Whether `record` still holds one.
+    static func holdsSecret(_ record: [String: Any]) -> Bool {
+        record.keys.contains { secretKeys.contains($0) }
+    }
+
+    /// Delete from iCloud > Credentials: iCloud's playlist records as they are,
+    /// each without its secret fields, or nil when none holds one. Never adds
+    /// or drops a record: another device's playlist that this one lacks stays
+    /// in the list (a dropped record reads as deleted, LaneMerge `.gone`).
+    static func scrubbedList(_ records: [[String: Any]]) -> [[String: Any]]? {
+        records.contains(where: holdsSecret) ? records.map(scrubbed) : nil
+    }
+
+    /// Whether a secret an older version left in a record is moved into the
+    /// Keychain: only when credential sync is on, the Keychain has none for
+    /// that slot, and the server has not refused the key. It never replaces
+    /// what the Keychain holds and is never written back.
+    static func migrate(remote: String, keychainHas: Bool, rejected: Bool, credentialsSyncOn: Bool) -> Bool {
+        credentialsSyncOn && !remote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !keychainHas && !rejected
+    }
+}
+
+/// The one-time launch copy of this device's sign-ins (local Keychain) into
+/// iCloud Keychain. It runs only with iCloud Sync and Credentials both on,
+/// and once per device: the flag is set whether or not it copied. Delete
+/// from iCloud > Credentials and Clear iCloud Data leave the flag set, so a
+/// relaunch never undoes the clear. After a clear (or with Credentials
+/// turned on later), a sign-in goes back to iCloud Keychain only when a
+/// device saves one with Credentials on (SyncManager.saveCredentialsSynced),
+/// which is all turning the Credentials toggle on has ever done.
+enum CredentialLaunchCopyRule {
+    static let flagKey = "kvsToKeychainMigrationDoneV1"
+    /// What a clear writes to the flag: done.
+    static let flagAfterClear = true
+
+    static func shouldCopy(done: Bool, syncOn: Bool, credentialsOn: Bool) -> Bool {
+        !done && syncOn && credentialsOn
+    }
+}
+
+/// This device's playlists' sign-ins into iCloud Keychain on an explicit
+/// user action (2026-11-14). Since the iCloud playlist records stopped
+/// carrying sign-ins (b95f57d), a sign-in saved while iCloud Sync or
+/// Credentials was off reached iCloud Keychain only when saved again. Now
+/// turning Credentials on, turning iCloud Sync on with Credentials on, and
+/// Push to iCloud or Push to both with Credentials on copy them too.
+/// Launches and automatic syncs never do (CredentialLaunchCopyRule), so a
+/// clear is never silently undone.
+enum CredentialPushRule {
+    enum Trigger: String, Sendable {
+        case credentialsTurnedOn = "Credentials turned on"
+        case syncTurnedOn = "iCloud Sync turned on"
+        case pushToICloud = "Push to iCloud"
+        case pushToBoth = "Push to both"
+        case launch = "launch"
+        case backgroundSync = "background sync"
+    }
+
+    static func runs(_ trigger: Trigger, syncOn: Bool, credentialsOn: Bool) -> Bool {
+        guard syncOn, credentialsOn else { return false }
+        switch trigger {
+        case .credentialsTurnedOn, .syncTurnedOn, .pushToICloud, .pushToBoth: return true
+        case .launch, .backgroundSync: return false
+        }
+    }
+
+    /// Whether this device's copy goes into iCloud Keychain: never empty,
+    /// never a key this device holds as refused; always where iCloud Keychain
+    /// has none; never over an equal one. Over a different one only when this
+    /// device changed its copy (SyncManager.credentialChangedAt, seconds)
+    /// after iCloud Keychain's item was last modified (the Keychain's own
+    /// modification date); an unknown local change time keeps iCloud's.
+    static func shouldCopy(local: String, cloud: String?, localChangedAt: TimeInterval,
+                           cloudModifiedAt: TimeInterval?, rejected: Bool) -> Bool {
+        let l = local.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !l.isEmpty, !rejected else { return false }
+        guard let c = cloud?.trimmingCharacters(in: .whitespacesAndNewlines), !c.isEmpty else { return true }
+        guard c != l else { return false }
+        guard localChangedAt > 0, let m = cloudModifiedAt else { return false }
+        return localChangedAt > m
+    }
+}
+
+/// Delete from iCloud for a lane (a Sync Category, or Clear iCloud Data)
+/// removes that lane's rows on every device's view of iCloud. A device that
+/// remembers what it saw there (the base LaneMerge uses) would read every
+/// missing row as deleted by an older build (`.gone`) and delete its local
+/// copy, though the prompt says other devices keep theirs. So the clear
+/// leaves a token per lane in iCloud; a device that has not seen that token
+/// drops its base for the lane first, and nothing missing is read as a
+/// deletion. Tokens, not times, so device clocks do not matter.
+enum LaneClearRule {
+    static func baseStillValid(cloudToken: String?, seenToken: String?) -> Bool {
+        guard let cloudToken else { return true }
+        return cloudToken == seenToken
+    }
+}
+
 /// Whether a credential carried by the iCloud server list replaces this
 /// device's. Stamps are the time each device last changed that credential
 /// (0 when unknown: older clients, or set before this rule shipped).

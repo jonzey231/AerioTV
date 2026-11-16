@@ -394,5 +394,114 @@ do {
     eq(ActivePlaylistRule.heal([e("b", "Home", 10), e("a", "Home", 10)]), "a", "same name and age: by id")
 }
 
+// MARK: - No secret in the iCloud key-value store (2026-11-14)
+do {
+    let legacy: [String: Any] = ["id": "P1", "name": "Home", "baseURL": "http://tv.example.com", "username": "logan",
+                                 "_password": "pw", "_apiKey": "key", "_passwordChangedAt": 10.0, "_apiKeyChangedAt": 20.0,
+                                 "_changedAt": 30.0]
+    let clean = KVSSecretRule.scrubbed(legacy)
+    check(KVSSecretRule.holdsSecret(legacy), "an older record holds a password and a key")
+    check(!KVSSecretRule.holdsSecret(clean), "the push rewrites it with no secret and no secret stamp")
+    eq(Set(clean.keys), ["id", "name", "baseURL", "username", "_changedAt"], "every other field stays, the record's own change time too")
+    eq(KVSSecretRule.scrubbed(clean).count, clean.count, "a clean record is unchanged")
+    check(KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: false, credentialsSyncOn: true),
+          "an older record's key fills an empty Keychain (one-version migration)")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: true, rejected: false, credentialsSyncOn: true),
+          "it never replaces what the Keychain holds")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: true, credentialsSyncOn: true),
+          "a key the server refused is never migrated")
+    check(!KVSSecretRule.migrate(remote: " ", keychainHas: false, rejected: false, credentialsSyncOn: true),
+          "an empty value is never migrated")
+    check(!KVSSecretRule.migrate(remote: "key", keychainHas: false, rejected: false, credentialsSyncOn: false),
+          "Credentials off: nothing is migrated")
+}
+
+// MARK: - Delete from iCloud never deletes another device's playlists (2026-11-14)
+do {
+    let now: TimeInterval = 10_000
+    func row(_ id: String, _ t: TimeInterval, secret: Bool) -> [String: Any] {
+        var r: [String: Any] = ["id": id, "name": id, "_changedAt": t]
+        if secret { r["_password"] = "pw"; r["_apiKey"] = "key" }
+        return r
+    }
+    func stamps(_ rows: [[String: Any]]) -> [String: TimeInterval] {
+        Dictionary(uniqueKeysWithValues: rows.map { ($0["id"] as! String, $0["_changedAt"] as! TimeInterval) })
+    }
+    // iCloud holds device A's playlist P1 and device B's playlist P2 (A lacks
+    // P2), both written by an older version with their credentials.
+    let cloud = [row("P1", 100, secret: true), row("P2", 200, secret: true)]
+    // Device B has both and saw both in iCloud.
+    let bLocal: [String: TimeInterval] = ["P1": 100, "P2": 200]
+    let bBase: [String: TimeInterval] = ["P1": 100, "P2": 200]
+    func bPlan(_ rows: [[String: Any]], base: [String: TimeInterval]?) -> [String: LaneMerge.Pick] {
+        LaneMerge.plan(local: .init(live: bLocal), remote: .init(live: stamps(rows)), base: base, now: now)
+    }
+    // The old Credentials clear rewrote the list from A's playlists only.
+    eq(bPlan([KVSSecretRule.scrubbed(cloud[0])], base: bBase)["P2"], .gone,
+       "before: A's Delete from iCloud > Credentials dropped P2, and B deleted it")
+    // Now A removes the credential fields from iCloud's records as they are.
+    let written = KVSSecretRule.scrubbedList(cloud) ?? []
+    eq(Set(written.compactMap { $0["id"] as? String }), ["P1", "P2"], "Credentials clear keeps every record, B's included")
+    check(!written.contains(where: KVSSecretRule.holdsSecret), "and every credential field is gone")
+    let plan = bPlan(written, base: bBase)
+    eq(plan.count, 2, "B's merge plans both playlists")
+    check(plan.values.allSatisfy { $0 == .local || $0 == .remote }, "device B keeps all its playlists")
+    check(KVSSecretRule.scrubbedList(written) == nil, "a second Credentials clear writes nothing")
+    // Delete from iCloud > Playlists (or Clear iCloud Data) on A: the rows go and a token stays.
+    eq(bPlan([], base: bBase)["P2"], .gone, "before: an emptied list read as deletions on B")
+    check(!LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: nil), "a clear B has not seen voids its base")
+    let cleared = bPlan([], base: LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: nil) ? bBase : nil)
+    check(cleared.count == 2 && cleared.values.allSatisfy { $0 == .local }, "B keeps both playlists (and pushes them back)")
+    check(LaneClearRule.baseStillValid(cloudToken: "t1", seenToken: "t1"), "once B has seen the clear, its base works again")
+    check(LaneClearRule.baseStillValid(cloudToken: nil, seenToken: nil), "no clear ever: the base holds")
+}
+
+// MARK: - The launch copy into iCloud Keychain never undoes a clear (2026-11-14)
+do {
+    typealias C = CredentialLaunchCopyRule
+    check(C.shouldCopy(done: false, syncOn: true, credentialsOn: true), "first launch with Sync and Credentials on: copies once")
+    check(!C.shouldCopy(done: false, syncOn: true, credentialsOn: false), "Credentials off: never copies")
+    check(!C.shouldCopy(done: false, syncOn: false, credentialsOn: true), "iCloud Sync off: never copies")
+    // A device that copied, then cleared Credentials (or all iCloud data), relaunches.
+    var done = true
+    done = C.flagAfterClear
+    check(!C.shouldCopy(done: done, syncOn: true, credentialsOn: true), "after Delete from iCloud > Credentials a relaunch uploads nothing")
+    // Credentials turned off, cleared, then turned on again: still nothing at launch.
+    check(!C.shouldCopy(done: C.flagAfterClear, syncOn: true, credentialsOn: true), "turning Credentials back on copies nothing at launch")
+    eq(C.flagKey, "kvsToKeychainMigrationDoneV1", "the flag earlier versions set keeps its name")
+}
+
+// MARK: - Sign-ins to iCloud Keychain on an explicit turn-on or push (2026-11-14)
+do {
+    typealias P = CredentialPushRule
+    for t in [P.Trigger.credentialsTurnedOn, .syncTurnedOn, .pushToICloud, .pushToBoth] {
+        check(P.runs(t, syncOn: true, credentialsOn: true), "\(t.rawValue) copies sign-ins with Credentials on")
+        check(!P.runs(t, syncOn: true, credentialsOn: false), "\(t.rawValue) copies nothing with Credentials off")
+        check(!P.runs(t, syncOn: false, credentialsOn: true), "\(t.rawValue) copies nothing with iCloud Sync off")
+    }
+    check(!P.runs(.launch, syncOn: true, credentialsOn: true), "a launch never copies (a clear is never undone)")
+    check(!P.runs(.backgroundSync, syncOn: true, credentialsOn: true), "an automatic sync never copies")
+
+    check(P.shouldCopy(local: "k1", cloud: nil, localChangedAt: 0, cloudModifiedAt: nil, rejected: false),
+          "iCloud Keychain has none: copied (a sign-in saved while sync was off)")
+    check(!P.shouldCopy(local: "k1", cloud: "k1", localChangedAt: 500, cloudModifiedAt: 100, rejected: false), "equal: nothing written")
+    check(!P.shouldCopy(local: "bad", cloud: nil, localChangedAt: 500, cloudModifiedAt: nil, rejected: true),
+          "a key this device holds as refused is never copied")
+    check(P.shouldCopy(local: "new", cloud: "old", localChangedAt: 500, cloudModifiedAt: 100, rejected: false),
+          "this device changed it after iCloud's item: copied")
+    check(!P.shouldCopy(local: "old", cloud: "new", localChangedAt: 100, cloudModifiedAt: 500, rejected: false),
+          "iCloud Keychain's item is newer: kept")
+    check(!P.shouldCopy(local: "mine", cloud: "theirs", localChangedAt: 0, cloudModifiedAt: 500, rejected: false),
+          "this device's change time unknown: iCloud's kept")
+    check(!P.shouldCopy(local: "mine", cloud: "theirs", localChangedAt: 500, cloudModifiedAt: nil, rejected: false),
+          "iCloud's modification date unreadable: iCloud's kept")
+    check(!P.shouldCopy(local: " ", cloud: nil, localChangedAt: 0, cloudModifiedAt: nil, rejected: false), "an empty sign-in is never copied")
+    // After Delete from iCloud > Credentials: the relaunch copies nothing (01710a6); turning
+    // Credentials back on, or Push to iCloud, brings them back.
+    check(!CredentialLaunchCopyRule.shouldCopy(done: CredentialLaunchCopyRule.flagAfterClear, syncOn: true, credentialsOn: true)
+          && P.runs(.credentialsTurnedOn, syncOn: true, credentialsOn: true),
+          "after a clear: not at launch, only on an explicit turn-on or push")
+}
+
 print("\(checks) checks, \(failures) failures")
 if failures == 0 { print("ALL TESTS PASSED") } else { exit(1) }

@@ -97,6 +97,13 @@ final class AirPlayTileDelivery {
     /// Tile hook: suspend (true) or re-arm (false) the stall watchdog; the
     /// item is the one now current (re-arm rebinds the watchdog to it).
     var onWatchdogs: ((_ suspend: Bool, _ item: AVPlayerItem?) -> Void)?
+    /// Tile hook: the user paused this tile (PlayerProgressStore.userPaused).
+    /// A mid-play handover resumes the player after its swap unless so.
+    var isUserPaused: (() -> Bool)?
+    /// Tile hook: rebuild the pipeline so the receiver gets the fresh-tune
+    /// handover (route already up). Returns false when the tile will not
+    /// (VOD, recordings, catch-up, already rebuilt this tune).
+    var onRebuildForReceiver: (() -> Bool)?
 
     var isServing: Bool { state == .serving }
     /// This delivery holds a player or a LAN state (it was attached as the
@@ -370,6 +377,10 @@ final class AirPlayTileDelivery {
             if state == .idle { beginMidPlay() }
         } else if state == .serving {
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback off (player \(AirPlayMonitor.playerStatusText(player))); ending the session after \(Int(Self.receiverReleaseGrace)) s of receiver silence or \(Int(Self.receiverReleaseHardCap)) s off")
+            if let player {
+                let err = player.currentItem?.error.map { " item error: \($0.localizedDescription)" } ?? ""
+                debugLog("[AVP-AIRPLAY] tile \(channelName): at external off: \(Self.playerStateText(player))\(err)")
+            }
             startReleaseGrace()
         } else if state == .preparing {
             debugLog("[AVP-AIRPLAY] tile \(channelName): external playback off while the LAN handover is prepared")
@@ -489,7 +500,7 @@ final class AirPlayTileDelivery {
 
     // MARK: Mid-play handoff
 
-    private func beginMidPlay() {
+    private func beginMidPlay(allowRebuild: Bool = true) {
         guard state == .idle, let remuxer, let player, player.currentItem != nil,
               Self.routeHasAirPlay() else { return }
         debugLog("[AVP-AIRPLAY] item audio codec=\(remuxer.sourceAudioCodec) channel=\(channelName)")
@@ -497,34 +508,105 @@ final class AirPlayTileDelivery {
             debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
             return
         }
-        // The player must be allowed to go external or the receiver only
-        // gets the system audio route (device log 2026-09-25 12:38:47).
-        AirPlayMonitor.shared.reenableExternalPlaybackForRoute()
-        AirPlayMonitor.enableExternalPlayback(on: player)
+        // A live tile re-tunes with the route up instead of swapping the
+        // item on its playing player (device pass 2026-11-14: a quick pick
+        // left the Roku parked on its first playlist fetch, while every
+        // fresh tune with the route up played). The receiver is resolved
+        // first: an audio-only speaker keeps the local picture as before.
+        if allowRebuild, onRebuildForReceiver != nil {
+            state = .preparing
+            let myToken = UUID()
+            token = myToken
+            holdExternal(player, token: myToken)
+            Task { @MainActor in
+                let receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
+                guard self.token == myToken else {
+                    self.endExternalHold(myToken, "handover superseded")
+                    return
+                }
+                self.state = .idle
+                guard AirPlayMidPlayHold.rebuildsForPick(userPaused: self.isUserPaused?() ?? false,
+                                                         audioOnlyReceiver: receiver.isAudioOnly) else {
+                    debugLog("[AVP-AIRPLAY] mid-play pick: \(receiver.isAudioOnly ? "audio-only receiver" : "the user paused"); no re-tune")
+                    self.endExternalHold(myToken, receiver.isAudioOnly ? "audio-only receiver" : "user paused, swapping in place")
+                    if !receiver.isAudioOnly { self.beginMidPlay(allowRebuild: false) }
+                    return
+                }
+                // The old player goes with the pipeline: drop the hold
+                // without turning its external playback back on, so its
+                // loopback item never reaches the receiver.
+                self.dropExternalHold(myToken)
+                if self.onRebuildForReceiver?() == true {
+                    debugLog("[AVP-AIRPLAY] mid-play pick: re-tuning \(self.channelName) with the route up (fresh-tune handover to \(receiver.name))")
+                    return
+                }
+                debugLog("[AVP-AIRPLAY] mid-play pick: the tile cannot re-tune; swapping the item in place")
+                self.beginMidPlay(allowRebuild: false)
+            }
+            return
+        }
         state = .preparing
         let myToken = UUID()
         token = myToken
+        // The loopback item must not go external while the LAN is prepared:
+        // the receiver cannot reach 127.0.0.1, AVFoundation drops the rate
+        // to 0, and the swap below inherited that pause (device pass
+        // 2026-11-14: the Apple TV froze on its first frame, the Roku never
+        // fetched a segment). External playback goes back on with the LAN
+        // item, as on the fresh-tune path (AirPlayMidPlayHold).
+        holdExternal(player, token: myToken)
         Task { @MainActor in
             let result = await self.prepareLAN(remuxer: remuxer, readyTimeout: Self.midPlayReadyTimeout,
                                                token: myToken)
-            guard self.token == myToken else { return }
+            guard self.token == myToken else {
+                self.endExternalHold(myToken, "handover superseded")
+                return
+            }
             switch result {
             case .ready(let url):
                 guard let player = self.player, let old = player.currentItem else {
+                    self.endExternalHold(myToken, "no player for the LAN item")
                     self.teardownLAN(); self.state = .idle; return
                 }
                 let item = self.makeLANItem(url: url, copying: old)
+                // From the swap on the tile's live driver treats this player
+                // as served, as the fresh-tune path does from its first item:
+                // no join-offset write, nudge or rejoin on the LAN item (device
+                // pass 2026-11-14: the driver raised the LAN item's join
+                // offset 2 ms after the swap and the Roku dropped AirPlay).
+                Self.handoverPlayers.add(player)
+                debugLog("[AVP-AIRPLAY] mid-play: swapping in the LAN item (\(Self.playerStateText(player)))")
                 player.replaceCurrentItem(with: item)
                 self.observeLANItem(item)
+                // The receiver only gets the item once the player may go
+                // external (device log 2026-09-25 12:38:47: otherwise only
+                // the system audio route reached the TV), and the swap does
+                // not restart a rate AVFoundation dropped.
+                self.endExternalHold(myToken, "LAN item in")
+                if AirPlayMidPlayHold.resumesAfterSwap(userPaused: self.isUserPaused?() ?? false) {
+                    player.play()
+                    debugLog("[AVP-AIRPLAY] mid-play: play() called (\(Self.playerStateText(player)))")
+                } else {
+                    debugLog("[AVP-AIRPLAY] mid-play: LAN item in, left paused (the user paused)")
+                }
                 // Truthful handoff line (device log 2026-09-25 12:38:47:
                 // "serving on LAN" was logged but the receiver never
                 // fetched): claim serving only once AVPlayer is external.
                 self.onWatchdogs?(true, nil)
                 let deadline = Date().addingTimeInterval(Self.externalConfirmTimeout)
+                var lastState = ""
                 while !player.isExternalPlaybackActive, Date() < deadline {
                     try? await Task.sleep(nanoseconds: 100_000_000)
-                    guard self.token == myToken else { return }
+                    guard self.token == myToken else { Self.handoverPlayers.remove(player); return }
+                    // Each change of item status, rate or external state
+                    // while the receiver takes the item, for the next test.
+                    let now = Self.playerStateText(player)
+                    if now != lastState {
+                        lastState = now
+                        debugLog("[AVP-AIRPLAY] mid-play: waiting for the receiver (\(now))")
+                    }
                 }
+                Self.handoverPlayers.remove(player)
                 guard player.isExternalPlaybackActive else {
                     debugLog("[AVP-AIRPLAY] receiver did not take the LAN item (external playback never became active within \(Int(Self.externalConfirmTimeout))s, allowsExternalPlayback=\(player.allowsExternalPlayback)); back to loopback, playing on this device")
                     self.lanItemStatusObservation = nil
@@ -540,18 +622,85 @@ final class AirPlayTileDelivery {
                     self.state = .idle
                     return
                 }
-                debugLog("[AVP-AIRPLAY] external playback active: serving on LAN \(self.endpointText), watchdogs suspended")
+                debugLog("[AVP-AIRPLAY] external playback active: serving on LAN \(self.endpointText), watchdogs suspended (\(Self.playerStateText(player)))")
                 self.enterServing()
             case .noAddress:
                 debugLog("[AVP-AIRPLAY] no LAN address for the remux server; starting on loopback")
+                self.endExternalHold(myToken, "no LAN address")
                 self.state = .idle
             case .unavailable:
                 debugLog("[AVP-AIRPLAY] LAN delivery unavailable; leaving the loopback item in place")
+                self.endExternalHold(myToken, "LAN delivery unavailable")
                 self.state = .idle
             case .audioOnlyReceiver:
+                self.endExternalHold(myToken, "audio-only receiver")
                 self.state = .idle
             }
         }
+    }
+
+    // MARK: Mid-play external playback hold
+
+    /// Players between the mid-play swap and serving (or the fall back to
+    /// loopback). PlayerView's live driver reads this as "served".
+    private static let handoverPlayers = NSHashTable<AVPlayer>.weakObjects()
+    static func isHandingOver(_ player: AVPlayer) -> Bool { handoverPlayers.contains(player) }
+
+    /// One line of the handover's player state: rate, timeControlStatus,
+    /// item status, the item's configured live offset, and external state.
+    static func playerStateText(_ player: AVPlayer) -> String {
+        let item = player.currentItem
+        let status: String
+        switch item?.status {
+        case .readyToPlay: status = "ready"
+        case .failed: status = "failed"
+        case .unknown: status = "unknown"
+        case nil: status = "none"
+        @unknown default: status = "other"
+        }
+        let offset = item.map { $0.configuredTimeOffsetFromLive.isValid ? $0.configuredTimeOffsetFromLive.seconds : 0 } ?? 0
+        return String(format: "rate %.1f, %@, item %@, configured offset %.1f s, external %@ (allowed %@)",
+                      player.rate, AirPlayMonitor.playerStatusText(player), status, offset,
+                      player.isExternalPlaybackActive ? "active" : "off",
+                      player.allowsExternalPlayback ? "yes" : "no")
+    }
+
+    /// Players a mid-play handover holds on this device until the LAN item
+    /// is in; AirPlayMonitor's route-driven re-enable leaves them alone.
+    private static let externalHeldPlayers = NSHashTable<AVPlayer>.weakObjects()
+    static func holdsExternalOff(_ player: AVPlayer) -> Bool { externalHeldPlayers.contains(player) }
+    private var midPlayHold = AirPlayMidPlayHold()
+    private weak var heldPlayer: AVPlayer?
+
+    private func holdExternal(_ player: AVPlayer, token myToken: UUID) {
+        midPlayHold.begin(myToken)
+        heldPlayer = player
+        Self.externalHeldPlayers.add(player)
+        if player.allowsExternalPlayback { player.allowsExternalPlayback = false }
+        debugLog("[AVP-AIRPLAY] mid-play: external playback held off until the LAN item is in (the loopback item cannot reach the receiver)")
+    }
+
+    /// This handover's outcome: its hold ends and external playback goes
+    /// back on. A newer handover's hold is left alone.
+    private func endExternalHold(_ myToken: UUID, _ why: String) {
+        guard midPlayHold.end(myToken) else { return }
+        releaseHeldPlayer(why)
+    }
+
+    /// Ends this handover's hold and leaves external playback off: the
+    /// player is about to be torn down with its pipeline.
+    private func dropExternalHold(_ myToken: UUID) {
+        guard midPlayHold.end(myToken) else { return }
+        if let p = heldPlayer { Self.externalHeldPlayers.remove(p) }
+        heldPlayer = nil
+    }
+
+    private func releaseHeldPlayer(_ why: String) {
+        guard let p = heldPlayer else { return }
+        heldPlayer = nil
+        Self.externalHeldPlayers.remove(p)
+        AirPlayMonitor.enableExternalPlayback(on: p)
+        debugLog("[AVP-AIRPLAY] mid-play: external playback back on (\(why))")
     }
 
     /// Mid-play LAN item: the same forward-buffer policy as the loopback
@@ -1372,7 +1521,10 @@ final class AirPlayTileDelivery {
         cancelReleaseGrace()
         tileExternal = false
         mutedForTake = false
-        if let player { Self.tilePlayers.remove(player) }
+        // A handover cut short by the teardown must not leave its player
+        // stuck on this device.
+        if midPlayHold.clear() { releaseHeldPlayer("delivery reset") }
+        if let player { Self.tilePlayers.remove(player); Self.handoverPlayers.remove(player) }
         player = nil
         leaveServing(holdForFlip: wasServing && logEnd)
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }

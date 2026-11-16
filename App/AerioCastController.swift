@@ -96,8 +96,28 @@ final class AerioCastController: NSObject, ObservableObject {
     private var handoffContent: Content?
     func rememberHandoff() { handoffContent = castingContent }
     /// Device picked while another session was up; started when that
-    /// session reports its end.
+    /// session reports its end, with the launch intent its entry named
+    /// (held in `launchPlan`).
     private var switchTarget: GCKDevice?
+    /// Which receiver the next Cast launch is for (owner rule 2026-11-14: a
+    /// "Google Cast" pick is a plain cast, only "AerioTV on TV" launches the
+    /// TV app). Restored at startup so a session the SDK resumes keeps the
+    /// entry it was picked from.
+    private var launchPlan = CastLaunchPlan(
+        stored: UserDefaults.standard.string(forKey: AerioCastController.launchIntentKey))
+    private static let launchIntentKey = "cast.launchIntent"
+
+    /// Hand the plan's next intent to the SDK, which embeds it in every launch
+    /// request as the launch credentials, and persist it for an app restart.
+    /// An unmarked launch opens the TV app, so this runs before every launch
+    /// path: startup (resume), every pick, a session end, a failed start.
+    private func applyLaunchPlan() {
+        UserDefaults.standard.set(launchPlan.stored, forKey: Self.launchIntentKey)
+        guard GCKCastContext.isSharedInstanceInitialized() else { return }
+        GCKCastContext.sharedInstance().setLaunch(
+            GCKCredentialsData(credentials: launchPlan.next.wire))
+        debugLog("[Cast] next launch: \(launchPlan.next.logDescription)")
+    }
     /// Set by stopCasting() so a deliberate teardown is never reported as a
     /// drop, even if the SDK attaches an error to it (Android parity, dce3074).
     private var userRequestedStop = false
@@ -419,12 +439,16 @@ final class AerioCastController: NSObject, ObservableObject {
     /// Latch the receiver type, log WHICH of the three outcomes happened, and
     /// release any held load.
     private func resolveReceiverTarget(_ target: ReceiverTarget, answered: Bool = true) {
-        // The web receiver answering hello means the AerioTV TV app is no
-        // longer what Cast Connect launches here (uninstalled, measured
-        // 2026-09-27), so the picker must stop listing it as AerioTV on TV.
-        // Ahead of the latch: the answer can land after a handshake timeout
-        // already chose the web receiver.
+        // The web receiver answering a launch that ASKED for the TV app
+        // (picked from AerioTV on TV) means Cast Connect fell back because
+        // the app is gone (uninstalled, measured 2026-09-27), so the picker
+        // must stop listing it as AerioTV on TV. A plain cast (Google Cast
+        // entry) comes up on the web receiver on purpose, even on a TV that
+        // has the app (owner rule 2026-11-14), so its answer says nothing
+        // about the app (Android 7a03952b). Ahead of the latch: the answer
+        // can land after a handshake timeout already chose the web receiver.
         if target == .webReceiver, answered,
+           CastNativeDeviceRegistry.webAnswerDemotes(launchIntent: launchPlan.next),
            let id = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.device.deviceID {
             CastNativeDeviceRegistry.shared.forget(id)
         }
@@ -438,6 +462,11 @@ final class AerioCastController: NSObject, ObservableObject {
                 CastNativeDeviceRegistry.shared.markNative(id)
             }
             debugLog("[Cast] target=android-tv-app, native playback (receiver answered)")
+            if launchPlan.next == .webReceiver {
+                // Only a TV app build without the launch check accepts a
+                // launch marked as a plain cast; it plays there until it updates.
+                debugLog("[Cast] the TV app opened for a plain cast launch: its build predates the launch check")
+            }
         } else if answered {
             debugLog("[Cast] target=web-receiver (receiver answered)")
         } else {
@@ -558,12 +587,19 @@ final class AerioCastController: NSObject, ObservableObject {
         // AC-3 passthrough as in normal playback).
         // Targets without the app (legacy dongles, Nest displays) fall back to
         // the web receiver on their own and keep the local HLS proxy path.
-        // No credentials: the Android TV receiver authenticates nothing; it
-        // validates the load against its own playlist and effective base.
+        // The launch options cannot change after this call, so the picked
+        // entry rides each launch as the launch credentials instead
+        // (applyLaunchPlan, CastLaunchIntent): the TV app declines a "Google
+        // Cast" pick and the framework loads the web receiver (owner rule
+        // 2026-11-14). That marking is not a sign-in: the Android TV receiver
+        // authenticates nothing; it validates the load against its own
+        // playlist and effective base.
         let launchOptions = GCKLaunchOptions()
         launchOptions.androidReceiverCompatible = true
         options.launchOptions = launchOptions
         GCKCastContext.setSharedInstanceWith(options)
+        // Before the session manager can resume (or relaunch) a saved session.
+        applyLaunchPlan()
         GCKCastContext.sharedInstance().sessionManager.add(self)
         // The flag above only makes discovery ELIGIBLE to run without a
         // GCKUICastButton; it does not by itself put a scanner on the wire.
@@ -1039,7 +1075,11 @@ final class AerioCastController: NSObject, ObservableObject {
     /// locally (full or mini player), else the multiview audio tile, else
     /// nothing -- and "nothing" means the cover shows a channel list once the
     /// session connects, never a bare receiver.
-    func beginSession(with device: GCKDevice) {
+    ///
+    /// `intent` is the picker entry's receiver: `.tvApp` only from "AerioTV
+    /// on TV"; a "Google Cast" pick is a plain cast even on a TV that has the
+    /// app (owner rule 2026-11-14). No default, so every caller names one.
+    func beginSession(with device: GCKDevice, intent: CastLaunchIntent) {
         let name = device.friendlyName ?? device.deviceID
         // The SDK refuses startSession while another Cast session is up
         // (measured 2026-09-27 10:24: "startSession refused" when the idle
@@ -1049,11 +1089,15 @@ final class AerioCastController: NSObject, ObservableObject {
         if let current = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
            current.device.deviceID != device.deviceID {
             debugLog("[Cast] picker selected \(name) while \(current.device.friendlyName ?? "?") is connected: ending it first")
+            launchPlan.pick(intent, switching: true)
+            applyLaunchPlan()
             switchTarget = device
             if handoffContent == nil { handoffContent = castingContent }
             stopCasting()
             return
         }
+        launchPlan.pick(intent, switching: false)
+        applyLaunchPlan()
         connectError = nil
         connectingDeviceID = device.deviceID
         awaitingChannelPick = false
@@ -1065,7 +1109,7 @@ final class AerioCastController: NSObject, ObservableObject {
         // locally still wins over the handoff.
         pending = seed.flatMap { Self.castContent(for: $0) } ?? handoffContent
         castingContent = pending
-        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? handoffContent?.title ?? "none")")
+        debugLog("[Cast] picker selected \(name) -> startSession seed=\(seed?.name ?? handoffContent?.title ?? "none") launch=\(intent.logDescription)")
         handoffContent = nil
         let started = GCKCastContext.sharedInstance().sessionManager.startSession(with: device)
         if !started {
@@ -1074,6 +1118,8 @@ final class AerioCastController: NSObject, ObservableObject {
             connectingDeviceID = nil
             connectError = "Could not connect to \(name)"
             debugLog("[Cast] startSession refused by the SDK for \(name)")
+            launchPlan.startFailed()
+            applyLaunchPlan()
         }
     }
 
@@ -1772,6 +1818,8 @@ extension AerioCastController: GCKSessionManagerListener {
     /// leave the message on the picker row the user tapped.
     private func onSessionFailedToStart(device: String, message: String) {
         debugLog("[Cast] session failed to start \(device): \(message)")
+        launchPlan.startFailed()
+        applyLaunchPlan()
         pending = nil
         castingContent = nil
         awaitingChannelPick = false
@@ -1865,9 +1913,14 @@ extension AerioCastController: GCKSessionManagerListener {
         awaitingChannelPick = false
         connectingDeviceID = nil
         debugLog("[Cast] session ended reason=\(wasUserStop ? "user stop" : (error != nil ? "error: \(error!.localizedDescription)" : "remote end"))")
+        // The next launch is a plain cast unless a switch picked from
+        // "AerioTV on TV" is waiting (owner rule 2026-11-14).
+        let switchIntent = launchPlan.sessionEnded()
+        applyLaunchPlan()
         if let next = switchTarget {
             switchTarget = nil
-            DispatchQueue.main.async { [weak self] in self?.beginSession(with: next) }
+            let intent = switchIntent ?? .webReceiver
+            DispatchQueue.main.async { [weak self] in self?.beginSession(with: next, intent: intent) }
         }
         if involuntary {
             debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
@@ -2922,8 +2975,15 @@ final class CastNativeDeviceRegistry: ObservableObject {
         debugLog("[Cast] device \(deviceID) recorded as AerioTV on TV")
     }
 
-    /// Only a web receiver's own answer calls this; a handshake timeout is
-    /// not evidence the TV app is gone.
+    /// A web receiver's answer demotes a device only when the launch asked
+    /// for the TV app (CastLaunchIntent.tvApp).
+    nonisolated static func webAnswerDemotes(launchIntent: CastLaunchIntent) -> Bool {
+        CastPickerRules.webAnswerDemotes(launchIntent: launchIntent)
+    }
+
+    /// Only a web receiver's own answer to an AerioTV on TV launch calls
+    /// this; a handshake timeout or a plain cast is not evidence the TV app
+    /// is gone.
     func forget(_ deviceID: String) {
         guard ids.contains(deviceID) else { return }
         ids.remove(deviceID)
@@ -3739,6 +3799,8 @@ struct MultiviewCompositePreviewGrid: View {
     @State private var menuTileID: String?
     /// The tile whose Switch Stream sheet is open (menu > Switch Stream).
     @State private var switchStreamTileID: String?
+    /// The grid's measured width; its height is a fixed 16:9 of it.
+    @State private var gridWidth: CGFloat = 0
 
     var body: some View {
         let tiles = Array(store.tiles.prefix(MultiviewCompositeLayout.maxTiles))
@@ -3900,7 +3962,18 @@ struct MultiviewCompositePreviewGrid: View {
                 }
             )
         }
-        .aspectRatio(16.0 / 9.0, contentMode: .fit)
+        // A fixed 16:9 height from the measured width, never a flexible
+        // one: the remote-session sheet sizes its detent from the laid-out
+        // content height, so a flexible grid is the one child the VStack
+        // squeezes, and it settled at zero height (device pass 2026-11-14:
+        // "preview grid shown" and "attached=yes" logged, no tiles on
+        // screen). Before cbb5dee the detent added the bottom inset, a spare
+        // band in every layout pass, which is what let the grid grow.
+        .frame(height: gridWidth * 9 / 16)
+        .frame(maxWidth: .infinity)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { w in
+            if abs(w - gridWidth) > 0.5 { gridWidth = w }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .confirmationDialog(menuTitle, isPresented: Binding(
             get: { menuTileID != nil },
@@ -3958,6 +4031,9 @@ struct MultiviewCompositePreviewGrid: View {
             }
         }
         .onAppear { debugLog("[MV-CAST] preview grid shown (remote controls sheet)") }
+        .onChange(of: gridWidth) { _, w in
+            debugLog(String(format: "[MV-CAST] preview grid size %.0fx%.0f pt", w, w * 9 / 16))
+        }
         .onDisappear { debugLog("[MV-CAST] preview grid hidden") }
     }
 
@@ -5191,18 +5267,26 @@ struct CastPickerSheet: View {
     @ObservedObject private var nativeRegistry = CastNativeDeviceRegistry.shared
     @Environment(\.dismiss) private var dismiss
     @State private var code = ""
+    /// The section of the Cast row tapped last (a device can have two rows).
+    @State private var tappedSection: CastPickerSection?
 
     /// One Cast row, used by both the "AerioTV on TV" and "Google Cast"
-    /// sections so their behavior stays identical.
+    /// sections so their behavior stays identical. The section decides the
+    /// receiver (owner rule 2026-11-14): "AerioTV on TV" launches the TV app;
+    /// "Google Cast" is always a plain cast to the web receiver, even on a TV
+    /// that has the app.
     @ViewBuilder
-    private func castDeviceRow(_ device: GCKDevice) -> some View {
+    private func castDeviceRow(_ device: GCKDevice, section: CastPickerSection) -> some View {
+        // A TV with the app has a row in each section: only the tapped one spins.
         let connecting = castController.connectingDeviceID == device.deviceID
+            && (tappedSection == nil || tappedSection == section)
         let otherConnecting = castController.connectingDeviceID != nil && !connecting
         Button {
+            tappedSection = section
             if !companion.isControlling { companion.disconnect() }
             // Session start AND the channel to load live in one place now
             // (guide pill parity with the in-player chrome).
-            castController.beginSession(with: device)
+            castController.beginSession(with: device, intent: section.launchIntent)
         } label: {
             HStack {
                 Label(device.friendlyName ?? "Cast device", systemImage: "sparkles.tv")
@@ -5218,6 +5302,7 @@ struct CastPickerSheet: View {
         // settles.
         .disabled(otherConnecting)
         .opacity(otherConnecting ? 0.4 : 1)
+        .accessibilityIdentifier("cast.row.\(section == .aerioTVOnTV ? "app" : "web").\(device.friendlyName ?? device.deviceID)")
     }
 
     var body: some View {
@@ -5278,14 +5363,22 @@ struct CastPickerSheet: View {
                 if showGoogleCast {
                     // Devices that have run the AerioTV Android TV app via
                     // Cast Connect get their own section, so the better path
-                    // is the obvious one to pick.
+                    // is the obvious one to pick. A TV that never had a
+                    // native session is listed too when its AerioTV app is
+                    // running: the app advertises the AerioTV Remote host
+                    // under the TV's device name, which is also its Cast name
+                    // (Android 2d32f325). Without that no TV could join,
+                    // since a Google Cast pick is a plain cast.
+                    let appTVNames = Set(companion.devices.map { CastPickerRules.normalizedTVName($0.name) })
                     let nativeDevices = castDevices.devices.filter {
-                        nativeRegistry.isNative($0.deviceID)
+                        CastPickerRules.listsUnderAerioTVOnTV(castName: $0.friendlyName,
+                                                              recordedNative: nativeRegistry.isNative($0.deviceID),
+                                                              appTVNames: appTVNames)
                     }
                     if !nativeDevices.isEmpty {
                         Section {
                             ForEach(nativeDevices, id: \.deviceID) { device in
-                                castDeviceRow(device)
+                                castDeviceRow(device, section: .aerioTVOnTV)
                             }
                         } header: {
                             Text("AerioTV on TV")
@@ -5298,9 +5391,12 @@ struct CastPickerSheet: View {
                             Text("Searching for devices…")
                                 .foregroundStyle(.secondary)
                         }
-                        ForEach(castDevices.devices.filter { !nativeRegistry.isNative($0.deviceID) },
-                                id: \.deviceID) { device in
-                            castDeviceRow(device)
+                        // Every Cast device, including one listed above: a
+                        // plain cast must never need the TV app (owner rule
+                        // 2026-11-14), so a TV with the app has two rows, each
+                        // with its own launch intent.
+                        ForEach(castDevices.devices, id: \.deviceID) { device in
+                            castDeviceRow(device, section: .googleCast)
                         }
                         if let error = castController.connectError {
                             Text(error)

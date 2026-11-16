@@ -6201,6 +6201,9 @@ struct AVPlayerMultiviewTile: View {
     /// AirPlay for an on-demand item the relay serves: the receiver gets
     /// the server's own URL without the key (RelayVODAirPlayHandover).
     @State private var vodAirPlayHandover: RelayVODAirPlayHandover?
+    /// This tune already rebuilt its pipeline for an AirPlay pick (one
+    /// per tune; a channel change clears it).
+    @State private var airPlayReceiverRebuildUsed = false
     /// An in-place AirPlay flip retargeted the remuxer and the new
     /// channel has not stored its first segment yet; a codec-gate failure
     /// in that window re-tunes the classic way instead of failing the tile.
@@ -6541,6 +6544,7 @@ struct AVPlayerMultiviewTile: View {
             streamLockoutRetries = 0
             streamAuthRetries = 0
             #if os(iOS)
+            airPlayDelivery.onRebuildForReceiver = { rebuildForAirPlayReceiver() }
             // AirPlay route already selected: resolve the receiver, plan
             // the audio and start on the LAN URL instead (plan 4c).
             if MultiviewCompositeTaps.ownsAirPlay(tileID: tileID), let mux = remuxer,
@@ -6628,6 +6632,9 @@ struct AVPlayerMultiviewTile: View {
         .onChange(of: streamURL) { oldURL, newURL in
             // A new tune starts playing: the user's pause belonged to the old one.
             progressStore.userPaused = false
+            #if os(iOS)
+            airPlayReceiverRebuildUsed = false
+            #endif
             // A previous channel's TS fallback / Force HLS bypass URL must
             // not follow the flip: liveSourceURL prefers it over streamURL,
             // so the flip would re-open the OLD channel.
@@ -8388,6 +8395,31 @@ struct AVPlayerMultiviewTile: View {
         start()
     }
 
+    #if os(iOS)
+    /// A mid-play AirPlay pick on a live channel: rebuild the pipeline so
+    /// the receiver gets the fresh-tune handover (a new player whose first
+    /// item is the LAN URL, started with the route already up), the path
+    /// every device test passed on. Device pass 2026-11-14: the in-place
+    /// swap onto the playing player left the Roku parked on its first
+    /// playlist fetch (no segment ever requested) whenever the pick came in
+    /// the first seconds of a tune. Once per tune; false when this tile
+    /// cannot (VOD, recordings, catch-up, already rebuilt), and the
+    /// delivery then swaps the item in place as before.
+    private func rebuildForAirPlayReceiver() -> Bool {
+        guard !airPlayReceiverRebuildUsed, !isVOD, !isDVR, catchup == nil else { return false }
+        airPlayReceiverRebuildUsed = true
+        debugLog("[AVP-MV] rebuilding the pipeline for the AirPlay receiver picked mid-play channel=\(channelName)")
+        stop(allowRetain: false)
+        statusText = "Preparing..."
+        let token = teardownToken
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard token == teardownToken else { return }
+            start()
+        }
+        return true
+    }
+    #endif
+
     /// Why this tile must not take Force HLS's direct HLS path, or nil.
     private var forceHLSBypassReason: String? {
         #if os(iOS)
@@ -9418,6 +9450,10 @@ struct AVPlayerMultiviewTile: View {
                 airPlayDelivery.onWatchdogs = { suspend, item in
                     stallWatchdog?.setSuspended(suspend, item: item)
                 }
+                // Class ref, safe across view-struct copies.
+                let store = progressStore
+                airPlayDelivery.isUserPaused = { store.userPaused }
+                airPlayDelivery.onRebuildForReceiver = { rebuildForAirPlayReceiver() }
                 setLANCard(on: mux)
                 airPlayDelivery.attach(player: avPlayer, remuxer: mux,
                                        loopbackURL: readyLocalURL, channelName: channelName)

@@ -979,13 +979,7 @@ struct AddProfileFlow: View {
                         ProfileAvatarView(name: user.username, username: user.username, spec: nil, size: ProfileUI.s(28, 48))
                         VStack(alignment: .leading, spacing: 1) {
                             Text(user.username).scaledFont(ProfileUI.body).foregroundColor(.textPrimary).lineLimit(1)
-                            HStack(spacing: 6) {
-                                Text(ProfileLevel.of(user.serverLevel).rawValue).scaledFont(ProfileUI.small).foregroundColor(.textSecondary)
-                                if (user.apiKey ?? "").isEmpty {
-                                    Image(systemName: "key.fill").font(.system(size: ProfileUI.s(11, 17))).foregroundColor(.textSecondary)
-                                    Text("Needs a password or API key").scaledFont(ProfileUI.small).foregroundColor(.textSecondary).lineLimit(1)
-                                }
-                            }
+                            ServerUserCaption(user: user)
                         }
                         Spacer(minLength: 0)
                     }

@@ -266,8 +266,10 @@ final class RecordingCoordinator: ObservableObject {
 
     /// Starts a local recording for the given `Recording` model object.
     /// The `Recording` should already be inserted into SwiftData with
-    /// `status == .scheduled` before calling this.
-    func startLocalRecording(_ recording: Recording, streamURL: URL,
+    /// `status == .scheduled` before calling this. `server` is the channel's
+    /// playlist: the stream opens with the headers live playback sends for
+    /// the same channel (its User-Agent and key), through the same gates.
+    func startLocalRecording(_ recording: Recording, streamURL: URL, server: ServerConnection? = nil,
                              modelContext: ModelContext) async {
         // Quota check
         guard !isQuotaExceeded else {
@@ -287,6 +289,27 @@ final class RecordingCoordinator: ObservableObject {
             return
         }
 
+        // The headers live playback opens this channel with, and the URL and
+        // headers after the stream-address gate (ServerConnection.keyedStream):
+        // a URL on an address the playlist left is rebuilt on the address in
+        // use, or sent without the key, or, with Xtream Codes credentials in
+        // it, not opened at all. Before this the recorder sent no key and the
+        // system User-Agent, unlike live playback and AerioTV for Android.
+        var openURL = streamURL
+        var openHeaders: [String: String] = [:]
+        if let server {
+            guard let opened = server.keyedStream(streamURL, headers: server.liveStreamHeaders) else {
+                recording.status = .failed
+                recording.failureReason = InterruptedCapture.nothingWritten
+                try? modelContext.save()
+                debugLog("[DVR] on-device recording \(recording.id.uuidString.prefix(8)): its stream URL is on an address the playlist left; nothing opened")
+                refreshGuideRecordingMarkers(modelContext: modelContext)
+                return
+            }
+            openURL = opened.url
+            openHeaders = opened.headers
+        }
+
         // Access security-scoped resource if custom dir
         let needsScope = customRecordingsDirectory != nil
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
@@ -297,8 +320,8 @@ final class RecordingCoordinator: ObservableObject {
         recording.status = .recording
         try? modelContext.save()
 
-        let session = LocalRecordingSession(streamURL: streamURL, filePath: path,
-                                            userAgent: nil)
+        let session = LocalRecordingSession(streamURL: openURL, filePath: path,
+                                            userAgent: nil, headers: openHeaders)
         activeSessions[recording.id] = session
         updateRecordingState()
 
@@ -321,6 +344,7 @@ final class RecordingCoordinator: ObservableObject {
             recording.failureReason = error.localizedDescription
             activeSessions.removeValue(forKey: recording.id)
             updateRecordingState()
+            discardEmptyCapture(recording)
             try? modelContext.save()
         }
         refreshGuideRecordingMarkers(modelContext: modelContext)
@@ -355,7 +379,10 @@ final class RecordingCoordinator: ObservableObject {
         let written = await session.getBytesWritten()
         recording.fileSizeBytes = written
         recording.status = written > 0 ? .completed : .failed
-        if written == 0 { recording.failureReason = "No data was written" }
+        if written == 0 {
+            recording.failureReason = "No data was written"
+            discardEmptyCapture(recording)
+        }
         // The length shown is what the file holds (stopped early, or started
         // partway into its window), not the scheduled window.
         if written > 0 {
@@ -723,7 +750,22 @@ final class RecordingCoordinator: ObservableObject {
         let what = out.capturedSeconds.map { "kept \(out.bytes) bytes, \(Int($0)) s captured" }
             ?? "nothing captured (\(out.failureReason ?? ""))"
         debugLog("[DVR] on-device recording \(rec.id.uuidString.prefix(8)) had no capture running (\(trigger)): now \(out.statusRaw), \(what)")
+        if rec.status == .failed { discardEmptyCapture(rec) }
         return true
+    }
+
+    /// A capture that wrote nothing leaves no file behind: AerioTV for
+    /// Android discards the empty file too (LocalRecordingService, and its
+    /// recovery of an interrupted capture). The row stays failed with its
+    /// reason and its stored path, so the DVR lists it as before, and a
+    /// failed row is never shown as missing (isLocalFileMissing reads
+    /// finished rows only). Only an empty file is removed.
+    private func discardEmptyCapture(_ rec: Recording) {
+        guard let path = rec.resolvedLocalFilePath,
+              let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
+              size.int64Value == 0 else { return }
+        try? FileManager.default.removeItem(atPath: path)
+        debugLog("[DVR] on-device recording \(rec.id.uuidString.prefix(8)) captured nothing: its empty file is removed")
     }
 
     /// Full variant with model updates, call this from views that have

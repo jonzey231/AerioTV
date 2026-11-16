@@ -1415,6 +1415,19 @@ do {
     eq(PlaylistDeleteCopy.savedOnDeviceSection, "Saved on this device", "DVR section")
 }
 
+// MARK: - Program Info's channel for a recording (Android c24e45aa)
+do {
+    typealias N = RecordingChannelName
+    eq(N.shown(saved: "Smoke One", title: "Smoke One Program 19"), "Smoke One", "channel: the saved name is shown")
+    eq(N.shown(saved: "  Smoke One ", title: "Show"), "Smoke One", "channel: the saved name is trimmed")
+    eq(N.shown(saved: "", title: "Recording from Nov 14, 2026"), nil, "channel: none saved (an adopted file)")
+    eq(N.shown(saved: "   ", title: "Show"), nil, "channel: a blank name is none")
+    eq(N.shown(saved: nil, title: "Show"), nil, "channel: nil is none")
+    eq(N.shown(saved: "News at Ten", title: "News at Ten"), nil, "channel: a name that repeats the title is none")
+    eq(N.shown(saved: "News at Ten", title: " News at Ten "), nil, "channel: the title is compared trimmed")
+    eq(N.shown(saved: "News", title: ""), nil, "channel: with no title the name stands in for it, so it is none")
+}
+
 // MARK: - On-device recording locations survive a container move (2026-11-13)
 do {
     typealias P = RecordingPathRules

@@ -207,6 +207,13 @@ struct ProgramInfoView: View {
     var usesGuideCorners = false
     @Environment(\.dismiss) private var dismiss
 
+    /// A recording with no channel (an adopted file, or a saved name that
+    /// only repeated its title) has none to show: its Channel row and the
+    /// line above the title are left out (Android c24e45aa).
+    private var hasChannel: Bool {
+        !target.channelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// v1.7.x: lazy-loaded category result for Dispatcharr programs
     /// whose `target.category` arrived empty. The bulk
     /// `/api/epg/grid/` endpoint deliberately strips `<category>`
@@ -535,10 +542,13 @@ struct ProgramInfoView: View {
                                        usesGuideCorners: usesGuideCorners)
                     }
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(target.channelName.uppercased())
-                            .scaledFont(.system(size: 11, weight: .semibold))
-                            .foregroundColor(Color.contrastText(.textSecondary))
-                            .tracking(1.2)
+                        // No channel (an adopted recording file): no empty line.
+                        if hasChannel {
+                            Text(target.channelName.uppercased())
+                                .scaledFont(.system(size: 11, weight: .semibold))
+                                .foregroundColor(Color.contrastText(.textSecondary))
+                                .tracking(1.2)
+                        }
                         Text(target.title)
                             .scaledFont(.system(size: 21, weight: .bold))
                             .foregroundColor(.textPrimary)
@@ -800,7 +810,11 @@ struct ProgramInfoView: View {
             }
 
             Section {
-                LabeledContent("Channel", value: target.channelName)
+                // No channel (an adopted recording file): no row, rather
+                // than a label with nothing beside it.
+                if hasChannel {
+                    LabeledContent("Channel", value: target.channelName)
+                }
                 // Program row: title on its OWN full-width line (soft-wraps,
                 // so a long single-word title can never mid-word-break), with
                 // the feed badges wrapping in a flow layout underneath rather
@@ -894,10 +908,13 @@ struct ProgramInfoView: View {
                                    usesGuideCorners: usesGuideCorners)
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(target.channelName.uppercased())
-                        .scaledFont(.system(size: 20, weight: .semibold))
-                        .foregroundColor(Color.contrastText(.textSecondary))
-                        .tracking(1.5)
+                    // No channel (an adopted recording file): no empty line.
+                    if hasChannel {
+                        Text(target.channelName.uppercased())
+                            .scaledFont(.system(size: 20, weight: .semibold))
+                            .foregroundColor(Color.contrastText(.textSecondary))
+                            .tracking(1.5)
+                    }
                     Text(target.title)
                         .scaledFont(.system(size: 38, weight: .bold))
                         .foregroundColor(.textPrimary)

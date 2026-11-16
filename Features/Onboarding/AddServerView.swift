@@ -438,19 +438,22 @@ struct AddServerView: View {
                 }
                 #endif
             } else {
-                // Android ConnectServerParts: Scan QR code + Enter details.
+                // Android ConnectServerParts: Scan QR code + Enter details,
+                // equal width. At a large Text Size the labels wrap, as on
+                // Android, and both pills take the taller one's height.
                 HStack(spacing: 10) {
                     OnboardingPillButton(title: "Scan QR code", filled: true, fullWidth: true,
-                                         systemImage: "qrcode.viewfinder", minHeight: 48) {
+                                         systemImage: "qrcode.viewfinder", minHeight: 48, fillsHeight: true) {
                         autoScanOnForm = true
                         choose(.dispatcharrAPI)
                     }
                     OnboardingPillButton(title: "Enter details", filled: false, fullWidth: true,
-                                         systemImage: "arrow.right.circle", minHeight: 48) {
+                                         systemImage: "arrow.right.circle", minHeight: 48, fillsHeight: true) {
                         autoScanOnForm = false
                         choose(.dispatcharrAPI)
                     }
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(isTV ? 32 : 18)
@@ -733,8 +736,11 @@ struct AddServerView: View {
                 .fontWeight(.medium)
                 .foregroundColor(.textPrimary)
             // Android GuideHistoryRow: pills for 1, 3, 7, 14, and All
-            // (0 = All Available; legacy 30 reads as All).
-            HStack(spacing: 8) {
+            // (0 = All Available; legacy 30 reads as All), 8 apart at their
+            // full width. When they do not fit on one line (a 375-point
+            // iPhone, or a large Text Size) the row wraps instead of
+            // shortening a label ("14 Da..." on iPhone 17 at 100%).
+            CategoryPillsLayout(spacing: 8) {
                 ForEach([1, 3, 7, 14, 0], id: \.self) { days in
                     guideDaysPill(days)
                 }
@@ -760,7 +766,7 @@ struct AddServerView: View {
             Text(label)
                 .scaledFont(.bodyMedium)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .fixedSize()
                 .foregroundColor(selected ? .white : .textPrimary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)

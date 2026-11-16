@@ -476,7 +476,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 3 | Login and account | `/api/accounts/users/me/` | your user record, including the API key and the Catch-Up (XC) password |
 | 4 | Login and account | `/api/accounts/users/` | admin check; a 2xx here proves the account is an admin (unlocks Switch Stream and server-side features); the user list for Add Profile (admin only) |
 | 5 | Login and account | `/api/accounts/users/me/app-data/` | Lists AerioTV's synced data keys and sizes for the signed-in profile (Dispatcharr Sync) |
-| 6 | Login and account | `/api/accounts/users/me/app-data/<key>/` | Reads, saves, and clears one Dispatcharr Sync category (the key is `<username>.aeriotv`; older releases used `app.molinete.aerio`, moved once) |
+| 6 | Login and account | `/api/accounts/users/me/app-data/<key>/` | Reads, saves, and clears one Dispatcharr Sync category (the key is `<username>.aeriotv`) |
 | 7 | Login and account | `/api/accounts/api-keys/generate/` | `POST` with `user_id` to mint an API key for a user from Enable API access in Add Profile (admin only) |
 | 8 | Login and account | `/api/accounts/api-keys/revoke/` | `POST` with `user_id` to revoke that key when Enable API access is turned back off (admin only) |
 | 9 | Login and account | `/api/accounts/users/<id>/` | `PATCH` with `channel_profiles` to assign a profile's Channel Profiles (admin only) |
@@ -500,7 +500,7 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 27 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
 | 28 | DVR | `/api/channels/recordings/` | list and schedule recordings |
 | 29 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
-| 30 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
+| 30 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed or interrupted recording |
 | 31 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
 | 32 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
 | 33 | DVR | `/api/channels/series-rules/` | series recording rules |

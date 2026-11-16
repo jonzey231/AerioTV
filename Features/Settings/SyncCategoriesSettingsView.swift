@@ -66,6 +66,11 @@ struct SyncCategoriesSettingsView: View {
             #endif
         }
         .navigationTitle("Sync Categories")
+        // Credentials turned on: this device's sign-ins go to iCloud Keychain
+        // (CredentialPushRule; iCloud Sync must be on too).
+        .onChange(of: syncCredentials) { _, on in
+            if on { SyncManager.shared.copySignInsToICloudKeychain(.credentialsTurnedOn) }
+        }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #else

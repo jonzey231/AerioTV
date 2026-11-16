@@ -424,7 +424,35 @@ final class SyncManager: ObservableObject {
     /// time), so an older build's absence can count as a deletion. Nil until
     /// a pull recorded it: then nothing is deleted for being absent.
     static func loadSeen(_ lane: String) -> [String: TimeInterval]? {
-        UserDefaults.standard.dictionary(forKey: "syncSeen.\(lane).v1") as? [String: TimeInterval]
+        // A Delete from iCloud on another device since this one last looked:
+        // what it saw there no longer applies (LaneClearRule). The key-value
+        // store is read on the main queue only (every caller is there).
+        if Thread.isMainThread {
+            let cloud = (NSUbiquitousKeyValueStore.default.dictionary(forKey: laneClearedKVSKey) as? [String: String])?[lane]
+            let seenKey = "syncLaneClearedSeen.\(lane)"
+            if !LaneClearRule.baseStillValid(cloudToken: cloud, seenToken: UserDefaults.standard.string(forKey: seenKey)) {
+                UserDefaults.standard.removeObject(forKey: "syncSeen.\(lane).v1")
+                UserDefaults.standard.set(cloud, forKey: seenKey)
+                debugLog("[SYNC] \(lane) was deleted from iCloud on a device: nothing missing there is read as a deletion; local copies stay")
+                return nil
+            }
+        }
+        return UserDefaults.standard.dictionary(forKey: "syncSeen.\(lane).v1") as? [String: TimeInterval]
+    }
+
+    /// Per-lane tokens a Delete from iCloud leaves (LaneClearRule).
+    static let laneClearedKVSKey = "syncLaneCleared.v1"
+
+    /// Delete from iCloud for [lanes]: a new token for each in iCloud, already
+    /// seen here (this device forgets its own base separately). Main queue.
+    static func markLanesCleared(_ lanes: [String], in store: NSUbiquitousKeyValueStore) {
+        var tokens = store.dictionary(forKey: laneClearedKVSKey) as? [String: String] ?? [:]
+        for lane in lanes {
+            let token = UUID().uuidString
+            tokens[lane] = token
+            UserDefaults.standard.set(token, forKey: "syncLaneClearedSeen.\(lane)")
+        }
+        store.set(tokens, forKey: laneClearedKVSKey)
     }
 
     static func saveSeen(_ lane: String, _ seen: [String: TimeInterval]?) {
@@ -432,7 +460,7 @@ final class SyncManager: ObservableObject {
         else { UserDefaults.standard.removeObject(forKey: "syncSeen.\(lane).v1") }
     }
 
-    private static let seenLanes = ["watchProgress", "reminders", "playlists", "favorites"]
+    static let seenLanes = ["watchProgress", "reminders", "playlists", "favorites"]
 
     /// iCloud no longer holds what this device saw there (cleared, turned
     /// off, another account).
@@ -498,6 +526,9 @@ final class SyncManager: ObservableObject {
     func syncSettingChanged(enabled: Bool) {
         debugLog("🔵 SyncManager.syncSettingChanged: enabled=\(enabled)")
         if enabled {
+            // Turned on by the user (Settings, onboarding, the providers offer):
+            // with Credentials on, this device's sign-ins go to iCloud Keychain.
+            copySignInsToICloudKeychain(.syncTurnedOn)
             isImporting = true
             startObserving()
 
@@ -580,12 +611,9 @@ final class SyncManager: ObservableObject {
     ///   • iCloud Keychain entries: `password_<id>` and
     ///     `apiKey_<id>` (both `synchronizable: true`) for every
     ///     local server. Local-only Keychain copies are not touched.
-    ///   • Launch-task gating flags
-    ///     (`kvsToKeychainMigrationDoneV1`,
-    ///     `kvsCredentialPurgeDoneV1`). Resetting them lets a
-    ///     subsequent re-enable of Sync trigger a clean migration
-    ///     from local Keychain → iCloud Keychain on this device,
-    ///     replicating what a brand-new install would do.
+    ///   • The launch copy of sign-ins into iCloud Keychain stays done
+    ///     (`kvsToKeychainMigrationDoneV1` set), so a relaunch never
+    ///     re-uploads what was just cleared (CredentialLaunchCopyRule).
     ///
     /// Pending debounced pushes are cancelled first so an in-flight
     /// `pushServers` debounce doesn't immediately repopulate the
@@ -627,6 +655,11 @@ final class SyncManager: ObservableObject {
                 kvs.removeObject(forKey: k)
             }
             kvs.removeObject(forKey: "lastSyncPing")
+            // The backup snapshots too, so the Dispatcharr Sync Turn On step
+            // cannot apply an "iCloud backup" the user just deleted.
+            for c in DsyncCategory.allCases { kvs.removeObject(forKey: CloudCanon.kvsKey(c)) }
+            // Other devices keep their local copies: nothing missing is a deletion.
+            SyncManager.markLanesCleared(SyncManager.seenLanes + DsyncCategory.allCases.map(CloudCanon.clearLane), in: kvs)
             kvs.synchronize()
             debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
         }
@@ -647,13 +680,12 @@ final class SyncManager: ObservableObject {
             }
         }
 
-        // Reset launch-task gating so a future Sync re-enable can
-        // run the migration + purge cleanly. No-op when the flags
-        // weren't set; safe regardless.
-        UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
-        UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+        // The launch copy into iCloud Keychain stays done, so a relaunch
+        // never re-uploads the sign-ins just cleared; one goes back only
+        // when a device saves it with Credentials on (CredentialLaunchCopyRule).
+        UserDefaults.standard.set(CredentialLaunchCopyRule.flagAfterClear, forKey: CredentialLaunchCopyRule.flagKey)
 
-        debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries, reset migration flags")
+        debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries; the launch copy stays done")
     }
 
     // MARK: - Scoped Delete (v1.6.17)
@@ -665,6 +697,17 @@ final class SyncManager: ObservableObject {
     @MainActor
     func clearCloudCategory(_ category: SyncCategory, localServers: [ServerConnection]) {
         debugLog("🔵 SyncManager.clearCloudCategory: starting category=\(category.rawValue)")
+        // The backup snapshots holding this category's data go too (a token
+        // per file, so other devices keep their data and rebuild the backup).
+        let snapshots = CloudCanon.snapshotsCleared(by: category.rawValue)
+        if !snapshots.isEmpty {
+            DispatchQueue.main.async {
+                let kvs = NSUbiquitousKeyValueStore.default
+                for c in snapshots { kvs.removeObject(forKey: CloudCanon.kvsKey(c)) }
+                SyncManager.markLanesCleared(snapshots.map(CloudCanon.clearLane), in: kvs)
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared \(snapshots.count) backup snapshot(s): \(snapshots.map(CloudCanon.fileName).joined(separator: ", "))")
+            }
+        }
 
         switch category {
         case .servers:
@@ -674,6 +717,8 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.serversRemovedKVSKey)
+                // Other devices keep their playlists: nothing missing is a deletion.
+                SyncManager.markLanesCleared(["playlists"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared servers KVS")
             }
@@ -684,6 +729,7 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.progressRemovedKVSKey)
+                SyncManager.markLanesCleared(["watchProgress"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared watch progress KVS")
             }
@@ -694,6 +740,7 @@ final class SyncManager: ObservableObject {
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: SyncManager.remindersRemovedKVSKey)
+                SyncManager.markLanesCleared(["reminders"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared reminders KVS")
             }
@@ -703,6 +750,8 @@ final class SyncManager: ObservableObject {
             let key = prefKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                // Favorites ride the preferences entry with their own base.
+                SyncManager.markLanesCleared(["favorites"], in: .default)
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared preferences KVS")
             }
@@ -750,33 +799,27 @@ final class SyncManager: ObservableObject {
                     keychainCleared += 1
                 }
             }
-            // Reset migration flags so re-enabling credential sync later
-            // can re-migrate cleanly (matches clearAllICloudData).
-            UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
-            UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+            // The launch copy into iCloud Keychain stays done (matches
+            // clearAllICloudData): a relaunch never re-uploads these.
+            UserDefaults.standard.set(CredentialLaunchCopyRule.flagAfterClear, forKey: CredentialLaunchCopyRule.flagKey)
             debugLog("🔵 SyncManager.clearCloudCategory: cleared \(keychainCleared) iCloud Keychain entries")
-            // SECURITY: serialize(...) also writes cleartext `_password`/`_apiKey`
-            // into the "syncedServers" KVS blob as a transport fallback (~922),
-            // so deleting only the Keychain left those credentials sitting in
-            // iCloud. Re-push the server blob with credentials explicitly
-            // stripped (the Keychain is already gone above, so a re-serialize
-            // omits them anyway, this is belt-and-suspenders). Cancel any
-            // pending server push first so it can't re-write creds afterward.
-            pushDebounce?.cancel(); pushDebounce = nil
-            nonisolated(unsafe) let capturedServers = localServers.map { $0 }
+            // SECURITY: versions before 2026-11-14 also wrote cleartext
+            // `_password`/`_apiKey` into the "syncedServers" KVS records. Remove
+            // those fields from iCloud's records as they are, after reading
+            // them: the list itself is never rewritten from this device's
+            // playlists, so another device's playlist this one lacks stays
+            // (a dropped record reads as deleted there; KVSSecretRule.scrubbedList).
             let serversKey = kvsKey
             DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let stripped = capturedServers.map { srv -> [String: Any] in
-                        var d = self.serialize(srv)
-                        d.removeValue(forKey: "_password")
-                        d.removeValue(forKey: "_apiKey")
-                        return d
-                    }
-                    NSUbiquitousKeyValueStore.default.set(stripped, forKey: serversKey)
-                    NSUbiquitousKeyValueStore.default.synchronize()
-                    debugLog("🔵 SyncManager.clearCloudCategory: re-pushed \(stripped.count) servers to KVS without credentials")
+                let store = NSUbiquitousKeyValueStore.default
+                guard let records = store.array(forKey: serversKey) as? [[String: Any]],
+                      let scrubbed = KVSSecretRule.scrubbedList(records) else {
+                    debugLog("🔵 SyncManager.clearCloudCategory: no credentials in iCloud's playlist records")
+                    return
                 }
+                store.set(scrubbed, forKey: serversKey)
+                store.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: removed credentials from \(records.filter(KVSSecretRule.holdsSecret).count) of \(scrubbed.count) iCloud playlist records")
             }
         }
     }
@@ -900,7 +943,11 @@ final class SyncManager: ObservableObject {
                                           remote: byID(store.array(forKey: key) as? [[String: Any]] ?? []),
                                           remoteRemoved: remoteRemoved, base: SyncManager.loadSeen("playlists"),
                                           stamp: SyncManager.serverRowStamp, now: now)
-                store.set(r.rows, forKey: key)
+                // No secret stays in iCloud's records, this device's or ones an
+                // older version wrote (KVSSecretRule).
+                let scrubbed = r.rows.filter(KVSSecretRule.holdsSecret).count
+                store.set(r.rows.map(KVSSecretRule.scrubbed), forKey: key)
+                if scrubbed > 0 { debugLog("[SYNC] removed stored credentials from \(scrubbed) iCloud playlist record(s); they sync through iCloud Keychain only") }
                 store.set(r.removed, forKey: SyncManager.serversRemovedKVSKey)
                 SyncManager.saveSeen("playlists", r.base)
                 debugLog("🔵 SyncManager: pushed \(r.rows.count) servers (local=\(payload.count) keptFromCloud=\(r.keptFromCloud) deletions=\(r.removed.count))")
@@ -1633,6 +1680,37 @@ final class SyncManager: ObservableObject {
         }
     }
 
+    /// An explicit turn-on or push (CredentialPushRule): this device's
+    /// playlists' sign-ins go into iCloud Keychain where it has none, or an
+    /// older one; never a key held as refused. Counts only in the log.
+    @discardableResult
+    func copySignInsToICloudKeychain(_ trigger: CredentialPushRule.Trigger) -> Int {
+        guard CredentialPushRule.runs(trigger, syncOn: isSyncEnabled, credentialsOn: SyncCategory.credentials.isEnabled),
+              let ctx = WatchProgressManager.modelContext,
+              let servers = try? ctx.fetch(FetchDescriptor<ServerConnection>()) else { return 0 }
+        var copied = 0, keptNewer = 0, refused = 0
+        for server in servers where !server.isGone {
+            for kind in [CredentialKind.password, CredentialKind.apiKey] {
+                let slot = "\(kind.rawValue)_\(server.id.uuidString)"
+                guard let local = KeychainHelper.load(key: slot), !local.isEmpty else { continue }
+                let rejected = kind == .apiKey && DispatcharrRequestGate.shared.isKeyRejected(local)
+                let cloud = KeychainHelper.load(key: slot, synchronizable: true)
+                if CredentialPushRule.shouldCopy(local: local, cloud: cloud,
+                                                 localChangedAt: Self.credentialChangedAt(kind, server.id),
+                                                 cloudModifiedAt: KeychainHelper.modificationDate(key: slot, synchronizable: true)?.timeIntervalSince1970,
+                                                 rejected: rejected) {
+                    if KeychainHelper.save(local, for: slot, synchronizable: true) { copied += 1 }
+                } else if rejected {
+                    refused += 1
+                } else if let cloud, !cloud.isEmpty, cloud != local {
+                    keptNewer += 1
+                }
+            }
+        }
+        debugLog("[SYNC] sign-ins to iCloud Keychain (\(trigger.rawValue)): copied \(copied), kept iCloud's newer \(keptNewer), refused keys skipped \(refused)")
+        return copied
+    }
+
     // MARK: - Credential change times (2026-11-10)
 
     enum CredentialKind: String { case password, apiKey }
@@ -1646,85 +1724,49 @@ final class SyncManager: ObservableObject {
         UserDefaults.standard.set(t, forKey: "syncCredentialChangedAt.\(kind.rawValue).\(serverID.uuidString)")
     }
 
-    /// The credentials from an iCloud server record this device should
-    /// store (CredentialSyncRule): never empty, never a rejected key, never
-    /// older than this device's. Records the adopted change times.
-    /// `local`: nil for a playlist new to this device.
-    /// Launch (2026-11-10): when iCloud carries a different key for a
-    /// playlist and this device's is not known to be newer, that key's first
-    /// API calls wait for the merge (CredentialMergeBarrier, bounded).
-    static func armLaunchCredentialBarrier() {
-        guard UserDefaults.standard.bool(forKey: "iCloudSyncEnabled"),
-              SyncCategory.servers.isEnabled, SyncCategory.credentials.isEnabled else { return }
-        let records = NSUbiquitousKeyValueStore.default.array(forKey: "syncedServers") as? [[String: Any]] ?? []
-        let entries = records.compactMap { d -> CredentialMergeBarrier.Entry? in
-            guard let id = d["id"] as? String, let uuid = UUID(uuidString: id),
-                  let cloud = d["_apiKey"] as? String, !cloud.isEmpty else { return nil }
-            return CredentialMergeBarrier.Entry(
-                localKey: ServerConnection.resolveCredential(key: "apiKey_\(id)", fallback: ""),
-                localChangedAt: credentialChangedAt(.apiKey, uuid),
-                cloudKey: cloud, cloudChangedAt: d["_apiKeyChangedAt"] as? Double ?? 0)
-        }
-        let keys = CredentialMergeBarrier.doubtfulKeys(entries)
-        guard !keys.isEmpty else { return }
-        CredentialMergeBarrier.shared.arm(doubtfulKeys: keys)
-        debugLog("[SYNC] launch: iCloud carries a different API key for \(keys.count) playlist(s); "
-                 + "their first calls wait for the merge (at most \(Int(CredentialMergeBarrier.maxWait)) s)")
-    }
-
     /// A key the server just proved rejected (DispatcharrKeyBroker): when
-    /// iCloud carries a different key for that playlist that the server has
-    /// not refused, adopt it now (CredentialSyncRule: a rejected key never
-    /// beats one the server has not refused) instead of waiting for the next
-    /// pull. No network. Returns the adopted key.
+    /// iCloud Keychain's synchronizable copy for that playlist now holds a
+    /// different key the server has not refused (another device saved it),
+    /// adopt it on this device now instead of waiting. No network. The
+    /// key-value store is never read for this (KVSSecretRule).
     func adoptCloudApiKey(playlistID: UUID, rejectedKey: String) -> String? {
         guard isSyncEnabled, SyncCategory.credentials.isEnabled else { return nil }
-        let records = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]] ?? []
-        guard let d = records.first(where: { ($0["id"] as? String).flatMap(UUID.init(uuidString:)) == playlistID }),
-              let cloud = (d["_apiKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              CredentialSyncRule.adoptRemote(remote: cloud, remoteStamp: 0, local: rejectedKey, localStamp: 0,
-                                             legacyRemoteNewer: false, replace: false,
-                                             rejected: DispatcharrRequestGate.shared.isKeyRejected(cloud),
-                                             localRejected: true)
-        else { return nil }
         let slot = "apiKey_\(playlistID.uuidString)"
-        KeychainHelper.save(cloud, for: slot)
-        KeychainHelper.save(cloud, for: slot, synchronizable: true)
-        let t = d["_apiKeyChangedAt"] as? Double ?? 0
-        if t > 0 { Self.setCredentialChangedAt(.apiKey, playlistID, t) }
-        DispatcharrRequestGate.shared.noteKeyReplaced(old: rejectedKey, new: cloud,
+        guard let synced = KeychainHelper.load(key: slot, synchronizable: true)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !synced.isEmpty, synced != rejectedKey.trimmingCharacters(in: .whitespacesAndNewlines),
+              !DispatcharrRequestGate.shared.isKeyRejected(synced)
+        else { return nil }
+        KeychainHelper.save(synced, for: slot)
+        DispatcharrRequestGate.shared.noteKeyReplaced(old: rejectedKey, new: synced,
                                                       routes: DispatcharrKeyBroker.routes(serverID: playlistID))
-        debugLog("[SYNC] adopting iCloud's apiKey for \(playlistID.uuidString.prefix(8)): the server rejected this device's key")
-        return cloud
+        debugLog("[SYNC] adopting iCloud Keychain's apiKey for \(playlistID.uuidString.prefix(8)): the server rejected this device's key")
+        return synced
     }
 
-    func credentialsToAdopt(_ remote: SyncedServer, local: ServerConnection?,
-                            legacyRemoteNewer: Bool, replace: Bool) -> [(key: String, value: String)] {
+    /// Credentials an iCloud server record still carries from an earlier
+    /// version, moved into this device's Keychain (local and synchronizable)
+    /// only where the Keychain has none for that slot, and only with
+    /// Credentials sync on (KVSSecretRule.migrate). Never replaces what the
+    /// Keychain holds; the next push removes them from iCloud. Logs presence
+    /// only.
+    func credentialsToAdopt(_ remote: SyncedServer) -> [(key: String, value: String)] {
+        let on = isSyncEnabled && SyncCategory.credentials.isEnabled
         var out: [(key: String, value: String)] = []
-        let id = remote.id
-        let pairs: [(CredentialKind, String, TimeInterval, String)] = [
-            (.password, remote.password, remote.passwordChangedAt, local?.effectivePassword ?? ""),
-            (.apiKey, remote.apiKey, remote.apiKeyChangedAt, local?.baseApiKey ?? "")
-        ]
-        for (kind, value, remoteStamp, localValue) in pairs {
+        for (kind, value) in [(CredentialKind.password, remote.password), (CredentialKind.apiKey, remote.apiKey)] {
+            let slot = "\(kind.rawValue)_\(remote.id.uuidString)"
+            let keychainHas = !(KeychainHelper.load(key: slot) ?? "").isEmpty
+                || !(KeychainHelper.load(key: slot, synchronizable: true) ?? "").isEmpty
             let rejected = kind == .apiKey && !value.isEmpty && DispatcharrRequestGate.shared.isKeyRejected(value)
-            let localRejected = kind == .apiKey && !localValue.isEmpty && DispatcharrRequestGate.shared.isKeyRejected(localValue)
-            let localStamp = local == nil ? 0 : Self.credentialChangedAt(kind, id)
-            guard CredentialSyncRule.adoptRemote(remote: value, remoteStamp: remoteStamp,
-                                                 local: localValue, localStamp: localStamp,
-                                                 legacyRemoteNewer: legacyRemoteNewer, replace: replace,
-                                                 rejected: rejected, localRejected: localRejected) else {
-                if rejected { debugLog("[SYNC] iCloud carries a rejected API key for \(id.uuidString.prefix(8)); not stored") }
-                else if !value.isEmpty, value != localValue {
-                    debugLog("[SYNC] kept this device's \(kind.rawValue) for \(id.uuidString.prefix(8)): iCloud's is not newer (cloud=\(Int(remoteStamp)) local=\(Int(localStamp)))")
+            guard KVSSecretRule.migrate(remote: value, keychainHas: keychainHas, rejected: rejected, credentialsSyncOn: on) else {
+                if !value.isEmpty {
+                    debugLog("[SYNC] iCloud record for \(remote.id.uuidString.prefix(8)) carries an old \(kind.rawValue) copy; "
+                             + "not used (\(!on ? "Credentials sync off" : keychainHas ? "the Keychain has one" : "rejected")); the next push removes it")
                 }
                 continue
             }
-            if localRejected {
-                debugLog("[SYNC] adopting iCloud's apiKey for \(id.uuidString.prefix(8)): the server rejected this device's key")
-            }
-            if remoteStamp > 0 { Self.setCredentialChangedAt(kind, id, remoteStamp) }
-            out.append(("\(kind.rawValue)_\(id.uuidString)", value))
+            debugLog("[SYNC] moving \(kind.rawValue) for \(remote.id.uuidString.prefix(8)) from an old iCloud record into the Keychain (it had none)")
+            out.append((slot, value))
         }
         return out
     }
@@ -1797,7 +1839,8 @@ final class SyncManager: ObservableObject {
         var dict = serializeRecord(server)
         let changed = Self.serverChangedAt(server.id.uuidString, record: dict)
         if changed > 0 { dict["_changedAt"] = changed }
-        appendCredentials(server, to: &dict)
+        // No password or API key: credentials sync through iCloud Keychain
+        // only (KVSSecretRule).
         return dict
     }
 
@@ -2044,54 +2087,6 @@ final class SyncManager: ObservableObject {
         return dict
     }
 
-    private func appendCredentials(_ server: ServerConnection, to dict: inout [String: Any]) {
-        // v1.6.23: re-include credentials in the KVS payload as a
-        // **transport fallback** when iCloud Keychain isn't propagating.
-        //
-        // History: v1.6.12 stopped writing `_password` / `_apiKey` here
-        // on the assumption that iCloud Keychain (which we set with
-        // `kSecAttrSynchronizable = true` in `saveCredentialsSynced`)
-        // would carry credentials across devices. Field reports in
-        // v1.6.22 (Freyguy1975, multiple Apple TV deployments) showed
-        // that path fails silently for any user who hasn't enabled
-        // iCloud Keychain on the receiving device, the server
-        // metadata syncs via KVS, the device renders the playlist,
-        // every API call returns 401, and there's no UX recovery short
-        // of re-entering the API key. The KVS payload is still
-        // encrypted in transit by Apple, scoped to this app's iCloud
-        // container, and only readable by the user's own devices,
-        // it's a weaker store than Keychain but acceptable as a
-        // fallback for users who declined the Keychain path.
-        //
-        // The Keychain write in `saveCredentialsSynced` stays the
-        // primary persistence; this is the *transport*. When iCloud
-        // Keychain DOES work, the receiving device's `effectiveApiKey`
-        // returns the Keychain copy (which the merge path overwrote
-        // from this `_apiKey` value, idempotent). When iCloud Keychain
-        // doesn't work, this is the only path the credential reaches
-        // the second device.
-        //
-        // Gated on `SyncCategory.credentials.isEnabled` so users who
-        // explicitly opted credentials out of sync don't get them
-        // shipped via KVS either, same gate as the Keychain write
-        // in `saveCredentialsSynced`.
-        if SyncCategory.credentials.isEnabled {
-            let pw  = server.effectivePassword
-            let key = server.baseApiKey
-            if !pw.isEmpty {
-                dict["_password"] = pw
-                let t = Self.credentialChangedAt(.password, server.id)
-                if t > 0 { dict["_passwordChangedAt"] = t }
-            }
-            // A key the server refused is never carried to iCloud.
-            if !key.isEmpty, !DispatcharrRequestGate.shared.isKeyRejected(key) {
-                dict["_apiKey"] = key
-                let t = Self.credentialChangedAt(.apiKey, server.id)
-                if t > 0 { dict["_apiKeyChangedAt"] = t }
-            }
-        }
-    }
-
     private nonisolated func deserialize(_ dict: [String: Any]) -> SyncedServer? {
         guard let idStr   = dict["id"] as? String,
               let id      = UUID(uuidString: idStr),
@@ -2100,19 +2095,10 @@ final class SyncManager: ObservableObject {
               let type    = ServerType(rawValue: typeRaw),
               let baseURL = dict["baseURL"] as? String else { return nil }
 
-        // `_password` / `_apiKey` carry credentials across devices via the
-        // KVS payload. History: v1.6.12 briefly stopped writing them (relying
-        // on iCloud Keychain alone), but v1.6.23 RESTORED the carry after
-        // field reports that Keychain-only sync failed for users without
-        // iCloud Keychain enabled on a second device (commonly Apple TV): the
-        // server metadata synced and the playlist rendered, but every API call
-        // returned 401 with no recovery short of re-typing the key. There is
-        // no longer a purge task. When present, `mergeRemoteServers` adopts
-        // these into the local + iCloud Keychain copies. The carry is gated on
-        // `SyncCategory.credentials.isEnabled` in `serialize`, and KVS is
-        // encrypted in transit and at rest by Apple and scoped to the user's
-        // own private iCloud container (a weaker store than Keychain, kept as a
-        // deliberate fallback so credential sync works without iCloud Keychain).
+        // `_password` / `_apiKey`: only in records an earlier version wrote.
+        // Read for the one-version move into an empty Keychain
+        // (credentialsToAdopt, KVSSecretRule), never written back; the next
+        // push rewrites the record without them.
         return SyncedServer(
             id: id, name: name, type: type, baseURL: baseURL,
             username:      dict["username"]  as? String ?? "",
