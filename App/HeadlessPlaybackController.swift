@@ -702,6 +702,15 @@ final class HeadlessAVPlayerEngine {
                         debugLog("[CARPLAY] video: DIAGNOSTIC AAC-LC rewrite on the car's copy \(on ? "on" : "unavailable (source audio is not AC-3)")")
                     }
                     guard self.token == t else { return }
+                    // DIAGNOSTIC: launch with -carplay.testURL <url> to hand the
+                    // car a known-good stream instead of the LAN playlist.
+                    if let test = UserDefaults.standard.string(forKey: "carplay.testURL"),
+                       let testURL = URL(string: test), testURL.scheme?.hasPrefix("http") == true {
+                        debugLog("[CARPLAY] video: DIAGNOSTIC handing the car the test URL \(testURL.host ?? "?")\(testURL.path)")
+                        self.lanURL = testURL
+                        self.startPlayer(url: testURL, headers: [:], allowsVideo: true)
+                        return
+                    }
                     self.startPlayer(url: url, headers: [:], allowsVideo: true)
                 }
             default:
