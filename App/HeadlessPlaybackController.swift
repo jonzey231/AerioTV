@@ -685,12 +685,48 @@ final class HeadlessAVPlayerEngine {
                     self.keepaliveHeld = true
                     BackgroundKeepalive.acquire(Self.keepaliveHolder)
                 }
-                self.startPlayer(url: url, headers: [:], allowsVideo: true)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // DIAGNOSTIC (CarPlay video, 2026-11-16): the car's first
+                    // playlist was empty (no published segment yet), so its
+                    // player failed at once. Wait for published segments the
+                    // way the AirPlay handover does before handing over.
+                    await self.waitForPublishedSegments(mux: mux, token: t)
+                    guard self.token == t else { return }
+                    // DIAGNOSTIC A/B: launch with -carplay.lanAAC YES to rewrite
+                    // AC-3 / E-AC-3 to AAC-LC stereo on the car's copy.
+                    if UserDefaults.standard.bool(forKey: "carplay.lanAAC") {
+                        let on = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+                            mux.setLANAudioAAC(true) { c.resume(returning: $0) }
+                        }
+                        debugLog("[CARPLAY] video: DIAGNOSTIC AAC-LC rewrite on the car's copy \(on ? "on" : "unavailable (source audio is not AC-3)")")
+                    }
+                    guard self.token == t else { return }
+                    self.startPlayer(url: url, headers: [:], allowsVideo: true)
+                }
             default:
                 debugLog("[CARPLAY] video: LAN delivery unavailable (\(result)); audio only on loopback")
                 self.startPlayer(url: loopbackURL, headers: [:], allowsVideo: false)
             }
         }
+    }
+
+    /// The car's first LAN playlist must list published segments, as the
+    /// AirPlay handover requires (AirPlayTileDelivery.waitForPublishedSegments).
+    private func waitForPublishedSegments(mux: TSHLSRemuxer, token t: UUID) async {
+        let need = AirPlayTileDelivery.handoverPublishedSegments
+        var st = mux.lanPublishedState()
+        let began = Date()
+        debugLog(String(format: "[CARPLAY] video: waiting for %d published segments (have %d, delay %.1f s)",
+                        need, st.segments, st.delay))
+        let deadline = began.addingTimeInterval(15)
+        while st.segments < need, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard token == t else { return }
+            st = mux.lanPublishedState()
+        }
+        debugLog(String(format: "[CARPLAY] video: handover after %.1f s (%d published segments)",
+                        Date().timeIntervalSince(began), st.segments))
     }
 
     func setPaused(_ paused: Bool) {
@@ -749,6 +785,16 @@ final class HeadlessAVPlayerEngine {
     /// twice before a full failover, so the retry never tears the
     /// listener out from under the car's fetch.
     private func itemFailed(_ message: String) {
+        // DIAGNOSTIC (CarPlay video, 2026-11-16): what the car-side player
+        // itself reported (error log events, access log).
+        if let item = player?.currentItem {
+            debugLog("[CARPLAY] external playback: item failure detail: \(TSHLSRemuxer.itemFailureDetail(item))")
+            if let events = item.accessLog()?.events.suffix(3) {
+                for e in events {
+                    debugLog("[CARPLAY] access log: uri=\(DebugLogger.loggableURI(e.uri)) bytes=\(e.numberOfBytesTransferred) stalls=\(e.numberOfStalls) indicated=\(Int(e.indicatedBitrate)) observed=\(Int(e.observedBitrate)) segments=\(e.numberOfMediaRequests)")
+                }
+            }
+        }
         if let url = lanURL, remuxer != nil, itemReissues < 2 {
             itemReissues += 1
             debugLog("[CARPLAY] external playback: item failed (\(message)); reissuing on the same LAN url (\(itemReissues)/2)")
