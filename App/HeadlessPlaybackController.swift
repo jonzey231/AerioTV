@@ -685,12 +685,39 @@ final class HeadlessAVPlayerEngine {
                     self.keepaliveHeld = true
                     BackgroundKeepalive.acquire(Self.keepaliveHolder)
                 }
-                self.startPlayer(url: url, headers: [:], allowsVideo: true)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    // CarPlay Simulator, iOS 27.3 (2026-11-16): handed the URL
+                    // before any segment was published, the car's first
+                    // playlist was empty and its player failed at once. Wait
+                    // for published segments, as the AirPlay handover does.
+                    await self.waitForPublishedSegments(mux: mux, token: t)
+                    guard self.token == t else { return }
+                    self.startPlayer(url: url, headers: [:], allowsVideo: true)
+                }
             default:
                 debugLog("[CARPLAY] video: LAN delivery unavailable (\(result)); audio only on loopback")
                 self.startPlayer(url: loopbackURL, headers: [:], allowsVideo: false)
             }
         }
+    }
+
+    /// The car's first LAN playlist must list published segments, as the
+    /// AirPlay handover requires (AirPlayTileDelivery.waitForPublishedSegments).
+    private func waitForPublishedSegments(mux: TSHLSRemuxer, token t: UUID) async {
+        let need = AirPlayTileDelivery.handoverPublishedSegments
+        var st = mux.lanPublishedState()
+        let began = Date()
+        debugLog(String(format: "[CARPLAY] video: waiting for %d published segments (have %d, delay %.1f s)",
+                        need, st.segments, st.delay))
+        let deadline = began.addingTimeInterval(15)
+        while st.segments < need, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard token == t else { return }
+            st = mux.lanPublishedState()
+        }
+        debugLog(String(format: "[CARPLAY] video: handover after %.1f s (%d published segments)",
+                        Date().timeIntervalSince(began), st.segments))
     }
 
     func setPaused(_ paused: Bool) {
@@ -749,6 +776,17 @@ final class HeadlessAVPlayerEngine {
     /// twice before a full failover, so the retry never tears the
     /// listener out from under the car's fetch.
     private func itemFailed(_ message: String) {
+        // What the car-side player itself reported (CarPlay Simulator, iOS
+        // 27.3, 2026-11-16: AVFoundation -11870 with OSStatus -72542 ten
+        // seconds after the playlist read; no segment was ever requested).
+        if let item = player?.currentItem {
+            debugLog("[CARPLAY] external playback: item failure detail: \(TSHLSRemuxer.itemFailureDetail(item))")
+            if let events = item.accessLog()?.events.suffix(3) {
+                for e in events {
+                    debugLog("[CARPLAY] access log: uri=\(DebugLogger.loggableURI(e.uri)) bytes=\(e.numberOfBytesTransferred) stalls=\(e.numberOfStalls) indicated=\(Int(e.indicatedBitrate)) observed=\(Int(e.observedBitrate)) segments=\(e.numberOfMediaRequests)")
+                }
+            }
+        }
         if let url = lanURL, remuxer != nil, itemReissues < 2 {
             itemReissues += 1
             debugLog("[CARPLAY] external playback: item failed (\(message)); reissuing on the same LAN url (\(itemReissues)/2)")
