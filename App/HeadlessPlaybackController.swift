@@ -687,30 +687,12 @@ final class HeadlessAVPlayerEngine {
                 }
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    // DIAGNOSTIC (CarPlay video, 2026-11-16): the car's first
-                    // playlist was empty (no published segment yet), so its
-                    // player failed at once. Wait for published segments the
-                    // way the AirPlay handover does before handing over.
+                    // CarPlay Simulator, iOS 27.3 (2026-11-16): handed the URL
+                    // before any segment was published, the car's first
+                    // playlist was empty and its player failed at once. Wait
+                    // for published segments, as the AirPlay handover does.
                     await self.waitForPublishedSegments(mux: mux, token: t)
                     guard self.token == t else { return }
-                    // DIAGNOSTIC A/B: launch with -carplay.lanAAC YES to rewrite
-                    // AC-3 / E-AC-3 to AAC-LC stereo on the car's copy.
-                    if UserDefaults.standard.bool(forKey: "carplay.lanAAC") {
-                        let on = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-                            mux.setLANAudioAAC(true) { c.resume(returning: $0) }
-                        }
-                        debugLog("[CARPLAY] video: DIAGNOSTIC AAC-LC rewrite on the car's copy \(on ? "on" : "unavailable (source audio is not AC-3)")")
-                    }
-                    guard self.token == t else { return }
-                    // DIAGNOSTIC: launch with -carplay.testURL <url> to hand the
-                    // car a known-good stream instead of the LAN playlist.
-                    if let test = UserDefaults.standard.string(forKey: "carplay.testURL"),
-                       let testURL = URL(string: test), testURL.scheme?.hasPrefix("http") == true {
-                        debugLog("[CARPLAY] video: DIAGNOSTIC handing the car the test URL \(testURL.host ?? "?")\(testURL.path)")
-                        self.lanURL = testURL
-                        self.startPlayer(url: testURL, headers: [:], allowsVideo: true)
-                        return
-                    }
                     self.startPlayer(url: url, headers: [:], allowsVideo: true)
                 }
             default:
@@ -794,8 +776,9 @@ final class HeadlessAVPlayerEngine {
     /// twice before a full failover, so the retry never tears the
     /// listener out from under the car's fetch.
     private func itemFailed(_ message: String) {
-        // DIAGNOSTIC (CarPlay video, 2026-11-16): what the car-side player
-        // itself reported (error log events, access log).
+        // What the car-side player itself reported (CarPlay Simulator, iOS
+        // 27.3, 2026-11-16: AVFoundation -11870 with OSStatus -72542 ten
+        // seconds after the playlist read; no segment was ever requested).
         if let item = player?.currentItem {
             debugLog("[CARPLAY] external playback: item failure detail: \(TSHLSRemuxer.itemFailureDetail(item))")
             if let events = item.accessLog()?.events.suffix(3) {
