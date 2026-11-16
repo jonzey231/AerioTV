@@ -968,15 +968,18 @@ final class MultiviewStore: ObservableObject {
         return true
     }
 
-    func switchVODVersion(_ option: VODVersionOption) {
+    /// `remember: false` (the AirPlay version fallback) plays the copy for
+    /// this session only: the title's saved pick and the Continue Watching
+    /// URL stay the user's.
+    func switchVODVersion(_ option: VODVersionOption, remember: Bool = true) {
         guard let tile = vodSoloTile,
               let idx = tiles.firstIndex(where: { $0.id == tile.id }),
               option.url != tile.streamURL else { return }
         let resumeMs = audioProgressStore?.currentMs ?? 0
         audioProgressStore?.explicitResumeMs = resumeMs > 5_000 ? resumeMs : nil
-        audioProgressStore?.vodStreamURL = option.url.absoluteString
+        if remember { audioProgressStore?.vodStreamURL = option.url.absoluteString }
         vodCurrentVersionID = option.id
-        if let key = vodVersionSelectionKey {
+        if remember, let key = vodVersionSelectionKey {
             VODVersionSelectionStore.setSelection(option.id, forKey: key)
         }
         DebugLogger.shared.log(
