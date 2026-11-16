@@ -1980,6 +1980,13 @@ extension AerioCastController: GCKSessionManagerListener {
         // playback returns to the phone, which announces itself. If
         // notifications are not authorized, behavior is unchanged - the
         // resume below stays as the fallback signal.
+        // Foreground drop while something was cast: say so plainly. With
+        // AerioTV on TV the TV app keeps playing after the Cast link dies
+        // (Google TV Streamer, device pass 2026-11-15), so this is not a
+        // failed start. Same words as AerioTV for Android.
+        if involuntary, UIApplication.shared.applicationState == .active, castingContent != nil {
+            surfaceCastFailure("Lost the connection to \(lastDeviceName ?? "the TV"). It may still be playing on the TV.")
+        }
         if involuntary, UIApplication.shared.applicationState != .active {
             let deviceName = lastDeviceName
             let contentTitle = castingContent?.title
@@ -2024,10 +2031,20 @@ extension AerioCastController: GCKRequestDelegate {
         // (assumeIsolated runs synchronously in place).
         let failedID = ObjectIdentifier(request)
         let errorText = String(describing: error)
+        let disconnected = error.code == GCKErrorCode.disconnected.rawValue
         MainActor.assumeIsolated {
             guard let inFlight = self.loadRequest, ObjectIdentifier(inFlight) == failedID else { return }
             self.loadRequest = nil
             debugLog("[CAST-HLS] receiver load failed: \(errorText)")
+            // GCKError 92 is the Cast link dropping, not the receiver refusing
+            // the load (iPhone 2026-11-15 16:46:08: AerioTV on TV was playing
+            // on the Google TV Streamer when its Cast service was frozen, and
+            // the still-pending load failed with 92). The session-end path
+            // reports the drop with the right words; nothing to say here.
+            if disconnected {
+                debugLog("[CAST-HLS] load request ended by the disconnect; the session end reports it")
+                return
+            }
             // Composite: the proxy is still up and publishing; re-issue the
             // load (2 s apart) and surface only once the retries are spent.
             if let last = self.lastProxyLoad,
