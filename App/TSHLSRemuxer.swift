@@ -6795,6 +6795,18 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[SWITCH] kept connection (AVPlayer remux tile) channel=\(channelName)")
             mux.noteSourceSwitch()
         }
+        // iOS rebuilt its media services: every AVPlayer and item from
+        // before the reset is dead, and nothing else reopens a movie
+        // (device pass 2026-11-15 17:35:38: the movie sat on a black 0:00
+        // with no item until it was closed). The auto-retry reopens it at
+        // its position.
+        .onReceive(NotificationCenter.default
+            .publisher(for: AVAudioSession.mediaServicesWereResetNotification)
+            .receive(on: DispatchQueue.main)) { _ in
+            guard isVOD, player != nil else { return }
+            debugLog("[AVP-MV] media services were reset; reopening at the position title=\(channelName)")
+            failOrFallback("media services were reset")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .aerioRadioRestartAsVideo)) { _ in
             guard !isVOD, !isDVR, catchup == nil else { return }
             restartAsVideoProgram("Switch to Video Mode")
@@ -7851,6 +7863,9 @@ struct AVPlayerMultiviewTile: View {
             || reason.contains("playback frozen")
             || reason.contains("playback failed")
             || reason.contains("never became ready")
+            // Every AVPlayer and item from before a media-services reset
+            // is dead (device pass 2026-11-15 17:35:38).
+            || reason.contains("media services were reset")
             || reason.contains("range fetch HTTP 5")
             // A fresh live ingest can 500 while the proxy is still
             // tearing down the previous connection for the same channel
