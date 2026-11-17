@@ -732,6 +732,9 @@ final class AirPlayMonitor: ObservableObject {
         }
         if isExternal {
             dismissedRouteUID = nil
+            // The receiver has it: a headless start (a movie's has no tile
+            // loading to clear it) is over, so no later fall-back expands.
+            headlessTune = false
             if phase != .active {
                 debugLog("[Cast] card show (AirPlay)")
                 setPhase(.active)
