@@ -426,6 +426,30 @@ final class AirPlayMonitor: ObservableObject {
         NotificationCenter.default.post(name: .aerioAirPlayHeadlessTuneWentLocal, object: nil)
     }
 
+    /// Owner 2026-11-17: a movie or episode started headless (route already
+    /// up) that the receiver cannot play is not started at all, never opened
+    /// on this device. The tile goes the way the card's X tears down a
+    /// headless tune (stopPlayback), but without the user-ended latch: the
+    /// route stays usable and the card returns to its idle state for it.
+    /// Nothing played, so no position is saved (the teardown path never
+    /// saves VOD progress). `searchEnded`: the version search that held the
+    /// start behind the card ended; the start flags may already be cleared
+    /// (a route change), so the minimized player is the headless sign.
+    /// Returns false when the start was not headless (the player is on
+    /// screen): the caller keeps its own fall-back.
+    @discardableResult
+    func headlessStartNotStarted(label: String, reason: String, searchEnded: Bool = false) -> Bool {
+        let headless = headlessTune || (hostsHeadless && !isExternal && !AirPlayTileDelivery.isServingReceiver)
+            || (searchEnded && NowPlayingManager.shared.isMinimized && !isExternal
+                && !AirPlayTileDelivery.isServingReceiver)
+        guard headless else { return false }
+        debugLog("[AVP-AIRPLAY] VOD \(label): not started on this device (\(reason))")
+        stopPlayback()
+        setPhase(.none)
+        evaluate()
+        return true
+    }
+
     func togglePlayPause() {
         guard let player else { return }
         player.timeControlStatus == .paused ? player.play() : player.pause()

@@ -9200,6 +9200,15 @@ struct AVPlayerMultiviewTile: View {
                 let verdict = await VODAirPlayFormatGate.startVerdict(url: source, headers: playerHeaders,
                                                                       mkvRemux: vodMKVRemuxStart, label: label)
                 guard token == teardownToken else { return }
+                // Owner 2026-11-17: refused (or held) with no version search
+                // behind the card: the alert only, the title is not started
+                // and no player is built or shown.
+                if verdict != .handOff, !AirPlayVersionFallback.shared.holdsHeadlessStart,
+                   AirPlayMonitor.shared.headlessStartNotStarted(
+                       label: label,
+                       reason: verdict == .refused ? "refused, no version search" : "held, no version search") {
+                    return
+                }
                 startPlayer(url: url, requestHeaders: gated, vodAirPlay: verdict)
             }
             return
@@ -9587,9 +9596,11 @@ struct AVPlayerMultiviewTile: View {
                 vodAirPlayHandover = handover
             }
             if let v = vodAirPlay, v != .handOff {
-                // Today's fall-back: the movie opens on this device, not
-                // started (the version fallback runs or the alert is up),
-                // paused when refused. Headless start: expand the player.
+                // The movie stays on this device, not started (the version
+                // fallback runs or the alert is up), paused when refused.
+                // A headless start with no search never gets here (not
+                // started at the verdict, owner 2026-11-17); the expand
+                // below is a no-op unless the start is still headless.
                 vodStartAwaitsGate = true
                 if v == .refused {
                     progressStore.noteUserPause(true, positionSeconds: Double(progressStore.explicitResumeMs ?? resumePositionMs ?? 0) / 1000)
@@ -9597,8 +9608,8 @@ struct AVPlayerMultiviewTile: View {
                 debugLog("[AVP-AIRPLAY] VOD \(channelName): path=this device (\(v == .refused ? "refused, paused" : "held for the version fallback's own copy")), external playback held off")
                 if AirPlayVersionFallback.shared.holdsHeadlessStart {
                     // Owner 2026-11-17: the search (and a switched copy's own
-                    // headless start) runs behind the card; the fallback
-                    // expands only when nothing reaches the receiver.
+                    // headless start) runs behind the card; when nothing
+                    // reaches the receiver the title is not started.
                     debugLog("[AVP-AIRPLAY] VOD \(channelName): stayed behind the card for the version search (no fullscreen player)")
                 } else {
                     debugLog("[AVP-AIRPLAY] VOD \(channelName): expanded on this device (\(v == .refused ? "refused, no version search" : "held, no version search"))")
