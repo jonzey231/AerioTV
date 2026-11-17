@@ -6559,6 +6559,7 @@ struct AVPlayerMultiviewTile: View {
         }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.willEnterForegroundNotification)) { _ in
+            vodAirPlayHandover?.handleForegroundReturn()
             if !resumeFromBackgroundGrace() { resumeFromBackground() }
         }
         // The AirPlay tune went local before the receiver took it (iPhone
@@ -8297,6 +8298,10 @@ struct AVPlayerMultiviewTile: View {
     /// in quiesceForBackground.
     private func beginBackgroundGrace() {
         if airPlayDelivery.handleBackgroundEntry() { return }
+        // A movie or episode the AirPlay receiver plays from the server's
+        // URL (device log 2026-11-17 08:37:13): the pause below stopped it
+        // on the TV and the grace expiry tore it down.
+        if vodAirPlayHandover?.handleBackgroundEntry(userPaused: progressStore.userPaused) == true { return }
         // A Multiview composite reads this tile's frames and audio; the
         // composite's keepalive holds the process (Logan 2026-10-07).
         if MultiviewCompositeTaps.shared.currentTransport != nil {
@@ -8406,6 +8411,7 @@ struct AVPlayerMultiviewTile: View {
         // A receiver is being served from this phone (plan section 6):
         // the keepalive holds the process, and quiescing would starve it.
         if airPlayDelivery.handleBackgroundEntry() { return }
+        if vodAirPlayHandover?.handleBackgroundEntry(userPaused: progressStore.userPaused) == true { return }
         if MultiviewCompositeTaps.shared.currentTransport != nil { return }
         if RadioModeSession.shared.isActive, MultiviewStore.shared.audioTileID == tileID, player != nil { return }
         guard !progressStore.isPiPActive else { return }

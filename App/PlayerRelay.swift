@@ -783,6 +783,15 @@ final class RelayVODAirPlayHandover {
     /// Started with the route up: the tile did not start playback, so an
     /// accepted hand-off plays it on the receiver.
     private var playAfterDecision = false
+    /// No background keepalive here (device log 2026-11-17 09:20:41): the
+    /// silent AVAudioEngine started on the AirPlay route 100 ms before
+    /// external playback dropped and the receiver showed its music screen.
+    /// The receiver plays the server's URL itself; AVPlayer's external
+    /// playback under the active .playback session keeps the app eligible
+    /// to run in the background (UIBackgroundModes audio).
+    /// The tile kept the movie playing for the receiver at background entry
+    /// (for the foreground line).
+    private var heldForBackground = false
     /// The start decision waits for the item to be ready, so the queued
     /// resume seek has landed before the position is read for the swap.
     private var startDecision = false
@@ -836,6 +845,7 @@ final class RelayVODAirPlayHandover {
 
     func detach() {
         releaseHold()
+        heldForBackground = false
         externalObservation = nil
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
         if let pickedObserver { NotificationCenter.default.removeObserver(pickedObserver) }
@@ -936,6 +946,32 @@ final class RelayVODAirPlayHandover {
             self.onItemSwapped?(back, false)
             debugLog("[AVP-AIRPLAY] VOD \(self.label): the receiver did not take the item within \(Int(Self.confirmTimeout)) s; back on the relay, playing on this device with external playback held off until a receiver is picked again")
         }
+    }
+
+    /// Background entry (the tile's grace and quiesce paths): true when the
+    /// receiver is playing the item, so the tile must neither pause nor
+    /// quiesce. `userPaused`: the user paused it; that movie keeps the usual
+    /// background handling.
+    func handleBackgroundEntry(userPaused: Bool) -> Bool {
+        guard state == .receiver, let player, player.isExternalPlaybackActive, !userPaused,
+              player.timeControlStatus != .paused || player.rate != 0 else { return false }
+        if !heldForBackground {
+            heldForBackground = true
+            let t = player.currentTime().seconds
+            debugLog(String(format: "[AVP-AIRPLAY] VOD %@: background entry: kept playing for the receiver at %.1fs (control=%@); tile pause and quiesce skipped",
+                            label, t.isFinite ? t : 0, AirPlayMonitor.playerStatusText(player)))
+        }
+        return true
+    }
+
+    /// Foreground return: one line when the movie was held for the receiver.
+    func handleForegroundReturn() {
+        guard heldForBackground else { return }
+        heldForBackground = false
+        let t = player?.currentTime().seconds ?? -1
+        debugLog(String(format: "[AVP-AIRPLAY] VOD %@: foreground: still on the receiver (external=%@ control=%@ t=%.1fs), no rebuild",
+                        label, player?.isExternalPlaybackActive == true ? "yes" : "no",
+                        AirPlayMonitor.playerStatusText(player), t.isFinite ? t : -1))
     }
 
     /// Ends the hold taken when the receiver did not take the item.
