@@ -6624,6 +6624,11 @@ struct MainTabView: View {
                !companionClient.isControlling,
                !castController.isCasting,
                !airPlay.hostsHeadless,
+               // Any remote-session card (AirPlay before a channel is
+               // picked, CarPlay) owns the cast entry the same way the Cast
+               // and companion cards do: the circle drew over the card's
+               // trailing corner (owner 2026-11-17).
+               activeRemoteTransport == nil,
                nowPlaying.playingItem == nil || nowPlaying.isMinimized,
                // Container sessions (VOD/DVR/live via PlayerSession) never
                // set nowPlaying.playingItem, so the FAB floated over the
