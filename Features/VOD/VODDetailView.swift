@@ -462,6 +462,13 @@ struct VODDetailView: View {
             }
         }
         #endif
+        // The AVPlayer container plays over this page without a cover, so
+        // the cover's onDisappear below never runs for it: follow the stored
+        // choice live instead (fallback or in-player switch, 2026-11-17).
+        .onReceive(NotificationCenter.default.publisher(for: VODVersionSelectionStore.didChange)) { note in
+            guard (note.userInfo?["key"] as? String) == versionSelectionKey else { return }
+            restoreRememberedVersion()
+        }
         .task {
             await loadDetail()
             await loadVersionProviders()
@@ -1857,20 +1864,49 @@ struct VODDetailView: View {
 
     /// Apply the user's remembered choice, if that copy still exists. A copy
     /// the provider dropped falls back to Auto rather than pinning a dead id.
+    /// Also runs whenever the stored choice changes while this page is up
+    /// (an in-player Switch Version or the AirPlay version fallback), so the
+    /// Version row, Play, and Resume agree with what played (owner
+    /// 2026-11-17).
     private func restoreRememberedVersion() {
-        guard let savedID = VODVersionSelectionStore.selection(forKey: versionSelectionKey) else { return }
-        if let match = versionProviders.first(where: { $0.id == savedID }) {
-            selectedVersion = match
+        guard versionProviders.count > 1 else { return }
+        let key = versionSelectionKey
+        guard let savedID = VODVersionSelectionStore.selection(forKey: key) else {
+            if selectedVersion != nil { selectedVersion = nil }
+            return
+        }
+        // Series rows pin by account: an in-player episode switch stores
+        // the ACCOUNT id (its rows are keyed that way), so match on the
+        // recorded account pin first, then on the relation id.
+        let match: DispatcharrVODProviderRelation?
+        if item.type == .series, let account = VODVersionSelectionStore.accountPin(forKey: key) {
+            match = versionProviders.first { $0.account.id == account }
         } else {
-            VODVersionSelectionStore.setSelection(nil, forKey: versionSelectionKey)
+            match = versionProviders.first { $0.id == savedID }
+        }
+        if let match {
+            if selectedVersion?.id != match.id {
+                debugLog("[VOD-VERSION] detail page adopts the stored version \(match.id) for \(item.id)")
+                selectedVersion = match
+            }
+        } else {
+            VODVersionSelectionStore.setSelection(nil, forKey: key)
         }
     }
 
     /// Persist (or clear, for Auto) the user's pick so reopening the title
-    /// keeps it.
+    /// keeps it. The pins are recorded too, so Resume (which replays a
+    /// stored URL) plays the same copy.
     private func rememberVersion(_ rel: DispatcharrVODProviderRelation?) {
         selectedVersion = rel
-        VODVersionSelectionStore.setSelection(rel?.id, forKey: versionSelectionKey)
+        if let rel {
+            VODVersionSelectionStore.setSelection(
+                rel.id, forKey: versionSelectionKey,
+                streamID: item.type == .movie ? rel.streamID.flatMap(Int.init) : nil,
+                accountID: rel.account.id)
+        } else {
+            VODVersionSelectionStore.setSelection(nil, forKey: versionSelectionKey)
+        }
     }
 
     private func loadVersionProviders() async {
@@ -1896,7 +1932,7 @@ struct VODDetailView: View {
             }
             debugLog("[VOD] versions: \(versionProviders.count) for \(item.name)")
             if versionProviders.count > 1 {
-                debugLog("[VOD-VERSION] \(item.type) \(item.id): \(versionProviders.count) provider copies")
+                debugLog("[VOD-VERSION] \(item.type) \(item.id): \(versionProviders.count) provider copies, stored choice \(VODVersionSelectionStore.selection(forKey: versionSelectionKey).map(String.init) ?? "auto")")
                 restoreRememberedVersion()
                 refreshLearnedVersionStreams()
                 await loadVersionMedia(movieID: numericID)
@@ -1986,26 +2022,13 @@ struct VODDetailView: View {
     private func buildVersionOptions(movie: VODMovie?, episode: VODEpisode?) -> [VODVersionOption] {
         guard versionProviders.count > 1, let api = versionAPI else { return [] }
         if let movie, !movie.dispatcharrUUID.isEmpty {
-            return versionProviders.compactMap { rel in
-                guard let url = api.proxyMovieURL(uuid: movie.dispatcharrUUID,
-                                                  preferredStreamID: rel.streamID.flatMap(Int.init),
-                                                  m3uAccountID: rel.account.id) else { return nil }
-                return VODVersionOption(id: rel.id, label: label(for: rel), url: url)
-            }
+            return VODVersionOption.movieOptions(providers: versionProviders,
+                                                 movieUUID: movie.dispatcharrUUID,
+                                                 api: api, label: { label(for: $0) })
         }
         if let episode, !episode.dispatcharrUUID.isEmpty {
-            var seen = Set<Int>()
-            return versionProviders.compactMap { rel in
-                guard seen.insert(rel.account.id).inserted,
-                      let url = api.proxyEpisodeURL(uuid: episode.dispatcharrUUID,
-                                                    m3uAccountID: rel.account.id) else { return nil }
-                var label = rel.account.name ?? "Source \(rel.account.id)"
-                if let note = AVPlayerSupportNote.note(
-                    containerExtension: rel.containerExtension, videoCodec: nil) {
-                    label += " · ⚠️ \(note)"
-                }
-                return VODVersionOption(id: rel.account.id, label: label, url: url)
-            }
+            return VODVersionOption.episodeOptions(providers: versionProviders,
+                                                   episodeUUID: episode.dispatcharrUUID, api: api)
         }
         return []
     }

@@ -5058,6 +5058,22 @@ final class AVPStallWatchdog {
             }
         case .readyToPlay:
             unknownPolls = 0
+            #if os(iOS)
+            // The receiver owns playback: its clock and presentation size
+            // are not a render this phone can judge, whichever path put the
+            // player there (the tile normally suspends this watchdog for a
+            // receiver; this covers any player that went external without
+            // that). Device log 2026-11-17 11:16:49.671: "clock stuck at
+            // 589.63s" on a player held by a receiver that could not fetch
+            // its item tore down a healthy AirPlay session. Baselines reset
+            // so the first local polls afterwards start clean. AirPlay only:
+            // a wired display's external fullscreen is this phone's render.
+            if player.isExternalPlaybackActive, AirPlayReceiverResolver.currentAirPlayOutput() != nil {
+                lastTime = -1
+                stuckPolls = 0
+                break
+            }
+            #endif
             let size = item.presentationSize
             if size.width == 0 && size.height == 0, audioOnlyExpected?() != true, !audioOnlyAccepted {
                 var accepted: String?
@@ -6253,6 +6269,14 @@ struct AVPlayerMultiviewTile: View {
     /// AirPlay for an on-demand item the relay serves: the receiver gets
     /// the server's own URL without the key (RelayVODAirPlayHandover).
     @State private var vodAirPlayHandover: RelayVODAirPlayHandover?
+    /// A mid-play pick the format gate already let through: the restart for
+    /// the receiver carries that verdict for this URL instead of probing
+    /// the formats again (one start only; cleared when read).
+    @State private var vodAirPlayRestartURL: URL?
+    /// A restart for the receiver whose take timed out: this URL starts
+    /// once more on this device (relay, key, external held off) with no
+    /// receiver decision at start; only a new pick tries the receiver again.
+    @State private var vodAirPlayLocalRestartURL: URL?
     /// AirPlay for an MKV movie or episode (loopback remux): kept on this
     /// device for a known non-Apple receiver (MKVVODAirPlayGate).
     @State private var mkvAirPlayGate: MKVVODAirPlayGate?
@@ -8021,7 +8045,18 @@ struct AVPlayerMultiviewTile: View {
                 HLSDelivery.forceInProcessNextStart = true
                 debugLog("[AVP-MV] loopback delivery never became ready; retrying with in-process delivery title=\(channelName)")
             }
-            debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
+            // With an AirPlay video route up, a VOD retry is a start with the
+            // route up: start() -> startVOD -> startPlayer takes the same
+            // receiver decision as a movie started with the route up (the
+            // gate, or the hand-off a fresh player is built for); no plain
+            // local start while the route serves a receiver.
+            #if os(iOS)
+            let routeNote = isVOD && AirPlayMonitor.shared.willServeReceiver
+                ? " (AirPlay video route up: the restart takes the start-for-the-receiver decision)" : ""
+            #else
+            let routeNote = ""
+            #endif
+            debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline\(routeNote) title=\(channelName)")
             if isVOD, progressStore.currentMs > 2_000 {
                 progressStore.explicitResumeMs = progressStore.currentMs
             }
@@ -8493,6 +8528,53 @@ struct AVPlayerMultiviewTile: View {
             start()
         }
         return true
+    }
+    #endif
+
+    #if os(iOS)
+    /// A mid-play AirPlay pick on a movie or episode the format gate let
+    /// through (owner 2026-11-17): no item swap on the running player (it
+    /// blocked the main thread 2 to 4.3 s inside AVFoundation, device log
+    /// 2026-11-17 08:32:16.986). The player is torn down at once (no double
+    /// audio) and the tile starts again at `seconds` through the start for
+    /// the receiver a movie picked with the route up takes: a fresh player
+    /// on the server's URL without the key, the route already up, the
+    /// verdict carried. The fullscreen player stays until the receiver
+    /// takes it (AirPlayMonitor.handOffToReceiver closes it to the card);
+    /// the take deadline, the background hold, and a re-pick are the
+    /// handover's, as for that start. A user pause carries over.
+    private func restartVODForAirPlayReceiver(at seconds: Double, why: String, forReceiver: Bool = true) {
+        guard isVOD, player != nil else { return }
+        let ms = Int32(max(0, min(seconds, Double(Int32.max) / 1000)) * 1000)
+        // Exact position (0 = from the start, no older resume point).
+        progressStore.explicitResumeMs = ms
+        // An extensionless URL that played direct was bounced off the MKV
+        // probe; the restart goes straight to direct play.
+        if streamURL.pathExtension.isEmpty,
+           MultiviewStore.shared.vodDirectContainerHint?.url != streamURL {
+            MultiviewStore.shared.setVODDirectContainerHint(url: streamURL, ext: "mp4")
+        }
+        if forReceiver {
+            vodAirPlayRestartURL = streamURL
+        } else {
+            vodAirPlayLocalRestartURL = streamURL
+        }
+        debugLog(String(format: "[AVP-AIRPLAY] VOD %@: restart %@ at %.1fs (%@): player torn down, fresh player next%@",
+                        channelName, forReceiver ? "for the receiver" : "on this device (relay, external playback held off)",
+                        Double(ms) / 1000, why, progressStore.userPaused ? " (user paused: stays paused)" : ""))
+        stop(allowRetain: false)
+        statusText = "Preparing..."
+        let token = teardownToken
+        // The beat is for the server, not for AirPlay (the relay player was
+        // never external, see the hold in startPlayer): the relay's
+        // upstream connection closes asynchronously (34 ms after the
+        // teardown, device log 2026-11-17 11:15:42.877), and the restart's
+        // first request is a range probe of the same title, the overlap
+        // that hit provider connection caps (HTTP 503) on version switches.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard token == teardownToken else { return }
+            start()
+        }
     }
     #endif
 
@@ -9046,7 +9128,23 @@ struct AVPlayerMultiviewTile: View {
         }
         statusText = "Preparing..."
         let server = MKVVODServer(url: streamURL, headers: headers)
-        server.onReady = { url in
+        // A probe still running when the tile went away (or flipped, or
+        // retried) must not start anything (device log 2026-11-17
+        // 11:16:14.152 tile gone, 11:16:14.503 "not an EBML" started a
+        // direct player for it anyway; that player went external at the
+        // next AirPlay pick and its watchdog tore down the receiver's
+        // movie at 11:16:49.671). The server also drops callbacks after
+        // stop(); this is the tile's own check.
+        let serverToken = teardownToken
+        let serverIsCurrent: (MKVVODServer?) -> Bool = { s in
+            guard let s, serverToken == teardownToken, mkvServer === s, !tileStopped else {
+                debugLog("[AVP-MV] stale MKV server callback dropped (tile gone, flipped, or restarted) title=\(channelName)")
+                return false
+            }
+            return true
+        }
+        server.onReady = { [weak server] url in
+            guard serverIsCurrent(server) else { return }
             readyLocalURL = url
             MultiviewStore.shared.registerEngine("AVPlayer · MKV Remux", for: tileID)
         }
@@ -9063,7 +9161,8 @@ struct AVPlayerMultiviewTile: View {
         server.onSubtitleCues = { track, cues in
             subStore.add(track: track, newCues: cues)
         }
-        server.onError = { reason in
+        server.onError = { [weak server] reason in
+            guard serverIsCurrent(server) else { return }
             if reason.contains("not an EBML") {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
                 // Clear the loading text: only the remux-READY path did,
@@ -9141,8 +9240,11 @@ struct AVPlayerMultiviewTile: View {
     /// `vodAirPlay`: a movie or episode started with the AirPlay video route
     /// up has its receiver verdict taken first (iOS); the second call
     /// carries it and builds the player for that answer.
+    /// `restartedForReceiver`: this start is a mid-play restart for the
+    /// receiver (verdict carried); a take that times out starts once more
+    /// on this device through the relay.
     private func startPlayer(url: URL, requestHeaders: [String: String], adoptedPlayer: AVPlayer? = nil,
-                             vodAirPlay: VODAirPlayVerdict? = nil) {
+                             vodAirPlay: VODAirPlayVerdict? = nil, restartedForReceiver: Bool = false) {
         // Direct opens re-read the key on every open: a replaced key is
         // swapped for its successor, a held one is never sent.
         var requestHeaders = requestHeaders
@@ -9187,7 +9289,21 @@ struct AVPlayerMultiviewTile: View {
         // URL blocked the main thread 2 to 4.3 s inside AVFoundation on
         // every such start (device log 2026-11-17).
         let vodMKVRemuxStart = isVOD && mkvServer != nil && url == readyLocalURL
-        if vodAirPlay == nil, isVOD, adoptedPlayer == nil,
+        // The verdict a mid-play pick carried into this restart, for this
+        // URL only; read once.
+        var carriedHandOff = false
+        if vodAirPlay == nil, adoptedPlayer == nil, let carried = vodAirPlayRestartURL {
+            vodAirPlayRestartURL = nil
+            carriedHandOff = carried == url && !vodMKVRemuxStart
+        }
+        // The local start after a timed-out take, for this URL only; read
+        // once. It skips the receiver decision below (no loop).
+        var localAfterTimeout = false
+        if vodAirPlay == nil, adoptedPlayer == nil, let local = vodAirPlayLocalRestartURL {
+            vodAirPlayLocalRestartURL = nil
+            localAfterTimeout = local == url
+        }
+        if vodAirPlay == nil, isVOD, adoptedPlayer == nil, !localAfterTimeout,
            vodMKVRemuxStart || (url.host != "127.0.0.1" && url.host != "localhost"),
            AirPlayMonitor.servableAirPlayOutput() != nil, AirPlayMonitor.shared.willServeReceiver,
            MultiviewCompositeTaps.ownsAirPlay(tileID: tileID) {
@@ -9195,6 +9311,14 @@ struct AVPlayerMultiviewTile: View {
             let label = channelName
             let source = vodMKVRemuxStart ? streamURL : url
             let gated = requestHeaders
+            if carriedHandOff {
+                // Owner 2026-11-17: the mid-play pick restarts through the
+                // headless start's player build, so no running player's item
+                // is swapped (the 2 to 4.3 s AVFoundation main-thread hang).
+                debugLog("[AVP-AIRPLAY] VOD \(label): restart for the receiver: verdict carried from the mid-play pick (hand-off), no second format read")
+                startPlayer(url: url, requestHeaders: gated, vodAirPlay: .handOff, restartedForReceiver: true)
+                return
+            }
             debugLog("[AVP-AIRPLAY] VOD \(label): AirPlay video route up at start (\(vodMKVRemuxStart ? "MKV remux" : "direct")); receiver verdict before any playback")
             Task { @MainActor in
                 let verdict = await VODAirPlayFormatGate.startVerdict(url: source, headers: playerHeaders,
@@ -9568,6 +9692,38 @@ struct AVPlayerMultiviewTile: View {
             // Headless start refused or held: off the receiver before
             // attach, which would otherwise hand it the item.
             if let v = vodAirPlay, v != .handOff { AirPlayTileDelivery.holdExternalOff(avPlayer) }
+            // A movie or episode playing here through the relay (127.0.0.1)
+            // never goes external: no receiver can fetch that item. With
+            // external allowed, an AirPlay pick mid-play made AVFoundation
+            // hand the receiver the relay item at once (device log
+            // 2026-11-17 11:15:42.685: the fullscreen player was dismissed
+            // for it before the gate's decision at 11:15:42.843), a receiver
+            // session that was torn down 160 ms later for the fresh player
+            // the restart builds, and that player's take then waited 1.3 s on
+            // the main thread inside AVFoundation (11:15:50.021). The hold
+            // starts with the player, because the system flips a player to
+            // external the instant the route is picked, before any app code
+            // runs; the route change still reaches the handover, which
+            // decides and restarts for the receiver. Held for the player's
+            // life (the hold is weak; teardown ends it).
+            // Not with a wired display or Screen Mirroring and no AirPlay
+            // output: that external fullscreen plays the loopback item, as
+            // before. A later switch to AirPlay still reaches the handover.
+            let loopbackHoldApplies = !AirPlayMonitor.wiredOrMirroredWithoutAirPlay
+            if vodAirPlay == nil, vodHandoverUpstream != nil, assetURL != url, loopbackHoldApplies {
+                AirPlayTileDelivery.holdExternalOff(avPlayer)
+                debugLog("[AVP-AIRPLAY] VOD \(channelName): relay item (127.0.0.1): external playback held off for this player; an AirPlay pick restarts for the receiver")
+            }
+            // The MKV loopback remux the same way: a mid-play pick flipped
+            // it to the receiver before MKVVODAirPlayGate decided (the card
+            // went active, the player closed to it, and the gate's hold then
+            // started the monitor's release grace). The gate releases this
+            // hold for a receiver it hands the item to.
+            let mkvHeldAtCreation = vodMKVRemuxStart && vodAirPlay == nil && loopbackHoldApplies
+            if mkvHeldAtCreation {
+                AirPlayTileDelivery.holdExternalOff(avPlayer)
+                debugLog("[AVP-AIRPLAY] VOD \(channelName): MKV remux item (127.0.0.1): external playback held off until the AirPlay gate decides")
+            }
             AirPlayMonitor.shared.attach(avPlayer)
             // Only the loopback remux item: a non-Matroska file the MKV
             // probe bounced to direct play keeps mkvServer set.
@@ -9575,21 +9731,37 @@ struct AVPlayerMultiviewTile: View {
                 let gate = MKVVODAirPlayGate(player: avPlayer, source: streamURL, label: channelName)
                 let pauseStore = progressStore
                 gate.onRefused = { pauseStore.noteUserPause(true, positionSeconds: avPlayer.currentTime().seconds) }
-                gate.attach(startVerdict: vodAirPlay)
+                gate.attach(startVerdict: vodAirPlay, heldAtCreation: mkvHeldAtCreation)
                 mkvAirPlayGate = gate
             }
             // A direct headless start gets the handover too (take deadline,
             // background, a later re-pick), keyed or not.
             if let upstream = vodHandoverUpstream ?? ((vodAirPlay != nil && !vodMKVRemuxStart) ? url : nil) {
                 let handover = RelayVODAirPlayHandover(player: avPlayer, upstream: upstream, relayURL: assetURL,
-                                                       options: options, label: channelName)
+                                                       label: channelName)
                 handover.onItemSwapped = { item, receiverPlays in
                     stallWatchdog?.setSuspended(receiverPlays, item: item)
+                }
+                handover.onRestartForReceiver = { seconds, why in
+                    restartVODForAirPlayReceiver(at: seconds, why: why)
                 }
                 let pauseStore = progressStore
                 handover.onRefused = { pauseStore.noteUserPause(true, positionSeconds: avPlayer.currentTime().seconds) }
                 if let v = vodAirPlay {
+                    // A keyed title's restart for the receiver: a take that
+                    // times out goes back to the relay here, with the key
+                    // (the local start skips the receiver decision, so once).
+                    if restartedForReceiver, v == .handOff, keyedOpen {
+                        handover.onTakeTimedOut = { seconds in
+                            restartVODForAirPlayReceiver(at: seconds, why: "the receiver did not take the restart",
+                                                         forReceiver: false)
+                        }
+                    }
                     handover.attachStarted(verdict: v)
+                } else if localAfterTimeout {
+                    // Kept here like a take that timed out: only a newly
+                    // picked receiver tries again.
+                    handover.attachStarted(verdict: .held)
                 } else {
                     handover.attach()
                 }

@@ -374,6 +374,14 @@ enum WatchProgressManager {
         NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
     }
 
+    /// The parent series id stamped on an episode's row (nil when the
+    /// episode was never annotated, or for a movie).
+    static func seriesID(vodID: String, serverID: String? = nil) -> String? {
+        guard let context = modelContext else { return nil }
+        let matches = matchingProgress(context: context, vodID: vodID)
+        return pickMatch(matches, serverID: serverID, claimLegacy: false)?.seriesID
+    }
+
     /// Get saved position for a VOD item. Returns nil if no progress or already finished.
     ///
     /// v1.6.8 (Codex A1): pass `serverID` so cross-server collisions
@@ -1027,7 +1035,23 @@ enum VODVersionSelectionStore {
     private struct Entry: Codable {
         var relationID: Int
         var updatedAt: Date
+        /// The provider pins this choice plays with (the `stream_id` and
+        /// `m3u_account_id` query of its /proxy/vod/ URL). Recorded since
+        /// 2026-11-17 so Resume (Continue Watching and the Movies hero),
+        /// which replays a stored URL, can follow the title's version
+        /// without a provider fetch. Nil `pinsRecorded` = an entry from
+        /// before then, whose pins are unknown.
+        var streamID: Int?
+        var accountID: Int?
+        var pinsRecorded: Bool?
     }
+
+    /// Posted on the main thread whenever a title's choice changes, from
+    /// any writer (the detail page's picker, the in-player Switch Version,
+    /// the AirPlay version fallback). userInfo["key"] is the storage key.
+    /// The detail page listens so its Version row follows a switch made
+    /// while it sits under the player (owner 2026-11-17).
+    static let didChange = Notification.Name("aerioVODVersionSelectionDidChange")
 
     private static func load() -> [String: Entry] {
         guard let data = UserDefaults.standard.data(forKey: key),
@@ -1055,15 +1079,99 @@ enum VODVersionSelectionStore {
         load()[key]?.relationID
     }
 
+    /// The account pin of the stored choice, when it was recorded. Episodes
+    /// pin by account only, and the in-player rows for an episode are keyed
+    /// by account id while the series page keys its rows by relation id.
+    static func accountPin(forKey key: String) -> Int? {
+        guard let entry = load()[key], entry.pinsRecorded == true else { return nil }
+        return entry.accountID
+    }
+
     /// Pass nil to clear (the user chose Auto).
     static func setSelection(_ relationID: Int?, forKey key: String) {
+        store(relationID, forKey: key, streamID: nil, accountID: nil, pinsRecorded: false)
+    }
+
+    /// Record a choice together with the provider pins it plays with.
+    static func setSelection(_ relationID: Int, forKey key: String,
+                             streamID: Int?, accountID: Int?) {
+        store(relationID, forKey: key, streamID: streamID, accountID: accountID,
+              pinsRecorded: true)
+    }
+
+    /// Record a choice from the version URL it plays (an in-player switch
+    /// or the AirPlay fallback hold only the option's URL).
+    static func setSelection(_ relationID: Int, forKey key: String, pinnedBy url: URL) {
+        let pins = pins(in: url)
+        setSelection(relationID, forKey: key, streamID: pins.streamID, accountID: pins.accountID)
+    }
+
+    private static func store(_ relationID: Int?, forKey key: String,
+                              streamID: Int?, accountID: Int?, pinsRecorded: Bool) {
         var all = load()
+        let before = all[key]
         if let relationID {
-            all[key] = Entry(relationID: relationID, updatedAt: Date())
+            all[key] = Entry(relationID: relationID, updatedAt: Date(),
+                             streamID: streamID, accountID: accountID,
+                             pinsRecorded: pinsRecorded ? true : nil)
         } else {
             all.removeValue(forKey: key)
         }
         save(all)
+        let changed = before?.relationID != relationID
+            || before?.streamID != streamID || before?.accountID != accountID
+        guard changed else { return }
+        debugLog("[VOD-VERSION] title version saved: \(relationID.map(String.init) ?? "auto") (was \(before.map { String($0.relationID) } ?? "auto"), pins \(pinsRecorded ? "recorded" : "none")) for \(key.split(separator: "|").dropFirst().joined(separator: " "))")
+        let post = {
+            NotificationCenter.default.post(name: didChange, object: nil, userInfo: ["key": key])
+        }
+        if Thread.isMainThread { post() } else { DispatchQueue.main.async(execute: post) }
+    }
+
+    static func pins(in url: URL) -> (streamID: Int?, accountID: Int?) {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        func int(_ name: String) -> Int? {
+            items.first { $0.name == name }?.value.flatMap(Int.init)
+        }
+        return (int("stream_id"), int("m3u_account_id"))
+    }
+
+    /// Point a stored Dispatcharr VOD URL (/proxy/vod/movie|episode/<uuid>
+    /// [/<session>][?pins]) at the title's chosen version, so Resume plays
+    /// the copy the detail page shows (owner 2026-11-17). Auto (no entry)
+    /// drops any pins; a recorded choice applies its pins (episodes pin by
+    /// account only). Returns nil when the URL already matches, is not a
+    /// Dispatcharr VOD URL, or the stored choice predates recorded pins.
+    /// A rewritten URL carries a fresh session id: a reused session can be
+    /// riding the previous provider (see DispatcharrAPI.mintVODSession).
+    static func urlFollowingSelection(_ url: URL, key: String) -> URL? {
+        guard !key.isEmpty else { return nil }
+        let comps = url.pathComponents
+        guard let p = comps.firstIndex(of: "proxy"), p + 3 < comps.count,
+              comps[p + 1] == "vod",
+              ["movie", "episode"].contains(comps[p + 2]),
+              var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        let isMovie = comps[p + 2] == "movie"
+        let wantStream: Int?
+        let wantAccount: Int?
+        if let entry = load()[key] {
+            guard entry.pinsRecorded == true else { return nil }
+            wantStream = isMovie ? entry.streamID : nil
+            wantAccount = entry.accountID
+        } else {
+            wantStream = nil
+            wantAccount = nil
+        }
+        let current = pins(in: url)
+        guard current.streamID != wantStream || current.accountID != wantAccount else { return nil }
+        let session = "vod_\(Int(Date().timeIntervalSince1970 * 1000))_\(Int.random(in: 1000...9999))"
+        let kept = Array(comps[1...(p + 3)]) + [session]
+        c.path = "/" + kept.joined(separator: "/")
+        var query = (c.queryItems ?? []).filter { $0.name != "stream_id" && $0.name != "m3u_account_id" }
+        if let wantStream { query.append(URLQueryItem(name: "stream_id", value: String(wantStream))) }
+        if let wantAccount { query.append(URLQueryItem(name: "m3u_account_id", value: String(wantAccount))) }
+        c.queryItems = query.isEmpty ? nil : query
+        return c.url
     }
 }
 
@@ -1074,6 +1182,56 @@ struct VODVersionOption: Identifiable, Equatable, Hashable {
     let id: Int          // provider relation pk (movies) or m3u account id (episodes)
     let label: String    // "Provider · 1080p"
     let url: URL
+}
+
+/// One builder for every list of provider copies (the detail page, Continue
+/// Watching, and the AirPlay version fallback when the player was handed
+/// none), so the URLs and ids match wherever the list was made.
+extension VODVersionOption {
+    /// Movies: one option per provider relation, pinned by the relation's
+    /// stream id and account, keyed by the relation id.
+    static func movieOptions(providers: [DispatcharrVODProviderRelation],
+                             movieUUID: String,
+                             api: DispatcharrAPI,
+                             label: (DispatcharrVODProviderRelation) -> String) -> [VODVersionOption] {
+        guard !movieUUID.isEmpty else { return [] }
+        return providers.compactMap { rel in
+            guard let url = api.proxyMovieURL(uuid: movieUUID,
+                                              preferredStreamID: rel.streamID.flatMap(Int.init),
+                                              m3uAccountID: rel.account.id) else { return nil }
+            return VODVersionOption(id: rel.id, label: label(rel), url: url)
+        }
+    }
+
+    /// Episodes: one option per distinct account (a series relation id does
+    /// not address an episode row), keyed by the ACCOUNT id, labeled with
+    /// the account name.
+    static func episodeOptions(providers: [DispatcharrVODProviderRelation],
+                               episodeUUID: String,
+                               api: DispatcharrAPI) -> [VODVersionOption] {
+        guard !episodeUUID.isEmpty else { return [] }
+        var seen = Set<Int>()
+        return providers.compactMap { rel in
+            guard seen.insert(rel.account.id).inserted,
+                  let url = api.proxyEpisodeURL(uuid: episodeUUID,
+                                                m3uAccountID: rel.account.id) else { return nil }
+            var label = rel.account.name ?? "Source \(rel.account.id)"
+            if let note = AVPlayerSupportNote.note(
+                containerExtension: rel.containerExtension, videoCodec: nil) {
+                label += " · ⚠️ \(note)"
+            }
+            return VODVersionOption(id: rel.account.id, label: label, url: url)
+        }
+    }
+
+    /// The Dispatcharr uuid in a /proxy/vod/<kind>/<uuid>[/<session>] URL
+    /// (`kind`: "movie" or "episode"), or nil.
+    static func proxyUUID(in url: URL, kind: String) -> String? {
+        let comps = url.pathComponents
+        guard let i = comps.firstIndex(of: kind), i + 1 < comps.count else { return nil }
+        let uuid = comps[i + 1]
+        return uuid.isEmpty ? nil : uuid
+    }
 }
 
 /// AVPlayer-engine playability notes for the Version picker. Only
