@@ -735,6 +735,18 @@ extension AVPlayer {
     }
 }
 
+/// The AirPlay format gate's answer (VODAirPlayFormatGate, iOS). Declared
+/// for every platform so the tile's start path can carry it.
+enum VODAirPlayVerdict {
+    /// The receiver may have the item (or the gate does not apply).
+    case handOff
+    /// Kept on this device, paused, and the user told.
+    case refused
+    /// Kept off the receiver only: the version fallback is waiting for
+    /// its switched copy's own item, so no pause and no message.
+    case held
+}
+
 #if os(iOS)
 /// AirPlay for an on-demand item the relay serves. In AirPlay video mode
 /// AVPlayer hands the item URL to the receiver, which cannot reach
@@ -840,6 +852,53 @@ final class RelayVODAirPlayHandover {
                 guard AirPlayMonitor.shared.willServeReceiver else { return }
                 self?.handover("the AirPlay route was picked again")
             }
+        }
+    }
+
+    /// Headless start (owner 2026-11-17, device log the same day: the swap
+    /// on a running player blocked the main thread 2 to 4.3 s inside
+    /// AVFoundation every time). The verdict was taken before the player
+    /// existed. `.handOff`: the tile built the player on the server's URL
+    /// without the key, with external playback on and the route up, so the
+    /// receiver gets it with no item swap; it must take it within
+    /// `confirmTimeout`, else this phone plays it with external playback
+    /// held off (live's fall-back). Otherwise the item stays on this device,
+    /// held off, and only a new pick tries the receiver again.
+    func attachStarted(verdict: VODAirPlayFormatGate.Verdict) {
+        guard let player, let item = player.currentItem else { return }
+        attach()
+        guard verdict == .handOff else {
+            heldLocal = true
+            return
+        }
+        state = .swapping
+        let deadline = Date().addingTimeInterval(Self.confirmTimeout)
+        Task { @MainActor [weak self, weak player] in
+            let took = await Self.awaitTake({ player }, item: item, deadline: deadline)
+            guard let self, let player = self.player, player.currentItem === item, let took else { return }
+            if took {
+                self.state = .receiver
+                debugLog("[AVP-AIRPLAY] VOD \(self.label): external playback active (headless start, no item swap)")
+                self.watchReceiver(item)
+                return
+            }
+            AirPlayTileDelivery.holdExternalOff(player)
+            self.heldLocal = true
+            self.state = .relay
+            self.onItemSwapped?(item, false)
+            debugLog("[AVP-AIRPLAY] VOD \(self.label): the receiver did not take the movie within \(Int(Self.confirmTimeout)) s; playing on this device with external playback held off until a receiver is picked again")
+            AirPlayMonitor.shared.headlessTuneFellBack(reason: "the receiver did not take the movie")
+        }
+    }
+
+    /// True once `player` plays `item` externally, false at `deadline`, nil
+    /// when the player or its item went away first.
+    static func awaitTake(_ player: () -> AVPlayer?, item: AVPlayerItem, deadline: Date) async -> Bool? {
+        while true {
+            guard let p = player(), p.currentItem === item else { return nil }
+            if p.isExternalPlaybackActive { return true }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
 
@@ -1054,25 +1113,57 @@ enum VODAirPlayFormatGate {
     private static var lastShown: (key: String, at: Date)?
     private static let messageWindow: TimeInterval = 10
 
-    enum Verdict {
-        /// The receiver may have the item (or the gate does not apply).
-        case handOff
-        /// Kept on this device, paused, and the user told.
-        case refused
-        /// Kept off the receiver only: the version fallback is waiting for
-        /// its switched copy's own item, so no pause and no message.
-        case held
-    }
+    typealias Verdict = VODAirPlayVerdict
 
     /// Whether the item may go to the receiver; shows the message when not.
     /// `source`: the tile URL the item plays (the version fallback counts a
     /// refusal only against the copy it belongs to).
     static func blocks(item: AVPlayerItem, mkvRemux: Bool, source: URL?, label: String) async -> Verdict {
-        var receiver = AirPlayReceiverResolver.shared.resolveNow() ?? .unknown
-        if receiver.model == nil {
-            receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
-        }
+        let receiver = await resolvedReceiver()
         let (video, audio) = await codecs(of: item)
+        return decide(receiver: receiver, video: video, audio: audio, mkvRemux: mkvRemux,
+                      source: source, label: label, readFrom: "item")
+    }
+
+    /// A movie or episode started with the AirPlay video route already up
+    /// (headless start): the verdict before any player exists. Formats are
+    /// read only for a known non-Apple receiver, from the server's URL
+    /// without the key (what the receiver would fetch), time boxed; the MKV
+    /// remux needs none (loopback, refused there). Same rule, version
+    /// fallback, and message as `blocks`.
+    static func startVerdict(url: URL, headers: [String: String], mkvRemux: Bool,
+                             label: String) async -> Verdict {
+        let receiver = await resolvedReceiver()
+        let knownNonApple = receiver.model != nil && !receiver.isApple && !receiver.isAudioOnly
+        var video: [String] = []
+        var audio: [String] = []
+        var readFrom = "not read (receiver not known non-Apple)"
+        if knownNonApple, mkvRemux {
+            readFrom = "not read (MKV remux)"
+        } else if knownNonApple {
+            let probed = await AirPlayVersionFallback.timed(AirPlayVersionFallback.perVersion) {
+                await AirPlayVersionFallback.probe(url, headers: headers)
+            }
+            if let probed {
+                video = probed.video
+                audio = probed.audio
+                readFrom = "phone probe"
+            } else {
+                readFrom = "phone probe, unreadable"
+            }
+        }
+        return decide(receiver: receiver, video: video, audio: audio, mkvRemux: mkvRemux,
+                      source: url, label: label, readFrom: readFrom)
+    }
+
+    private static func resolvedReceiver() async -> AirPlayReceiver {
+        let receiver = AirPlayReceiverResolver.shared.resolveNow() ?? .unknown
+        if receiver.model != nil { return receiver }
+        return await AirPlayReceiverResolver.shared.resolveForHandoff()
+    }
+
+    private static func decide(receiver: AirPlayReceiver, video: [String], audio: [String], mkvRemux: Bool,
+                               source: URL?, label: String, readFrom: String) -> Verdict {
         let videoText = video.isEmpty ? "none" : video.joined(separator: "+")
         let audioText = audio.isEmpty ? "none" : audio.joined(separator: "+")
         let path = mkvRemux ? "mkv-remux" : "direct-mp4"
@@ -1086,7 +1177,7 @@ enum VODAirPlayFormatGate {
             // Unreadable formats (nil): no grounds to refuse.
             blocked = !(receiverPlays(video: video, audio: audio) ?? true)
         }
-        debugLog("[AVP-AIRPLAY] VOD \(label): format gate receiver='\(receiver.name)' model=\(receiver.model ?? "unknown") apple=\(receiver.isApple) audioOnly=\(receiver.isAudioOnly) video=\(videoText) audio=\(audioText) path=\(path) -> \(blocked ? "kept on this device" : "hand-off as before")")
+        debugLog("[AVP-AIRPLAY] VOD \(label): format gate receiver='\(receiver.name)' model=\(receiver.model ?? "unknown") apple=\(receiver.isApple) audioOnly=\(receiver.isAudioOnly) video=\(videoText) audio=\(audioText) (\(readFrom)) path=\(path) -> \(blocked ? "kept on this device" : "hand-off as before")")
         if blocked {
             // Another version of the title may play there (owner
             // 2026-11-16); the fallback owns the message when it searches.
@@ -1184,8 +1275,32 @@ final class MKVVODAirPlayGate {
         self.label = label
     }
 
-    func attach() {
+    /// `startVerdict`: a headless start already decided (the tile held
+    /// external playback off for anything but `.handOff`); no second gate
+    /// run. `.handOff` (Apple or unresolved receiver, as before) gets the
+    /// same take deadline as the direct path, then this phone.
+    func attach(startVerdict: VODAirPlayFormatGate.Verdict? = nil) {
         guard let player else { return }
+        if let startVerdict {
+            if startVerdict != .handOff {
+                held = true
+            } else if let item = player.currentItem {
+                let deadline = Date().addingTimeInterval(RelayVODAirPlayHandover.confirmTimeout)
+                Task { @MainActor [weak self, weak player] in
+                    let took = await RelayVODAirPlayHandover.awaitTake({ player }, item: item, deadline: deadline)
+                    guard let self, let took else { return }
+                    if took {
+                        debugLog("[AVP-AIRPLAY] VOD \(self.label): external playback active (headless start, MKV remux)")
+                        return
+                    }
+                    guard let player = self.player else { return }
+                    AirPlayTileDelivery.holdExternalOff(player)
+                    self.held = true
+                    debugLog("[AVP-AIRPLAY] VOD \(self.label): the receiver did not take the MKV remux within \(Int(RelayVODAirPlayHandover.confirmTimeout)) s; playing on this device with external playback held off")
+                    AirPlayMonitor.shared.headlessTuneFellBack(reason: "the receiver did not take the movie")
+                }
+            }
+        }
         externalObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] p, _ in
             let active = p.isExternalPlaybackActive
             Task { @MainActor in if active { self?.evaluate("the receiver took the item") } }
@@ -1212,7 +1327,7 @@ final class MKVVODAirPlayGate {
         }
         // AirPlayMonitor.attach already enabled external playback for a
         // route that was up before this tile.
-        if AirPlayMonitor.shared.willServeReceiver { evaluate("an AirPlay route was already up") }
+        if startVerdict == nil, AirPlayMonitor.shared.willServeReceiver { evaluate("an AirPlay route was already up") }
     }
 
     func detach() {
@@ -1273,7 +1388,7 @@ final class MKVVODAirPlayGate {
 final class AirPlayVersionFallback {
     static let shared = AirPlayVersionFallback()
 
-    private static let perVersion: TimeInterval = 8
+    static let perVersion: TimeInterval = 8
     private static let overall: TimeInterval = 25
     /// A switched copy the gate never ruled on (the tile took a path with
     /// no gate) does not keep the session alive forever.
@@ -1523,7 +1638,7 @@ final class AirPlayVersionFallback {
                               authMode: server.dispatcharrHeaderMode)
     }
 
-    private struct Codecs: Sendable {
+    struct Codecs: Sendable {
         let video: [String]
         let audio: [String]
     }
@@ -1531,7 +1646,7 @@ final class AirPlayVersionFallback {
     /// Reads one copy's tracks the way the player would open it (no sign-in,
     /// as the receiver will fetch it). One provider connection; released by
     /// cancelLoading when the time box ends, and dropped on return.
-    private static func probe(_ url: URL, headers: [String: String]) async -> Codecs? {
+    static func probe(_ url: URL, headers: [String: String]) async -> Codecs? {
         var options: [String: Any] = [:]
         if !headers.isEmpty { options["AVURLAssetHTTPHeaderFieldsKey"] = headers }
         let asset = AVURLAsset(url: url, options: options)
@@ -1546,7 +1661,7 @@ final class AirPlayVersionFallback {
     }
 
     /// Runs `work`, canceled after `seconds` (and when the caller is).
-    private static func timed<T: Sendable>(_ seconds: TimeInterval,
+    static func timed<T: Sendable>(_ seconds: TimeInterval,
                                            _ work: @escaping @MainActor () async -> T?) async -> T? {
         guard seconds > 0 else { return nil }
         let task = Task { @MainActor in await work() }

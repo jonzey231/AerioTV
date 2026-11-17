@@ -1048,6 +1048,15 @@ final class PlayerSession: ObservableObject {
         // On Demand and DVR picks open the player here without touching
         // playingItem, so the search keyboard would stay over the player.
         SearchDismissCenter.dismissAll(reason: "on demand player")
+        #if os(iOS)
+        // A movie or episode picked with the AirPlay video route up starts
+        // the way live does (owner 2026-11-17): no fullscreen player, the
+        // card reads Connecting to AirPlay, and the tile decides the
+        // receiver before any playback; it expands on a fall-back.
+        if kind == .vod, AirPlayMonitor.shared.beginHeadlessTune(channel: title) {
+            NowPlayingManager.shared.applyMinimized()
+        }
+        #endif
         mode = .multiview
         return true
     }

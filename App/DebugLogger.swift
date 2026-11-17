@@ -1170,8 +1170,10 @@ final class MainThreadProfiler: @unchecked Sendable {
     /// Sampling period once armed.
     private static let samplePeriod: TimeInterval = 0.010
     /// Deepest frame-pointer walk per sample.
-    private static let maxFrames = 48
-    /// Sample ceiling per turn (48 * 600 * 8 bytes = 230 KB, a 6 s turn).
+    private static let maxFrames = 96
+    /// Turns this long or longer also print the full most common stack.
+    private static let fullStackTurnMs = 1000
+    /// Sample ceiling per turn (96 * 600 * 8 bytes = 460 KB, a 6 s turn).
     private static let maxSamples = 600
     /// Reports per rolling minute.
     private static let maxProfilesPerMinute = 20
@@ -1393,6 +1395,60 @@ final class MainThreadProfiler: @unchecked Sendable {
         for (name, n) in leaves.sorted(by: { $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value }).prefix(Self.topLeaves) {
             debugLog("  \(Self.pct(n, samples))  \(name)")
         }
+        if turnMs >= Self.fullStackTurnMs { reportFullStack(samples: samples) }
+    }
+
+    /// Turns of a second or more (device log 2026-11-17: a 4 s turn whose
+    /// top 12 frames named only AVFCore, MediaToolbox, and kevent_id): the
+    /// most common sampled stack, every frame, deepest first, each with its
+    /// image and offset so stripped (<redacted>) frames stay distinct.
+    /// Stacks are compared from the caller side, so a leaf PC that moves
+    /// inside one function does not split them.
+    private func reportFullStack(samples: Int) {
+        var counts: [[UInt64]: Int] = [:]
+        for s in 0..<samples {
+            let depth = Int(frameCounts[s])
+            guard depth > 1 else { continue }
+            let slot = frames + (s * Self.maxFrames)
+            // Return addresses only (frame 1 on): the caller chain.
+            let key = (1..<depth).map { slot[$0] }
+            counts[key, default: 0] += 1
+        }
+        guard let (chain, n) = counts.max(by: { $0.value < $1.value }) else { return }
+        // A representative leaf PC for this chain.
+        var leaf: UInt64 = 0
+        for s in 0..<samples {
+            let depth = Int(frameCounts[s])
+            guard depth > 1 else { continue }
+            let slot = frames + (s * Self.maxFrames)
+            if depth - 1 == chain.count, (1..<depth).allSatisfy({ slot[$0] == chain[$0 - 1] }) {
+                leaf = slot[0]
+                break
+            }
+        }
+        let all = [leaf] + chain
+        let truncated = all.count >= Self.maxFrames ? " (walk hit the \(Self.maxFrames)-frame cap)" : ""
+        debugLog("[PROFILE]   full stack of the most common sample (\(n) of \(samples), \(all.count) frames\(truncated)), deepest first:")
+        for (i, addr) in all.enumerated() {
+            debugLog(String(format: "  #%02d %@", i, Self.symbolizeWithOffset(addr)))
+        }
+    }
+
+    /// Symbol, image, and offset: `name (image +0xoffset)`, with the
+    /// symbol's own offset when one resolved.
+    private static func symbolizeWithOffset(_ addr: UInt64) -> String {
+        var info = Dl_info()
+        guard dladdr(UnsafeRawPointer(bitPattern: UInt(addr)), &info) != 0 else {
+            return String(format: "0x%llx (unknown image)", addr)
+        }
+        let image = info.dli_fname.map { (String(cString: $0) as NSString).lastPathComponent } ?? "?"
+        let base = UInt64(UInt(bitPattern: info.dli_fbase))
+        let imageOffset = addr &- base
+        guard let sname = info.dli_sname else {
+            return String(format: "<no symbol> (%@ +0x%llx)", image, imageOffset)
+        }
+        let symOffset = addr &- UInt64(UInt(bitPattern: info.dli_saddr))
+        return String(format: "%@ +%llu (%@ +0x%llx)", demangle(String(cString: sname)), symOffset, image, imageOffset)
     }
 
     private static func pct(_ n: Int, _ total: Int) -> String {

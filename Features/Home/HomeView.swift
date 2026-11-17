@@ -6665,8 +6665,11 @@ struct MainTabView: View {
         // AirPlay handoff (device test 2026-09-25): the receiver took the
         // channel, the fullscreen player was minimized, so land on Live TV
         // with the remote-session card driving the session (Cast parity).
+        // A movie or episode keeps the tab it was started from (owner
+        // 2026-11-17: Movies jumped to Live TV after the hand-off).
         .onChange(of: airPlay.hostsHeadless) { _, headless in
-            guard headless, selectedTab != .liveTV else { return }
+            guard headless, selectedTab != .liveTV,
+                  MultiviewStore.shared.vodSoloTile?.kind != .vod else { return }
             selectedTab = .liveTV
         }
         #endif
