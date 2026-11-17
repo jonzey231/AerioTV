@@ -1774,17 +1774,33 @@ struct VODDetailView: View {
         // episode always restarted at zero and Continue Watching lost
         // its progress bar.
         let launchTitle = episodeLaunchTitle(ep)
-        WatchProgressManager.annotate(
-            vodID: ep.id,
-            title: launchTitle,
-            posterURL: ep.posterURL?.absoluteString,
-            vodType: "episode",
-            serverID: ep.serverID.uuidString,
-            seriesID: ep.seriesID,
-            seasonNumber: ep.seasonNumber,
-            episodeNumber: ep.episodeNumber,
-            upNextQueue: upNextQueueJSON(after: ep)
-        )
+        let upNext = upNextQueueJSON(after: ep)
+        let stamp: @MainActor () -> Void = {
+            WatchProgressManager.annotate(
+                vodID: ep.id,
+                title: launchTitle,
+                posterURL: ep.posterURL?.absoluteString,
+                vodType: "episode",
+                serverID: ep.serverID.uuidString,
+                seriesID: ep.seriesID,
+                seasonNumber: ep.seasonNumber,
+                episodeNumber: ep.episodeNumber,
+                upNextQueue: upNext
+            )
+        }
+        #if os(iOS)
+        // Owner 2026-11-17: an episode started headless for an AirPlay
+        // receiver that cannot play leaves no trace (no Continue Watching
+        // row, no Currently Watching). The row is written by the first
+        // position save instead, on the receiver or on this device.
+        if AirPlayMonitor.shared.startWouldBeHeadless {
+            WatchProgressManager.annotateWhenPlayed(vodID: ep.id, serverID: ep.serverID.uuidString, stamp)
+        } else {
+            stamp()
+        }
+        #else
+        stamp()
+        #endif
         Task {
             await resolveAndLaunch(
                 url: url,
