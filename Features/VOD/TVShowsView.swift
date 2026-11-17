@@ -396,7 +396,10 @@ struct TVShowsView: View {
                 serverID: progress.serverID,
                 vodType: "episode",
                 resumePositionMs: progress.positionMs,
-                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
+                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey,
+                episodeInfo: .fromProgress(title: progress.title,
+                                           seasonNumber: progress.seasonNumber,
+                                           episodeNumber: progress.episodeNumber)) {
                 isPlaying = true
                 return
             }

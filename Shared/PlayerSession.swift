@@ -990,7 +990,8 @@ final class PlayerSession: ObservableObject {
                   versionSelectionKey: String? = nil,
                   kind: TilePlaybackKind = .vod,
                   dvrScheduledEnd: Date? = nil,
-                  dvrChannelID: String? = nil) -> Bool {
+                  dvrChannelID: String? = nil,
+                  episodeInfo: OnDemandEpisodeInfo? = nil) -> Bool {
         if Self.refusedByLaunchLock("on demand \(title)") { return false }
         guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
         let ext = streamURL.pathExtension.lowercased()
@@ -1021,7 +1022,8 @@ final class PlayerSession: ObservableObject {
                                   resumePositionMs: resumePositionMs,
                                   bypassWarning: true,
                                   dvrScheduledEnd: dvrScheduledEnd,
-                                  dvrChannelID: dvrChannelID)
+                                  dvrChannelID: dvrChannelID,
+                                  episodeInfo: episodeInfo)
         guard result == .added else {
             DebugLogger.shared.log("[Engine] beginVOD: addVOD -> \(result); falling back to legacy cover",
                                    category: "Playback", level: .warning)

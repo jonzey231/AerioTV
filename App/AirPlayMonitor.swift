@@ -409,10 +409,7 @@ final class AirPlayMonitor: ObservableObject {
     /// "Connecting to AirPlay…" at once. Returns true when the caller must
     /// start minimized.
     func beginHeadlessTune(channel: String) -> Bool {
-        guard let out = Self.servableAirPlayOutput(),
-              receiver?.isAudioOnly != true,
-              !AerioCastController.shared.isCasting,
-              !CompanionClient.shared.isControlling else { return false }
+        guard startWouldBeHeadless, let out = Self.servableAirPlayOutput() else { return false }
         headlessTune = true
         if !hostsHeadless { hostsHeadless = true }
         debugLog("[AVP-AIRPLAY] AirPlay route selected (\(out.name ?? "?")): tuning \(channel) headless, no fullscreen player; card shows Connecting to AirPlay")
@@ -421,6 +418,16 @@ final class AirPlayMonitor: ObservableObject {
         // active one follows once the old tile detaches.
         evaluate()
         return true
+    }
+
+    /// A start picked now would go headless to the receiver (the same test
+    /// beginHeadlessTune makes). The episode launch reads it to hold its
+    /// watch-progress row until the title plays (owner 2026-11-17).
+    var startWouldBeHeadless: Bool {
+        Self.servableAirPlayOutput() != nil
+            && receiver?.isAudioOnly != true
+            && !AerioCastController.shared.isCasting
+            && !CompanionClient.shared.isControlling
     }
 
     /// The headless tune cannot reach the receiver (audio-only speaker,
@@ -455,6 +462,8 @@ final class AirPlayMonitor: ObservableObject {
                 && !AirPlayTileDelivery.isServingReceiver)
         guard headless else { return false }
         debugLog("[AVP-AIRPLAY] VOD \(label): not started on this device (\(reason))")
+        // Nothing played: the held watch-progress row is never written.
+        WatchProgressManager.discardDeferredAnnotation()
         stopPlayback()
         setPhase(.none)
         evaluate()

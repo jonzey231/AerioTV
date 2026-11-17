@@ -284,6 +284,12 @@ enum WatchProgressManager {
                      seasonNumber: Int? = nil, episodeNumber: Int? = nil,
                      upNextQueue: String? = nil) {
         guard let context = modelContext else { return }
+        // The title is playing: a launch annotation held for it is written
+        // first, in the order an ordinary launch writes them.
+        if let held = deferredAnnotation, held.key == "\(serverID ?? "")|\(vodID)" {
+            deferredAnnotation = nil
+            held.apply()
+        }
         let matches = matchingProgress(context: context, vodID: vodID)
         let existing = pickMatch(matches, serverID: serverID, claimLegacy: true)
 
@@ -372,6 +378,22 @@ enum WatchProgressManager {
         }
         try? context.save()
         NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
+    }
+
+    /// A launch annotation held until the title plays (owner 2026-11-17):
+    /// a title started for an AirPlay receiver that cannot play leaves no
+    /// trace, so no row is created or touched (and nothing is pushed to
+    /// sync) until the first position save for it. Only the latest start
+    /// is held.
+    private static var deferredAnnotation: (key: String, apply: @MainActor () -> Void)?
+
+    static func annotateWhenPlayed(vodID: String, serverID: String?,
+                                   _ annotation: @escaping @MainActor () -> Void) {
+        deferredAnnotation = ("\(serverID ?? "")|\(vodID)", annotation)
+    }
+
+    static func discardDeferredAnnotation() {
+        deferredAnnotation = nil
     }
 
     /// The parent series id stamped on an episode's row (nil when the

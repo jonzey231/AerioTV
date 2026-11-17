@@ -108,4 +108,59 @@ struct MultiviewTile: Identifiable, Equatable {
     /// for the prompt's "Continue on Live TV" hand-off (posted as an
     /// aerioOpenChannel deep link after session exit).
     var dvrChannelID: String? = nil
+
+    /// `.vod` episode tiles: the series name, season, episode number, and
+    /// episode title as separate fields, so the remote-session card and
+    /// sheet can split them across their lines (owner 2026-11-17). nil for
+    /// movies, recordings, and live tiles.
+    var episodeInfo: OnDemandEpisodeInfo? = nil
+}
+
+/// What an episode is, field by field. `item.name` on the tile keeps the
+/// combined label ("Severance S01E02 Half Loop") the player already uses.
+struct OnDemandEpisodeInfo: Equatable {
+    var seriesName: String?
+    var seasonNumber: Int?
+    var episodeNumber: Int?
+    var episodeTitle: String?
+
+    /// The title line: the series name, else the label the player has.
+    func titleLine(fallback: String) -> String {
+        let name = seriesName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? fallback : name
+    }
+
+    /// The program line: "S1 E2 · Half Loop" (the "S1 E2" style Continue
+    /// Watching and DVR use), "S1 E2" without a title, the title alone
+    /// without numbers, nil with neither.
+    var programLine: String? {
+        var code: String? = nil
+        if let s = seasonNumber, let e = episodeNumber, s > 0, e > 0 { code = "S\(s) E\(e)" }
+        let title = episodeTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch (code, title.isEmpty) {
+        case let (code?, false): return "\(code) · \(title)"
+        case let (code?, true): return code
+        case (nil, false): return title
+        case (nil, true): return nil
+        }
+    }
+
+    /// A Continue Watching row, which keeps season and episode as fields
+    /// but only the combined label for the names. The label is the one
+    /// VODDetailView.episodeLaunchTitle builds ("<series> S01E02 <title>"),
+    /// so it is cut at that exact code from the row's own numbers; a row
+    /// whose label lacks the code (one Up Next seeded) keeps the numbers
+    /// and no names.
+    static func fromProgress(title: String, seasonNumber: Int, episodeNumber: Int) -> OnDemandEpisodeInfo {
+        var info = OnDemandEpisodeInfo(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+        guard seasonNumber > 0, episodeNumber > 0 else { return info }
+        let code = " " + String(format: "S%02dE%02d", seasonNumber, episodeNumber)
+        guard let range = title.range(of: code) else { return info }
+        let series = String(title[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+        let rest = String(title[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        info.seriesName = series.isEmpty ? nil : series
+        // "Episode N" is the launch label's stand-in for a missing title.
+        info.episodeTitle = (rest.isEmpty || rest == "Episode \(episodeNumber)") ? nil : rest
+        return info
+    }
 }

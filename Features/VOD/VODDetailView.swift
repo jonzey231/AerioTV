@@ -1774,17 +1774,33 @@ struct VODDetailView: View {
         // episode always restarted at zero and Continue Watching lost
         // its progress bar.
         let launchTitle = episodeLaunchTitle(ep)
-        WatchProgressManager.annotate(
-            vodID: ep.id,
-            title: launchTitle,
-            posterURL: ep.posterURL?.absoluteString,
-            vodType: "episode",
-            serverID: ep.serverID.uuidString,
-            seriesID: ep.seriesID,
-            seasonNumber: ep.seasonNumber,
-            episodeNumber: ep.episodeNumber,
-            upNextQueue: upNextQueueJSON(after: ep)
-        )
+        let upNext = upNextQueueJSON(after: ep)
+        let stamp: @MainActor () -> Void = {
+            WatchProgressManager.annotate(
+                vodID: ep.id,
+                title: launchTitle,
+                posterURL: ep.posterURL?.absoluteString,
+                vodType: "episode",
+                serverID: ep.serverID.uuidString,
+                seriesID: ep.seriesID,
+                seasonNumber: ep.seasonNumber,
+                episodeNumber: ep.episodeNumber,
+                upNextQueue: upNext
+            )
+        }
+        #if os(iOS)
+        // Owner 2026-11-17: an episode started headless for an AirPlay
+        // receiver that cannot play leaves no trace (no Continue Watching
+        // row, no Currently Watching). The row is written by the first
+        // position save instead, on the receiver or on this device.
+        if AirPlayMonitor.shared.startWouldBeHeadless {
+            WatchProgressManager.annotateWhenPlayed(vodID: ep.id, serverID: ep.serverID.uuidString, stamp)
+        } else {
+            stamp()
+        }
+        #else
+        stamp()
+        #endif
         Task {
             await resolveAndLaunch(
                 url: url,
@@ -1793,9 +1809,21 @@ struct VODDetailView: View {
                 vodType: "episode",
                 posterURL: ep.posterURL?.absoluteString,
                 serverID: ep.serverID.uuidString,
-                fromStart: fromStart
+                fromStart: fromStart,
+                episodeInfo: episodeInfo(ep)
             )
         }
+    }
+
+    /// The same episode as `episodeLaunchTitle`, field by field, for the
+    /// remote-session card and sheet. A provider title too short to stand
+    /// is left out rather than replaced by "Episode N".
+    private func episodeInfo(_ ep: VODEpisode) -> OnDemandEpisodeInfo {
+        let own = ep.cleanedTitle(showName: item.name)
+        return OnDemandEpisodeInfo(seriesName: item.name,
+                                   seasonNumber: ep.seasonNumber,
+                                   episodeNumber: ep.episodeNumber,
+                                   episodeTitle: own.count > 2 ? own : nil)
     }
 
     /// v1.7.3 (Issue #19): flatten the loaded series into the episodes
@@ -2129,18 +2157,21 @@ struct VODDetailView: View {
     /// remote session is active (PlayWhereRouter, Logan 2026-10-06).
     private func resolveAndLaunch(url: URL, title: String, vodID: String? = nil,
                                   vodType: String = "movie", posterURL: String? = nil,
-                                  serverID: String? = nil, fromStart: Bool = false) async {
+                                  serverID: String? = nil, fromStart: Bool = false,
+                                  episodeInfo: OnDemandEpisodeInfo? = nil) async {
         PlayWhereRouter.shared.request(title: title, item: .nonLive) {
             Task {
                 await launchPicked(url: url, title: title, vodID: vodID, vodType: vodType,
-                                   posterURL: posterURL, serverID: serverID, fromStart: fromStart)
+                                   posterURL: posterURL, serverID: serverID, fromStart: fromStart,
+                                   episodeInfo: episodeInfo)
             }
         }
     }
 
     private func launchPicked(url: URL, title: String, vodID: String? = nil,
                               vodType: String = "movie", posterURL: String? = nil,
-                              serverID: String? = nil, fromStart: Bool = false) async {
+                              serverID: String? = nil, fromStart: Bool = false,
+                              episodeInfo: OnDemandEpisodeInfo? = nil) async {
         let resumeServerID = serverID ?? item.serverID.uuidString
         playingTitle = title
         playingHeaders = serverHeaders()
@@ -2243,7 +2274,8 @@ struct VODDetailView: View {
                                                          serverID: resumeServerID),
             versionOptions: playingVersionOptions,
             selectedVersionID: playingVersionOptionID,
-            versionSelectionKey: versionSelectionKey) {
+            versionSelectionKey: versionSelectionKey,
+            episodeInfo: episodeInfo) {
             isPlaying = true
             return
         }
