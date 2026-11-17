@@ -3229,7 +3229,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // Remember an in-player switch too, so reopening the
                     // title keeps the copy the user chose here.
                     if let key = self.progressStore.vodVersionSelectionKey {
-                        VODVersionSelectionStore.setSelection(option.id, forKey: key)
+                        VODVersionSelectionStore.setSelection(option.id, forKey: key, pinnedBy: option.url)
                     }
                     self.progressStore.vodStreamURL = option.url.absoluteString
                     debugLog("[VOD-VERSION] switch to '\(option.label)' at \(resumeMs)ms")

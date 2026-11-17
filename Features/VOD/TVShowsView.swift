@@ -269,7 +269,7 @@ struct TVShowsView: View {
                     resumePositionMs: resumePositionMs,
                     vodVersionOptions: resumeVersionOptions,
                     vodSelectedVersionID: VODVersionSelectionStore
-                        .selection(forKey: resumeVersionSelectionKey),
+                        .accountPin(forKey: resumeVersionSelectionKey),
                     vodVersionSelectionKey: resumeVersionSelectionKey
                 )
                 .onDisappear { isPlaying = false }
@@ -350,7 +350,7 @@ struct TVShowsView: View {
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = progress.positionMs
-            let url = opened.url
+            var url = opened.url
             resumePlayingHeaders = opened.headers
             // ATV log 2026-08-17: same defect as MoviesView's resume path -
             // mounting the cover directly skipped the teardown VODDetailView
@@ -376,6 +376,13 @@ struct TVShowsView: View {
                                 itemID: seriesID)
             } else {
                 resumeVersionSelectionKey = ""
+            }
+            // Resume plays the source the series page shows (owner
+            // 2026-11-17): the stored URL carries whichever account last
+            // played, so it is pointed at the series' chosen source first.
+            if let followed = VODVersionSelectionStore.urlFollowingSelection(url, key: resumeVersionSelectionKey) {
+                debugLog("[VOD-VERSION] episode resume \(progress.vodID): stored URL pointed at the series' source (account \(VODVersionSelectionStore.accountPin(forKey: resumeVersionSelectionKey).map(String.init) ?? "auto"))")
+                url = followed
             }
             loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
             // TEST (AVPlayer VOD): unified container first; false = engine
@@ -433,9 +440,7 @@ struct TVShowsView: View {
         // path: the catalog may not hold this episode yet (mid-sync, or a
         // synced row from another device), but the URL is always present
         // because it is what we are about to play.
-        let comps = resumeURL.pathComponents
-        let uuid = comps.firstIndex(of: "episode")
-            .flatMap { i in i + 1 < comps.count ? comps[i + 1] : nil } ?? ""
+        let uuid = VODVersionOption.proxyUUID(in: resumeURL, kind: "episode") ?? ""
         guard !uuid.isEmpty else {
             debugLog("[VOD-VERSION] episode resume skipped: no uuid in \(resumeURL.path)")
             return
@@ -450,18 +455,8 @@ struct TVShowsView: View {
                 debugLog("[VOD-VERSION] episode resume \(progress.vodID): providers fetch failed")
                 return
             }
-            var seen = Set<Int>()
-            let options: [VODVersionOption] = providers.compactMap { rel in
-                guard seen.insert(rel.account.id).inserted,
-                      let url = api.proxyEpisodeURL(uuid: uuid,
-                                                    m3uAccountID: rel.account.id) else { return nil }
-                var label = rel.account.name ?? "Source \(rel.account.id)"
-                if let note = AVPlayerSupportNote.note(
-                    containerExtension: rel.containerExtension, videoCodec: nil) {
-                    label += " · ⚠️ \(note)"
-                }
-                return VODVersionOption(id: rel.account.id, label: label, url: url)
-            }
+            let options = VODVersionOption.episodeOptions(providers: providers,
+                                                          episodeUUID: uuid, api: api)
             guard options.count > 1 else {
                 debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) distinct account(s), no picker")
                 return
@@ -472,7 +467,10 @@ struct TVShowsView: View {
             MultiviewStore.shared.updateVODVersionContext(
                 vodID: progress.vodID,
                 options: options,
-                selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
+                // Episode rows are keyed by ACCOUNT id; the stored choice's
+                // id may be the series page's relation id, so mark the row
+                // by the recorded account pin.
+                selectedID: VODVersionSelectionStore.accountPin(forKey: resumeVersionSelectionKey),
                 selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
         }
     }

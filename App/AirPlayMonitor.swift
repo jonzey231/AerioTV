@@ -145,6 +145,17 @@ final class AirPlayMonitor: ObservableObject {
         return out
     }
 
+    /// A wired display (HDMI or USB-C adapter) or Screen Mirroring is up
+    /// and the route has no AirPlay output: external playback there is the
+    /// adapter's fullscreen, which plays any item, loopback included.
+    static var wiredOrMirroredWithoutAirPlay: Bool {
+        guard AirPlayReceiverResolver.currentAirPlayOutput() == nil else { return false }
+        if AVAudioSession.sharedInstance().currentRoute.outputs.contains(where: { $0.portType == .HDMI }) {
+            return true
+        }
+        return UIScreen.screens.count > 1
+    }
+
     /// A tune now would be served to a screen receiver (Force HLS bypass).
     var willServeReceiver: Bool {
         Self.servableAirPlayOutput() != nil && receiver?.isAudioOnly != true
@@ -837,6 +848,10 @@ extension Notification.Name {
     /// The user re-picked an AirPlay route after ending AirPlay (the latch
     /// cleared with no route change): a tile playing locally hands over.
     static let aerioAirPlayRoutePicked = Notification.Name("aerioAirPlayRoutePicked")
+    /// The system route picker closed (any outcome), after the user-ended
+    /// latch was settled: on-screen notices it covered are shown again and
+    /// the audio route chip re-reads the latch.
+    static let aerioAirPlayRoutePickerClosed = Notification.Name("aerioAirPlayRoutePickerClosed")
     /// A headless AirPlay tune is now playing on this device (the route
     /// was lost before the handoff, or the handoff fell back): a tile
     /// whose remuxer carries HEVC in TS for the receiver retunes, since
@@ -849,8 +864,17 @@ extension Notification.Name {
 @MainActor
 final class AirPlayRoutePickerDelegate: NSObject, @MainActor AVRoutePickerViewDelegate {
     static let shared = AirPlayRoutePickerDelegate()
+    /// The system route picker is up over the app (between the delegate's
+    /// will-begin and did-end). The AirPlay version fallback counts its
+    /// notice's on-screen time only while this is false.
+    private(set) var isPresenting = false
+    func routePickerViewWillBeginPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        isPresenting = true
+    }
     func routePickerViewDidEndPresentingRoutes(_ routePickerView: AVRoutePickerView) {
+        isPresenting = false
         AirPlayMonitor.shared.routePickerDismissed()
+        NotificationCenter.default.post(name: .aerioAirPlayRoutePickerClosed, object: nil)
     }
 }
 
@@ -923,6 +947,11 @@ struct AirPlayAudioRouteChip: View {
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)
             .receive(on: DispatchQueue.main)) { _ in refresh() }
         .onReceive(tick) { _ in refresh() }
+        // The pick that cleared the latch: gone at once, not at the next
+        // tick (device recording 2026-11-17 08:24:51 to 08:24:54: it sat
+        // over the version search notice after the latch had cleared).
+        .onReceive(NotificationCenter.default.publisher(for: .aerioAirPlayRoutePickerClosed)
+            .receive(on: DispatchQueue.main)) { _ in refresh() }
     }
 
     private static var deviceWord: String {
@@ -930,8 +959,12 @@ struct AirPlayAudioRouteChip: View {
     }
 
     private func refresh() {
-        let latched = AirPlayMonitor.shared.userEndedRouteUID != nil
-        guard latched, let out = AirPlayReceiverResolver.currentAirPlayOutput() else {
+        // Only while the latch applies to the route now selected (the same
+        // rule as servableAirPlayOutput): a latch left from an earlier
+        // route uid does not keep the video here, so the chip has nothing
+        // true to say.
+        guard let out = AirPlayReceiverResolver.currentAirPlayOutput(),
+              let ended = AirPlayMonitor.shared.userEndedRouteUID, ended == out.uid else {
             if device != nil { device = nil }
             loggedUID = nil
             return

@@ -871,8 +871,27 @@ struct MoviesView: View {
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = startAt ?? progress.positionMs
-            let url = opened.url
             resumePlayingHeaders = opened.headers
+            // Same title key the detail page and the player use. Resume
+            // plays the version the page shows (owner 2026-11-17): the
+            // stored URL carries whichever copy last played, so it is
+            // pointed at the title's chosen version first. The position is
+            // the title's, whatever copy it was saved from.
+            resumeVersionSelectionKey = progress.serverID
+                .flatMap(UUID.init(uuidString:))
+                .map { uuid in
+                    VODVersionSelectionStore.storageKey(serverID: uuid,
+                                                        itemType: kindString,
+                                                        itemID: progress.vodID)
+                } ?? ""
+            var url = opened.url
+            // Movies only: an episode row's vodID is the episode's, not the
+            // series key the series page pins under (TVShowsView owns that).
+            if kind == .movie,
+               let followed = VODVersionSelectionStore.urlFollowingSelection(url, key: resumeVersionSelectionKey) {
+                debugLog("[VOD-VERSION] resume \(progress.vodID): stored URL pointed at the title's version (selection \(VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey).map(String.init) ?? "auto"))")
+                url = followed
+            }
             // ATV log 2026-08-17 (Logan): this fast path mounted the player
             // cover directly, skipping the teardown VODDetailView does before
             // its own cover. A minimized live channel therefore kept decoding
@@ -886,13 +905,6 @@ struct MoviesView: View {
             // them for this resume so the two entry points behave alike; the
             // fetch is best-effort and never gates playback starting.
             resumeVersionOptions = []
-            resumeVersionSelectionKey = progress.serverID
-                .flatMap(UUID.init(uuidString:))
-                .map { uuid in
-                    VODVersionSelectionStore.storageKey(serverID: uuid,
-                                                        itemType: kindString,
-                                                        itemID: progress.vodID)
-                } ?? ""
             loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
             // TEST (AVPlayer VOD): unified container first; false = engine
             // off or non-VOD shape, legacy cover mounts unchanged.
@@ -961,9 +973,7 @@ struct MoviesView: View {
         // may not be loaded yet during the 2.5-minute VOD sync, and a synced
         // progress row can name a title this device never fetched. The URL is
         // always present because it is what we are about to play.
-        let comps = resumeURL.pathComponents
-        let uuid = comps.firstIndex(of: "movie")
-            .flatMap { i in i + 1 < comps.count ? comps[i + 1] : nil } ?? ""
+        let uuid = VODVersionOption.proxyUUID(in: resumeURL, kind: "movie") ?? ""
         guard !uuid.isEmpty else {
             debugLog("[VOD-VERSION] resume skipped: no uuid in \(resumeURL.path)")
             return
@@ -1001,14 +1011,9 @@ struct MoviesView: View {
             @MainActor func pushOptions() {
                 let labels = VODVersionLabeler.labels(providers: providers,
                                                       media: media, learned: learned)
-                resumeVersionOptions = providers.compactMap { rel in
-                    guard let url = api.proxyMovieURL(uuid: uuid,
-                                                      preferredStreamID: rel.streamID.flatMap(Int.init),
-                                                      m3uAccountID: rel.account.id) else { return nil }
-                    return VODVersionOption(id: rel.id,
-                                            label: labels[rel.id] ?? rel.displayLabel,
-                                            url: url)
-                }
+                resumeVersionOptions = VODVersionOption.movieOptions(
+                    providers: providers, movieUUID: uuid, api: api,
+                    label: { labels[$0.id] ?? $0.displayLabel })
                 // Container path (beginVOD): the options resolved AFTER the
                 // launch; hand them to the session so Switch Version works
                 // there too. No-op when the legacy cover is playing.
@@ -1399,11 +1404,13 @@ struct MoviesView: View {
     }
 
     private func playMoviePicked(_ item: VODDisplayItem, resumePositionMs startAt: Int32) {
-        guard let movie = item.movie, let url = movie.streamURL else { return }
+        guard let movie = item.movie, let catalogURL = movie.streamURL else { return }
         let server = servers.first(where: { $0.id == item.serverID })
         var headers = server?.authHeaders ?? [:]
         let key = VODVersionSelectionStore.storageKey(serverID: item.serverID,
                                                       itemType: "movie", itemID: item.id)
+        // The title's chosen version, as the detail page's Play uses it.
+        let url = VODVersionSelectionStore.urlFollowingSelection(catalogURL, key: key) ?? catalogURL
         Task { @MainActor in
             var resolved = url
             // A VOD URL saved before the playlist moved is rebuilt on the

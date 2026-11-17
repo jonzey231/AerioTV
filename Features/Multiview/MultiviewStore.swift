@@ -877,7 +877,7 @@ final class MultiviewStore: ObservableObject {
     /// arrive via updateVODVersionContext as often as via beginVOD.
     @Published private(set) var vodVersionOptions: [VODVersionOption] = []
     @Published private(set) var vodCurrentVersionID: Int?
-    private var vodVersionSelectionKey: String?
+    private(set) var vodVersionSelectionKey: String?
     /// A version URL the server reported as an MP4/M4V/MOV container
     /// (set by the AirPlay version fallback before it switches). Version
     /// URLs carry no extension, so without this the tile tries the MKV
@@ -907,6 +907,21 @@ final class MultiviewStore: ObservableObject {
         guard let tile = vodSoloTile, tile.vodID == vodID else { return }
         setVODVersionContext(options: options, selectedID: selectedID,
                              selectionKey: selectionKey)
+    }
+
+    /// Provider copies the AirPlay version fallback loaded itself because
+    /// the entry point that started this title handed none (Movies hero
+    /// Play and Play from Beginning, for example). Kept for Switch Version
+    /// too. Ignored unless the named title is still the playing solo-VOD
+    /// tile and no other list arrived meanwhile; the launch's selection key
+    /// wins over `selectionKey`.
+    func adoptLoadedVODVersionOptions(vodID: String,
+                                      options: [VODVersionOption],
+                                      selectedID: Int?,
+                                      selectionKey: String?) {
+        guard let tile = vodSoloTile, tile.vodID == vodID, vodVersionOptions.count < 2 else { return }
+        setVODVersionContext(options: options, selectedID: selectedID,
+                             selectionKey: vodVersionSelectionKey ?? selectionKey)
     }
 
     /// In-place provider-copy swap, mirroring the mpv path's
@@ -987,7 +1002,9 @@ final class MultiviewStore: ObservableObject {
         audioProgressStore?.vodStreamURL = option.url.absoluteString
         vodCurrentVersionID = option.id
         if let key = vodVersionSelectionKey {
-            VODVersionSelectionStore.setSelection(option.id, forKey: key)
+            // Recorded with the URL's pins so the detail page's Version row
+            // and Resume both follow this switch (owner 2026-11-17).
+            VODVersionSelectionStore.setSelection(option.id, forKey: key, pinnedBy: option.url)
         }
         DebugLogger.shared.log(
             "[VOD-VERSION] container switch to '\(option.label)' at \(resumeMs)ms",

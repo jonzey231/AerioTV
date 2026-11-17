@@ -2750,7 +2750,7 @@ final class MKVVODServer: @unchecked Sendable {
                 try self.remuxer.prepare()
             } catch {
                 debugLog("[MKV-VOD] prepare failed: \(error)")
-                DispatchQueue.main.async { self.onError?("\(error)") }
+                self.toMain("prepare error") { $0.onError?("\(error)") }
                 return
             }
             if let v = self.remuxer.video {
@@ -2759,14 +2759,14 @@ final class MKVVODServer: @unchecked Sendable {
                 let tenBit = v.codecID == "V_MPEGH/ISO/HEVC"
                     && v.codecPrivate.count > 17
                     && (v.codecPrivate[17] & 0x07) > 0
-                DispatchQueue.main.async { self.onVideoParameters?(v.width, v.height, fps, tenBit) }
+                self.toMain("video parameters") { $0.onVideoParameters?(v.width, v.height, fps, tenBit) }
             }
             let subTracks = self.remuxer.subtitleTrackList()
             if !subTracks.isEmpty {
                 self.remuxer.onCuesHarvested = { [weak self] track, cues in
-                    DispatchQueue.main.async { self?.onSubtitleCues?(track, cues) }
+                    self?.toMain("subtitle cues") { $0.onSubtitleCues?(track, cues) }
                 }
-                DispatchQueue.main.async { self.onSubtitleTracks?(subTracks) }
+                self.toMain("subtitle tracks") { $0.onSubtitleTracks?(subTracks) }
             }
             do {
                 // Loopback only. This server hands out the decoded movie with
@@ -2799,7 +2799,7 @@ final class MKVVODServer: @unchecked Sendable {
                             let url = URL(string: "http://127.0.0.1:\(self.localPort)/\(entry)")!
                             debugLog("[MKV-VOD] READY -> \(url.absoluteString)")
                             self.startMemoryLog()
-                            DispatchQueue.main.async { self.onReady?(url) }
+                            self.toMain("ready") { $0.onReady?(url) }
                         }
                     }
                 }
@@ -2807,7 +2807,7 @@ final class MKVVODServer: @unchecked Sendable {
                 self.listener = listener
             } catch {
                 debugLog("[MKV-VOD] listener failed: \(error)")
-                DispatchQueue.main.async { self.onError?("\(error)") }
+                self.toMain("listener error") { $0.onError?("\(error)") }
             }
         }
     }
@@ -2844,6 +2844,24 @@ final class MKVVODServer: @unchecked Sendable {
         }
         t.resume()
         memTimer = t
+    }
+
+    /// Every callback to the tile goes through here: none is delivered
+    /// once `stop()` ran. A prepare in flight when the tile went away
+    /// finished with "not an EBML" afterwards, and its onError started a
+    /// direct player for a tile that no longer existed (device log
+    /// 2026-11-17 11:16:14.503: that player played unseen, went external at
+    /// the next AirPlay pick, and its watchdog later tore down the movie
+    /// the receiver was playing).
+    private func toMain(_ what: String, _ body: @escaping @Sendable (MKVVODServer) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard !self.stopped else {
+                debugLog("[MKV-VOD] \(what) after stop dropped (the tile tore this server down)")
+                return
+            }
+            body(self)
+        }
     }
 
     func stop() {
@@ -3052,7 +3070,7 @@ final class MKVVODServer: @unchecked Sendable {
                         if consecutiveBuildFailures >= 3, !escalatedBuildFailure {
                             escalatedBuildFailure = true
                             debugLog("[MKV-VOD] \(consecutiveBuildFailures) consecutive segment builds failed; escalating to engine fallback")
-                            DispatchQueue.main.async { self.onError?("repeated segment build failures (\(error))") }
+                            self.toMain("segment build error") { $0.onError?("repeated segment build failures (\(error))") }
                         }
                     }
                 }
