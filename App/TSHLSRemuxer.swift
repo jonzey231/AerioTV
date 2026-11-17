@@ -8985,7 +8985,13 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func startVOD() {
-        let ext = streamURL.pathExtension.lowercased()
+        var ext = streamURL.pathExtension.lowercased()
+        // Version URLs carry no extension; the AirPlay version fallback
+        // leaves the server-reported container for the copy it switched to.
+        if ext.isEmpty, let hint = MultiviewStore.shared.vodDirectContainerHint, hint.url == streamURL {
+            ext = hint.ext
+            debugLog("[AVP-MV] VOD container hint \(ext) from the server; skipping the MKV probe title=\(channelName)")
+        }
         if streamURL.isFileURL || ext == "ts" {
             // Local-file recordings (and any raw .ts VOD): AVPlayer can't
             // open bare TS, so ingest through the live remux arm as an
@@ -9533,7 +9539,7 @@ struct AVPlayerMultiviewTile: View {
             // Only the loopback remux item: a non-Matroska file the MKV
             // probe bounced to direct play keeps mkvServer set.
             if isVOD, mkvServer != nil, url == readyLocalURL {
-                let gate = MKVVODAirPlayGate(player: avPlayer, label: channelName)
+                let gate = MKVVODAirPlayGate(player: avPlayer, source: streamURL, label: channelName)
                 let pauseStore = progressStore
                 gate.onRefused = { pauseStore.noteUserPause(true, positionSeconds: avPlayer.currentTime().seconds) }
                 gate.attach()
