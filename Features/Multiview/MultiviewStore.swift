@@ -878,6 +878,16 @@ final class MultiviewStore: ObservableObject {
     @Published private(set) var vodVersionOptions: [VODVersionOption] = []
     @Published private(set) var vodCurrentVersionID: Int?
     private var vodVersionSelectionKey: String?
+    /// A version URL the server reported as an MP4/M4V/MOV container
+    /// (set by the AirPlay version fallback before it switches). Version
+    /// URLs carry no extension, so without this the tile tries the MKV
+    /// remux first; the tile's startVOD plays a matching URL direct.
+    /// Matched by URL, cleared with the rest of the session.
+    private(set) var vodDirectContainerHint: (url: URL, ext: String)?
+
+    func setVODDirectContainerHint(url: URL, ext: String) {
+        vodDirectContainerHint = (url, ext)
+    }
 
     func setVODVersionContext(options: [VODVersionOption],
                               selectedID: Int?,
@@ -1284,6 +1294,7 @@ final class MultiviewStore: ObservableObject {
         if !vodVersionOptions.isEmpty { vodVersionOptions = [] }
         if vodCurrentVersionID != nil { vodCurrentVersionID = nil }
         vodVersionSelectionKey = nil
+        vodDirectContainerHint = nil
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).
         clearEngineLock()

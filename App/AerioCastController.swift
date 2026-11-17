@@ -1736,16 +1736,60 @@ final class AerioCastController: NSObject, ObservableObject {
 
     /// A one-button alert on the topmost presented controller. Shared with
     /// AirPlay (VODAirPlayFormatGate) so both say things the same way.
+    ///
+    /// The system AirPlay route picker can leave the scene
+    /// .foregroundInactive (and the key window unset) at the moment the
+    /// alert is raised, so an inactive scene and any of its windows are
+    /// accepted as a fallback. When there is no usable root yet, or the top
+    /// controller is mid-transition, the alert is retried every 0.5 s for
+    /// up to ~15 s instead of being dropped.
     static func presentAlert(title: String, message: String) {
-        let scene = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-        guard let root = scene?.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
-        var top = root
-        while let presented = top.presentedViewController { top = presented }
+        attemptPresentAlert(title: title, message: message, attempt: 0)
+    }
+
+    private static let alertRetryInterval: TimeInterval = 0.5
+    private static let alertMaxAttempts = 30   // ~15 s
+
+    private static func attemptPresentAlert(title: String, message: String, attempt: Int) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive }
+            ?? scenes.first { $0.activationState == .foregroundInactive }
+        let window = scene?.windows.first(where: { $0.isKeyWindow })
+            ?? scene?.windows.first(where: { !$0.isHidden && $0.rootViewController != nil })
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController { top = presented }
+
+        if let top, let existing = top as? UIAlertController,
+           existing.title == title, existing.message == message {
+            return   // already on screen; do not stack a duplicate
+        }
+
+        let blocked = top == nil
+            || top!.isBeingDismissed || top!.isBeingPresented
+            || top!.viewIfLoaded?.window == nil
+        if blocked {
+            guard attempt < alertMaxAttempts else {
+                debugLog("[ALERT] gave up after \(attempt) retries: \(title): \(message)")
+                return
+            }
+            if attempt == 0 {
+                let why = top == nil ? "no usable scene/window" : "top controller in transition or off-window"
+                debugLog("[ALERT] deferred (\(why)): \(title): \(message)")
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + alertRetryInterval) {
+                MainActor.assumeIsolated {
+                    attemptPresentAlert(title: title, message: message, attempt: attempt + 1)
+                }
+            }
+            return
+        }
+
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "OK", style: .default))
-        top.present(alert, animated: true)
+        top!.present(alert, animated: true)
+        if attempt > 0 {
+            debugLog("[ALERT] presented after \(attempt) retries: \(title)")
+        }
     }
 
     // MARK: - State plumbing

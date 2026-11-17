@@ -36,6 +36,7 @@
 import AVFoundation
 import Foundation
 import Network
+import SwiftData
 
 final class PlayerRelay: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let shared = PlayerRelay()
@@ -859,19 +860,24 @@ final class RelayVODAirPlayHandover {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
             }
-            let blocked = await VODAirPlayFormatGate.blocks(item: old, mkvRemux: false, label: self?.label ?? "")
+            let verdict = await VODAirPlayFormatGate.blocks(item: old, mkvRemux: false, source: self?.upstream,
+                                                            label: self?.label ?? "")
             guard let self else { return }
             guard let player = self.player, player.currentItem === old else { self.state = .relay; return }
             let playAfter = self.playAfterDecision
             self.playAfterDecision = false
-            if blocked {
+            if verdict != .handOff {
                 AirPlayTileDelivery.holdExternalOff(player)
                 self.heldLocal = true
                 self.state = .relay
-                player.pause()
-                self.onRefused?()
-                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; kept on this device, paused at %.1fs, external playback held off until a receiver is picked again",
-                                self.label, why, old.currentTime().seconds.isFinite ? old.currentTime().seconds : 0))
+                let refused = verdict == .refused
+                if refused {
+                    player.pause()
+                    self.onRefused?()
+                }
+                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; kept on this device%@ at %.1fs, external playback held off until a receiver is picked again",
+                                self.label, why, refused ? ", paused" : " (not paused: the version fallback waits on its own copy)",
+                                old.currentTime().seconds.isFinite ? old.currentTime().seconds : 0))
                 return
             }
             self.swap(why, player: player, old: old, forcePlay: playAfter)
@@ -1012,8 +1018,20 @@ enum VODAirPlayFormatGate {
     private static var lastShown: (key: String, at: Date)?
     private static let messageWindow: TimeInterval = 10
 
-    /// True when the item must stay on this device; shows the message.
-    static func blocks(item: AVPlayerItem, mkvRemux: Bool, label: String) async -> Bool {
+    enum Verdict {
+        /// The receiver may have the item (or the gate does not apply).
+        case handOff
+        /// Kept on this device, paused, and the user told.
+        case refused
+        /// Kept off the receiver only: the version fallback is waiting for
+        /// its switched copy's own item, so no pause and no message.
+        case held
+    }
+
+    /// Whether the item may go to the receiver; shows the message when not.
+    /// `source`: the tile URL the item plays (the version fallback counts a
+    /// refusal only against the copy it belongs to).
+    static func blocks(item: AVPlayerItem, mkvRemux: Bool, source: URL?, label: String) async -> Verdict {
         var receiver = AirPlayReceiverResolver.shared.resolveNow() ?? .unknown
         if receiver.model == nil {
             receiver = await AirPlayReceiverResolver.shared.resolveForHandoff()
@@ -1028,23 +1046,54 @@ enum VODAirPlayFormatGate {
             blocked = false
         } else if mkvRemux {
             blocked = true
-        } else if video.isEmpty && audio.isEmpty {
-            // Formats unreadable: no grounds to refuse.
-            blocked = false
         } else {
-            let videoOK = video.allSatisfy { $0 == "avc1" || $0 == "avc3" }
-            let audioOK = audio.isEmpty || audio.contains { $0.hasPrefix("aac") || $0 == ".mp3" }
-            blocked = !(videoOK && audioOK)
+            // Unreadable formats (nil): no grounds to refuse.
+            blocked = !(receiverPlays(video: video, audio: audio) ?? true)
         }
         debugLog("[AVP-AIRPLAY] VOD \(label): format gate receiver='\(receiver.name)' model=\(receiver.model ?? "unknown") apple=\(receiver.isApple) audioOnly=\(receiver.isAudioOnly) video=\(videoText) audio=\(audioText) path=\(path) -> \(blocked ? "kept on this device" : "hand-off as before")")
-        if blocked { showMessage(receiver: receiver, label: label) }
-        return blocked
+        if blocked {
+            // Another version of the title may play there (owner
+            // 2026-11-16); the fallback owns the message when it searches.
+            switch AirPlayVersionFallback.shared.refused(receiver: receiver, label: label,
+                                                         source: source, mkvRemux: mkvRemux) {
+            case .notHandled: showMessage(receiver: receiver, label: label)
+            case .handled: break
+            case .ignored: return .held
+            }
+            return .refused
+        } else if knownNonApple {
+            AirPlayVersionFallback.shared.accepted(label: label, source: source)
+        }
+        return .handOff
+    }
+
+    /// The rule for a known non-Apple video receiver: H.264 video with AAC
+    /// or MP3 audio (Roku 3840R device pass 2026-11-16). Takes the item's
+    /// four-character codes or the server's measured codec names. Nil when
+    /// nothing was read, so the caller decides what unknown means.
+    static func receiverPlays(video: [String], audio: [String]) -> Bool? {
+        if video.isEmpty && audio.isEmpty { return nil }
+        let videoOK = video.allSatisfy { ["avc1", "avc3", "h264"].contains($0.lowercased()) }
+        let audioOK = audio.isEmpty || audio.contains {
+            let a = $0.lowercased()
+            return a.hasPrefix("aac") || a == ".mp3" || a == "mp3"
+        }
+        return videoOK && audioOK
     }
 
     /// Codec four-character codes of the item's video and audio tracks.
     private static func codecs(of item: AVPlayerItem) async -> (video: [String], audio: [String]) {
         var tracks = item.tracks.compactMap(\.assetTrack)
         if tracks.isEmpty { tracks = (try? await item.asset.load(.tracks)) ?? [] }
+        return await codecs(of: tracks)
+    }
+
+    /// Same as above for a bare asset (the version probe).
+    static func codecs(of asset: AVAsset) async -> (video: [String], audio: [String]) {
+        await codecs(of: (try? await asset.load(.tracks)) ?? [])
+    }
+
+    private static func codecs(of tracks: [AVAssetTrack]) async -> (video: [String], audio: [String]) {
         var video: [String] = []
         var audio: [String] = []
         for t in tracks where t.mediaType == .video || t.mediaType == .audio {
@@ -1058,12 +1107,16 @@ enum VODAirPlayFormatGate {
         return (video, audio)
     }
 
-    private static func showMessage(receiver: AirPlayReceiver, label: String) {
-        let name = receiver.displayName?.trimmingCharacters(in: .whitespaces) ?? "this TV"
+    static func receiverName(_ receiver: AirPlayReceiver) -> String {
+        receiver.displayName?.trimmingCharacters(in: .whitespaces) ?? "this TV"
+    }
+
+    static func showMessage(receiver: AirPlayReceiver, label: String, message custom: String? = nil) {
+        let name = receiverName(receiver)
         let key = "\(label)|\(receiver.name)"
         if let last = lastShown, last.key == key, Date().timeIntervalSince(last.at) < messageWindow { return }
         lastShown = (key, Date())
-        let message = "This video's format can't play on \(name) over AirPlay."
+        let message = custom ?? "This video's format can't play on \(name) over AirPlay."
         debugLog("[AVP-AIRPLAY] VOD \(label): message shown: \(message)")
         AerioCastController.presentAlert(title: "AirPlay", message: message)
     }
@@ -1079,6 +1132,8 @@ enum VODAirPlayFormatGate {
 final class MKVVODAirPlayGate {
     private weak var player: AVPlayer?
     private let label: String
+    /// The tile URL this remux plays (AirPlayVersionFallback matches on it).
+    private let source: URL
     private var held = false
     private var deciding = false
     private var externalObservation: NSKeyValueObservation?
@@ -1087,8 +1142,9 @@ final class MKVVODAirPlayGate {
     /// Same as RelayVODAirPlayHandover.onRefused: a user-style pause.
     var onRefused: (() -> Void)?
 
-    init(player: AVPlayer, label: String) {
+    init(player: AVPlayer, source: URL, label: String) {
         self.player = player
+        self.source = source
         self.label = label
     }
 
@@ -1138,18 +1194,25 @@ final class MKVVODAirPlayGate {
         guard !deciding, let player, let item = player.currentItem else { return }
         deciding = true
         Task { @MainActor [weak self] in
-            let blocked = await VODAirPlayFormatGate.blocks(item: item, mkvRemux: true, label: self?.label ?? "")
+            let verdict = await VODAirPlayFormatGate.blocks(item: item, mkvRemux: true, source: self?.source,
+                                                            label: self?.label ?? "")
             guard let self else { return }
             self.deciding = false
             guard let player = self.player else { return }
-            if blocked {
+            if verdict != .handOff {
+                // Held either way: the receiver cannot reach the loopback
+                // remux. Only a refusal of this copy pauses it.
                 AirPlayTileDelivery.holdExternalOff(player)
                 self.held = true
-                player.pause()
-                self.onRefused?()
+                let refused = verdict == .refused
+                if refused {
+                    player.pause()
+                    self.onRefused?()
+                }
                 let at = player.currentTime().seconds
-                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; MKV remux kept on this device, paused at %.1fs, external playback held off until a receiver is picked again",
-                                self.label, why, at.isFinite ? at : 0))
+                debugLog(String(format: "[AVP-AIRPLAY] VOD %@: %@; MKV remux kept on this device%@ at %.1fs, external playback held off until a receiver is picked again",
+                                self.label, why, refused ? ", paused" : " (not paused: the version fallback waits on its own copy)",
+                                at.isFinite ? at : 0))
             } else if self.held {
                 // A different receiver was picked: back to what
                 // AirPlayMonitor does for every player.
@@ -1159,6 +1222,309 @@ final class MKVVODAirPlayGate {
                 debugLog("[AVP-AIRPLAY] VOD \(self.label): \(why); hold released, external playback back on")
             }
         }
+    }
+}
+
+/// Owner decision 2026-11-16: when the format gate refuses a known
+/// non-Apple receiver, try the title's other provider copies (the Switch
+/// Version options) before giving up. Each candidate is judged from the
+/// server's measured codecs, else from a one-at-a-time probe on this
+/// phone; the first that passes the gate's rule plays from the same
+/// position and becomes the title's selected version, exactly as a pick
+/// in Switch Version (owner decision 2026-11-17), and the gate runs again
+/// on it. Nothing qualifies: the alert, paused.
+@MainActor
+final class AirPlayVersionFallback {
+    static let shared = AirPlayVersionFallback()
+
+    private static let perVersion: TimeInterval = 8
+    private static let overall: TimeInterval = 25
+    /// A switched copy the gate never ruled on (the tile took a path with
+    /// no gate) does not keep the session alive forever.
+    private static let sessionLifetime: TimeInterval = 120
+
+    @MainActor
+    private final class Session {
+        let tileID: String
+        let vodID: String
+        let receiverName: String
+        let displayName: String
+        let label: String
+        let started = Date()
+        var deadline: Date
+        var tried = Set<Int>()
+        var switchedTo: Int?
+        /// The switched copy's URL: only a refusal of an item playing it,
+        /// on its own direct path, counts against it.
+        var switchedURL: URL?
+        var task: Task<Void, Never>?
+        var watcher: Task<Void, Never>?
+        var cancelled = false
+
+        init(tileID: String, vodID: String, receiver: AirPlayReceiver, label: String) {
+            self.tileID = tileID
+            self.vodID = vodID
+            self.receiverName = receiver.name
+            self.displayName = VODAirPlayFormatGate.receiverName(receiver)
+            self.label = label
+            self.deadline = Date().addingTimeInterval(AirPlayVersionFallback.overall)
+        }
+    }
+
+    private var session: Session?
+
+    enum Refusal {
+        /// No search: the gate shows today's alert.
+        case notHandled
+        /// A search runs (or continues) and owns the message.
+        case handled
+        /// Not the switched copy's own item (device log 2026-11-17 08:20:47:
+        /// the switched MP4's extensionless URL opened on the MKV remux path
+        /// first). Kept off the receiver, not paused, no message.
+        case ignored
+    }
+
+    /// The gate refused `receiver` for an item playing `source`.
+    func refused(receiver: AirPlayReceiver, label: String, source: URL?, mkvRemux: Bool) -> Refusal {
+        let store = MultiviewStore.shared
+        guard let tile = store.vodSoloTile, tile.kind == .vod, let vodID = tile.vodID,
+              tile.vodType == "movie" || tile.vodType == "episode",
+              store.vodVersionOptions.count > 1 else {
+            if let s = session { end(s, "the title has no other versions") }
+            return .notHandled
+        }
+        if let s = session, s.tileID == tile.id, s.vodID == vodID, s.receiverName == receiver.name,
+           Date().timeIntervalSince(s.started) < Self.sessionLifetime {
+            // A second notification of the same pick while searching.
+            if s.task != nil { return .handled }
+            if let switched = s.switchedTo {
+                // The switch was judged on the copy's direct formats; a
+                // remux of it, or an item of another URL, says nothing
+                // about them. Wait for its own direct item.
+                guard !mkvRemux, let source, source == s.switchedURL else {
+                    let what = source != nil && source == s.switchedURL ? "its MKV remux path" : "an item of another URL"
+                    debugLog("[AVP-AIRPLAY] VOD \(label): version fallback: refusal on \(what), not relation \(switched)'s direct item; ignored, still waiting for its own verdict")
+                    return .ignored
+                }
+                // The copy picked from measurements was refused on its own
+                // item: never retry it, go on with the rest.
+                s.switchedTo = nil
+                s.switchedURL = nil
+                s.tried.insert(switched)
+                s.deadline = Date().addingTimeInterval(Self.overall)
+                debugLog("[AVP-AIRPLAY] VOD \(label): version fallback: relation \(switched) refused by the gate after the switch; trying the next version")
+                run(s)
+                return .handled
+            }
+        }
+        if let s = session { end(s, "a new refusal replaced it") }
+        let s = Session(tileID: tile.id, vodID: vodID, receiver: receiver, label: label)
+        if let current = store.vodCurrentVersionID { s.tried.insert(current) }
+        session = s
+        let notice = "This version can't play on \(s.displayName) over AirPlay. Trying other versions of this title."
+        debugLog("[AVP-AIRPLAY] VOD \(label): version fallback: versions found=\(store.vodVersionOptions.count) current=\(store.vodCurrentVersionID.map(String.init) ?? "auto"); notice shown")
+        showNotice(notice)
+        run(s)
+        return .handled
+    }
+
+    /// The gate let an item through: a switched copy reached the receiver.
+    func accepted(label: String, source: URL?) {
+        guard let s = session, s.task == nil, let switched = s.switchedTo,
+              let source, source == s.switchedURL else { return }
+        debugLog("[AVP-AIRPLAY] VOD \(label): version fallback: relation \(switched) passed the gate; handed to the receiver")
+        end(s, nil)
+    }
+
+    private func end(_ s: Session, _ why: String?) {
+        if let why { debugLog("[AVP-AIRPLAY] VOD \(s.label): version fallback ended: \(why)") }
+        s.cancelled = true
+        s.task?.cancel()
+        s.watcher?.cancel()
+        s.task = nil
+        s.watcher = nil
+        if session === s { session = nil }
+    }
+
+    /// Still the same title, tile, and receiver. Checked between steps and
+    /// by the watcher, which cancels a probe in flight.
+    private func stillValid(_ s: Session) -> Bool {
+        guard !s.cancelled, session === s else { return false }
+        let store = MultiviewStore.shared
+        guard let tile = store.vodSoloTile, tile.id == s.tileID, tile.vodID == s.vodID else { return false }
+        guard AirPlayMonitor.shared.willServeReceiver else { return false }
+        if let now = AirPlayReceiverResolver.shared.resolveNow(), now.name != s.receiverName { return false }
+        return true
+    }
+
+    private func run(_ s: Session) {
+        s.task = Task { @MainActor [weak self] in
+            await self?.search(s)
+        }
+        s.watcher?.cancel()
+        s.watcher = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let self, !s.cancelled, s.task != nil else { return }
+                if !self.stillValid(s) {
+                    // Stopped, another route, or the receiver left.
+                    s.task?.cancel()
+                    return
+                }
+            }
+        }
+    }
+
+    private func search(_ s: Session) async {
+        let store = MultiviewStore.shared
+        let options = store.vodVersionOptions
+        let tile = store.vodSoloTile
+        let headers = RedirectAuthPolicy.withoutSignIn(tile?.headers ?? [:])
+        let isMovie = tile?.vodType == "movie"
+        // Movies: the server's container and measured codecs per relation.
+        // Episode copies are per account with no measurements, so they go
+        // straight to the phone probe.
+        var api: DispatcharrAPI?
+        var movieID: Int?
+        var containers: [Int: String] = [:]
+        if isMovie, let id = Int(s.vodID), let made = Self.api(serverID: tile?.vodServerID) {
+            api = made
+            movieID = id
+            let providers = await Self.timed(min(Self.perVersion, s.deadline.timeIntervalSinceNow)) {
+                try? await made.getMovieProviders(movieID: id)
+            }
+            for rel in providers ?? [] {
+                if let ext = rel.containerExtension { containers[rel.id] = ext.lowercased() }
+            }
+        }
+        for option in options where !s.tried.contains(option.id) {
+            guard stillValid(s), !Task.isCancelled else { break }
+            guard s.deadline.timeIntervalSinceNow > 1 else {
+                debugLog("[AVP-AIRPLAY] VOD \(s.label): version fallback: \(Int(Self.overall)) s budget spent")
+                break
+            }
+            s.tried.insert(option.id)
+            let container = containers[option.id] ?? "unknown"
+            if container == "mkv" {
+                // Remuxed on loopback, which no receiver can reach.
+                debugLog("[AVP-AIRPLAY] VOD \(s.label): version candidate relation=\(option.id) container=mkv codecs=- source=container verdict=skip")
+                continue
+            }
+            let versionDeadline = min(Date().addingTimeInterval(Self.perVersion), s.deadline)
+            var video: [String] = []
+            var audio: [String] = []
+            var source = "none"
+            if let api, let movieID {
+                let media = await Self.timed(versionDeadline.timeIntervalSinceNow) {
+                    try? await api.getMovieProviderMedia(movieID: movieID, relationID: option.id)
+                }
+                if let media, media.videoCodec != nil || media.audioCodec != nil {
+                    video = media.videoCodec.map { [$0] } ?? []
+                    audio = media.audioCodec.map { [$0] } ?? []
+                    source = "server"
+                }
+            }
+            if source == "none", stillValid(s), !Task.isCancelled, versionDeadline.timeIntervalSinceNow > 0.5 {
+                let url = option.url
+                let probed = await Self.timed(versionDeadline.timeIntervalSinceNow) {
+                    await Self.probe(url, headers: headers)
+                }
+                if let probed {
+                    video = probed.video
+                    audio = probed.audio
+                    source = "phone probe"
+                }
+            }
+            let plays = VODAirPlayFormatGate.receiverPlays(video: video, audio: audio)
+            let codecs = "video=\(video.isEmpty ? "none" : video.joined(separator: "+")) audio=\(audio.isEmpty ? "none" : audio.joined(separator: "+"))"
+            // Unknown is not a pass here: switching to a copy nothing could
+            // read would only trade one refusal for a guess.
+            let verdict = plays == true ? "qualifies" : (plays == false ? "refused" : "unknown, skipped")
+            debugLog("[AVP-AIRPLAY] VOD \(s.label): version candidate relation=\(option.id) container=\(container) \(codecs) source=\(source) verdict=\(verdict)")
+            guard plays == true else { continue }
+            guard stillValid(s), !Task.isCancelled else { break }
+            s.switchedTo = option.id
+            s.switchedURL = option.url
+            s.task = nil
+            s.watcher?.cancel()
+            s.watcher = nil
+            // The server's container, when it names a direct-play one,
+            // spares the extensionless URL the MKV remux attempt.
+            let directHint = ["mp4", "m4v", "mov"].contains(container)
+            if directHint { store.setVODDirectContainerHint(url: option.url, ext: container) }
+            debugLog("[AVP-AIRPLAY] VOD \(s.label): version fallback: switching to relation \(option.id) at the same position (saved as the title's version\(directHint ? ", direct \(container)" : ""))")
+            store.switchVODVersion(option)
+            return
+        }
+        guard stillValid(s), !Task.isCancelled else {
+            end(s, "canceled (movie stopped, another route, or the receiver left)")
+            return
+        }
+        let message = "No version of this title can play on \(s.displayName) over AirPlay."
+        debugLog("[AVP-AIRPLAY] VOD \(s.label): version fallback: no version qualifies (\(s.tried.count) of \(options.count) tried); kept on this device, paused")
+        end(s, nil)
+        VODAirPlayFormatGate.showMessage(receiver: AirPlayReceiverResolver.shared.resolveNow() ?? .unknown,
+                                         label: s.label, message: message)
+    }
+
+    /// The gate's own notice spot: the tile's top capsule.
+    private func showNotice(_ text: String) {
+        guard let progress = MultiviewStore.shared.audioProgressStore else { return }
+        progress.liveResumeNotice = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak progress] in
+            if progress?.liveResumeNotice == text { progress?.liveResumeNotice = nil }
+        }
+    }
+
+    private static func api(serverID: String?) -> DispatcharrAPI? {
+        guard let serverID, let container = AerioApp.sharedContainer else { return nil }
+        let servers = (try? ModelContext(container).fetch(FetchDescriptor<ServerConnection>())) ?? []
+        guard let server = servers.first(where: { $0.id.uuidString == serverID }),
+              server.type == .dispatcharrAPI else { return nil }
+        return DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                              auth: .apiKey(server.effectiveApiKey),
+                              userAgent: server.effectiveUserAgent,
+                              authMode: server.dispatcharrHeaderMode)
+    }
+
+    private struct Codecs: Sendable {
+        let video: [String]
+        let audio: [String]
+    }
+
+    /// Reads one copy's tracks the way the player would open it (no sign-in,
+    /// as the receiver will fetch it). One provider connection; released by
+    /// cancelLoading when the time box ends, and dropped on return.
+    private static func probe(_ url: URL, headers: [String: String]) async -> Codecs? {
+        var options: [String: Any] = [:]
+        if !headers.isEmpty { options["AVURLAssetHTTPHeaderFieldsKey"] = headers }
+        let asset = AVURLAsset(url: url, options: options)
+        let result = await withTaskCancellationHandler {
+            await VODAirPlayFormatGate.codecs(of: asset)
+        } onCancel: {
+            asset.cancelLoading()
+        }
+        asset.cancelLoading()
+        if Task.isCancelled || (result.video.isEmpty && result.audio.isEmpty) { return nil }
+        return Codecs(video: result.video, audio: result.audio)
+    }
+
+    /// Runs `work`, canceled after `seconds` (and when the caller is).
+    private static func timed<T: Sendable>(_ seconds: TimeInterval,
+                                           _ work: @escaping @MainActor () async -> T?) async -> T? {
+        guard seconds > 0 else { return nil }
+        let task = Task { @MainActor in await work() }
+        let timer = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            task.cancel()
+        }
+        let value = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        timer.cancel()
+        return value
     }
 }
 #endif
