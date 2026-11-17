@@ -1411,6 +1411,10 @@ final class AirPlayVersionFallback {
         var task: Task<Void, Never>?
         var watcher: Task<Void, Never>?
         var cancelled = false
+        /// Refused at a headless start (the player still minimized behind
+        /// the card): the search keeps it there, and only a search that
+        /// ends with nothing playing on the receiver expands it.
+        var headless = false
 
         init(tileID: String, vodID: String, receiver: AirPlayReceiver, label: String) {
             self.tileID = tileID
@@ -1423,6 +1427,13 @@ final class AirPlayVersionFallback {
     }
 
     private var session: Session?
+
+    /// A headless start refused (or held) while a search for it runs: the
+    /// tile stays behind the card instead of expanding (owner 2026-11-17).
+    var holdsHeadlessStart: Bool {
+        guard let s = session, !s.cancelled else { return false }
+        return s.headless
+    }
 
     enum Refusal {
         /// No search: the gate shows today's alert.
@@ -1471,10 +1482,14 @@ final class AirPlayVersionFallback {
         if let s = session { end(s, "a new refusal replaced it") }
         let s = Session(tileID: tile.id, vodID: vodID, receiver: receiver, label: label)
         if let current = store.vodCurrentVersionID { s.tried.insert(current) }
+        s.headless = AirPlayMonitor.shared.isHeadlessTuning
         session = s
         let notice = "This version can't play on \(s.displayName) over AirPlay. Trying other versions of this title."
         debugLog("[AVP-AIRPLAY] VOD \(label): version fallback: versions found=\(store.vodVersionOptions.count) current=\(store.vodCurrentVersionID.map(String.init) ?? "auto"); notice shown")
         showNotice(notice)
+        // The capsule is in the minimized tile, out of sight: the card
+        // carries the search.
+        if s.headless { AirPlayMonitor.shared.noteConnectingStatus(Self.cardStatus) }
         run(s)
         return .handled
     }
@@ -1495,6 +1510,23 @@ final class AirPlayVersionFallback {
         s.task = nil
         s.watcher = nil
         if session === s { session = nil }
+        if s.headless, AirPlayMonitor.shared.connectingStatus == Self.cardStatus {
+            AirPlayMonitor.shared.noteConnectingStatus(nil)
+        }
+    }
+
+    /// The card's line while a headless start searches (one line, the
+    /// length of "Connecting to AirPlay").
+    static let cardStatus = "Trying other versions"
+
+    /// A headless start whose search ended with nothing on the receiver:
+    /// the player expands on this device, paused (today's fall-back).
+    private func expandHeadless(_ s: Session, _ reason: String) {
+        guard s.headless else { return }
+        let store = MultiviewStore.shared
+        guard let tile = store.vodSoloTile, tile.id == s.tileID, tile.vodID == s.vodID else { return }
+        debugLog("[AVP-AIRPLAY] VOD \(s.label): version fallback: expanded on this device, paused (\(reason))")
+        AirPlayMonitor.shared.headlessTuneFellBack(reason: reason)
     }
 
     /// Still the same title, tile, and receiver. Checked between steps and
@@ -1609,6 +1641,7 @@ final class AirPlayVersionFallback {
         }
         guard stillValid(s), !Task.isCancelled else {
             end(s, "canceled (movie stopped, another route, or the receiver left)")
+            expandHeadless(s, "version search canceled")
             return
         }
         let message = "No version of this title can play on \(s.displayName) over AirPlay."
@@ -1616,6 +1649,7 @@ final class AirPlayVersionFallback {
         end(s, nil)
         VODAirPlayFormatGate.showMessage(receiver: AirPlayReceiverResolver.shared.resolveNow() ?? .unknown,
                                          label: s.label, message: message)
+        expandHeadless(s, "no version of this title plays on the receiver")
     }
 
     /// The gate's own notice spot: the tile's top capsule.

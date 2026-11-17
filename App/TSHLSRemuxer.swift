@@ -9595,7 +9595,15 @@ struct AVPlayerMultiviewTile: View {
                     progressStore.noteUserPause(true, positionSeconds: Double(progressStore.explicitResumeMs ?? resumePositionMs ?? 0) / 1000)
                 }
                 debugLog("[AVP-AIRPLAY] VOD \(channelName): path=this device (\(v == .refused ? "refused, paused" : "held for the version fallback's own copy")), external playback held off")
-                AirPlayMonitor.shared.headlessTuneFellBack(reason: "the receiver cannot play this movie")
+                if AirPlayVersionFallback.shared.holdsHeadlessStart {
+                    // Owner 2026-11-17: the search (and a switched copy's own
+                    // headless start) runs behind the card; the fallback
+                    // expands only when nothing reaches the receiver.
+                    debugLog("[AVP-AIRPLAY] VOD \(channelName): stayed behind the card for the version search (no fullscreen player)")
+                } else {
+                    debugLog("[AVP-AIRPLAY] VOD \(channelName): expanded on this device (\(v == .refused ? "refused, no version search" : "held, no version search"))")
+                    AirPlayMonitor.shared.headlessTuneFellBack(reason: "the receiver cannot play this movie")
+                }
             }
             if let mux = remuxer {
                 airPlayDelivery.onWatchdogs = { suspend, item in
