@@ -917,7 +917,12 @@ struct MoviesView: View {
                 serverID: progress.serverID,
                 vodType: progressType,
                 resumePositionMs: startAt ?? progress.positionMs,
-                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
+                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey,
+                episodeInfo: progressType == "episode"
+                    ? .fromProgress(title: progress.title,
+                                    seasonNumber: progress.seasonNumber,
+                                    episodeNumber: progress.episodeNumber)
+                    : nil) {
                 isPlaying = true
                 return
             }

@@ -1015,7 +1015,8 @@ final class MultiviewStore: ObservableObject {
             headers: tile.headers, addedAt: tile.addedAt, kind: tile.kind,
             vodID: tile.vodID, vodServerID: tile.vodServerID,
             vodType: tile.vodType,
-            resumePositionMs: resumeMs > 5_000 ? resumeMs : nil)
+            resumePositionMs: resumeMs > 5_000 ? resumeMs : nil,
+            episodeInfo: tile.episodeInfo)
         tiles[idx] = swapped
     }
 
@@ -1032,7 +1033,8 @@ final class MultiviewStore: ObservableObject {
         resumePositionMs: Int32? = nil,
         bypassWarning: Bool = false,
         dvrScheduledEnd: Date? = nil,
-        dvrChannelID: String? = nil
+        dvrChannelID: String? = nil,
+        episodeInfo: OnDemandEpisodeInfo? = nil
     ) -> AddResult {
         // Dedup on the VOD id when present. Server recordings have no
         // id, so they can be added more than once (matching channels).
@@ -1074,7 +1076,8 @@ final class MultiviewStore: ObservableObject {
             vodType: vodType,
             resumePositionMs: resumePositionMs,
             dvrScheduledEnd: dvrScheduledEnd,
-            dvrChannelID: dvrChannelID
+            dvrChannelID: dvrChannelID,
+            episodeInfo: episodeInfo
         )
         tiles.append(tile)
         if tiles.count == 2 {

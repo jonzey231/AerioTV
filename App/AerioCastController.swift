@@ -3387,6 +3387,10 @@ struct RemoteSessionSheet: View {
     /// 2026-10-08): its channels with the audio one marked and the Layout
     /// row; no channel flips, skips or Play/Pause (no single transport).
     var nativeMultiview: NativeMultiviewState? = nil
+    /// A movie or episode (AirPlay, owner 2026-11-17): not a channel, so
+    /// no LIVE badge and no Channel Down / Up; the scrubber, skips,
+    /// Play / Pause, Options and Stop stay.
+    var isOnDemand: Bool = false
     /// Companion only: drop the link while the TV keeps playing.
     var onDisconnect: () -> Void = {}
     /// Companion only: the client whose Options sheet (Stream Info, tracks,
@@ -3527,7 +3531,7 @@ struct RemoteSessionSheet: View {
             if let failure { failureBlock(failure) }
             programBlock
             Group {
-                if !compositeMultiview && nativeMultiview == nil {
+                if !compositeMultiview && nativeMultiview == nil && !isOnDemand {
                     HStack(spacing: 24) {
                         labeledButton("chevron.down", label: "Channel Down", action: onChannelDown)
                         labeledButton("chevron.up", label: "Channel Up", action: onChannelUp)
@@ -3738,14 +3742,17 @@ struct RemoteSessionSheet: View {
                     }
                     Spacer(minLength: 0)
                     // Recording: red dot + red LIVE on a red-tinted capsule.
-                    HStack(spacing: 4) {
-                        Circle().fill(Color.red).frame(width: 5, height: 5)
-                        Text("LIVE").scaledFont(.caption2.weight(.semibold))
+                    // A movie or episode is not live.
+                    if !isOnDemand {
+                        HStack(spacing: 4) {
+                            Circle().fill(Color.red).frame(width: 5, height: 5)
+                            Text("LIVE").scaledFont(.caption2.weight(.semibold))
+                        }
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.red.opacity(0.15), in: Capsule())
                     }
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.red.opacity(0.15), in: Capsule())
                 }
                 if let window = liveWindow, mode == .playing {
                     // Seekable session (VOD, catch-up, DVR, live with a

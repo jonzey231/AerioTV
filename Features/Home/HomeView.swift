@@ -7011,6 +7011,32 @@ struct MainTabView: View {
         airPlay.deviceName.map { "AirPlay to \($0)" } ?? "AirPlay"
     }
 
+    /// The movie or episode tile an AirPlay session is playing (beginVOD
+    /// path: no playingItem, one `.vod` tile). nil for live, Multiview and
+    /// in-progress DVR.
+    private var airPlayOnDemandTile: MultiviewTile? {
+        guard nowPlaying.playingItem == nil, mvComposite.transport != .airPlay,
+              let tile = multiviewStore.vodSoloTile, tile.kind == .vod else { return nil }
+        return tile
+    }
+
+    /// The card's title line and the sheet's title and program lines for a
+    /// movie or episode on an AirPlay receiver (owner 2026-11-17), filled the
+    /// way live TV fills them: movie = its title, no program line; episode =
+    /// series name, then "S1 E2 · Half Loop". Recordings keep today's lines.
+    private var airPlayOnDemandLines: (title: String, program: String?)? {
+        guard let tile = airPlayOnDemandTile else { return nil }
+        switch tile.vodType {
+        case "movie":
+            return (tile.item.name, nil)
+        case "episode":
+            guard let info = tile.episodeInfo else { return (tile.item.name, nil) }
+            return (info.titleLine(fallback: tile.item.name), info.programLine)
+        default:
+            return nil
+        }
+    }
+
     private var airPlayIsIdleRoute: Bool {
         if case .idleRoute = airPlay.phase { return true }
         return false
@@ -7277,11 +7303,13 @@ struct MainTabView: View {
                 let composite = mvComposite.transport == .airPlay
                 RemoteSessionCard(
                     transport: .airPlay,
-                    title: composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay"),
+                    title: composite ? (mvComposite.singleChannelName ?? "Multiview")
+                        : (item?.name ?? airPlayOnDemandLines?.title ?? "AirPlay"),
                     status: probing ? (airPlay.connectingStatus ?? "Connecting to AirPlay")
                         : (composite && mvComposite.singleChannelName == nil
                             ? mvComposite.subtitle : airPlay.statusLine(playing: airPlayPlayingStatus)),
-                    artURL: composite ? nil : item?.logoURL?.absoluteString,
+                    // A movie or episode shows its poster.
+                    artURL: composite ? nil : (item?.logoURL ?? airPlayOnDemandTile?.item.logoURL)?.absoluteString,
                     isPlaying: airPlay.isPlaying,
                     // Nothing to pause until the receiver has the video.
                     showTransport: !probing,
@@ -7494,16 +7522,20 @@ struct MainTabView: View {
             let composite = mvComposite.transport == .airPlay
             let item = composite ? nil : nowPlaying.playingItem
             let idle = airPlayIsIdleRoute
+            let onDemand = idle ? nil : airPlayOnDemandTile
+            let onDemandLines = (idle || composite || item != nil) ? nil : airPlayOnDemandLines
             RemoteSessionSheet(
                 transport: .airPlay,
                 mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
-                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay")),
+                channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? onDemandLines?.title ?? "AirPlay")),
                 statusText: idle ? "Connected. Select a channel to start."
                     : (airPlayIsProbing ? (airPlay.connectingStatus ?? "Connecting to AirPlay")
                         : airPlay.statusLine(playing: airPlayPlayingStatus)),
-                artURL: item?.logoURL?.absoluteString,
+                artURL: (item?.logoURL ?? onDemand?.item.logoURL)?.absoluteString,
                 channelID: item?.id,
-                fallbackSubtitle: composite && mvComposite.singleChannelName == nil ? mvComposite.subtitle : nil,
+                // A movie or episode has no EPG: the episode line stands
+                // where live TV shows the program.
+                fallbackSubtitle: composite && mvComposite.singleChannelName == nil ? mvComposite.subtitle : onDemandLines?.program,
                 isPlaying: airPlay.isPlaying,
                 item: item,
                 onTogglePlayPause: { airPlay.togglePlayPause() },
@@ -7529,6 +7561,7 @@ struct MainTabView: View {
                 seekWindow: composite ? nil : { airPlay.remoteSeekWindow() },
                 onSeekTo: { airPlay.seek(to: $0) },
                 compositeMultiview: composite,
+                isOnDemand: onDemand != nil,
                 onAddChannel: (idle || airPlayIsProbing) ? nil
                     : remoteAddChannel(.sheet, single: composite ? nil : item)
             )

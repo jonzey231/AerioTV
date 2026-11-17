@@ -1793,9 +1793,21 @@ struct VODDetailView: View {
                 vodType: "episode",
                 posterURL: ep.posterURL?.absoluteString,
                 serverID: ep.serverID.uuidString,
-                fromStart: fromStart
+                fromStart: fromStart,
+                episodeInfo: episodeInfo(ep)
             )
         }
+    }
+
+    /// The same episode as `episodeLaunchTitle`, field by field, for the
+    /// remote-session card and sheet. A provider title too short to stand
+    /// is left out rather than replaced by "Episode N".
+    private func episodeInfo(_ ep: VODEpisode) -> OnDemandEpisodeInfo {
+        let own = ep.cleanedTitle(showName: item.name)
+        return OnDemandEpisodeInfo(seriesName: item.name,
+                                   seasonNumber: ep.seasonNumber,
+                                   episodeNumber: ep.episodeNumber,
+                                   episodeTitle: own.count > 2 ? own : nil)
     }
 
     /// v1.7.3 (Issue #19): flatten the loaded series into the episodes
@@ -2129,18 +2141,21 @@ struct VODDetailView: View {
     /// remote session is active (PlayWhereRouter, Logan 2026-10-06).
     private func resolveAndLaunch(url: URL, title: String, vodID: String? = nil,
                                   vodType: String = "movie", posterURL: String? = nil,
-                                  serverID: String? = nil, fromStart: Bool = false) async {
+                                  serverID: String? = nil, fromStart: Bool = false,
+                                  episodeInfo: OnDemandEpisodeInfo? = nil) async {
         PlayWhereRouter.shared.request(title: title, item: .nonLive) {
             Task {
                 await launchPicked(url: url, title: title, vodID: vodID, vodType: vodType,
-                                   posterURL: posterURL, serverID: serverID, fromStart: fromStart)
+                                   posterURL: posterURL, serverID: serverID, fromStart: fromStart,
+                                   episodeInfo: episodeInfo)
             }
         }
     }
 
     private func launchPicked(url: URL, title: String, vodID: String? = nil,
                               vodType: String = "movie", posterURL: String? = nil,
-                              serverID: String? = nil, fromStart: Bool = false) async {
+                              serverID: String? = nil, fromStart: Bool = false,
+                              episodeInfo: OnDemandEpisodeInfo? = nil) async {
         let resumeServerID = serverID ?? item.serverID.uuidString
         playingTitle = title
         playingHeaders = serverHeaders()
@@ -2243,7 +2258,8 @@ struct VODDetailView: View {
                                                          serverID: resumeServerID),
             versionOptions: playingVersionOptions,
             selectedVersionID: playingVersionOptionID,
-            versionSelectionKey: versionSelectionKey) {
+            versionSelectionKey: versionSelectionKey,
+            episodeInfo: episodeInfo) {
             isPlaying = true
             return
         }
