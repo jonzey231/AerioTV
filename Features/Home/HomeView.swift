@@ -7278,7 +7278,7 @@ struct MainTabView: View {
                 RemoteSessionCard(
                     transport: .airPlay,
                     title: composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay"),
-                    status: probing ? "Connecting to AirPlay"
+                    status: probing ? (airPlay.connectingStatus ?? "Connecting to AirPlay")
                         : (composite && mvComposite.singleChannelName == nil
                             ? mvComposite.subtitle : airPlay.statusLine(playing: airPlayPlayingStatus)),
                     artURL: composite ? nil : item?.logoURL?.absoluteString,
@@ -7499,7 +7499,7 @@ struct MainTabView: View {
                 mode: idle ? .idle : (airPlayIsProbing ? .connecting : .playing),
                 channelName: idle ? (airPlay.deviceName ?? "AirPlay") : (composite ? (mvComposite.singleChannelName ?? "Multiview") : (item?.name ?? "AirPlay")),
                 statusText: idle ? "Connected. Select a channel to start."
-                    : (airPlayIsProbing ? "Connecting to AirPlay"
+                    : (airPlayIsProbing ? (airPlay.connectingStatus ?? "Connecting to AirPlay")
                         : airPlay.statusLine(playing: airPlayPlayingStatus)),
                 artURL: item?.logoURL?.absoluteString,
                 channelID: item?.id,

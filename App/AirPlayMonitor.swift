@@ -65,6 +65,16 @@ final class AirPlayMonitor: ObservableObject {
     /// has a player or falls back. Survives the old tile's detach on a flip.
     private var headlessTune = false
     private var loadingForCard: Bool { tileLoading || headlessTune }
+    /// A headless start (no fullscreen player yet) is in progress.
+    var isHeadlessTuning: Bool { headlessTune }
+    /// The card's connecting line while a headless movie start waits on
+    /// something other than the receiver (the version fallback's search,
+    /// owner 2026-11-17). Nil: "Connecting to AirPlay".
+    @Published private(set) var connectingStatus: String?
+
+    func noteConnectingStatus(_ text: String?) {
+        if connectingStatus != text { connectingStatus = text }
+    }
     private var servingSubscription: AnyCancellable?
     /// The receiver dropped `isExternalPlaybackActive` while a tile serves
     /// it (a receiver rebuffer, device log 2026-09-25 17:04). The card
@@ -409,10 +419,35 @@ final class AirPlayMonitor: ObservableObject {
         guard headlessTune || (hostsHeadless && !isExternal && !AirPlayTileDelivery.isServingReceiver) else { return }
         headlessTune = false
         hostsHeadless = false
+        noteConnectingStatus(nil)
         debugLog("[AVP-AIRPLAY] headless tune fell back (\(reason)): showing the player on this device")
         NowPlayingManager.shared.expand()
         evaluate()
         NotificationCenter.default.post(name: .aerioAirPlayHeadlessTuneWentLocal, object: nil)
+    }
+
+    /// Owner 2026-11-17: a movie or episode started headless (route already
+    /// up) that the receiver cannot play is not started at all, never opened
+    /// on this device. The tile goes the way the card's X tears down a
+    /// headless tune (stopPlayback), but without the user-ended latch: the
+    /// route stays usable and the card returns to its idle state for it.
+    /// Nothing played, so no position is saved (the teardown path never
+    /// saves VOD progress). `searchEnded`: the version search that held the
+    /// start behind the card ended; the start flags may already be cleared
+    /// (a route change), so the minimized player is the headless sign.
+    /// Returns false when the start was not headless (the player is on
+    /// screen): the caller keeps its own fall-back.
+    @discardableResult
+    func headlessStartNotStarted(label: String, reason: String, searchEnded: Bool = false) -> Bool {
+        let headless = headlessTune || (hostsHeadless && !isExternal && !AirPlayTileDelivery.isServingReceiver)
+            || (searchEnded && NowPlayingManager.shared.isMinimized && !isExternal
+                && !AirPlayTileDelivery.isServingReceiver)
+        guard headless else { return false }
+        debugLog("[AVP-AIRPLAY] VOD \(label): not started on this device (\(reason))")
+        stopPlayback()
+        setPhase(.none)
+        evaluate()
+        return true
     }
 
     func togglePlayPause() {
@@ -503,6 +538,7 @@ final class AirPlayMonitor: ObservableObject {
         MultiviewCompositeSession.shared.stop(detail: "airplay session ended")
         hostsHeadless = false
         headlessTune = false
+        noteConnectingStatus(nil)
         // End the receiver's video session from the sender before the tile
         // goes (device log 2026-10-07 12:01:13, Play Here for ESPN HD while
         // ESPN2 HD played on the Apple TV: the tile was kept live as Kept
@@ -735,6 +771,7 @@ final class AirPlayMonitor: ObservableObject {
             // The receiver has it: a headless start (a movie's has no tile
             // loading to clear it) is over, so no later fall-back expands.
             headlessTune = false
+            noteConnectingStatus(nil)
             if phase != .active {
                 debugLog("[Cast] card show (AirPlay)")
                 setPhase(.active)
