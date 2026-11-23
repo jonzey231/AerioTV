@@ -8652,8 +8652,17 @@ struct EPGGuideView: View {
             #if os(tvOS)
             guideFocusTargetChannelID = channelID
             try? await Task.sleep(nanoseconds: 120_000_000)
-            if let target = focusTargetProgramID(forChannel: channelID) {
+            guard let target = focusTargetProgramID(forChannel: channelID) else { return }
+            // A row scrolled in from off screen may not exist yet, so one
+            // focus write can be dropped and focus lands on a neighbouring
+            // row. Re-assert until it sticks, as the return-from-player
+            // refocus does.
+            for attempt in 0..<8 {
+                proxy.scrollTo(channelID, anchor: .center)
                 focusedProgramID = target
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                debugLog("🧭 [GuideFocus] number jump attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+                if focusedProgramID == target { break }
             }
             #endif
         }
