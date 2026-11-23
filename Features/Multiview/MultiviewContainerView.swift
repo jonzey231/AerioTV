@@ -279,6 +279,16 @@ struct MultiviewContainerView: View {
     @State private var showRecentsOverlay = false
     #endif
 
+    /// The Channels or Recently Watched overlay is up. Its rows own the
+    /// D-pad then, so Left/Right must not scrub the player underneath.
+    private var playerOverlayOpen: Bool {
+        #if os(tvOS)
+        showChannelsOverlay || showRecentsOverlay
+        #else
+        false
+        #endif
+    }
+
     #if os(iOS)
     /// Top-strip swipe down (Logan 2026-09-14): how far the player follows
     /// the finger, and the container height the strip is measured against
@@ -424,7 +434,10 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
+                    // The Channels / Recently Watched overlays need the same trap:
+                    // Up from their first row otherwise lands on the tile, whose
+                    // focus shows nothing, and no Down leads back to the list.
+                    .disabled(showTVOptions || playerOverlayOpen || store.pendingStreamSwitchTileID != nil)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -1864,8 +1877,7 @@ struct MultiviewContainerView: View {
             && !nowPlaying.isMinimized
             && !chromeState.isVisible
             && !dpadScrub.active
-            && !showChannelsOverlay
-            && !showRecentsOverlay
+            && !playerOverlayOpen
             && !showAddSheet && !showTVOptions
             && !showRecordSheet && !showExitConfirmation
     }
@@ -2018,7 +2030,7 @@ struct MultiviewContainerView: View {
     /// first step of the hold. `holdActive` stops any move events
     /// delivered during the hold from double-stepping.
     private func startScrubHold(_ dir: Int) {
-        guard store.tiles.count == 1, !nowPlaying.isMinimized,
+        guard store.tiles.count == 1, !nowPlaying.isMinimized, !playerOverlayOpen,
               !chromeState.isVisible || focusedChrome == .timeline else { return }
         scrubHoldTask?.cancel()
         dpadScrub.holdActive = true
@@ -2629,6 +2641,7 @@ struct MultiviewContainerView: View {
         if store.tiles.count == 1,
            !nowPlaying.isMinimized,
            !chromeState.isVisible,
+           !playerOverlayOpen,
            !dpadScrub.holdActive,   // hold loop already stepping
            direction == .left || direction == .right,
            dpadScrub.step(direction == .left ? -1 : +1, store: store) {
