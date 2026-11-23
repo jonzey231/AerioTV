@@ -1864,8 +1864,7 @@ struct MultiviewContainerView: View {
             && !nowPlaying.isMinimized
             && !chromeState.isVisible
             && !dpadScrub.active
-            && !showChannelsOverlay
-            && !showRecentsOverlay
+            && !playerOverlayOpen
             && !showAddSheet && !showTVOptions
             && !showRecordSheet && !showExitConfirmation
     }
@@ -2017,8 +2016,18 @@ struct MultiviewContainerView: View {
     /// story as the guide's hold-Right), which simply becomes the
     /// first step of the hold. `holdActive` stops any move events
     /// delivered during the hold from double-stepping.
+    /// The Channels or Recently Watched overlay is up. Its rows own the
+    /// D-pad then, so Left/Right must not scrub the player underneath.
+    private var playerOverlayOpen: Bool {
+        #if os(tvOS)
+        showChannelsOverlay || showRecentsOverlay
+        #else
+        false
+        #endif
+    }
+
     private func startScrubHold(_ dir: Int) {
-        guard store.tiles.count == 1, !nowPlaying.isMinimized,
+        guard store.tiles.count == 1, !nowPlaying.isMinimized, !playerOverlayOpen,
               !chromeState.isVisible || focusedChrome == .timeline else { return }
         scrubHoldTask?.cancel()
         dpadScrub.holdActive = true
@@ -2629,6 +2638,7 @@ struct MultiviewContainerView: View {
         if store.tiles.count == 1,
            !nowPlaying.isMinimized,
            !chromeState.isVisible,
+           !playerOverlayOpen,
            !dpadScrub.holdActive,   // hold loop already stepping
            direction == .left || direction == .right,
            dpadScrub.step(direction == .left ? -1 : +1, store: store) {
