@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 #if os(tvOS)
 import GameController
+import UIKit.UIGestureRecognizerSubclass
 #endif
 
 // MARK: - Channel number entry (GH #71)
@@ -11,9 +12,9 @@ import GameController
 // Bluetooth keyboard / a CEC or universal remote with a number pad (the
 // Siri Remote has no digits). Digits typed while the live player or the
 // EPG guide is on screen collect in a small overlay under the nav bar;
-// Return resolves them against the channel numbers and either tunes
-// (player) or jumps the guide's focus/scroll to that row. An entry left
-// alone for 6s clears itself.
+// Return (OK / Select on Apple TV) resolves them against the channel
+// numbers and either tunes (player) or jumps the guide's focus/scroll to
+// that row. An entry left alone for 6s clears itself.
 //
 // One shared state holder feeds every screen. Each screen registers a
 // `Scope` with the channel list it shows and what "resolve" means for
@@ -39,13 +40,20 @@ final class ChannelNumberEntry: ObservableObject {
     }
 
     static let maxDigits = 4
-    /// Digits wait for Return; an entry left alone this long clears itself
-    /// (Logan 2026-09-02: no auto-commit, matches Android).
+    /// Digits wait for Return (OK / Select on Apple TV). An entry left
+    /// alone this long clears itself (Logan 2026-09-02: no auto-commit,
+    /// matches Android).
     static let idleClear: TimeInterval = 6.0
     static let messageDuration: TimeInterval = 1.5
 
     /// Digits typed so far (empty when idle).
-    @Published private(set) var digits = ""
+    @Published private(set) var digits = "" {
+        didSet {
+            #if os(tvOS)
+            selectPressCommit.setArmed(!digits.isEmpty)
+            #endif
+        }
+    }
     /// Transient "No channel 123" notice.
     @Published private(set) var message: String?
     /// Scope that currently owns key presses and the overlay.
@@ -61,6 +69,15 @@ final class ChannelNumberEntry: ObservableObject {
     /// `.onKeyPress` and the GameController fallback both firing) counts
     /// once.
     private var lastEvent: (character: Character, at: Date)?
+
+    #if os(tvOS)
+    private lazy var selectPressCommit = SelectPressCommitInterceptor { [weak self] in
+        self?.commit()
+    }
+    /// Commits a keyboard Return / Enter if no Select press follows it (see
+    /// `commitIfNoSelectFollows`).
+    private var returnKeyFallback: Task<Void, Never>?
+    #endif
 
     private init() {}
 
@@ -94,7 +111,8 @@ final class ChannelNumberEntry: ObservableObject {
     /// not a digit, nothing is registered, or the press is a duplicate.
     @discardableResult
     func handle(character c: Character, source: String = "keypress") -> Bool {
-        guard c.isASCII, c.isNumber, activeScope != nil else { return false }
+        guard c.isASCII, c.isNumber, let scope = activeScope,
+              !isCoveredByPlayer(scope) else { return false }
         let now = Date()
         if let last = lastEvent, last.character == c, now.timeIntervalSince(last.at) < 0.15 {
             return true
@@ -109,6 +127,20 @@ final class ChannelNumberEntry: ObservableObject {
         debugLog("[ChannelNumber] \(source) digit=\(c) buffer=\(digits) scope=\(String(describing: activeScope))")
         scheduleCommit()
         return true
+    }
+
+    /// The guide stays mounted under the full-screen player. With a
+    /// multiview or a movie up, the player scope is off, so the guide would
+    /// own the digits while its overlay is hidden. On Apple TV the buffered
+    /// entry would also take the player's next OK. So the guide takes no
+    /// digits while a full-screen player covers it.
+    private func isCoveredByPlayer(_ scope: Scope) -> Bool {
+        #if os(tvOS)
+        let player = NowPlayingManager.shared
+        return scope == .guide && player.isActive && !player.isMinimized
+        #else
+        return false
+        #endif
     }
 
     private func scheduleCommit() {
@@ -224,11 +256,30 @@ final class ChannelNumberEntry: ObservableObject {
                 if let digit = Self.digit(for: keyCode) {
                     self.handle(character: digit, source: "gckeyboard")
                 } else if keyCode == .returnOrEnter || keyCode == .keypadEnter {
-                    self.commit()
+                    self.commitIfNoSelectFollows()
                 } else if keyCode == .escape {
                     self.cancel()
                 }
             }
+        }
+    }
+
+    /// tvOS also delivers a keyboard's Return / Enter as a Select press,
+    /// which `SelectPressCommitInterceptor` commits. Committing here at once
+    /// would disarm that recognizer before the Select arrives, and the Select
+    /// would then play the focused guide cell. So this only commits if the
+    /// same entry is still pending after the Select had time to land (it
+    /// followed the key by 2 to 20 ms in testing), for a keyboard whose
+    /// Return tvOS does not turn into Select.
+    private func commitIfNoSelectFollows() {
+        let pending = digits
+        guard !pending.isEmpty else { return }
+        returnKeyFallback?.cancel()
+        returnKeyFallback = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self, self.digits == pending else { return }
+            debugLog("[ChannelNumber] no Select followed Return, committing from the keyboard")
+            self.commit()
         }
     }
 
@@ -249,6 +300,125 @@ final class ChannelNumberEntry: ObservableObject {
     }
     #endif
 }
+
+// MARK: - tvOS remote Select commits
+
+#if os(tvOS)
+/// A remote's OK button arrives as a `.select` press, and tvOS also delivers
+/// a keyboard's Return / Enter as one (confirmed for keypad Enter). The
+/// focused view (a player tile, a guide cell) would act on it. While digits
+/// are buffered, a window-level recognizer takes the press first, swallows it
+/// so the focused view does not also act on it, and commits the entry
+/// instead. The only other commit path on tvOS is the keyboard fallback in
+/// `commitIfNoSelectFollows`. Same window-recognizer approach as
+/// `PlayerLongPressDetector`.
+@MainActor
+final class SelectPressCommitInterceptor: NSObject {
+    private let onSelect: () -> Void
+    private weak var attachedWindow: UIWindow?
+    private var recognizer: SelectPressDownRecognizer?
+    /// Whether digits are buffered. Disarming while Select is still held
+    /// does not remove the recognizer yet. Removing it mid-press leaves the
+    /// guide's own tap and hold gestures stuck (the next OK opens the
+    /// program menu or does nothing), so removal waits for the press to end.
+    private var isArmed = false
+
+    init(onSelect: @escaping () -> Void) {
+        self.onSelect = onSelect
+    }
+
+    /// Attach to the key window while armed, detach otherwise.
+    func setArmed(_ armed: Bool) {
+        isArmed = armed
+        if armed {
+            attach()
+        } else if let recognizer, recognizer.state == .began || recognizer.state == .changed {
+            return
+        } else {
+            detach()
+        }
+    }
+
+    private func attach() {
+        guard recognizer == nil, let window = Self.keyWindow() else { return }
+        let press = SelectPressDownRecognizer(target: self, action: #selector(handleSelect(_:)))
+        press.cancelsTouchesInView = true
+        // Presses only. Every other recognizer waits on this one, and it
+        // never decides on a touch, so a Siri Remote swipe would stall.
+        press.allowedTouchTypes = []
+        window.addGestureRecognizer(press)
+        recognizer = press
+        attachedWindow = window
+    }
+
+    private func detach() {
+        if let recognizer { attachedWindow?.removeGestureRecognizer(recognizer) }
+        recognizer = nil
+        attachedWindow = nil
+    }
+
+    @objc private func handleSelect(_ gesture: SelectPressDownRecognizer) {
+        switch gesture.state {
+        case .began:
+            onSelect()
+        case .ended, .cancelled, .failed:
+            // Detach off this action callback, so the recognizer is not
+            // removed from inside its own state change. Re-check first, in
+            // case new digits re-armed it in between.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isArmed else { return }
+                self.detach()
+            }
+        default:
+            break
+        }
+    }
+
+    private static func keyWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+    }
+}
+
+/// Begins the moment Select goes down, ahead of the focused view's own
+/// Select handling. (A zero-duration `UILongPressGestureRecognizer` does not
+/// fire for a quick press, which then plays the focused cell.)
+final class SelectPressDownRecognizer: UIGestureRecognizer {
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        guard state == .possible else { return }
+        // Any other button fails at once: the other recognizers are told to
+        // wait for this one, so it must never sit undecided on an arrow or
+        // Back press.
+        state = Self.containsSelect(presses) ? .began : .failed
+    }
+
+    // Only the Select ending decides. Another button let go while Select is
+    // still held must not end the recognition early.
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        guard Self.containsSelect(presses) else { return }
+        state = isRecognizing ? .ended : .failed
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent) {
+        guard Self.containsSelect(presses) else { return }
+        state = isRecognizing ? .cancelled : .failed
+    }
+
+    private var isRecognizing: Bool { state == .began || state == .changed }
+
+    private static func containsSelect(_ presses: Set<UIPress>) -> Bool {
+        presses.contains(where: { $0.type == .select })
+    }
+
+    // Win against the focused view's own Select recognizers (guide cells,
+    // player tiles): never wait on them, and make them wait on this one.
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func shouldRequireFailure(of otherGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func shouldBeRequiredToFail(by otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
+}
+#endif
 
 // MARK: - Overlay
 
@@ -300,9 +470,10 @@ struct ChannelNumberEntryOverlay: View {
 
 /// Attach to a screen that supports number entry. Registers the scope
 /// while `isActive`, intercepts digit / Return / Escape key presses, and
-/// hosts the overlay. Key presses only reach `.onKeyPress` when focus
-/// sits inside the modified view; the tvOS GameController fallback in
-/// the state holder covers presses that do not.
+/// hosts the overlay. On tvOS, Return is left to the Select press that
+/// tvOS sends for it (`SelectPressCommitInterceptor`). Key presses only
+/// reach `.onKeyPress` when focus sits inside the modified view. The tvOS
+/// GameController fallback in the state holder covers presses that do not.
 struct ChannelNumberEntryModifier: ViewModifier {
     let scope: ChannelNumberEntry.Scope
     let isActive: Bool
@@ -310,6 +481,17 @@ struct ChannelNumberEntryModifier: ViewModifier {
     let onResolve: (ChannelDisplayItem) -> Void
 
     @ObservedObject private var entry = ChannelNumberEntry.shared
+
+    /// The newest closures from the screen. The modifier is rebuilt on every
+    /// render with closures that capture that render's values, but the scope
+    /// registers once, so the handler reads through this box. That way a
+    /// guide that registers while its list is still loading resolves numbers
+    /// against the full list once it arrives, not that first, partial one.
+    private final class LatestHandler {
+        var channels: () -> [ChannelDisplayItem] = { [] }
+        var onResolve: (ChannelDisplayItem) -> Void = { _ in }
+    }
+    @State private var latest = LatestHandler()
 
     init(scope: ChannelNumberEntry.Scope, isActive: Bool = true,
          channels: @escaping () -> [ChannelDisplayItem],
@@ -321,13 +503,21 @@ struct ChannelNumberEntryModifier: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content
+        latest.channels = channels
+        latest.onResolve = onResolve
+        return content
             .onKeyPress(characters: .decimalDigits, phases: .down) { press in
                 guard let c = press.characters.first else { return .ignored }
                 return entry.handle(character: c) ? .handled : .ignored
             }
             .onKeyPress(.return, phases: .down) { _ in
-                entry.commit() ? .handled : .ignored
+                #if os(tvOS)
+                // Left to the Select press tvOS sends for the same key (see
+                // `commitIfNoSelectFollows`).
+                return .ignored
+                #else
+                return entry.commit() ? .handled : .ignored
+                #endif
             }
             .onKeyPress(.escape, phases: .down) { _ in
                 entry.cancel() ? .handled : .ignored
@@ -338,7 +528,9 @@ struct ChannelNumberEntryModifier: ViewModifier {
             }
             .onChange(of: isActive, initial: true) { _, active in
                 if active {
-                    entry.register(scope, channels: channels, onResolve: onResolve)
+                    entry.register(scope,
+                                   channels: { [latest] in latest.channels() },
+                                   onResolve: { [latest] item in latest.onResolve(item) })
                 } else {
                     entry.unregister(scope)
                 }

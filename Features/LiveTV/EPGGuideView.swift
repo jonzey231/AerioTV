@@ -5305,7 +5305,8 @@ final class GuideFocusScratch {
     /// same-row change (our own snap / restore, which must not loop).
     var lastFocusedChannel: String?
     /// Stands the vertical column snap down while a programmatic jump owns
-    /// focus (Menu to the top channel), so the jump is the only writer.
+    /// focus (Menu to the top channel, a search or channel-number jump), so
+    /// the jump is the only writer.
     var verticalSnapInFlight = false
     /// The column snap asserting focus onto the anchor-time cell, and the
     /// cell it is writing. Any other landing cancels it: the user moved on,
@@ -5313,6 +5314,9 @@ final class GuideFocusScratch {
     /// 2026-11-05: a held or fast Down rubber-banded a row or two).
     var columnSnapTask: Task<Void, Never>?
     var columnSnapTarget: String?
+    /// The pending search or channel-number jump. A newer jump cancels it,
+    /// so two jumps never write focus at once.
+    var guideJumpTask: Task<Void, Never>?
     /// When focus last moved; the Left handler uses it to tell a real move
     /// from a press that the engine refused at the edge.
     var lastFocusChangeAt = Date.distantPast
@@ -8641,23 +8645,51 @@ struct EPGGuideView: View {
         defaults.removeObject(forKey: "guideJumpChannelID")
         defaults.removeObject(forKey: "guideJumpStart")
         let start = Date(timeIntervalSince1970: startTS)
-        Task { @MainActor in
+        focusScratch.guideJumpTask?.cancel()
+        focusScratch.guideJumpTask = Task { @MainActor in
             // Let the guide's own initial scroll-to-now settle first.
             try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
             withAnimation(.easeInOut(duration: 0.3)) {
                 proxy.scrollTo(channelID, anchor: .center)
                 let lead = pixelsPerHour * 0.25
                 horizontalOffset = min(0, max(maxHorizontalOffset, -xOffset(for: start) + lead))
             }
             #if os(tvOS)
-            guideFocusTargetChannelID = channelID
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            if let target = focusTargetProgramID(forChannel: channelID) {
-                focusedProgramID = target
-            }
+            await focusJumpedRow(channelID, at: start, proxy: proxy)
             #endif
         }
     }
+
+    #if os(tvOS)
+    /// Focus the jumped-to row's programme at `time`, the cell the column
+    /// snap also aims at once the timeline sits there. A row scrolled in
+    /// from off screen may not exist yet, so one focus write can be dropped
+    /// and focus lands on a neighbouring row. So re-assert until it sticks,
+    /// as the return-from-player refocus does, with the column snap stood
+    /// down so this is the only writer.
+    @MainActor
+    private func focusJumpedRow(_ channelID: String, at time: Date, proxy: ScrollViewProxy) async {
+        guideFocusTargetChannelID = channelID
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        guard !Task.isCancelled,
+              let target = programID(forChannel: channelID, containing: time)
+                ?? focusTargetProgramID(forChannel: channelID) else { return }
+        focusScratch.columnSnapTask?.cancel()
+        focusScratch.columnSnapTask = nil
+        focusScratch.columnSnapTarget = nil
+        focusScratch.verticalSnapInFlight = true
+        defer { focusScratch.verticalSnapInFlight = false }
+        for attempt in 0..<8 {
+            proxy.scrollTo(channelID, anchor: .center)
+            focusedProgramID = target
+            try? await Task.sleep(nanoseconds: 70_000_000)
+            if Task.isCancelled { return }
+            debugLog("🧭 [GuideFocus] guide jump attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+            if focusedProgramID == target { return }
+        }
+    }
+    #endif
 
     /// Time span the program area shows at the current horizontal offset,
     /// padded 30 min each side. Shared by the program rows and the time strip
