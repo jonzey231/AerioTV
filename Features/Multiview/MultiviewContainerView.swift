@@ -424,7 +424,10 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
+                    // The Channels / Recently Watched overlays need the same trap:
+                    // Up from their first row otherwise lands on the tile, whose
+                    // focus shows nothing, and no Down leads back to the list.
+                    .disabled(showTVOptions || playerOverlayOpen || store.pendingStreamSwitchTileID != nil)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
