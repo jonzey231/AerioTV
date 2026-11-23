@@ -99,9 +99,8 @@ struct RecentChannelsOverlay: View {
                     .focusSection()
                     // The list is one column, so Left/Right have no row to
                     // move to. Right steps out to the player, like the
-                    // Channels overlay; Left does nothing. Handling both here
-                    // keeps them from reaching the player, which would
-                    // scrub the live picture underneath.
+                    // Channels overlay. Left does nothing. Handling both here
+                    // keeps them from reaching the player underneath.
                     .onMoveCommand { direction in
                         if direction == .right { onDismiss() }
                     }
@@ -114,21 +113,20 @@ struct RecentChannelsOverlay: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         // Hardware Back / Menu closes the overlay.
         .onExitCommand(perform: onDismiss)
-        .onAppear { focusFirstRow() }
+        .task { await focusFirstRow() }
     }
 
     /// Land focus on the first (most-recent) row. The overlay opens on a
     /// held Up, and a `@FocusState` write made while that press is still
-    /// down does not take, so a longer hold left no row focused and the
-    /// D-pad dead. Keep seeding for a couple of seconds, but only while no
-    /// row has focus, so it never fights the user's own moves.
-    private func focusFirstRow() {
+    /// down does not take. So keep seeding for a couple of seconds, but only
+    /// while no row has focus, so it never fights the user's own moves.
+    /// Runs from `.task`, which stops it when the overlay closes.
+    private func focusFirstRow() async {
         guard let firstID = entries.first?.id else { return }
-        Task { @MainActor in
-            for _ in 0..<40 {
-                if focusedID == nil { focusedID = firstID }
-                try? await Task.sleep(nanoseconds: 60_000_000)
-            }
+        for _ in 0..<40 {
+            if focusedID == nil { focusedID = firstID }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            if Task.isCancelled { return }
         }
     }
 }

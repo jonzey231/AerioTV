@@ -279,6 +279,16 @@ struct MultiviewContainerView: View {
     @State private var showRecentsOverlay = false
     #endif
 
+    /// The Channels or Recently Watched overlay is up. Its rows own the
+    /// D-pad then, so Left/Right must not scrub the player underneath.
+    private var playerOverlayOpen: Bool {
+        #if os(tvOS)
+        showChannelsOverlay || showRecentsOverlay
+        #else
+        false
+        #endif
+    }
+
     #if os(iOS)
     /// Top-strip swipe down (Logan 2026-09-14): how far the player follows
     /// the finger, and the container height the strip is measured against
@@ -2019,16 +2029,6 @@ struct MultiviewContainerView: View {
     /// story as the guide's hold-Right), which simply becomes the
     /// first step of the hold. `holdActive` stops any move events
     /// delivered during the hold from double-stepping.
-    /// The Channels or Recently Watched overlay is up. Its rows own the
-    /// D-pad then, so Left/Right must not scrub the player underneath.
-    private var playerOverlayOpen: Bool {
-        #if os(tvOS)
-        showChannelsOverlay || showRecentsOverlay
-        #else
-        false
-        #endif
-    }
-
     private func startScrubHold(_ dir: Int) {
         guard store.tiles.count == 1, !nowPlaying.isMinimized, !playerOverlayOpen,
               !chromeState.isVisible || focusedChrome == .timeline else { return }
